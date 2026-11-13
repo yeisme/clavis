@@ -29,11 +29,13 @@ func isValidIMEMode(m IMEMode) bool {
 	return false
 }
 
-// IMERule defines a per-application IME auto-switching rule.
+// IMERule defines a per-application (and optional URL/title pattern) IME auto-switching rule.
 type IMERule struct {
 	BundleID       string  `json:"bundleId"`
 	ProcessName    string  `json:"processName,omitempty"`
 	AppName        string  `json:"appName"`
+	URLPattern     string  `json:"urlPattern,omitempty"`
+	TitlePattern   string  `json:"titlePattern,omitempty"`
 	InputSourceID  string  `json:"inputSourceId"`
 	PreferredMode  IMEMode `json:"preferredMode"`
 	RestoreOnLeave bool    `json:"restoreOnLeave"`
@@ -59,7 +61,15 @@ func decodeIMERule(tbl *toml.Table, path string) (IMERule, error) {
 	if err != nil {
 		return IMERule{}, err
 	}
-	inputSourceID, err := requiredString(tbl, "input_source_id", path)
+	urlPattern, _, err := optionalString(tbl, "url_pattern", path)
+	if err != nil {
+		return IMERule{}, err
+	}
+	titlePattern, _, err := optionalString(tbl, "title_pattern", path)
+	if err != nil {
+		return IMERule{}, err
+	}
+	inputSourceID, _, err := optionalString(tbl, "input_source_id", path)
 	if err != nil {
 		return IMERule{}, err
 	}
@@ -92,6 +102,8 @@ func decodeIMERule(tbl *toml.Table, path string) (IMERule, error) {
 		BundleID:       bundleID,
 		ProcessName:    processName,
 		AppName:        appName,
+		URLPattern:     urlPattern,
+		TitlePattern:   titlePattern,
 		InputSourceID:  inputSourceID,
 		PreferredMode:  mode,
 		RestoreOnLeave: restoreOnLeave,
@@ -107,7 +119,15 @@ func (r IMERule) toTOML() *toml.Table {
 		t.Set("process_name", toml.StringVal(r.ProcessName))
 	}
 	t.Set("app_name", toml.StringVal(r.AppName))
-	t.Set("input_source_id", toml.StringVal(r.InputSourceID))
+	if r.URLPattern != "" {
+		t.Set("url_pattern", toml.StringVal(r.URLPattern))
+	}
+	if r.TitlePattern != "" {
+		t.Set("title_pattern", toml.StringVal(r.TitlePattern))
+	}
+	if r.InputSourceID != "" {
+		t.Set("input_source_id", toml.StringVal(r.InputSourceID))
+	}
 	t.Set("preferred_mode", toml.StringVal(string(r.PreferredMode)))
 	t.Set("restore_on_leave", toml.BoolVal(r.RestoreOnLeave))
 	return t

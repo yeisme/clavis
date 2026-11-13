@@ -368,3 +368,277 @@ func TestGlossaryEngine(t *testing.T) {
 		t.Fatalf("unexpected normalization: %q", norm)
 	}
 }
+
+func TestUtilitiesEmojiAppLauncherAndMultiTurnAI(t *testing.T) {
+	fixedNow := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+
+	// 1. Math evaluator
+	mathItems := engine.EvaluateUtilities("(2 + 3) * 4^2 - 10 % 3", fixedNow)
+	if len(mathItems) != 1 || mathItems[0].Kind != engine.ItemUtility || mathItems[0].UtilityValue != "79" || !strings.Contains(mathItems[0].Title, "Result = 79") {
+		t.Fatalf("unexpected math utility items: %+v", mathItems)
+	}
+
+	// 2. Converters: uuid, ts, 10-digit timestamp, b64/b64d, hex/0x
+	uuidItems := engine.EvaluateUtilities("uuid", fixedNow)
+	if len(uuidItems) != 1 || len(uuidItems[0].UtilityValue) != 36 {
+		t.Fatalf("unexpected uuid items: %+v", uuidItems)
+	}
+	tsItems := engine.EvaluateUtilities("ts", fixedNow)
+	if len(tsItems) != 2 || tsItems[0].UtilityValue != "1776599999" && tsItems[0].UtilityValue != "1776600000" {
+		t.Fatalf("unexpected ts items: %+v", tsItems)
+	}
+	convTs := engine.EvaluateUtilities("1700000000", fixedNow)
+	if len(convTs) != 1 || convTs[0].UtilityValue != "2023-11-14T22:13:20Z" {
+		t.Fatalf("unexpected 10-digit timestamp conversion: %+v", convTs)
+	}
+	b64Enc := engine.EvaluateUtilities("b64 hello clavis", fixedNow)
+	if len(b64Enc) != 1 || b64Enc[0].UtilityValue != "aGVsbG8gY2xhdmlz" {
+		t.Fatalf("unexpected b64 encode: %+v", b64Enc)
+	}
+	b64Dec := engine.EvaluateUtilities("b64d aGVsbG8gY2xhdmlz", fixedNow)
+	if len(b64Dec) != 1 || b64Dec[0].UtilityValue != "hello clavis" {
+		t.Fatalf("unexpected b64 decode: %+v", b64Dec)
+	}
+	hexEnc := engine.EvaluateUtilities("hex 255", fixedNow)
+	if len(hexEnc) != 1 || hexEnc[0].UtilityValue != "0xFF" {
+		t.Fatalf("unexpected hex encode: %+v", hexEnc)
+	}
+	hexDec := engine.EvaluateUtilities("0xFF", fixedNow)
+	if len(hexDec) != 1 || hexDec[0].UtilityValue != "255" {
+		t.Fatalf("unexpected 0xFF decode: %+v", hexDec)
+	}
+
+	// 3. Emoji search (English + Chinese)
+	enEmoji := engine.SearchEmojis(":rocket")
+	if len(enEmoji) == 0 || enEmoji[0].UtilityValue != "🚀" {
+		t.Fatalf("expected 🚀 for :rocket, got %+v", enEmoji)
+	}
+	zhEmoji := engine.SearchEmojis("火箭")
+	if len(zhEmoji) == 0 || zhEmoji[0].UtilityValue != "🚀" {
+		t.Fatalf("expected 🚀 for 火箭, got %+v", zhEmoji)
+	}
+
+	// 4. Capsule integration: InstalledApps, Emoji confirm, Utility confirm, Multi-turn AI follow-up
+	sm := engine.NewStateMachine(config.DefaultConfig())
+	_ = sm.Handle(engine.Event{
+		Type: engine.EventSetInstalledApps,
+		InstalledApps: []engine.InstalledAppEntry{
+			{Name: "Visual Studio Code", BundleID: "com.microsoft.VSCode", Path: "/Applications/Visual Studio Code.app"},
+		},
+	})
+	_ = sm.Handle(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Query: "VSCode"})
+	st := sm.State()
+	if len(st.OmniboxItems) == 0 || st.OmniboxItems[0].Kind != engine.ItemInstalledApp {
+		t.Fatalf("expected installed app first for VSCode, got %+v", st.OmniboxItems)
+	}
+	appEff := sm.Handle(engine.Event{Type: engine.EventConfirmSelection})
+	if len(appEff) != 2 || appEff[0].Type != engine.EffectRunAction || appEff[0].Action.Target != "com.microsoft.VSCode" {
+		t.Fatalf("unexpected installed app confirm effects: %+v", appEff)
+	}
+
+	// Select AI profile + multi-turn follow-up
+	_ = sm.Handle(engine.Event{Type: engine.EventSelectAIProfile, ProfileID: "claude"})
+	_ = sm.Handle(engine.Event{Type: engine.EventOpenLeader, Context: &engine.CapsuleContext{SelectedText: "hello world"}})
+	_ = sm.Handle(engine.Event{Type: engine.EventLeaderKeyPress, Key: "a"})
+	startEff := sm.Handle(engine.Event{Type: engine.EventLeaderKeyPress, Key: "p"})
+	if len(startEff) != 1 || startEff[0].Type != engine.EffectStartAI || startEff[0].ProfileID != "claude" {
+		t.Fatalf("expected EffectStartAI with profile claude, got %+v", startEff)
+	}
+	_ = sm.Handle(engine.Event{Type: engine.EventAIChunk, Chunk: "Polished v1"})
+	_ = sm.Handle(engine.Event{Type: engine.EventAICompleted})
+
+	followEff := sm.Handle(engine.Event{Type: engine.EventFollowUpAI, Prompt: "Make it more formal"})
+	if len(followEff) != 2 || followEff[0].Type != engine.EffectCancelAI || followEff[1].Type != engine.EffectStartAI {
+		t.Fatalf("unexpected follow-up effects: %+v", followEff)
+	}
+	if len(followEff[1].History) != 2 || followEff[1].History[1].Content != "Polished v1" || followEff[1].ProfileID != "claude" {
+		t.Fatalf("expected 2 history turns and claude profile in follow-up EffectStartAI, got %+v", followEff[1])
+	}
+	st = sm.State()
+	if st.Phase != engine.PhaseAIStreaming || st.AIComplete || st.AIOutput != "" || st.AIPrompt != "Make it more formal" {
+		t.Fatalf("unexpected state after EventFollowUpAI: %+v", st)
+	}
+}
+
+func TestPinyinFullWidthPrefixRoutingAndDualActions(t *testing.T) {
+	// 1. Pinyin full, initialism, partial trailing syllable, polyphones, and ü (v/u) with exact Hanzi rune indices
+	pyFull, ok := engine.Match("weixin", "微信 (WeChat)")
+	if !ok || !reflect.DeepEqual(pyFull.MatchedLabelIndices, []int{0, 1}) {
+		t.Fatalf("expected [0, 1] for weixin -> 微信 (WeChat), got (%+v, %v)", pyFull, ok)
+	}
+	pyInit, ok := engine.Match("wx", "微信 (WeChat)")
+	if !ok || !reflect.DeepEqual(pyInit.MatchedLabelIndices, []int{0, 1}) {
+		t.Fatalf("expected [0, 1] for wx -> 微信 (WeChat), got (%+v, %v)", pyInit, ok)
+	}
+	if pyFull.Score <= pyInit.Score {
+		t.Fatalf("expected full pinyin score (%d) > initialism score (%d)", pyFull.Score, pyInit.Score)
+	}
+	pyPartial, ok := engine.Match("weix", "微信")
+	if !ok || !reflect.DeepEqual(pyPartial.MatchedLabelIndices, []int{0, 1}) {
+		t.Fatalf("expected [0, 1] for trailing partial weix -> 微信, got (%+v, %v)", pyPartial, ok)
+	}
+	pyPoly, ok := engine.Match("chonggou", "重构代码")
+	if !ok || !reflect.DeepEqual(pyPoly.MatchedLabelIndices, []int{0, 1}) {
+		t.Fatalf("expected polyphone chonggou -> 重构代码 [0, 1], got (%+v, %v)", pyPoly, ok)
+	}
+	pyV, ok := engine.Match("lvse", "绿色主题")
+	if !ok || !reflect.DeepEqual(pyV.MatchedLabelIndices, []int{0, 1}) {
+		t.Fatalf("expected v-spelling lvse -> 绿色主题 [0, 1], got (%+v, %v)", pyV, ok)
+	}
+	pyMixed, ok := engine.Match("dkvsc", "打开 VSCode")
+	if !ok || len(pyMixed.MatchedLabelIndices) != 5 {
+		t.Fatalf("expected mixed Hanzi+ASCII match dkvsc -> 打开 VSCode, got (%+v, %v)", pyMixed, ok)
+	}
+
+	// 2. Full-width operators, hex, and emoji Pinyin search
+	fixedNow := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+	fwMath := engine.EvaluateUtilities("＝（２＋３）×４^2", fixedNow)
+	if len(fwMath) != 1 || fwMath[0].UtilityValue != "80" {
+		t.Fatalf("expected 80 for full-width math expression, got %+v", fwMath)
+	}
+	fwHex := engine.EvaluateUtilities("０ｘＦＦ", fixedNow)
+	if len(fwHex) != 1 || fwHex[0].UtilityValue != "255" {
+		t.Fatalf("expected 255 for full-width 0xFF, got %+v", fwHex)
+	}
+	fwEmoji := engine.SearchEmojis("：huojian")
+	if len(fwEmoji) == 0 || fwEmoji[0].UtilityValue != "🚀" {
+		t.Fatalf("expected 🚀 for full-width Pinyin ：huojian, got %+v", fwEmoji)
+	}
+
+	// 3. Leader '/' & '／' instant clean search switch
+	sm := engine.NewStateMachine(config.DefaultConfig())
+	appCtx := engine.CapsuleContext{
+		BundleID:         "com.tencent.xinWeChat",
+		AppName:          "微信",
+		SelectedText:     "selected sample",
+		ClipboardPreview: "clip-val",
+	}
+	_ = sm.Handle(engine.Event{Type: engine.EventOpenLeader, Context: &appCtx})
+	_ = sm.Handle(engine.Event{Type: engine.EventLeaderKeyPress, Key: "/"})
+	st := sm.State()
+	if st.Phase != engine.PhaseOmnibox || st.OmniboxTab != config.TabActions || st.OmniboxQuery != "" {
+		t.Fatalf("expected '/' in Leader to open clean Actions Omnibox, got %+v", st)
+	}
+
+	// 4. Omnibox Prefix Quick-Routing: >, ;, @, ?, :, = (including full-width)
+	_ = sm.Handle(engine.Event{
+		Type: engine.EventSetClipboardEntries,
+		ClipboardEntries: []engine.OmniboxClipboardEntry{
+			{ID: "c1", Content: "alpha clipboard line", SourceAppName: "Notes"},
+			{ID: "c2", Content: "beta clipboard line", SourceAppName: "Safari"},
+		},
+	})
+
+	// ';' & '；' route to Snippets
+	_ = sm.Handle(engine.Event{Type: engine.EventUpdateQuery, Query: "；sig"})
+	st = sm.State()
+	if len(st.OmniboxItems) == 0 || st.OmniboxItems[0].Kind != engine.ItemSnippet || st.OmniboxItems[0].Snippet.ID != "email-signoff" {
+		t.Fatalf("expected ；sig to route to email-signoff snippet, got %+v", st.OmniboxItems)
+	}
+	// Secondary confirm on snippet copies rendered text instead of injecting
+	secSnipEff := sm.Handle(engine.Event{Type: engine.EventConfirmSecondarySelection})
+	if len(secSnipEff) != 2 || secSnipEff[0].Type != engine.EffectCopyText || secSnipEff[0].Text != "Best regards," {
+		t.Fatalf("expected secondary confirm on snippet to emit EffectCopyText, got %+v", secSnipEff)
+	}
+
+	// '@' routes inline to Clipboard entries & supports Pin/Secondary Copy
+	_ = sm.Handle(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Query: "@beta", Context: &appCtx})
+	st = sm.State()
+	if len(st.OmniboxItems) != 1 || st.OmniboxItems[0].ClipboardID != "c2" {
+		t.Fatalf("expected @beta to filter clipboard c2, got %+v", st.OmniboxItems)
+	}
+	pinEff := sm.Handle(engine.Event{Type: engine.EventExecuteItemAction, ActionID: "pin"})
+	if len(pinEff) != 1 || pinEff[0].Type != engine.EffectPinClipboardItem || !pinEff[0].IsPinned {
+		t.Fatalf("expected pin action in @ prefix view, got %+v", pinEff)
+	}
+	secClipEff := sm.Handle(engine.Event{Type: engine.EventConfirmSecondarySelection})
+	if len(secClipEff) != 2 || secClipEff[0].Type != engine.EffectCopyText || secClipEff[0].Text != "beta clipboard line" {
+		t.Fatalf("expected secondary confirm on clipboard item to copy, got %+v", secClipEff)
+	}
+
+	// '?' routes to AI with adhoc prompt first; secondary asks without selection
+	_ = sm.Handle(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Query: "？explain golang", Context: &appCtx})
+	st = sm.State()
+	if len(st.OmniboxItems) == 0 || st.OmniboxItems[0].Kind != engine.ItemAIMode {
+		t.Fatalf("expected ？query to route to AI items first, got %+v", st.OmniboxItems)
+	}
+	secAIEff := sm.Handle(engine.Event{Type: engine.EventConfirmSecondarySelection})
+	if len(secAIEff) != 1 || secAIEff[0].Type != engine.EffectStartAI || secAIEff[0].Mode != "ask" || secAIEff[0].SourceText != "" {
+		t.Fatalf("expected secondary AI action to force ask without selection, got %+v", secAIEff)
+	}
+
+	// '=' routes to Utilities & Secondary confirm injects directly at cursor
+	_ = sm.Handle(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Query: "=6*7", Context: &appCtx})
+	st = sm.State()
+	if len(st.OmniboxItems) != 1 || st.OmniboxItems[0].UtilityValue != "42" {
+		t.Fatalf("expected =6*7 utility result 42, got %+v", st.OmniboxItems)
+	}
+	specs := engine.AvailableItemActions(st.OmniboxItems[0])
+	if len(specs) < 2 || specs[0].ID != "copy" || specs[1].ID != "paste" {
+		t.Fatalf("unexpected AvailableItemActions for utility: %+v", specs)
+	}
+	secUtilEff := sm.Handle(engine.Event{Type: engine.EventSelectAndConfirmIndex, Index: 0, Secondary: true})
+	if len(secUtilEff) != 2 || secUtilEff[0].Type != engine.EffectApplyAIOutput || secUtilEff[0].Text != "42" {
+		t.Fatalf("expected secondary SelectAndConfirmIndex on utility to inject 42, got %+v", secUtilEff)
+	}
+
+	// '>' routes to Commands + One-Click Bind Current App IME Rule (matched via Chinese Pinyin "bdywsrf" / "绑定当前应用为英文输入法")
+	_ = sm.Handle(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Query: ">英文输入法", Context: &appCtx})
+	st = sm.State()
+	if len(st.OmniboxItems) == 0 || st.OmniboxItems[0].Kind != engine.ItemAppIMERule || st.OmniboxItems[0].IMEMode != config.IMEModeASCII {
+		t.Fatalf("expected >英文输入法 to surface Bind Current App to ASCII IME, got %+v", st.OmniboxItems)
+	}
+	bindEff := sm.Handle(engine.Event{Type: engine.EventSelectAndConfirmIndex, Index: 0})
+	if len(bindEff) != 2 || bindEff[0].Type != engine.EffectBindAppIMERule || bindEff[0].IMEMode != config.IMEModeASCII || bindEff[0].Context.BundleID != "com.tencent.xinWeChat" {
+		t.Fatalf("expected EffectBindAppIMERule(ascii) for WeChat, got %+v", bindEff)
+	}
+}
+
+func TestSnippetEngine_FullWidthPunctuationTriggers(t *testing.T) {
+	eng := engine.NewSnippetEngine([]config.SnippetItem{
+		{ID: "sig", Trigger: ";sig", Content: "Best regards,", WordBoundary: true},
+		{ID: "fw-colon", Trigger: "：note", Content: "NOTE", WordBoundary: true},
+	}, 32)
+
+	// A CJK IME commits '；' (U+FF1B) instead of ';' (U+003B); the ASCII trigger must still fire.
+	eng.Reset()
+	var (
+		matched *engine.SnippetMatch
+		ok      bool
+	)
+	for _, r := range "；sig" {
+		matched, ok = eng.Feed(r, engine.FeedOptions{})
+	}
+	if !ok || matched.Snippet.ID != "sig" {
+		t.Fatalf("expected full-width '；sig' to match ';sig', got (%+v, %v)", matched, ok)
+	}
+	// DeleteCount counts typed runes, so the host deletes '；sig' (4 runes, not 4 bytes).
+	if matched.DeleteCount != 4 || matched.RenderedText != "Best regards," {
+		t.Fatalf("unexpected delete/render for full-width trigger: %+v", matched)
+	}
+
+	// Reverse direction: a full-width trigger still matches plain ASCII typing.
+	eng.Reset()
+	for _, r := range ":note" {
+		matched, ok = eng.Feed(r, engine.FeedOptions{})
+	}
+	if !ok || matched.Snippet.ID != "fw-colon" {
+		t.Fatalf("expected ':note' to match '：note', got (%+v, %v)", matched, ok)
+	}
+
+	// Full-width letters are not punctuation: they must never alias ASCII word characters.
+	eng.Reset()
+	for _, r := range "；ｓｉｇ" {
+		if _, ok := eng.Feed(r, engine.FeedOptions{}); ok {
+			t.Fatal("expected full-width letters not to match an ASCII word trigger")
+		}
+	}
+
+	// Word boundary still applies to full-width triggers typed inside a word.
+	eng.Reset()
+	for _, r := range "hi；sig" {
+		if _, ok := eng.Feed(r, engine.FeedOptions{}); ok {
+			t.Fatal("expected word boundary to block 'hi；sig'")
+		}
+	}
+}

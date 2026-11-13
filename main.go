@@ -1,0 +1,1275 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"math"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/ui"
+	"github.com/yeisme/clavis/internal/apps"
+	"github.com/yeisme/clavis/internal/bridge"
+	"github.com/yeisme/clavis/internal/secrets"
+	"github.com/yeisme/clavis/internal/storage"
+	"github.com/yeisme/clavis/internal/watcher"
+	"github.com/yeisme/clavis/pkg/core/clipboard"
+	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/engine"
+	"github.com/yeisme/clavis/pkg/core/host"
+	"github.com/yeisme/clavis/uiapp"
+)
+
+const (
+	appName          = "Clavis"
+	keychainService  = "com.yeisme.clavis"
+	clipPollInterval = 400 * time.Millisecond
+	clipPruneEvery   = 5 * time.Minute
+	imePillDuration  = 850 * time.Millisecond
+	imePillOffsetX   = 8.0
+	imePillOffsetY   = 6.0
+)
+
+func main() {
+	if hasSmokeCheckFlag(os.Args[1:]) {
+		if err := runSmokeCheck(os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "Clavis smoke-check failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	mygo.App.SetName(appName)
+	if !mygo.App.RequestSingleInstanceLock() {
+		return
+	}
+	mygo.App.SetActivationPolicy(mygo.ActivationPolicyAccessory)
+	mygo.App.OnWindowAllClosed(func() {})
+
+	app := newDesktopApp()
+
+	mygo.App.OnSecondInstance(func([]string, string) {
+		app.openLeader()
+	})
+	mygo.App.WhenReady(func() {
+		app.start()
+	})
+	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		app.shutdown()
+	})
+
+	if err := mygo.App.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Clavis failed to start: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func hasSmokeCheckFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if arg == "--smoke-check" {
+			return true
+		}
+	}
+	return false
+}
+
+// runSmokeCheck validates core config initialization and platform bridge capabilities
+// in an isolated temporary directory without mutating ~/.config/clavis.
+func runSmokeCheck(w io.Writer) error {
+	cfg := config.DefaultConfig()
+	if tmpDir, err := os.MkdirTemp("", "clavis-smoke-*"); err == nil {
+		defer os.RemoveAll(tmpDir)
+		store := config.NewConfigStore(tmpDir)
+		if loaded, loadErr := store.LoadOrInitialize(); loadErr == nil {
+			cfg = loaded
+		}
+	}
+
+	br := bridge.NewHostService(
+		bridge.WithTriggerConfig(cfg.Main.Trigger),
+		bridge.WithKeymapConfig(cfg.Main.Keymap),
+		bridge.WithIMEConfig(cfg.Main.IME, cfg.IMERules),
+	)
+	_ = br.Capabilities()
+
+	_, err := fmt.Fprintf(
+		w,
+		"Clavis smoke-check ok (leader=%s, os=%s, arch=%s)\n",
+		cfg.Main.Trigger.LeaderKey,
+		runtime.GOOS,
+		runtime.GOARCH,
+	)
+	return err
+}
+
+func resolveConfigDir() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".config", "clavis")
+	}
+	if cfgDir, err := os.UserConfigDir(); err == nil && cfgDir != "" {
+		return filepath.Join(cfgDir, "clavis")
+	}
+	return ".clavis"
+}
+
+type dynamicBridgeUpdater interface {
+	UpdateTriggerConfig(cfg config.TriggerConfig)
+	UpdateKeymapConfig(cfg config.KeymapConfig)
+	UpdateIMEConfig(imeCfg config.IMEConfig, rules config.IMERulesConfig)
+}
+
+type desktopApp struct {
+	mu                     sync.Mutex
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	cfgStore               *config.ConfigStore
+	sqliteStore            *storage.SQLiteClipboardStore
+	clipStore              clipboard.Store
+	hostBridge             bridge.HostService
+	controller             *uiapp.AppController
+	configWatcher          *watcher.ConfigWatcher
+	capsulePanel           *mygo.Window
+	imePillPanel           *mygo.Window
+	settingsWin            *mygo.Window
+	tray                   *mygo.Tray
+	permMenuItem           *mygo.MenuItem
+	loginMenuItem          *mygo.MenuItem
+	bridgeRunning          bool
+	fallbackAccelerator    string
+	sessionAnchor          *host.CursorAnchor
+	imePillLabel           string
+	imePillTimer           *time.Timer
+	imePillGen             atomic.Uint64
+	presentSeq             atomic.Uint64
+	presentTransitionUntil atomic.Int64
+	lastPanelHideNano      atomic.Int64
+	shutdownOnce           sync.Once
+}
+
+func newDesktopApp() *desktopApp {
+	return &desktopApp{}
+}
+
+func (a *desktopApp) start() {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	cfgDir := resolveConfigDir()
+	cfgStore := config.NewConfigStore(cfgDir)
+	cfg, err := cfgStore.LoadOrInitialize()
+	if err != nil {
+		cfg = config.DefaultConfig()
+	}
+
+	var sqliteStore *storage.SQLiteClipboardStore
+	var clipStore clipboard.Store
+	if userDataDir, err := mygo.App.Path(mygo.PathUserData); err == nil && userDataDir != "" {
+		dbPath := filepath.Join(userDataDir, "clipboard.db")
+		if s, openErr := storage.NewSQLiteClipboardStoreFromConfig(ctx, dbPath, cfg.Main.Clipboard); openErr == nil {
+			sqliteStore = s
+			clipStore = s
+			_, _ = s.PruneExpired(ctx, cfg.Main.Clipboard.RetentionDays, cfg.Main.Clipboard.MaxHistoryItems)
+		}
+	}
+	if clipStore == nil {
+		clipStore = clipboard.NewMemoryStore(clipboard.NewPrivacyFilterFromConfig(cfg.Main.Clipboard))
+	}
+
+	secretStore := secrets.NewMyGoSecretsStore(keychainService)
+	appProvider := apps.NewMyGoAppProvider()
+	hostBridge := bridge.NewHostService(
+		bridge.WithTriggerConfig(cfg.Main.Trigger),
+		bridge.WithKeymapConfig(cfg.Main.Keymap),
+		bridge.WithIMEConfig(cfg.Main.IME, cfg.IMERules),
+		bridge.WithOnInputSourceChanged(func(info host.InputSourceInfo) {
+			a.mu.Lock()
+			ctrl := a.controller
+			a.mu.Unlock()
+			if ctrl == nil {
+				return
+			}
+			ctrl.NotifyIMESwitch(info, nil)
+		}),
+		bridge.WithOnKeymapLayerChanged(func(layer string) {
+			a.mu.Lock()
+			ctrl := a.controller
+			a.mu.Unlock()
+			if ctrl == nil {
+				return
+			}
+			ctrl.NotifyKeymapLayer(layer)
+		}),
+	)
+
+	controller := uiapp.NewAppController(uiapp.Options{
+		ConfigStore:    cfgStore,
+		ClipboardStore: clipStore,
+		SecretStore:    secretStore,
+		Bridge:         hostBridge,
+		AppProvider:    appProvider,
+		ClipboardWriter: func(text string) {
+			mygo.Clipboard.WriteText(text)
+		},
+		BeforeInject: a.beforeInject,
+		OpenPath: func(p string) error {
+			return mygo.Shell.OpenPath(p)
+		},
+		OnRepaint:      a.handleRepaint,
+		OnPresentPhase: a.handlePresentPhase,
+		OnHide:         a.handleHide,
+		OnOpenSettings: a.handleOpenSettings,
+		OnShowIMEPill:  a.handleShowIMEPill,
+	})
+
+	initW, initH := uiapp.PreferredCapsuleSize(engine.PhaseLeader, cfg.Main.Appearance)
+	capsulePanel := mygo.NewWindow(mygo.WindowOptions{
+		Title:         appName,
+		Width:         initW,
+		Height:        initH,
+		Panel:         true,
+		Hidden:        true,
+		Frameless:     true,
+		Transparent:   true,
+		Vibrancy:      mygo.VibrancyGlass,
+		CornerRadius:  int(uiapp.NormalizeCornerRadius(cfg.Main.Appearance)),
+		DisableResize: true,
+		AlwaysOnTop:   true,
+		SkipTaskbar:   true,
+		Content:       ui.View(controller.CapsuleView),
+	})
+	capsulePanel.OnClose(func(e *mygo.CloseEvent) {
+		e.PreventDefault()
+		controller.Dispatch(engine.Event{Type: engine.EventDismiss})
+	})
+	capsulePanel.OnBlur(func() {
+		if a.isInPresentTransition() {
+			return
+		}
+		phase := controller.State().Phase
+		if phase == engine.PhaseHidden || phase == engine.PhaseHUD {
+			return
+		}
+		controller.Dispatch(engine.Event{Type: engine.EventDismiss})
+	})
+
+	pillW, pillH := uiapp.PreferredIMEPillSize()
+	imePillPanel := mygo.NewWindow(mygo.WindowOptions{
+		Title:         "Clavis IME",
+		Width:         pillW,
+		Height:        pillH,
+		Panel:         true,
+		Hidden:        true,
+		Frameless:     true,
+		Transparent:   true,
+		Vibrancy:      mygo.VibrancyGlass,
+		CornerRadius:  15,
+		DisableResize: true,
+		AlwaysOnTop:   true,
+		SkipTaskbar:   true,
+		Content: ui.View(func(c *ui.Context) {
+			uiapp.IMEPillView(c, a.currentIMEPillLabel())
+		}),
+	})
+	imePillPanel.OnClose(func(e *mygo.CloseEvent) {
+		e.PreventDefault()
+		imePillPanel.Hide()
+	})
+
+	settingsWin := mygo.NewWindow(mygo.WindowOptions{
+		Title:     "Clavis Settings",
+		Width:     960,
+		Height:    640,
+		MinWidth:  760,
+		MinHeight: 500,
+		Hidden:    true,
+		StateKey:  "settings",
+		Content:   ui.View(controller.SettingsView),
+	})
+	settingsWin.OnClose(func(e *mygo.CloseEvent) {
+		e.PreventDefault()
+		settingsWin.Hide()
+	})
+
+	a.mu.Lock()
+	a.ctx = ctx
+	a.cancel = cancel
+	a.cfgStore = cfgStore
+	a.sqliteStore = sqliteStore
+	a.clipStore = clipStore
+	a.hostBridge = hostBridge
+	a.controller = controller
+	a.capsulePanel = capsulePanel
+	a.imePillPanel = imePillPanel
+	a.settingsWin = settingsWin
+	a.mu.Unlock()
+
+	a.setupTray()
+	a.startBridgeAndFallbackShortcut(cfg.Main.Trigger.CapsuleShortcut)
+
+	cw := watcher.NewConfigWatcher(cfgStore, watcher.WithOnReload(func(watcher.ReloadResult) {
+		a.applyConfigReload()
+	}))
+	if err := cw.StartWatching(ctx); err == nil {
+		a.mu.Lock()
+		a.configWatcher = cw
+		a.mu.Unlock()
+	}
+
+	// Installed-app discovery runs inside ctrl.Start in the background so the main-thread
+	// startup path never blocks on slow /Applications scans.
+	go a.runClipboardPoller(ctx)
+	go a.refreshPermissionsAsync()
+}
+
+func (a *desktopApp) setupTray() {
+	permItem := &mygo.MenuItem{
+		Label: "Permissions: Checking…",
+		Click: func(*mygo.MenuItem, *mygo.Window) {
+			a.openSettings(uiapp.SettingsTabPermissions)
+		},
+	}
+	loginItem := &mygo.MenuItem{
+		Label:   "Open at Login",
+		Type:    mygo.MenuItemCheckbox,
+		Checked: mygo.App.OpenAtLogin(),
+		Click: func(item *mygo.MenuItem, _ *mygo.Window) {
+			want := item.IsChecked()
+			if err := mygo.App.SetOpenAtLogin(want); err != nil {
+				item.SetChecked(!want)
+			}
+		},
+	}
+
+	menu := mygo.NewMenu([]*mygo.MenuItem{
+		permItem,
+		mygo.Separator(),
+		{
+			Label: "Open Capsule",
+			Click: func(*mygo.MenuItem, *mygo.Window) {
+				a.openOmnibox(config.TabActions)
+			},
+		},
+		{
+			Label: "Clipboard History",
+			Click: func(*mygo.MenuItem, *mygo.Window) {
+				a.openOmnibox(config.TabClipboard)
+			},
+		},
+		mygo.Separator(),
+		{
+			Label: "Reload Configuration",
+			Click: func(*mygo.MenuItem, *mygo.Window) {
+				a.reloadConfiguration()
+			},
+		},
+		{
+			Label: "Open Config Folder",
+			Click: func(*mygo.MenuItem, *mygo.Window) {
+				a.mu.Lock()
+				ctrl := a.controller
+				a.mu.Unlock()
+				if ctrl != nil {
+					_ = ctrl.OpenConfigDirectory()
+				}
+			},
+		},
+		{
+			Label: "Settings…",
+			Click: func(*mygo.MenuItem, *mygo.Window) {
+				a.openSettings(uiapp.SettingsTabGeneral)
+			},
+		},
+		mygo.Separator(),
+		loginItem,
+		mygo.Separator(),
+		{
+			Label: "Quit Clavis",
+			Click: func(*mygo.MenuItem, *mygo.Window) {
+				mygo.App.Quit()
+			},
+		},
+	})
+
+	tray, err := mygo.NewTray(mygo.TrayOptions{
+		ID:             "clavis-tray",
+		Icon:           uiapp.GenerateTrayIconPNG(32),
+		IconIsTemplate: true,
+		ToolTip:        "Clavis",
+		Menu:           menu,
+	})
+	if err != nil {
+		return
+	}
+
+	a.mu.Lock()
+	a.tray = tray
+	a.permMenuItem = permItem
+	a.loginMenuItem = loginItem
+	a.mu.Unlock()
+}
+
+func (a *desktopApp) startBridgeAndFallbackShortcut(capsuleShortcut string) {
+	a.mu.Lock()
+	ctrl := a.controller
+	br := a.hostBridge
+	ctx := a.ctx
+	running := a.bridgeRunning
+	a.mu.Unlock()
+	if ctrl == nil || ctx == nil {
+		return
+	}
+
+	if !running {
+		if err := ctrl.Start(ctx); err == nil {
+			a.mu.Lock()
+			a.bridgeRunning = true
+			running = true
+			a.mu.Unlock()
+		}
+	}
+
+	caps := host.Capabilities{}
+	if br != nil {
+		caps = br.Capabilities()
+	}
+	if running && caps.GlobalHotkeys {
+		a.unregisterFallbackShortcut()
+		return
+	}
+
+	a.registerFallbackShortcut(capsuleShortcut)
+}
+
+func (a *desktopApp) registerFallbackShortcut(shortcut string) {
+	acc := toMyGoAccelerator(shortcut)
+	if acc == "" {
+		return
+	}
+	a.mu.Lock()
+	prev := a.fallbackAccelerator
+	a.mu.Unlock()
+	if prev == acc && mygo.GlobalShortcut.IsRegistered(acc) {
+		return
+	}
+	if prev != "" {
+		mygo.GlobalShortcut.Unregister(prev)
+	}
+	if err := mygo.GlobalShortcut.Register(acc, func() {
+		a.toggleOmnibox()
+	}); err == nil {
+		a.mu.Lock()
+		a.fallbackAccelerator = acc
+		a.mu.Unlock()
+	}
+}
+
+func (a *desktopApp) unregisterFallbackShortcut() {
+	a.mu.Lock()
+	prev := a.fallbackAccelerator
+	a.fallbackAccelerator = ""
+	a.mu.Unlock()
+	if prev != "" {
+		mygo.GlobalShortcut.Unregister(prev)
+	}
+}
+
+func (a *desktopApp) openLeader() {
+	a.mu.Lock()
+	ctrl := a.controller
+	a.mu.Unlock()
+	if ctrl == nil {
+		return
+	}
+	go ctrl.HandleTriggerEvent(host.TriggerEvent{
+		Kind:        host.TriggerLeaderKey,
+		TimestampMs: time.Now().UnixMilli(),
+	})
+}
+
+func (a *desktopApp) openOmnibox(tab config.CapsuleTab) {
+	a.mu.Lock()
+	ctrl := a.controller
+	a.mu.Unlock()
+	if ctrl == nil {
+		return
+	}
+	go ctrl.OpenOmnibox(tab, "")
+}
+
+func (a *desktopApp) toggleOmnibox() {
+	a.mu.Lock()
+	ctrl := a.controller
+	a.mu.Unlock()
+	if ctrl == nil {
+		return
+	}
+	go ctrl.HandleTriggerEvent(host.TriggerEvent{
+		Kind:        host.TriggerCapsuleToggle,
+		TimestampMs: time.Now().UnixMilli(),
+	})
+}
+
+func (a *desktopApp) openSettings(tab uiapp.SettingsTab) {
+	a.mu.Lock()
+	ctrl := a.controller
+	a.mu.Unlock()
+	if ctrl != nil {
+		ctrl.Dispatch(engine.Event{Type: engine.EventDismiss})
+		ctrl.OpenSettings(tab)
+		return
+	}
+	a.handleOpenSettings(tab)
+}
+
+func (a *desktopApp) reloadConfiguration() {
+	a.applyConfigReload()
+	a.mu.Lock()
+	ctrl := a.controller
+	a.mu.Unlock()
+	if ctrl == nil {
+		return
+	}
+	if len(ctrl.ConfigStore.LastErrors()) == 0 {
+		ctrl.Dispatch(engine.Event{
+			Type:    engine.EventShowHUD,
+			Message: "Configuration reloaded",
+		})
+	} else {
+		ctrl.Dispatch(engine.Event{
+			Type:    engine.EventShowHUD,
+			Message: "Configuration reload failed",
+		})
+	}
+}
+
+func (a *desktopApp) applyConfigReload() {
+	a.mu.Lock()
+	ctrl := a.controller
+	br := a.hostBridge
+	sqliteStore := a.sqliteStore
+	a.mu.Unlock()
+	if ctrl == nil {
+		return
+	}
+
+	ok := ctrl.ReloadConfig()
+	cfg := ctrl.Config()
+	if ok {
+		if updater, canUpdate := br.(dynamicBridgeUpdater); canUpdate {
+			updater.UpdateTriggerConfig(cfg.Main.Trigger)
+			updater.UpdateKeymapConfig(cfg.Main.Keymap)
+			updater.UpdateIMEConfig(cfg.Main.IME, cfg.IMERules)
+		}
+		if sqliteStore != nil {
+			sqliteStore.SetPrivacyFilter(clipboard.NewPrivacyFilterFromConfig(cfg.Main.Clipboard))
+		}
+		a.startBridgeAndFallbackShortcut(cfg.Main.Trigger.CapsuleShortcut)
+	}
+	go a.refreshPermissionsAsync()
+}
+
+func (a *desktopApp) refreshPermissionsAsync() {
+	a.mu.Lock()
+	ctrl := a.controller
+	ctx := a.ctx
+	br := a.hostBridge
+	a.mu.Unlock()
+	if ctrl == nil || ctx == nil {
+		return
+	}
+	status, err := ctrl.RefreshPermissions(ctx)
+	var caps host.Capabilities
+	if br != nil {
+		caps = br.Capabilities()
+	}
+	label := formatPermissionsMenuLabel(status, err, caps)
+	mygo.RunOnMain(func() {
+		a.mu.Lock()
+		item := a.permMenuItem
+		a.mu.Unlock()
+		if item != nil {
+			item.SetLabel(label)
+		}
+	})
+}
+
+func (a *desktopApp) runClipboardPoller(ctx context.Context) {
+	pollTicker := time.NewTicker(clipPollInterval)
+	pruneTicker := time.NewTicker(clipPruneEvery)
+	defer pollTicker.Stop()
+	defer pruneTicker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-pollTicker.C:
+			a.mu.Lock()
+			ctrl := a.controller
+			br := a.hostBridge
+			store := a.clipStore
+			a.mu.Unlock()
+			if ctrl == nil || br == nil || store == nil {
+				continue
+			}
+			cfg := ctrl.Config()
+			if !cfg.Main.Clipboard.Enabled {
+				continue
+			}
+			cand, _, err := br.PollClipboardCandidate(ctx)
+			if err != nil || cand == nil {
+				continue
+			}
+			_, _, _ = store.Record(ctx, *cand)
+		case <-pruneTicker.C:
+			a.mu.Lock()
+			ctrl := a.controller
+			store := a.clipStore
+			a.mu.Unlock()
+			if ctrl == nil || store == nil {
+				continue
+			}
+			cfg := ctrl.Config()
+			if cfg.Main.Clipboard.Enabled {
+				_, _ = store.PruneExpired(ctx, cfg.Main.Clipboard.RetentionDays, cfg.Main.Clipboard.MaxHistoryItems)
+			}
+		}
+	}
+}
+
+func (a *desktopApp) handleRepaint() {
+	a.mu.Lock()
+	capWin := a.capsulePanel
+	setWin := a.settingsWin
+	pillWin := a.imePillPanel
+	ctrl := a.controller
+	a.mu.Unlock()
+	if capWin != nil {
+		if ctrl != nil && capWin.IsVisible() {
+			state := ctrl.State()
+			cfg := ctrl.Config()
+			w, h := uiapp.PreferredCapsuleSizeForState(state, cfg.Main.Appearance)
+			if w > 0 && h > 0 {
+				curW, curH := capWin.Size()
+				if curW != w || curH != h {
+					capWin.SetSize(w, h)
+				}
+			}
+		}
+		capWin.Invalidate()
+	}
+	if setWin != nil {
+		setWin.Invalidate()
+	}
+	if pillWin != nil && pillWin.IsVisible() {
+		pillWin.Invalidate()
+	}
+}
+
+func (a *desktopApp) currentIMEPillLabel() string {
+	a.mu.Lock()
+	lbl := strings.TrimSpace(a.imePillLabel)
+	a.mu.Unlock()
+	if lbl == "" {
+		return "EN"
+	}
+	return lbl
+}
+
+func (a *desktopApp) stopIMEPillTimer() {
+	a.mu.Lock()
+	if a.imePillTimer != nil {
+		a.imePillTimer.Stop()
+		a.imePillTimer = nil
+	}
+	a.mu.Unlock()
+}
+
+func (a *desktopApp) handleShowIMEPill(label string, anchor *host.CursorAnchor) {
+	trimmed := strings.TrimSpace(label)
+	if trimmed == "" {
+		trimmed = "EN"
+	}
+	gen := a.imePillGen.Add(1)
+
+	a.mu.Lock()
+	a.imePillLabel = trimmed
+	if a.imePillTimer != nil {
+		a.imePillTimer.Stop()
+		a.imePillTimer = nil
+	}
+	br := a.hostBridge
+	ctx := a.ctx
+	prevAnchor := a.sessionAnchor
+	a.mu.Unlock()
+
+	anchorCopy := cloneValidAnchor(anchor, prevAnchor)
+	go a.presentIMEPillAsync(ctx, gen, br, anchorCopy)
+}
+
+func cloneValidAnchor(primary, fallback *host.CursorAnchor) *host.CursorAnchor {
+	if primary != nil && primary.Valid {
+		copied := *primary
+		return &copied
+	}
+	if fallback != nil && fallback.Valid {
+		copied := *fallback
+		return &copied
+	}
+	return nil
+}
+
+func (a *desktopApp) presentIMEPillAsync(ctx context.Context, gen uint64, br bridge.HostService, resolvedAnchor *host.CursorAnchor) {
+	if resolvedAnchor == nil && br != nil && ctx != nil {
+		snapCtx, cancel := context.WithTimeout(ctx, 80*time.Millisecond)
+		snap, err := br.SnapshotContext(snapCtx)
+		cancel()
+		if err == nil && snap.CursorAnchor != nil && snap.CursorAnchor.Valid {
+			copied := *snap.CursorAnchor
+			resolvedAnchor = &copied
+		}
+	}
+
+	mygo.RunOnMain(func() {
+		if a.imePillGen.Load() != gen {
+			return
+		}
+		a.mu.Lock()
+		pill := a.imePillPanel
+		a.mu.Unlock()
+		if pill == nil {
+			return
+		}
+
+		pillW, pillH := uiapp.PreferredPillSizeForLabel(a.currentIMEPillLabel())
+		displays := mygo.Screen.Displays()
+		cursorPt := mygo.Screen.CursorScreenPoint()
+		bounds := computeIMEPillBounds(resolvedAnchor, cursorPt, bridge.Size{
+			Width:  float64(pillW),
+			Height: float64(pillH),
+		}, displays)
+
+		pill.SetBounds(bounds)
+		pill.ShowInactive()
+		pill.Invalidate()
+		a.scheduleIMEPillAutoHide(gen)
+	})
+}
+
+func (a *desktopApp) scheduleIMEPillAutoHide(gen uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.imePillGen.Load() != gen {
+		return
+	}
+	if a.imePillTimer != nil {
+		a.imePillTimer.Stop()
+	}
+	a.imePillTimer = time.AfterFunc(imePillDuration, func() {
+		if a.imePillGen.Load() != gen {
+			return
+		}
+		mygo.RunOnMain(func() {
+			if a.imePillGen.Load() != gen {
+				return
+			}
+			a.mu.Lock()
+			p := a.imePillPanel
+			a.mu.Unlock()
+			if p != nil && p.IsVisible() {
+				p.Hide()
+			}
+		})
+	})
+}
+
+func (a *desktopApp) handlePresentPhase(phase engine.CapsulePhase) {
+	seq := a.presentSeq.Add(1)
+	a.markPresentTransition(350 * time.Millisecond)
+
+	a.mu.Lock()
+	br := a.hostBridge
+	ctx := a.ctx
+	prevAnchor := a.sessionAnchor
+	a.mu.Unlock()
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	go func() {
+		var anchor *host.CursorAnchor
+		if prevAnchor != nil && prevAnchor.Valid {
+			copied := *prevAnchor
+			anchor = &copied
+		} else if br != nil {
+			snapCtx, cancel := context.WithTimeout(ctx, 120*time.Millisecond)
+			snap, err := br.SnapshotContext(snapCtx)
+			cancel()
+			if err == nil && snap.CursorAnchor != nil && snap.CursorAnchor.Valid {
+				copied := *snap.CursorAnchor
+				anchor = &copied
+				a.setSessionAnchor(anchor)
+			}
+		}
+
+		mygo.RunOnMain(func() {
+			if a.presentSeq.Load() != seq {
+				return
+			}
+			a.mu.Lock()
+			panel := a.capsulePanel
+			ctrl := a.controller
+			a.mu.Unlock()
+			if panel == nil || ctrl == nil {
+				return
+			}
+			state := ctrl.State()
+			if state.Phase == engine.PhaseHidden {
+				return
+			}
+
+			a.markPresentTransition(180 * time.Millisecond)
+
+			cfg := ctrl.Config()
+			w, h := uiapp.PreferredCapsuleSizeForState(state, cfg.Main.Appearance)
+			displays := mygo.Screen.Displays()
+			cursorPt := mygo.Screen.CursorScreenPoint()
+			bounds := computeCapsuleBounds(anchor, cursorPt, bridge.Size{
+				Width:  float64(w),
+				Height: float64(h),
+			}, displays)
+
+			panel.SetBounds(bounds)
+			if state.Phase == engine.PhaseHUD {
+				panel.ShowInactive()
+			} else {
+				panel.Show()
+				panel.Focus()
+			}
+			panel.Invalidate()
+		})
+	}()
+}
+
+func (a *desktopApp) handleHide() {
+	a.mu.Lock()
+	ctrl := a.controller
+	a.mu.Unlock()
+	if ctrl != nil && ctrl.State().Phase != engine.PhaseHidden {
+		return
+	}
+	a.presentSeq.Add(1)
+	a.setSessionAnchor(nil)
+	go mygo.RunOnMain(func() {
+		a.mu.Lock()
+		panel := a.capsulePanel
+		ctrl := a.controller
+		a.mu.Unlock()
+		if panel == nil {
+			return
+		}
+		if ctrl != nil && ctrl.State().Phase != engine.PhaseHidden {
+			return
+		}
+		if panel.IsVisible() {
+			panel.Hide()
+			a.lastPanelHideNano.Store(time.Now().UnixNano())
+		}
+	})
+}
+
+func (a *desktopApp) beforeInject(ctx context.Context) {
+	a.mu.Lock()
+	panel := a.capsulePanel
+	a.mu.Unlock()
+	if panel == nil {
+		return
+	}
+	wasVisible := false
+	mygo.RunOnMain(func() {
+		if panel.IsVisible() {
+			wasVisible = true
+			panel.Hide()
+			a.lastPanelHideNano.Store(time.Now().UnixNano())
+		}
+	})
+	const focusRestoreDelay = 35 * time.Millisecond
+	var wait time.Duration
+	if wasVisible {
+		wait = focusRestoreDelay
+	} else if lastHide := a.lastPanelHideNano.Load(); lastHide > 0 {
+		elapsed := time.Since(time.Unix(0, lastHide))
+		if elapsed < focusRestoreDelay {
+			wait = focusRestoreDelay - elapsed
+		}
+	}
+	if wait > 0 {
+		select {
+		case <-ctx.Done():
+		case <-time.After(wait):
+		}
+	}
+}
+
+func (a *desktopApp) handleOpenSettings(_ uiapp.SettingsTab) {
+	go mygo.RunOnMain(func() {
+		a.mu.Lock()
+		win := a.settingsWin
+		a.mu.Unlock()
+		if win == nil {
+			return
+		}
+		mygo.App.Show()
+		win.Show()
+		win.Focus()
+		win.Invalidate()
+	})
+}
+
+func (a *desktopApp) setSessionAnchor(anchor *host.CursorAnchor) {
+	a.mu.Lock()
+	if anchor == nil {
+		a.sessionAnchor = nil
+	} else {
+		copied := *anchor
+		a.sessionAnchor = &copied
+	}
+	a.mu.Unlock()
+}
+
+func (a *desktopApp) markPresentTransition(d time.Duration) {
+	deadline := time.Now().Add(d).UnixNano()
+	for {
+		cur := a.presentTransitionUntil.Load()
+		if deadline <= cur {
+			return
+		}
+		if a.presentTransitionUntil.CompareAndSwap(cur, deadline) {
+			return
+		}
+	}
+}
+
+func (a *desktopApp) isInPresentTransition() bool {
+	return time.Now().UnixNano() < a.presentTransitionUntil.Load()
+}
+
+func (a *desktopApp) shutdown() {
+	a.shutdownOnce.Do(func() {
+		a.unregisterFallbackShortcut()
+		a.imePillGen.Add(1)
+		a.stopIMEPillTimer()
+
+		a.mu.Lock()
+		cancel := a.cancel
+		cw := a.configWatcher
+		ctrl := a.controller
+		sqliteStore := a.sqliteStore
+		tray := a.tray
+		a.bridgeRunning = false
+		a.mu.Unlock()
+
+		if cancel != nil {
+			cancel()
+		}
+		if cw != nil {
+			cw.Stop()
+		}
+		if ctrl != nil {
+			_ = ctrl.Stop()
+			ctrl.Close()
+		}
+		if sqliteStore != nil {
+			_ = sqliteStore.Close()
+		}
+		if tray != nil {
+			tray.Destroy()
+		}
+	})
+}
+
+// ---- Coordinate & Tray Helpers ----
+
+// computeCapsuleBounds maps a caret CursorAnchor (or fallback cursor screen point)
+// and MyGo displays (top-left DIPs) through bridge.PlacePopover so the Capsule opens
+// cleanly under or above the anchor and remains clamped inside the active monitor's WorkArea.
+func computeCapsuleBounds(
+	anchor *host.CursorAnchor,
+	cursorFallback mygo.Point,
+	size bridge.Size,
+	displays []mygo.Display,
+) mygo.Rectangle {
+	anchorRect := resolveAnchorRect(anchor, cursorFallback)
+	bridgeDisplays := toBridgeDisplays(displays)
+	placed := bridge.PlacePopover(anchorRect, size, bridgeDisplays)
+	return mygo.Rectangle{
+		X:      int(math.Round(placed.X)),
+		Y:      int(math.Round(placed.Y)),
+		Width:  int(math.Round(placed.Width)),
+		Height: int(math.Round(placed.Height)),
+	}
+}
+
+// computeIMEPillBounds places the floating IME micro-pill compactly just above and to the right
+// of the caret anchor (or fallback cursor point) without covering the active typing line,
+// clamping the pill inside the target monitor's WorkArea.
+func computeIMEPillBounds(
+	anchor *host.CursorAnchor,
+	cursorFallback mygo.Point,
+	size bridge.Size,
+	displays []mygo.Display,
+) mygo.Rectangle {
+	if size.Width <= 0 || size.Height <= 0 {
+		pw, ph := uiapp.PreferredIMEPillSize()
+		if size.Width <= 0 {
+			size.Width = float64(pw)
+		}
+		if size.Height <= 0 {
+			size.Height = float64(ph)
+		}
+	}
+
+	anchorRect := resolveAnchorRect(anchor, cursorFallback)
+	x := anchorRect.MaxX() + imePillOffsetX
+	y := anchorRect.Y - size.Height - imePillOffsetY
+
+	bridgeDisplays := toBridgeDisplays(displays)
+	if len(bridgeDisplays) > 0 {
+		target := selectBridgeDisplayForPoint(anchorRect.Center(), bridgeDisplays)
+		wa := target.WorkArea
+		if wa.IsZero() {
+			wa = target.Bounds
+		}
+		minY := wa.Y + bridge.PopoverScreenMargin
+		maxY := wa.MaxY() - bridge.PopoverScreenMargin
+		if y < minY {
+			belowY := anchorRect.MaxY() + imePillOffsetY
+			if belowY+size.Height <= maxY {
+				y = belowY
+			}
+		}
+		x = clampScreenAxis(x, size.Width, wa.X, wa.Width, bridge.PopoverScreenMargin)
+		y = clampScreenAxis(y, size.Height, wa.Y, wa.Height, bridge.PopoverScreenMargin)
+	}
+
+	return mygo.Rectangle{
+		X:      int(math.Round(x)),
+		Y:      int(math.Round(y)),
+		Width:  int(math.Round(size.Width)),
+		Height: int(math.Round(size.Height)),
+	}
+}
+
+func resolveAnchorRect(anchor *host.CursorAnchor, cursorFallback mygo.Point) bridge.Rect {
+	if anchor != nil && anchor.Valid {
+		w := anchor.Width
+		if w < 1 {
+			w = 1
+		}
+		h := anchor.Height
+		if h < 1 {
+			h = 18
+		}
+		return bridge.Rect{
+			X:      anchor.X,
+			Y:      anchor.Y,
+			Width:  w,
+			Height: h,
+		}
+	}
+	return bridge.Rect{
+		X:      float64(cursorFallback.X),
+		Y:      float64(cursorFallback.Y),
+		Width:  1,
+		Height: 18,
+	}
+}
+
+func toBridgeDisplays(displays []mygo.Display) []bridge.DisplayInfo {
+	bridgeDisplays := make([]bridge.DisplayInfo, len(displays))
+	for i, d := range displays {
+		bridgeDisplays[i] = bridge.DisplayInfo{
+			ID: d.ID,
+			Bounds: bridge.Rect{
+				X:      float64(d.Bounds.X),
+				Y:      float64(d.Bounds.Y),
+				Width:  float64(d.Bounds.Width),
+				Height: float64(d.Bounds.Height),
+			},
+			WorkArea: bridge.Rect{
+				X:      float64(d.WorkArea.X),
+				Y:      float64(d.WorkArea.Y),
+				Width:  float64(d.WorkArea.Width),
+				Height: float64(d.WorkArea.Height),
+			},
+			Primary: d.Primary,
+		}
+	}
+	return bridgeDisplays
+}
+
+func selectBridgeDisplayForPoint(p bridge.Point, displays []bridge.DisplayInfo) bridge.DisplayInfo {
+	for _, d := range displays {
+		b := d.Bounds
+		if p.X >= b.X && p.X <= b.MaxX() && p.Y >= b.Y && p.Y <= b.MaxY() {
+			return d
+		}
+	}
+	bestIdx := -1
+	bestDist := math.Inf(1)
+	for i, d := range displays {
+		b := d.Bounds
+		dx := max(max(b.X-p.X, 0), p.X-b.MaxX())
+		dy := max(max(b.Y-p.Y, 0), p.Y-b.MaxY())
+		dist := dx*dx + dy*dy
+		if dist < bestDist {
+			bestDist = dist
+			bestIdx = i
+		}
+	}
+	if bestIdx >= 0 {
+		return displays[bestIdx]
+	}
+	for _, d := range displays {
+		if d.Primary {
+			return d
+		}
+	}
+	return displays[0]
+}
+
+func clampScreenAxis(pos, size, start, span, margin float64) float64 {
+	minPos := start + margin
+	maxPos := start + span - size - margin
+	if maxPos < minPos {
+		return minPos
+	}
+	if pos < minPos {
+		return minPos
+	}
+	if pos > maxPos {
+		return maxPos
+	}
+	return pos
+}
+
+func formatPermissionsMenuLabel(status host.PermissionStatus, err error, caps host.Capabilities) string {
+	if err != nil {
+		return "Permissions: Check Failed"
+	}
+	if !caps.Accessibility && !caps.InputMonitoring {
+		return "Permissions: Standard Mode"
+	}
+	if status.Accessibility && status.InputMonitoring {
+		return "Permissions: All Granted"
+	}
+	var missing []string
+	if caps.Accessibility && !status.Accessibility {
+		missing = append(missing, "Accessibility")
+	}
+	if caps.InputMonitoring && !status.InputMonitoring {
+		missing = append(missing, "Input Monitoring")
+	}
+	if len(missing) == 0 {
+		return "Permissions: Granted"
+	}
+	return "Permissions: Grant " + strings.Join(missing, " & ")
+}
+
+func toMyGoAccelerator(shortcut string) string {
+	hk, err := bridge.ParseHotkey(shortcut)
+	if err != nil {
+		return ""
+	}
+	var parts []string
+	for _, m := range hk.Modifiers {
+		switch m {
+		case "command":
+			parts = append(parts, "Super")
+		case "control":
+			parts = append(parts, "Ctrl")
+		case "option":
+			parts = append(parts, "Alt")
+		case "shift":
+			parts = append(parts, "Shift")
+		}
+	}
+	key := mapShortcutKeyToMyGo(hk.Key)
+	if key == "" {
+		return ""
+	}
+	parts = append(parts, key)
+	return strings.Join(parts, "+")
+}
+
+func mapShortcutKeyToMyGo(k string) string {
+	switch k {
+	case "space":
+		return "Space"
+	case "return":
+		return "Enter"
+	case "escape":
+		return "Escape"
+	case "tab":
+		return "Tab"
+	case "backspace":
+		return "Backspace"
+	case "forwarddelete":
+		return "Delete"
+	case "left":
+		return "Left"
+	case "right":
+		return "Right"
+	case "up":
+		return "Up"
+	case "down":
+		return "Down"
+	case "home":
+		return "Home"
+	case "end":
+		return "End"
+	case "pageup":
+		return "PageUp"
+	case "pagedown":
+		return "PageDown"
+	case "grave":
+		return "`"
+	case "minus":
+		return "-"
+	case "equal":
+		return "="
+	case "leftbracket":
+		return "["
+	case "rightbracket":
+		return "]"
+	case "semicolon":
+		return ";"
+	case "quote":
+		return "'"
+	case "comma":
+		return ","
+	case "period":
+		return "."
+	case "slash":
+		return "/"
+	case "backslash":
+		return `\`
+	}
+	if strings.HasPrefix(k, "f") && len(k) >= 2 {
+		return strings.ToUpper(k)
+	}
+	if len(k) == 1 {
+		return strings.ToUpper(k)
+	}
+	return ""
+}

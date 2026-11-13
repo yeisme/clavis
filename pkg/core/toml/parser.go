@@ -410,16 +410,15 @@ func (s *scanner) parseKeyValueAssignment(table *tableNode, isInline bool) error
 				if existing.table.origin == originExplicit {
 					return s.errAt(keyLine, keyCol, fmt.Sprintf("Cannot add dotted key to explicitly defined table '%s'", key))
 				}
+				if existing.table.origin == originImplicit && !isInline {
+					existing.table.origin = originDotted
+				}
 				target = existing.table
 			case astArrayOfTables, astValue:
 				return s.errAt(keyLine, keyCol, fmt.Sprintf("Cannot traverse through non-table key '%s'", key))
 			}
 		} else {
-			origin := originDotted
-			if isInline {
-				origin = originInline
-			}
-			dottedTbl := newTableNode(origin)
+			dottedTbl := newTableNode(originDotted)
 			target.entries[key] = astNode{kind: astTable, table: dottedTbl}
 			target = dottedTbl
 		}

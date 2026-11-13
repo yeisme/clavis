@@ -18,7 +18,8 @@ func Match(query, target string) (FuzzyMatchResult, bool) {
 	return MatchFull(query, target, "", nil)
 }
 
-// MatchFull runs fuzzy matching of query against label, key hint, and keywords.
+// MatchFull runs fuzzy matching of query against label, key hint, and keywords,
+// including zero-dependency Hanzi Pinyin/initialism matching and full-width normalization.
 func MatchFull(query, label, key string, keywords []string) (FuzzyMatchResult, bool) {
 	trimmed := strings.TrimSpace(query)
 	if trimmed == "" {
@@ -28,19 +29,27 @@ func MatchFull(query, label, key string, keywords []string) (FuzzyMatchResult, b
 	var best FuzzyMatchResult
 	hasBest := false
 
-	if direct, ok := scoreSingleQuery(trimmed, label, key, keywords); ok {
-		best = direct
-		hasBest = true
-	}
-
-	tokens := strings.Fields(trimmed)
-	if len(tokens) > 1 {
-		if multi, ok := scoreMultiToken(tokens, label, key, keywords); ok {
-			if !hasBest || multi.Score > best.Score {
-				best = multi
+	evaluateCandidate := func(q string) {
+		if direct, ok := scoreSingleQuery(q, label, key, keywords); ok {
+			if !hasBest || direct.Score > best.Score {
+				best = direct
 				hasBest = true
 			}
 		}
+		tokens := strings.Fields(q)
+		if len(tokens) > 1 {
+			if multi, ok := scoreMultiToken(tokens, label, key, keywords); ok {
+				if !hasBest || multi.Score > best.Score {
+					best = multi
+					hasBest = true
+				}
+			}
+		}
+	}
+
+	evaluateCandidate(trimmed)
+	if norm := strings.TrimSpace(NormalizeFullWidth(trimmed)); norm != "" && norm != trimmed {
+		evaluateCandidate(norm)
 	}
 
 	return best, hasBest
@@ -72,6 +81,12 @@ func scoreMultiToken(tokens []string, label, key string, keywords []string) (Fuz
 
 func scoreSingleQuery(query, label, key string, keywords []string) (FuzzyMatchResult, bool) {
 	labelMatch, labelOK := scoreLabel(query, label)
+	if pyMatch, pyOK := MatchPinyinLabel(query, label); pyOK {
+		if !labelOK || pyMatch.Score > labelMatch.Score {
+			labelMatch = pyMatch
+			labelOK = true
+		}
+	}
 	keyBonus := scoreKey(query, key)
 	keywordBonus := scoreKeywords(query, keywords)
 
@@ -145,6 +160,11 @@ func scoreKeywords(query string, keywords []string) int {
 			}
 			if pts > best {
 				best = pts
+			}
+		}
+		if ContainsHanzi(kw) {
+			if pyPts := MatchPinyinKeyword(query, kw); pyPts > best {
+				best = pyPts
 			}
 		}
 	}

@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -299,6 +300,29 @@ func TestConfigStoreReloadAndRollback(t *testing.T) {
 	}
 }
 
+func TestValidatorRejectsNaNAndInfFloats(t *testing.T) {
+	for _, val := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		m := config.DefaultMainConfig()
+		m.Appearance.CapsuleWidth = val
+		m.Appearance.CornerRadius = val
+		m.AI.Temperature = val
+		m.AI.TimeoutSeconds = val
+		issues := config.ValidateMain(m)
+		for _, kp := range []string{
+			"appearance.capsule_width",
+			"appearance.corner_radius",
+			"ai.timeout_seconds",
+		} {
+			if !hasIssue(issues, kp, config.SeverityError) {
+				t.Fatalf("expected error for %s=%v, got %+v", kp, val, issues)
+			}
+		}
+		if !hasIssue(issues, "ai.temperature", config.SeverityWarning) {
+			t.Fatalf("expected warning for ai.temperature=%v, got %+v", val, issues)
+		}
+	}
+}
+
 func hasIssue(issues []config.ValidationIssue, keyPath string, sev config.ValidationSeverity) bool {
 	for _, issue := range issues {
 		if issue.KeyPath == keyPath && issue.Severity == sev {
@@ -306,4 +330,291 @@ func hasIssue(issues []config.ValidationIssue, keyPath string, sev config.Valida
 		}
 	}
 	return false
+}
+
+func TestZeroGPTDefaultsAndMultiProfileAI(t *testing.T) {
+	mainTOML := config.DefaultContent(config.FileMain)
+	lowerTOML := strings.ToLower(mainTOML)
+	if strings.Contains(lowerTOML, "gpt") || strings.Contains(lowerTOML, "openai.com") {
+		t.Fatalf("DefaultContent(FileMain) must not contain any GPT/OpenAI defaults:\n%s", mainTOML)
+	}
+
+	aiCfg := config.DefaultAIConfig()
+	if aiCfg.ActiveProfileID != "deepseek" || aiCfg.Provider != "deepseek" || aiCfg.Model != "deepseek-chat" {
+		t.Fatalf("expected DeepSeek as default AI profile, got %+v", aiCfg)
+	}
+	if len(aiCfg.Profiles) != 4 {
+		t.Fatalf("expected 4 default AI profiles (deepseek, ollama, claude, gemini), got %d", len(aiCfg.Profiles))
+	}
+
+	ollama, ok := aiCfg.ProfileByID("ollama")
+	if !ok || ollama.Model != "qwen2.5:7b" || ollama.Protocol != config.ProtocolOpenAICompatible {
+		t.Fatalf("unexpected ollama profile: %+v (%v)", ollama, ok)
+	}
+	claude, ok := aiCfg.ProfileByID("claude")
+	if !ok || claude.Protocol != config.ProtocolAnthropic || claude.APIKeyEnvVar != "ANTHROPIC_API_KEY" {
+		t.Fatalf("unexpected claude profile: %+v (%v)", claude, ok)
+	}
+	gemini, ok := aiCfg.ProfileByID("gemini")
+	if !ok || gemini.Protocol != config.ProtocolGemini || gemini.APIKeyEnvVar != "GEMINI_API_KEY" {
+		t.Fatalf("unexpected gemini profile: %+v (%v)", gemini, ok)
+	}
+
+	// Switching ActiveProfileID updates ActiveProfile()
+	aiCfg.ActiveProfileID = "claude"
+	if got := aiCfg.ActiveProfile(); got.ID != "claude" || got.Protocol != config.ProtocolAnthropic {
+		t.Fatalf("expected ActiveProfile claude, got %+v", got)
+	}
+
+	// Legacy flat [ai] without [[ai.profiles]] synthesizes a single profile
+	legacyTOML := `
+[ai]
+provider = "custom-llm"
+base_url = "https://llm.example.com/v1"
+model = "custom-70b"
+keychain_account = "clavis.ai.custom"
+`
+	decodedLegacy, err := config.DecodeMainConfig(legacyTOML)
+	if err != nil {
+		t.Fatalf("DecodeMainConfig legacy failed: %v", err)
+	}
+	if len(decodedLegacy.AI.Profiles) != 1 || decodedLegacy.AI.ActiveProfile().Model != "custom-70b" {
+		t.Fatalf("expected synthesized single profile for legacy [ai], got %+v", decodedLegacy.AI)
+	}
+
+	// Reject raw API keys inside [[ai.profiles]]
+	for _, key := range []string{"api_key", "apiKey", "secret_key", "secretKey"} {
+		badProfTOML := "[ai]\nactive_profile_id = \"p1\"\n[[ai.profiles]]\nid = \"p1\"\nbase_url = \"https://api.deepseek.com/v1\"\nmodel = \"deepseek-chat\"\n" + key + " = \"sk-secret\"\n"
+		_, err := config.DecodeMainConfig(badProfTOML)
+		if err == nil {
+			t.Fatalf("expected error for forbidden key %q in [[ai.profiles]]", key)
+		}
+		var de *config.DecodingError
+		if !errors.As(err, &de) || de.KeyPath != "ai.profiles[0]."+key {
+			t.Fatalf("expected DecodingError at ai.profiles[0].%s, got %v", key, err)
+		}
+	}
+}
+
+func TestKeymapSmartIMEAndSaveStore(t *testing.T) {
+	// Keymap & Smart IME TOML decode/encode + validation
+	customTOML := `
+[keymap]
+enabled = true
+tap_hold_threshold_ms = 180
+caps_lock_tap = "escape"
+caps_lock_hold = "nav"
+nav_layer_enabled = true
+
+[[keymap.remaps]]
+from = "right_command"
+tap = "f18"
+hold = "right_command"
+app_bundle_ids = ["com.apple.Terminal"]
+
+[ime]
+enabled = true
+default_input_source_id = "com.apple.keylayout.ABC"
+show_indicator_hud = true
+switch_delay_ms = 40
+lock_ascii_on_leader = false
+show_floating_pill = false
+`
+	m, err := config.DecodeMainConfig(customTOML)
+	if err != nil {
+		t.Fatalf("DecodeMainConfig failed: %v", err)
+	}
+	if m.Keymap.TapHoldThresholdMs != 180 || len(m.Keymap.Remaps) != 1 || m.Keymap.Remaps[0].Tap != "f18" {
+		t.Fatalf("unexpected keymap config: %+v", m.Keymap)
+	}
+	if m.IME.LockASCIIOnLeader || m.IME.ShowFloatingPill {
+		t.Fatalf("expected LockASCIIOnLeader=false and ShowFloatingPill=false, got %+v", m.IME)
+	}
+
+	// Keymap threshold out-of-range validation
+	badKeymap := m
+	badKeymap.Keymap.TapHoldThresholdMs = 50
+	if issues := config.ValidateMain(badKeymap); !hasIssue(issues, "keymap.tap_hold_threshold_ms", config.SeverityError) {
+		t.Fatalf("expected keymap.tap_hold_threshold_ms validation error, got %+v", issues)
+	}
+
+	// IME rules URLPattern & TitlePattern + regex validation
+	imeTOML := `
+[[rules]]
+bundle_id = "com.apple.Safari"
+app_name = "Safari"
+url_pattern = "*github.com*"
+title_pattern = ".*Pull Request.*"
+input_source_id = "com.apple.keylayout.ABC"
+preferred_mode = "ascii"
+restore_on_leave = true
+`
+	imeCfg, err := config.DecodeIMERulesConfig(imeTOML)
+	if err != nil {
+		t.Fatalf("DecodeIMERulesConfig failed: %v", err)
+	}
+	if len(imeCfg.Rules) != 1 || imeCfg.Rules[0].URLPattern != "*github.com*" || imeCfg.Rules[0].TitlePattern != ".*Pull Request.*" {
+		t.Fatalf("unexpected decoded IMERule: %+v", imeCfg.Rules)
+	}
+	if issues := config.ValidateIMERules(imeCfg); len(issues) != 0 {
+		t.Fatalf("expected valid IME rule, got %+v", issues)
+	}
+
+	badIME := config.IMERulesConfig{
+		Rules: append([]config.IMERule(nil), imeCfg.Rules...),
+	}
+	badIME.Rules[0].TitlePattern = "[unclosed-regex"
+	if issues := config.ValidateIMERules(badIME); !hasIssue(issues, "rules[0].title_pattern", config.SeverityError) {
+		t.Fatalf("expected rules[0].title_pattern regex error, got %+v", issues)
+	}
+
+	// ConfigStore SaveMain and SaveIMERules
+	dir := t.TempDir()
+	store := config.NewConfigStore(dir)
+	if _, err := store.LoadOrInitialize(); err != nil {
+		t.Fatalf("LoadOrInitialize failed: %v", err)
+	}
+
+	if err := store.SaveMain(m); err != nil {
+		t.Fatalf("SaveMain failed: %v", err)
+	}
+	if store.Current().Main.Keymap.TapHoldThresholdMs != 180 {
+		t.Fatalf("expected SaveMain to update Current()")
+	}
+	if err := store.SaveMain(badKeymap); err == nil {
+		t.Fatalf("expected SaveMain to reject invalid MainConfig")
+	}
+
+	if err := store.SaveIMERules(imeCfg); err != nil {
+		t.Fatalf("SaveIMERules failed: %v", err)
+	}
+	if len(store.Current().IMERules.Rules) != 1 || store.Current().IMERules.Rules[0].URLPattern != "*github.com*" {
+		t.Fatalf("expected SaveIMERules to update Current()")
+	}
+	if err := store.SaveIMERules(badIME); err == nil {
+		t.Fatalf("expected SaveIMERules to reject invalid IMERulesConfig")
+	}
+	if !store.Reload() {
+		t.Fatalf("expected Reload after SaveMain/SaveIMERules to succeed, errors: %+v", store.LastErrors())
+	}
+
+	// Verify ShowPreviewPane round-trip & default true
+	defMain := config.DefaultMainConfig()
+	if !defMain.Appearance.ShowPreviewPane {
+		t.Fatal("expected ShowPreviewPane=true by default")
+	}
+	defMain.Appearance.ShowPreviewPane = false
+	decodedMain, err := config.DecodeMainConfig(defMain.Encode())
+	if err != nil || decodedMain.Appearance.ShowPreviewPane {
+		t.Fatalf("expected ShowPreviewPane=false after round-trip, got %+v (%v)", decodedMain.Appearance, err)
+	}
+
+	// Verify optional input_source_id when preferred_mode is valid ("ascii", "native", "keep")
+	modeOnlyTOML := `
+[[rules]]
+bundle_id = "com.tencent.xinWeChat"
+app_name = "WeChat"
+preferred_mode = "native"
+restore_on_leave = true
+
+[[rules]]
+process_name = "code"
+app_name = "VS Code"
+preferred_mode = "ascii"
+`
+	modeOnlyCfg, err := config.DecodeIMERulesConfig(modeOnlyTOML)
+	if err != nil {
+		t.Fatalf("DecodeIMERulesConfig without input_source_id failed: %v", err)
+	}
+	if issues := config.ValidateIMERules(modeOnlyCfg); len(issues) != 0 {
+		t.Fatalf("expected mode-only IME rules to validate cleanly, got %+v", issues)
+	}
+	if err := store.SaveIMERules(modeOnlyCfg); err != nil {
+		t.Fatalf("SaveIMERules mode-only failed: %v", err)
+	}
+	redecodedIME, err := config.DecodeIMERulesConfig(modeOnlyCfg.Encode())
+	if err != nil || len(redecodedIME.Rules) != 2 || redecodedIME.Rules[0].PreferredMode != config.IMEModeNative {
+		t.Fatalf("unexpected round-trip for mode-only IME rules: %+v (%v)", redecodedIME, err)
+	}
+
+	// Missing both input_source_id and preferred_mode fails validation
+	emptyModeAndSource := config.IMERulesConfig{
+		Rules: []config.IMERule{{BundleID: "com.example.App", AppName: "Example"}},
+	}
+	if issues := config.ValidateIMERules(emptyModeAndSource); !hasIssue(issues, "rules[0].input_source_id", config.SeverityError) {
+		t.Fatalf("expected validation error when both input_source_id and preferred_mode are empty, got %+v", issues)
+	}
+
+	// Verify SaveSnippets, SaveLeader (cross-file validation), SaveGlossary, and SaveAll
+	newSnippets := config.SnippetsConfig{
+		Items: []config.SnippetItem{
+			{ID: "greet", Trigger: ";gm", Content: "Good morning!", Description: "Greeting", WordBoundary: true},
+		},
+	}
+	if err := store.SaveSnippets(newSnippets); err != nil {
+		t.Fatalf("SaveSnippets failed: %v", err)
+	}
+	if len(store.Current().Snippets.Items) != 1 || store.Current().Snippets.Items[0].ID != "greet" {
+		t.Fatalf("SaveSnippets did not update Current().Snippets")
+	}
+
+	// Leader referencing non-existent snippet generates cross-file warning, duplicate key fails
+	leaderWithMissingSnip := config.LeaderConfig{
+		Nodes: []config.LeaderNode{
+			{Key: "g", Label: "Greet", Action: config.SnippetAction("missing-snippet")},
+		},
+	}
+	if err := store.SaveLeader(leaderWithMissingSnip); err != nil {
+		t.Fatalf("SaveLeader with warning should succeed, got: %v", err)
+	}
+	if len(store.LastWarnings()) == 0 {
+		t.Fatal("expected cross-file missing snippet warning in LastWarnings() after SaveLeader")
+	}
+	// Saving snippet with matching ID clears the cross-file warning!
+	newSnippets.Items = append(newSnippets.Items, config.SnippetItem{
+		ID: "missing-snippet", Trigger: ";ms", Content: "Fixed", WordBoundary: true,
+	})
+	if err := store.SaveSnippets(newSnippets); err != nil {
+		t.Fatalf("SaveSnippets second call failed: %v", err)
+	}
+	if len(store.LastWarnings()) != 0 {
+		t.Fatalf("expected cross-file warning to clear when snippet is added, got %+v", store.LastWarnings())
+	}
+
+	badLeaderSave := config.LeaderConfig{
+		Nodes: []config.LeaderNode{
+			{Key: "a", Label: "One", Action: config.ToggleIMEAction()},
+			{Key: "a", Label: "Two", Action: config.ToggleIMEAction()},
+		},
+	}
+	if err := store.SaveLeader(badLeaderSave); err == nil {
+		t.Fatal("expected SaveLeader to reject duplicate keys")
+	}
+
+	newGlossary := config.GlossaryConfig{
+		Terms: []config.GlossaryTerm{
+			{Term: "MyGo", Aliases: []string{"mygo"}, Hint: "UI framework", Category: "tech"},
+		},
+	}
+	if err := store.SaveGlossary(newGlossary); err != nil {
+		t.Fatalf("SaveGlossary failed: %v", err)
+	}
+	if len(store.Current().Glossary.Terms) != 1 || store.Current().Glossary.Terms[0].Term != "MyGo" {
+		t.Fatalf("SaveGlossary did not update Current().Glossary")
+	}
+	if err := store.SaveGlossary(config.GlossaryConfig{Terms: []config.GlossaryTerm{{Term: "  "}}}); err == nil {
+		t.Fatal("expected SaveGlossary to reject empty term")
+	}
+
+	fullCfg := store.Current()
+	fullCfg.Main.Appearance.CapsuleWidth = 720
+	if err := store.SaveAll(fullCfg); err != nil {
+		t.Fatalf("SaveAll failed: %v", err)
+	}
+	if store.Current().Main.Appearance.CapsuleWidth != 720 || len(store.SavedDigests()) != 5 {
+		t.Fatalf("unexpected state after SaveAll: width=%v digests=%d", store.Current().Main.Appearance.CapsuleWidth, len(store.SavedDigests()))
+	}
+	if !store.Reload() {
+		t.Fatalf("Reload after all 5 Save* calls failed: %+v", store.LastErrors())
+	}
 }

@@ -39,6 +39,8 @@ type ContextSnapshot struct {
 	BundleID          string           `json:"bundleId,omitempty"`
 	ProcessName       string           `json:"processName,omitempty"`
 	AppName           string           `json:"appName,omitempty"`
+	WindowTitle       string           `json:"windowTitle,omitempty"`
+	ActiveURL         string           `json:"activeUrl,omitempty"`
 	SelectedText      string           `json:"selectedText,omitempty"`
 	SurroundingText   string           `json:"surroundingText,omitempty"`
 	ClipboardPreview  string           `json:"clipboardPreview,omitempty"`
@@ -63,11 +65,12 @@ type PermissionStatus struct {
 type TriggerKind string
 
 const (
-	TriggerLeaderKey      TriggerKind = "leader_key"
-	TriggerDoubleTap      TriggerKind = "double_tap"
-	TriggerCapsuleToggle  TriggerKind = "capsule_toggle"
-	TriggerSnippetKey     TriggerKind = "snippet_key"
-	TriggerSnippetBack    TriggerKind = "snippet_backspace"
+	TriggerLeaderKey     TriggerKind = "leader_key"
+	TriggerDoubleTap     TriggerKind = "double_tap"
+	TriggerCapsuleToggle TriggerKind = "capsule_toggle"
+	TriggerSnippetKey    TriggerKind = "snippet_key"
+	TriggerSnippetBack   TriggerKind = "snippet_backspace"
+	TriggerSnippetReset  TriggerKind = "snippet_reset"
 )
 
 // TriggerEvent describes a global hotkey or keystroke event captured by the host.

@@ -126,6 +126,17 @@ dotted.a.c = 99
 	aTbl, _ := aVal.AsTable()
 	assertStr(t, aTbl, "b", "nested")
 	assertInt(t, aTbl, "c", 99)
+
+	inlineDotted, err := toml.Parse("t = { a.b = 1, a.c = 2 }\n")
+	if err != nil {
+		t.Fatalf("unexpected error for dotted keys inside inline table: %v", err)
+	}
+	tVal, _ := inlineDotted.Get("t")
+	tTbl, _ := tVal.AsTable()
+	taVal, _ := tTbl.Get("a")
+	taTbl, _ := taVal.AsTable()
+	assertInt(t, taTbl, "b", 1)
+	assertInt(t, taTbl, "c", 2)
 }
 
 func TestParseTablesAndArraysOfTables(t *testing.T) {
@@ -199,6 +210,18 @@ func TestParseRejectsErrorsWithLineAndColumn(t *testing.T) {
 			name: "reopen dotted table",
 			src:  "a.b = 1\n[a]\nc = 2\n",
 			line: 2,
+			col:  1,
+		},
+		{
+			name: "reopen dotted subtable inside table",
+			src:  "[a]\nb.c = 1\n[a.b]\nd = 2\n",
+			line: 3,
+			col:  1,
+		},
+		{
+			name: "reopen implicit table finalized by dotted key",
+			src:  "[a.b.c]\nx = 1\n[a]\nb.d = 2\n[a.b]\ne = 3\n",
+			line: 5,
 			col:  1,
 		},
 		{

@@ -67,6 +67,15 @@ double_tap_interval_ms = 300
 capsule_shortcut = "option+space"
 snippet_expansion_enabled = true
 
+[keymap]
+# Dual-role Tap/Hold key remapping & CapsLock Vim navigation layer
+enabled = true
+# Allowed range: 80..500 ms
+tap_hold_threshold_ms = 200
+caps_lock_tap = "escape"
+caps_lock_hold = "nav"
+nav_layer_enabled = true
+
 [appearance]
 # Theme: "system", "light", or "dark"
 theme = "system"
@@ -74,17 +83,73 @@ capsule_width = 680.0
 max_visible_results = 8
 corner_radius = 16.0
 show_key_hints = true
+show_preview_pane = true
 hud_duration_ms = 1400
 
 [ai]
 # API keys are never stored in config.toml; store them in OS Keychain / Credential Manager under keychain_account
-provider = "openai"
-base_url = "https://api.openai.com/v1"
-model = "gpt-4o-mini"
+active_profile_id = "deepseek"
+provider = "deepseek"
+protocol = "openai_compatible"
+base_url = "https://api.deepseek.com/v1"
+model = "deepseek-chat"
 temperature = 0.2
 timeout_seconds = 30.0
 system_prompt = "You are a concise macOS writing and productivity assistant. Return only the requested output unless asked otherwise."
-keychain_account = "clavis.ai.default"
+keychain_account = "clavis.ai.deepseek"
+api_key_env_var = "DEEPSEEK_API_KEY"
+
+[[ai.profiles]]
+id = "deepseek"
+name = "DeepSeek"
+provider = "deepseek"
+protocol = "openai_compatible"
+base_url = "https://api.deepseek.com/v1"
+model = "deepseek-chat"
+temperature = 0.2
+timeout_seconds = 30.0
+system_prompt = "You are a concise macOS writing and productivity assistant. Return only the requested output unless asked otherwise."
+keychain_account = "clavis.ai.deepseek"
+api_key_env_var = "DEEPSEEK_API_KEY"
+
+[[ai.profiles]]
+id = "ollama"
+name = "Ollama (Local)"
+provider = "ollama"
+protocol = "openai_compatible"
+base_url = "http://127.0.0.1:11434/v1"
+model = "qwen2.5:7b"
+temperature = 0.2
+timeout_seconds = 30.0
+system_prompt = "You are a concise macOS writing and productivity assistant. Return only the requested output unless asked otherwise."
+keychain_account = "clavis.ai.ollama"
+api_key_env_var = ""
+
+[[ai.profiles]]
+id = "claude"
+name = "Claude"
+provider = "anthropic"
+protocol = "anthropic"
+base_url = "https://api.anthropic.com/v1"
+model = "claude-3-7-sonnet-latest"
+temperature = 0.2
+timeout_seconds = 30.0
+system_prompt = "You are a concise macOS writing and productivity assistant. Return only the requested output unless asked otherwise."
+keychain_account = "clavis.ai.anthropic"
+api_key_env_var = "ANTHROPIC_API_KEY"
+
+[[ai.profiles]]
+id = "gemini"
+name = "Gemini"
+provider = "gemini"
+protocol = "gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+model = "gemini-2.5-flash"
+temperature = 0.2
+timeout_seconds = 30.0
+system_prompt = "You are a concise macOS writing and productivity assistant. Return only the requested output unless asked otherwise."
+keychain_account = "clavis.ai.gemini"
+api_key_env_var = "GEMINI_API_KEY"
 
 [clipboard]
 enabled = true
@@ -98,6 +163,8 @@ enabled = true
 default_input_source_id = "com.apple.keylayout.ABC"
 show_indicator_hud = true
 switch_delay_ms = 50
+lock_ascii_on_leader = true
+show_floating_pill = true
 `
 
 const defaultLeaderTOML = `# Clavis leader key tree
@@ -210,6 +277,7 @@ category = "product"
 
 const defaultIMERulesTOML = `# Clavis per-application input method rules
 # preferred_mode: "ascii", "native", or "keep"
+# Optional context matchers: url_pattern = "*github.com*", title_pattern = ".*VIM.*"
 
 [[rules]]
 bundle_id = "com.apple.Terminal"

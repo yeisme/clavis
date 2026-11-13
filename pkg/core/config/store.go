@@ -1,10 +1,13 @@
 package config
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/yeisme/clavis/pkg/core/toml"
@@ -38,14 +41,29 @@ type ConfigStore struct {
 	current      ClavisConfig
 	lastErrors   []LoadError
 	lastWarnings []ValidationIssue
+	savedDigests map[string][32]byte
 }
 
 // NewConfigStore creates a ConfigStore rooted at dir with DefaultConfig().
 func NewConfigStore(dir string) *ConfigStore {
 	return &ConfigStore{
-		dir:     dir,
-		current: DefaultConfig(),
+		dir:          dir,
+		current:      DefaultConfig(),
+		savedDigests: make(map[string][32]byte),
 	}
+}
+
+// SavedDigests returns a copy of the SHA-256 content digests of the last successfully
+// loaded or atomically saved TOML files in Directory().
+func (s *ConfigStore) SavedDigests() map[string][32]byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.savedDigests) == 0 {
+		return nil
+	}
+	out := make(map[string][32]byte, len(s.savedDigests))
+	maps.Copy(out, s.savedDigests)
+	return out
 }
 
 // Directory returns the configuration directory path.
@@ -85,6 +103,229 @@ func (s *ConfigStore) LoadOrInitialize() (ClavisConfig, error) {
 	}
 	s.Reload()
 	return s.Current(), nil
+}
+
+func firstErrorIssue(issues []ValidationIssue) error {
+	for _, issue := range issues {
+		if issue.Severity == SeverityError {
+			return LoadError{
+				File:    issue.File,
+				KeyPath: issue.KeyPath,
+				Message: issue.Message,
+			}
+		}
+	}
+	return nil
+}
+
+func collectWarningIssues(issues []ValidationIssue) []ValidationIssue {
+	var warnings []ValidationIssue
+	for _, issue := range issues {
+		if issue.Severity != SeverityError {
+			warnings = append(warnings, issue)
+		}
+	}
+	return warnings
+}
+
+func (s *ConfigStore) ensureSavedDigestsLocked() {
+	if s.savedDigests == nil {
+		s.savedDigests = make(map[string][32]byte)
+	}
+	if len(s.savedDigests) == 0 {
+		maps.Copy(s.savedDigests, readTOMLFileHashes(s.dir))
+	}
+}
+
+func readTOMLFileHashes(dir string) map[string][32]byte {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string][32]byte)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".toml") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		out[entry.Name()] = sha256.Sum256(data)
+	}
+	return out
+}
+
+// SaveMain validates mainCfg, atomically writes config.toml to disk, and updates Current().Main.
+func (s *ConfigStore) SaveMain(mainCfg MainConfig) error {
+	if err := firstErrorIssue(ValidateMain(mainCfg)); err != nil {
+		return err
+	}
+	encoded := mainCfg.Encode()
+	if err := atomicWriteConfigFile(s.dir, FileMain, encoded); err != nil {
+		return err
+	}
+	sum := sha256.Sum256([]byte(encoded))
+	s.mu.Lock()
+	s.ensureSavedDigestsLocked()
+	s.current.Main = mainCfg
+	s.lastErrors = nil
+	s.lastWarnings = collectWarningIssues(Validate(s.current))
+	s.savedDigests[string(FileMain)] = sum
+	s.mu.Unlock()
+	return nil
+}
+
+// SaveLeader validates leaderCfg (including cross-file snippet references), atomically writes leader.toml, and updates Current().Leader.
+func (s *ConfigStore) SaveLeader(leaderCfg LeaderConfig) error {
+	cur := s.Current()
+	knownSnippetIDs := make(map[string]struct{}, len(cur.Snippets.Items))
+	for _, item := range cur.Snippets.Items {
+		knownSnippetIDs[item.ID] = struct{}{}
+	}
+	if err := firstErrorIssue(ValidateLeader(leaderCfg, knownSnippetIDs)); err != nil {
+		return err
+	}
+	encoded := leaderCfg.Encode()
+	if err := atomicWriteConfigFile(s.dir, FileLeader, encoded); err != nil {
+		return err
+	}
+	sum := sha256.Sum256([]byte(encoded))
+	s.mu.Lock()
+	s.ensureSavedDigestsLocked()
+	s.current.Leader = leaderCfg
+	s.lastErrors = nil
+	s.lastWarnings = collectWarningIssues(Validate(s.current))
+	s.savedDigests[string(FileLeader)] = sum
+	s.mu.Unlock()
+	return nil
+}
+
+// SaveSnippets validates snippetsCfg, atomically writes snippets.toml, and updates Current().Snippets and cross-file warnings.
+func (s *ConfigStore) SaveSnippets(snippetsCfg SnippetsConfig) error {
+	if err := firstErrorIssue(ValidateSnippets(snippetsCfg)); err != nil {
+		return err
+	}
+	encoded := snippetsCfg.Encode()
+	if err := atomicWriteConfigFile(s.dir, FileSnippets, encoded); err != nil {
+		return err
+	}
+	sum := sha256.Sum256([]byte(encoded))
+	s.mu.Lock()
+	s.ensureSavedDigestsLocked()
+	s.current.Snippets = snippetsCfg
+	s.lastErrors = nil
+	s.lastWarnings = collectWarningIssues(Validate(s.current))
+	s.savedDigests[string(FileSnippets)] = sum
+	s.mu.Unlock()
+	return nil
+}
+
+// SaveGlossary validates glossaryCfg, atomically writes glossary.toml, and updates Current().Glossary.
+func (s *ConfigStore) SaveGlossary(glossaryCfg GlossaryConfig) error {
+	if err := firstErrorIssue(ValidateGlossary(glossaryCfg)); err != nil {
+		return err
+	}
+	encoded := glossaryCfg.Encode()
+	if err := atomicWriteConfigFile(s.dir, FileGlossary, encoded); err != nil {
+		return err
+	}
+	sum := sha256.Sum256([]byte(encoded))
+	s.mu.Lock()
+	s.ensureSavedDigestsLocked()
+	s.current.Glossary = glossaryCfg
+	s.lastErrors = nil
+	s.lastWarnings = collectWarningIssues(Validate(s.current))
+	s.savedDigests[string(FileGlossary)] = sum
+	s.mu.Unlock()
+	return nil
+}
+
+// SaveIMERules validates imeRulesCfg, atomically writes ime-rules.toml to disk, and updates Current().IMERules.
+func (s *ConfigStore) SaveIMERules(imeRulesCfg IMERulesConfig) error {
+	if err := firstErrorIssue(ValidateIMERules(imeRulesCfg)); err != nil {
+		return err
+	}
+	encoded := imeRulesCfg.Encode()
+	if err := atomicWriteConfigFile(s.dir, FileIMERules, encoded); err != nil {
+		return err
+	}
+	sum := sha256.Sum256([]byte(encoded))
+	s.mu.Lock()
+	s.ensureSavedDigestsLocked()
+	s.current.IMERules = imeRulesCfg
+	s.lastErrors = nil
+	s.lastWarnings = collectWarningIssues(Validate(s.current))
+	s.savedDigests[string(FileIMERules)] = sum
+	s.mu.Unlock()
+	return nil
+}
+
+// SaveAll validates the full ClavisConfig across all 5 files before atomically persisting every TOML file.
+func (s *ConfigStore) SaveAll(cfg ClavisConfig) error {
+	issues := Validate(cfg)
+	if err := firstErrorIssue(issues); err != nil {
+		return err
+	}
+	files := []struct {
+		kind    ConfigFileKind
+		content string
+	}{
+		{FileMain, cfg.Main.Encode()},
+		{FileLeader, cfg.Leader.Encode()},
+		{FileSnippets, cfg.Snippets.Encode()},
+		{FileGlossary, cfg.Glossary.Encode()},
+		{FileIMERules, cfg.IMERules.Encode()},
+	}
+	sums := make(map[string][32]byte, len(files))
+	for _, f := range files {
+		if err := atomicWriteConfigFile(s.dir, f.kind, f.content); err != nil {
+			return err
+		}
+		sums[string(f.kind)] = sha256.Sum256([]byte(f.content))
+	}
+	warnings := collectWarningIssues(issues)
+	s.mu.Lock()
+	s.ensureSavedDigestsLocked()
+	s.current = cfg
+	s.lastErrors = nil
+	s.lastWarnings = warnings
+	maps.Copy(s.savedDigests, sums)
+	s.mu.Unlock()
+	return nil
+}
+
+func atomicWriteConfigFile(dir string, kind ConfigFileKind, content string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".clavis-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.WriteString(content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o644); err != nil {
+		return err
+	}
+	targetPath := filepath.Join(dir, string(kind))
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
 }
 
 // Reload parses and validates all 5 TOML config files from disk.
@@ -140,10 +381,14 @@ func (s *ConfigStore) Reload() bool {
 		return false
 	}
 
+	diskHashes := readTOMLFileHashes(s.dir)
 	s.mu.Lock()
 	s.current = candidate
 	s.lastErrors = nil
 	s.lastWarnings = warningIssues
+	if diskHashes != nil {
+		s.savedDigests = diskHashes
+	}
 	s.mu.Unlock()
 	return true
 }

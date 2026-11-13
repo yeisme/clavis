@@ -1,6 +1,9 @@
 package config
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/yeisme/clavis/pkg/core/toml"
 )
 
@@ -73,6 +76,7 @@ type AppearanceConfig struct {
 	MaxVisibleResults int     `json:"maxVisibleResults"`
 	CornerRadius      float64 `json:"cornerRadius"`
 	ShowKeyHints      bool    `json:"showKeyHints"`
+	ShowPreviewPane   bool    `json:"showPreviewPane"`
 	HUDDurationMs     int     `json:"hudDurationMs"`
 }
 
@@ -83,6 +87,7 @@ func DefaultAppearanceConfig() AppearanceConfig {
 		MaxVisibleResults: 8,
 		CornerRadius:      16.0,
 		ShowKeyHints:      true,
+		ShowPreviewPane:   true,
 		HUDDurationMs:     1400,
 	}
 }
@@ -117,6 +122,11 @@ func decodeAppearanceConfig(tbl *toml.Table, path string) (AppearanceConfig, err
 	} else if ok {
 		cfg.ShowKeyHints = b
 	}
+	if b, ok, err := optionalBool(tbl, "show_preview_pane", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.ShowPreviewPane = b
+	}
 	if n, ok, err := optionalInt(tbl, "hud_duration_ms", path); err != nil {
 		return cfg, err
 	} else if ok {
@@ -132,31 +142,349 @@ func (c AppearanceConfig) toTOML() *toml.Table {
 	t.Set("max_visible_results", toml.IntVal(int64(c.MaxVisibleResults)))
 	t.Set("corner_radius", toml.FloatVal(c.CornerRadius))
 	t.Set("show_key_hints", toml.BoolVal(c.ShowKeyHints))
+	t.Set("show_preview_pane", toml.BoolVal(c.ShowPreviewPane))
 	t.Set("hud_duration_ms", toml.IntVal(int64(c.HUDDurationMs)))
 	return t
 }
 
-// AIConfig configures the OpenAI-compatible AI provider.
+// AIProtocol specifies the wire format protocol used by an AI profile.
+type AIProtocol string
+
+const (
+	ProtocolOpenAICompatible AIProtocol = "openai_compatible"
+	ProtocolAnthropic        AIProtocol = "anthropic"
+	ProtocolGemini           AIProtocol = "gemini"
+)
+
+// AllAIProtocols returns all supported AI wire protocols in deterministic order.
+func AllAIProtocols() []AIProtocol {
+	return []AIProtocol{
+		ProtocolOpenAICompatible,
+		ProtocolAnthropic,
+		ProtocolGemini,
+	}
+}
+
+func isValidAIProtocol(p AIProtocol) bool {
+	for _, item := range AllAIProtocols() {
+		if item == p {
+			return true
+		}
+	}
+	return false
+}
+
+const defaultAISystemPrompt = "You are a concise macOS writing and productivity assistant. Return only the requested output unless asked otherwise."
+
+// AIProfile defines one named AI provider/model profile.
+type AIProfile struct {
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	Provider        string     `json:"provider"`
+	Protocol        AIProtocol `json:"protocol"`
+	BaseURL         string     `json:"baseUrl"`
+	Model           string     `json:"model"`
+	Temperature     float64    `json:"temperature"`
+	TimeoutSeconds  float64    `json:"timeoutSeconds"`
+	SystemPrompt    string     `json:"systemPrompt"`
+	KeychainAccount string     `json:"keychainAccount"`
+	APIKeyEnvVar    string     `json:"apiKeyEnvVar,omitempty"`
+}
+
+// DefaultAIProfiles returns the built-in multi-provider AI profiles (DeepSeek, Ollama, Claude, Gemini).
+func DefaultAIProfiles() []AIProfile {
+	return []AIProfile{
+		{
+			ID:              "deepseek",
+			Name:            "DeepSeek",
+			Provider:        "deepseek",
+			Protocol:        ProtocolOpenAICompatible,
+			BaseURL:         "https://api.deepseek.com/v1",
+			Model:           "deepseek-chat",
+			Temperature:     0.2,
+			TimeoutSeconds:  30.0,
+			SystemPrompt:    defaultAISystemPrompt,
+			KeychainAccount: "clavis.ai.deepseek",
+			APIKeyEnvVar:    "DEEPSEEK_API_KEY",
+		},
+		{
+			ID:              "ollama",
+			Name:            "Ollama (Local)",
+			Provider:        "ollama",
+			Protocol:        ProtocolOpenAICompatible,
+			BaseURL:         "http://127.0.0.1:11434/v1",
+			Model:           "qwen2.5:7b",
+			Temperature:     0.2,
+			TimeoutSeconds:  30.0,
+			SystemPrompt:    defaultAISystemPrompt,
+			KeychainAccount: "clavis.ai.ollama",
+			APIKeyEnvVar:    "",
+		},
+		{
+			ID:              "claude",
+			Name:            "Claude",
+			Provider:        "anthropic",
+			Protocol:        ProtocolAnthropic,
+			BaseURL:         "https://api.anthropic.com/v1",
+			Model:           "claude-3-7-sonnet-latest",
+			Temperature:     0.2,
+			TimeoutSeconds:  30.0,
+			SystemPrompt:    defaultAISystemPrompt,
+			KeychainAccount: "clavis.ai.anthropic",
+			APIKeyEnvVar:    "ANTHROPIC_API_KEY",
+		},
+		{
+			ID:              "gemini",
+			Name:            "Gemini",
+			Provider:        "gemini",
+			Protocol:        ProtocolGemini,
+			BaseURL:         "https://generativelanguage.googleapis.com/v1beta",
+			Model:           "gemini-2.5-flash",
+			Temperature:     0.2,
+			TimeoutSeconds:  30.0,
+			SystemPrompt:    defaultAISystemPrompt,
+			KeychainAccount: "clavis.ai.gemini",
+			APIKeyEnvVar:    "GEMINI_API_KEY",
+		},
+	}
+}
+
+// AIConfig configures the AI subsystem, supporting both named multi-provider profiles
+// and flat fallback fields for backward compatibility.
 type AIConfig struct {
-	Provider        string  `json:"provider"`
-	BaseURL         string  `json:"baseUrl"`
-	Model           string  `json:"model"`
-	Temperature     float64 `json:"temperature"`
-	TimeoutSeconds  float64 `json:"timeoutSeconds"`
-	SystemPrompt    string  `json:"systemPrompt"`
-	KeychainAccount string  `json:"keychainAccount"`
+	ActiveProfileID string      `json:"activeProfileId"`
+	Provider        string      `json:"provider"`
+	Protocol        AIProtocol  `json:"protocol"`
+	BaseURL         string      `json:"baseUrl"`
+	Model           string      `json:"model"`
+	Temperature     float64     `json:"temperature"`
+	TimeoutSeconds  float64     `json:"timeoutSeconds"`
+	SystemPrompt    string      `json:"systemPrompt"`
+	KeychainAccount string      `json:"keychainAccount"`
+	APIKeyEnvVar    string      `json:"apiKeyEnvVar,omitempty"`
+	Profiles        []AIProfile `json:"profiles"`
 }
 
 func DefaultAIConfig() AIConfig {
+	profiles := DefaultAIProfiles()
+	active := profiles[0]
 	return AIConfig{
-		Provider:        "openai",
-		BaseURL:         "https://api.openai.com/v1",
-		Model:           "gpt-4o-mini",
-		Temperature:     0.2,
-		TimeoutSeconds:  30.0,
-		SystemPrompt:    "You are a concise macOS writing and productivity assistant. Return only the requested output unless asked otherwise.",
-		KeychainAccount: "clavis.ai.default",
+		ActiveProfileID: active.ID,
+		Provider:        active.Provider,
+		Protocol:        active.Protocol,
+		BaseURL:         active.BaseURL,
+		Model:           active.Model,
+		Temperature:     active.Temperature,
+		TimeoutSeconds:  active.TimeoutSeconds,
+		SystemPrompt:    active.SystemPrompt,
+		KeychainAccount: active.KeychainAccount,
+		APIKeyEnvVar:    active.APIKeyEnvVar,
+		Profiles:        profiles,
 	}
+}
+
+// ProfileByID looks up a configured AIProfile by ID.
+func (c AIConfig) ProfileByID(id string) (AIProfile, bool) {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return AIProfile{}, false
+	}
+	for _, p := range c.Profiles {
+		if p.ID == trimmed {
+			return p, true
+		}
+	}
+	for _, p := range c.Profiles {
+		if strings.EqualFold(p.ID, trimmed) {
+			return p, true
+		}
+	}
+	return AIProfile{}, false
+}
+
+// ActiveProfile resolves the currently active AIProfile, falling back to flat AIConfig fields.
+func (c AIConfig) ActiveProfile() AIProfile {
+	def := DefaultAIProfiles()[0]
+	if p, ok := c.ProfileByID(c.ActiveProfileID); ok {
+		// If the active profile is the default profile and caller mutated flat fields directly,
+		// overlay the customized flat fields onto the returned profile.
+		if p.ID == def.ID {
+			if c.Provider != "" && c.Provider != def.Provider && p.Provider == def.Provider {
+				p.Provider = c.Provider
+			}
+			if c.Protocol != "" && c.Protocol != def.Protocol && p.Protocol == def.Protocol {
+				p.Protocol = c.Protocol
+			}
+			if c.BaseURL != "" && c.BaseURL != def.BaseURL && p.BaseURL == def.BaseURL {
+				p.BaseURL = c.BaseURL
+			}
+			if c.Model != "" && c.Model != def.Model && p.Model == def.Model {
+				p.Model = c.Model
+			}
+			if c.Temperature != 0 && c.Temperature != def.Temperature && p.Temperature == def.Temperature {
+				p.Temperature = c.Temperature
+			}
+			if c.TimeoutSeconds != 0 && c.TimeoutSeconds != def.TimeoutSeconds && p.TimeoutSeconds == def.TimeoutSeconds {
+				p.TimeoutSeconds = c.TimeoutSeconds
+			}
+			if c.SystemPrompt != "" && c.SystemPrompt != def.SystemPrompt && p.SystemPrompt == def.SystemPrompt {
+				p.SystemPrompt = c.SystemPrompt
+			}
+			if c.KeychainAccount != "" && c.KeychainAccount != def.KeychainAccount && p.KeychainAccount == def.KeychainAccount {
+				p.KeychainAccount = c.KeychainAccount
+			}
+			if c.APIKeyEnvVar != "" && c.APIKeyEnvVar != def.APIKeyEnvVar && p.APIKeyEnvVar == def.APIKeyEnvVar {
+				p.APIKeyEnvVar = c.APIKeyEnvVar
+			}
+		}
+		if p.Protocol == "" {
+			p.Protocol = ProtocolOpenAICompatible
+		}
+		return p
+	}
+	if len(c.Profiles) > 0 && c.ActiveProfileID == "" {
+		p := c.Profiles[0]
+		if p.Protocol == "" {
+			p.Protocol = ProtocolOpenAICompatible
+		}
+		return p
+	}
+	proto := c.Protocol
+	if proto == "" {
+		proto = ProtocolOpenAICompatible
+	}
+	id := c.ActiveProfileID
+	if id == "" {
+		id = c.Provider
+	}
+	if id == "" {
+		id = "default"
+	}
+	return AIProfile{
+		ID:              id,
+		Name:            c.Provider,
+		Provider:        c.Provider,
+		Protocol:        proto,
+		BaseURL:         c.BaseURL,
+		Model:           c.Model,
+		Temperature:     c.Temperature,
+		TimeoutSeconds:  c.TimeoutSeconds,
+		SystemPrompt:    c.SystemPrompt,
+		KeychainAccount: c.KeychainAccount,
+		APIKeyEnvVar:    c.APIKeyEnvVar,
+	}
+}
+
+func checkForbiddenAPIKeys(tbl *toml.Table, path string) error {
+	for _, forbiddenKey := range []string{"api_key", "apiKey", "secret_key", "secretKey"} {
+		if _, exists := tbl.Get(forbiddenKey); exists {
+			return &DecodingError{
+				KeyPath: joinPath(path, forbiddenKey),
+				Message: "Raw API keys must never be stored in config.toml; use 'keychain_account' instead",
+			}
+		}
+	}
+	return nil
+}
+
+func decodeAIProfile(tbl *toml.Table, path string) (AIProfile, error) {
+	if err := checkForbiddenAPIKeys(tbl, path); err != nil {
+		return AIProfile{}, err
+	}
+	id, err := requiredString(tbl, "id", path)
+	if err != nil {
+		return AIProfile{}, err
+	}
+	name, _, err := optionalString(tbl, "name", path)
+	if err != nil {
+		return AIProfile{}, err
+	}
+	provider, _, err := optionalString(tbl, "provider", path)
+	if err != nil {
+		return AIProfile{}, err
+	}
+	if provider == "" {
+		provider = id
+	}
+	if name == "" {
+		name = provider
+	}
+	rawProto := string(ProtocolOpenAICompatible)
+	if s, ok, err := optionalString(tbl, "protocol", path); err != nil {
+		return AIProfile{}, err
+	} else if ok && s != "" {
+		rawProto = s
+	}
+	baseURL, err := requiredString(tbl, "base_url", path)
+	if err != nil {
+		return AIProfile{}, err
+	}
+	model, err := requiredString(tbl, "model", path)
+	if err != nil {
+		return AIProfile{}, err
+	}
+	temp := 0.2
+	if f, ok, err := optionalFloat(tbl, "temperature", path); err != nil {
+		return AIProfile{}, err
+	} else if ok {
+		temp = f
+	}
+	timeout := 30.0
+	if f, ok, err := optionalFloat(tbl, "timeout_seconds", path); err != nil {
+		return AIProfile{}, err
+	} else if ok {
+		timeout = f
+	}
+	sysPrompt := defaultAISystemPrompt
+	if s, ok, err := optionalString(tbl, "system_prompt", path); err != nil {
+		return AIProfile{}, err
+	} else if ok {
+		sysPrompt = s
+	}
+	keychainAcc := "clavis.ai." + id
+	if s, ok, err := optionalString(tbl, "keychain_account", path); err != nil {
+		return AIProfile{}, err
+	} else if ok {
+		keychainAcc = s
+	}
+	envVar, _, err := optionalString(tbl, "api_key_env_var", path)
+	if err != nil {
+		return AIProfile{}, err
+	}
+
+	return AIProfile{
+		ID:              id,
+		Name:            name,
+		Provider:        provider,
+		Protocol:        AIProtocol(rawProto),
+		BaseURL:         baseURL,
+		Model:           model,
+		Temperature:     temp,
+		TimeoutSeconds:  timeout,
+		SystemPrompt:    sysPrompt,
+		KeychainAccount: keychainAcc,
+		APIKeyEnvVar:    envVar,
+	}, nil
+}
+
+func (p AIProfile) toTOML() *toml.Table {
+	t := toml.NewTable()
+	t.Set("id", toml.StringVal(p.ID))
+	t.Set("name", toml.StringVal(p.Name))
+	t.Set("provider", toml.StringVal(p.Provider))
+	proto := p.Protocol
+	if proto == "" {
+		proto = ProtocolOpenAICompatible
+	}
+	t.Set("protocol", toml.StringVal(string(proto)))
+	t.Set("base_url", toml.StringVal(p.BaseURL))
+	t.Set("model", toml.StringVal(p.Model))
+	t.Set("temperature", toml.FloatVal(p.Temperature))
+	t.Set("timeout_seconds", toml.FloatVal(p.TimeoutSeconds))
+	t.Set("system_prompt", toml.StringVal(p.SystemPrompt))
+	t.Set("keychain_account", toml.StringVal(p.KeychainAccount))
+	t.Set("api_key_env_var", toml.StringVal(p.APIKeyEnvVar))
+	return t
 }
 
 func decodeAIConfig(tbl *toml.Table, path string) (AIConfig, error) {
@@ -164,61 +492,316 @@ func decodeAIConfig(tbl *toml.Table, path string) (AIConfig, error) {
 	if tbl == nil {
 		return cfg, nil
 	}
-	for _, forbiddenKey := range []string{"api_key", "apiKey", "secret_key", "secretKey"} {
-		if _, exists := tbl.Get(forbiddenKey); exists {
-			return cfg, &DecodingError{
-				KeyPath: joinPath(path, forbiddenKey),
-				Message: "Raw API keys must never be stored in config.toml; use 'keychain_account' instead",
-			}
-		}
+	if err := checkForbiddenAPIKeys(tbl, path); err != nil {
+		return cfg, err
+	}
+
+	hasFlatField := false
+	hasActiveID := false
+
+	if s, ok, err := optionalString(tbl, "active_profile_id", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.ActiveProfileID = s
+		hasActiveID = true
 	}
 	if s, ok, err := optionalString(tbl, "provider", path); err != nil {
 		return cfg, err
 	} else if ok {
 		cfg.Provider = s
+		hasFlatField = true
+	}
+	if s, ok, err := optionalString(tbl, "protocol", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.Protocol = AIProtocol(s)
+		hasFlatField = true
 	}
 	if s, ok, err := optionalString(tbl, "base_url", path); err != nil {
 		return cfg, err
 	} else if ok {
 		cfg.BaseURL = s
+		hasFlatField = true
 	}
 	if s, ok, err := optionalString(tbl, "model", path); err != nil {
 		return cfg, err
 	} else if ok {
 		cfg.Model = s
+		hasFlatField = true
 	}
 	if f, ok, err := optionalFloat(tbl, "temperature", path); err != nil {
 		return cfg, err
 	} else if ok {
 		cfg.Temperature = f
+		hasFlatField = true
 	}
 	if f, ok, err := optionalFloat(tbl, "timeout_seconds", path); err != nil {
 		return cfg, err
 	} else if ok {
 		cfg.TimeoutSeconds = f
+		hasFlatField = true
 	}
 	if s, ok, err := optionalString(tbl, "system_prompt", path); err != nil {
 		return cfg, err
 	} else if ok {
 		cfg.SystemPrompt = s
+		hasFlatField = true
 	}
 	if s, ok, err := optionalString(tbl, "keychain_account", path); err != nil {
 		return cfg, err
 	} else if ok {
 		cfg.KeychainAccount = s
+		hasFlatField = true
 	}
+	if s, ok, err := optionalString(tbl, "api_key_env_var", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.APIKeyEnvVar = s
+		hasFlatField = true
+	}
+
+	profileTables, hasProfiles, err := optionalTableArray(tbl, "profiles", path)
+	if err != nil {
+		return cfg, err
+	}
+	if hasProfiles {
+		profiles := make([]AIProfile, 0, len(profileTables))
+		for i, pt := range profileTables {
+			prof, err := decodeAIProfile(pt, fmt.Sprintf("%s.profiles[%d]", path, i))
+			if err != nil {
+				return cfg, err
+			}
+			profiles = append(profiles, prof)
+		}
+		cfg.Profiles = profiles
+		if !hasActiveID && len(profiles) > 0 {
+			cfg.ActiveProfileID = profiles[0].ID
+		}
+		if !hasFlatField {
+			if active, ok := cfg.ProfileByID(cfg.ActiveProfileID); ok {
+				cfg.Provider = active.Provider
+				cfg.Protocol = active.Protocol
+				cfg.BaseURL = active.BaseURL
+				cfg.Model = active.Model
+				cfg.Temperature = active.Temperature
+				cfg.TimeoutSeconds = active.TimeoutSeconds
+				cfg.SystemPrompt = active.SystemPrompt
+				cfg.KeychainAccount = active.KeychainAccount
+				cfg.APIKeyEnvVar = active.APIKeyEnvVar
+			}
+		}
+	} else if hasFlatField && !hasActiveID {
+		// Legacy [ai] table without [[ai.profiles]]: synthesize a single profile if customized.
+		def := DefaultAIProfiles()[0]
+		isCustom := cfg.Provider != def.Provider ||
+			cfg.Protocol != def.Protocol ||
+			cfg.BaseURL != def.BaseURL ||
+			cfg.Model != def.Model ||
+			cfg.Temperature != def.Temperature ||
+			cfg.TimeoutSeconds != def.TimeoutSeconds ||
+			cfg.SystemPrompt != def.SystemPrompt ||
+			cfg.KeychainAccount != def.KeychainAccount ||
+			cfg.APIKeyEnvVar != def.APIKeyEnvVar
+		if isCustom {
+			id := strings.TrimSpace(cfg.Provider)
+			if id == "" {
+				id = "custom"
+			}
+			proto := cfg.Protocol
+			if proto == "" {
+				proto = ProtocolOpenAICompatible
+			}
+			synthesized := AIProfile{
+				ID:              id,
+				Name:            id,
+				Provider:        cfg.Provider,
+				Protocol:        proto,
+				BaseURL:         cfg.BaseURL,
+				Model:           cfg.Model,
+				Temperature:     cfg.Temperature,
+				TimeoutSeconds:  cfg.TimeoutSeconds,
+				SystemPrompt:    cfg.SystemPrompt,
+				KeychainAccount: cfg.KeychainAccount,
+				APIKeyEnvVar:    cfg.APIKeyEnvVar,
+			}
+			cfg.ActiveProfileID = id
+			cfg.Profiles = []AIProfile{synthesized}
+		}
+	} else if hasActiveID && !hasFlatField {
+		if active, ok := cfg.ProfileByID(cfg.ActiveProfileID); ok {
+			cfg.Provider = active.Provider
+			cfg.Protocol = active.Protocol
+			cfg.BaseURL = active.BaseURL
+			cfg.Model = active.Model
+			cfg.Temperature = active.Temperature
+			cfg.TimeoutSeconds = active.TimeoutSeconds
+			cfg.SystemPrompt = active.SystemPrompt
+			cfg.KeychainAccount = active.KeychainAccount
+			cfg.APIKeyEnvVar = active.APIKeyEnvVar
+		}
+	}
+
 	return cfg, nil
 }
 
 func (c AIConfig) toTOML() *toml.Table {
 	t := toml.NewTable()
+	t.Set("active_profile_id", toml.StringVal(c.ActiveProfileID))
 	t.Set("provider", toml.StringVal(c.Provider))
+	proto := c.Protocol
+	if proto == "" {
+		proto = ProtocolOpenAICompatible
+	}
+	t.Set("protocol", toml.StringVal(string(proto)))
 	t.Set("base_url", toml.StringVal(c.BaseURL))
 	t.Set("model", toml.StringVal(c.Model))
 	t.Set("temperature", toml.FloatVal(c.Temperature))
 	t.Set("timeout_seconds", toml.FloatVal(c.TimeoutSeconds))
 	t.Set("system_prompt", toml.StringVal(c.SystemPrompt))
 	t.Set("keychain_account", toml.StringVal(c.KeychainAccount))
+	t.Set("api_key_env_var", toml.StringVal(c.APIKeyEnvVar))
+	if len(c.Profiles) > 0 {
+		vals := make([]toml.Value, len(c.Profiles))
+		for i, p := range c.Profiles {
+			vals[i] = toml.TableVal(p.toTOML())
+		}
+		t.Set("profiles", toml.ArrayVal(vals))
+	}
+	return t
+}
+
+// KeyRemapRule defines a low-level tap/hold or direct key remap rule.
+type KeyRemapRule struct {
+	From         string   `json:"from"`
+	Tap          string   `json:"tap,omitempty"`
+	Hold         string   `json:"hold,omitempty"`
+	AppBundleIDs []string `json:"appBundleIds,omitempty"`
+}
+
+func decodeKeyRemapRule(tbl *toml.Table, path string) (KeyRemapRule, error) {
+	from, err := requiredString(tbl, "from", path)
+	if err != nil {
+		return KeyRemapRule{}, err
+	}
+	tap, _, err := optionalString(tbl, "tap", path)
+	if err != nil {
+		return KeyRemapRule{}, err
+	}
+	hold, _, err := optionalString(tbl, "hold", path)
+	if err != nil {
+		return KeyRemapRule{}, err
+	}
+	apps, hasApps, err := optionalStringArray(tbl, "app_bundle_ids", path)
+	if err != nil {
+		return KeyRemapRule{}, err
+	}
+	if !hasApps {
+		apps = []string{}
+	}
+	return KeyRemapRule{
+		From:         from,
+		Tap:          tap,
+		Hold:         hold,
+		AppBundleIDs: apps,
+	}, nil
+}
+
+func (r KeyRemapRule) toTOML() *toml.Table {
+	t := toml.NewTable()
+	t.Set("from", toml.StringVal(r.From))
+	if r.Tap != "" {
+		t.Set("tap", toml.StringVal(r.Tap))
+	}
+	if r.Hold != "" {
+		t.Set("hold", toml.StringVal(r.Hold))
+	}
+	t.Set("app_bundle_ids", stringsToTOMLArray(r.AppBundleIDs))
+	return t
+}
+
+// KeymapConfig configures dual-role tap/hold keys, CapsLock remapping, and Vim navigation layer.
+type KeymapConfig struct {
+	Enabled            bool           `json:"enabled"`
+	TapHoldThresholdMs int            `json:"tapHoldThresholdMs"`
+	CapsLockTap        string         `json:"capsLockTap"`
+	CapsLockHold       string         `json:"capsLockHold"`
+	NavLayerEnabled    bool           `json:"navLayerEnabled"`
+	Remaps             []KeyRemapRule `json:"remaps"`
+}
+
+func DefaultKeymapConfig() KeymapConfig {
+	return KeymapConfig{
+		Enabled:            true,
+		TapHoldThresholdMs: 200,
+		CapsLockTap:        "escape",
+		CapsLockHold:       "nav",
+		NavLayerEnabled:    true,
+		Remaps:             []KeyRemapRule{},
+	}
+}
+
+func decodeKeymapConfig(tbl *toml.Table, path string) (KeymapConfig, error) {
+	cfg := DefaultKeymapConfig()
+	if tbl == nil {
+		return cfg, nil
+	}
+	if b, ok, err := optionalBool(tbl, "enabled", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.Enabled = b
+	}
+	if n, ok, err := optionalInt(tbl, "tap_hold_threshold_ms", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.TapHoldThresholdMs = n
+	}
+	if s, ok, err := optionalString(tbl, "caps_lock_tap", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.CapsLockTap = s
+	}
+	if s, ok, err := optionalString(tbl, "caps_lock_hold", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.CapsLockHold = s
+	}
+	if b, ok, err := optionalBool(tbl, "nav_layer_enabled", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.NavLayerEnabled = b
+	}
+	remapTables, hasRemaps, err := optionalTableArray(tbl, "remaps", path)
+	if err != nil {
+		return cfg, err
+	}
+	if hasRemaps {
+		remaps := make([]KeyRemapRule, 0, len(remapTables))
+		for i, rt := range remapTables {
+			rule, err := decodeKeyRemapRule(rt, fmt.Sprintf("%s.remaps[%d]", path, i))
+			if err != nil {
+				return cfg, err
+			}
+			remaps = append(remaps, rule)
+		}
+		cfg.Remaps = remaps
+	}
+	return cfg, nil
+}
+
+func (c KeymapConfig) toTOML() *toml.Table {
+	t := toml.NewTable()
+	t.Set("enabled", toml.BoolVal(c.Enabled))
+	t.Set("tap_hold_threshold_ms", toml.IntVal(int64(c.TapHoldThresholdMs)))
+	t.Set("caps_lock_tap", toml.StringVal(c.CapsLockTap))
+	t.Set("caps_lock_hold", toml.StringVal(c.CapsLockHold))
+	t.Set("nav_layer_enabled", toml.BoolVal(c.NavLayerEnabled))
+	if len(c.Remaps) > 0 {
+		vals := make([]toml.Value, len(c.Remaps))
+		for i, r := range c.Remaps {
+			vals[i] = toml.TableVal(r.toTOML())
+		}
+		t.Set("remaps", toml.ArrayVal(vals))
+	}
 	return t
 }
 
@@ -293,6 +876,8 @@ type IMEConfig struct {
 	DefaultInputSourceID string `json:"defaultInputSourceId"`
 	ShowIndicatorHUD     bool   `json:"showIndicatorHud"`
 	SwitchDelayMs        int    `json:"switchDelayMs"`
+	LockASCIIOnLeader    bool   `json:"lockAsciiOnLeader"`
+	ShowFloatingPill     bool   `json:"showFloatingPill"`
 }
 
 func DefaultIMEConfig() IMEConfig {
@@ -301,6 +886,8 @@ func DefaultIMEConfig() IMEConfig {
 		DefaultInputSourceID: "com.apple.keylayout.ABC",
 		ShowIndicatorHUD:     true,
 		SwitchDelayMs:        50,
+		LockASCIIOnLeader:    true,
+		ShowFloatingPill:     true,
 	}
 }
 
@@ -329,6 +916,16 @@ func decodeIMEConfig(tbl *toml.Table, path string) (IMEConfig, error) {
 	} else if ok {
 		cfg.SwitchDelayMs = n
 	}
+	if b, ok, err := optionalBool(tbl, "lock_ascii_on_leader", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.LockASCIIOnLeader = b
+	}
+	if b, ok, err := optionalBool(tbl, "show_floating_pill", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.ShowFloatingPill = b
+	}
 	return cfg, nil
 }
 
@@ -338,12 +935,15 @@ func (c IMEConfig) toTOML() *toml.Table {
 	t.Set("default_input_source_id", toml.StringVal(c.DefaultInputSourceID))
 	t.Set("show_indicator_hud", toml.BoolVal(c.ShowIndicatorHUD))
 	t.Set("switch_delay_ms", toml.IntVal(int64(c.SwitchDelayMs)))
+	t.Set("lock_ascii_on_leader", toml.BoolVal(c.LockASCIIOnLeader))
+	t.Set("show_floating_pill", toml.BoolVal(c.ShowFloatingPill))
 	return t
 }
 
 // MainConfig represents config.toml.
 type MainConfig struct {
 	Trigger    TriggerConfig    `json:"trigger"`
+	Keymap     KeymapConfig     `json:"keymap"`
 	Appearance AppearanceConfig `json:"appearance"`
 	AI         AIConfig         `json:"ai"`
 	Clipboard  ClipboardConfig  `json:"clipboard"`
@@ -353,6 +953,7 @@ type MainConfig struct {
 func DefaultMainConfig() MainConfig {
 	return MainConfig{
 		Trigger:    DefaultTriggerConfig(),
+		Keymap:     DefaultKeymapConfig(),
 		Appearance: DefaultAppearanceConfig(),
 		AI:         DefaultAIConfig(),
 		Clipboard:  DefaultClipboardConfig(),
@@ -372,6 +973,10 @@ func DecodeMainConfig(input string) (MainConfig, error) {
 // MainConfigFromTOML decodes MainConfig from a parsed TOML table.
 func MainConfigFromTOML(tbl *toml.Table) (MainConfig, error) {
 	triggerTbl, _, err := optionalTable(tbl, "trigger", "")
+	if err != nil {
+		return MainConfig{}, err
+	}
+	keymapTbl, _, err := optionalTable(tbl, "keymap", "")
 	if err != nil {
 		return MainConfig{}, err
 	}
@@ -396,6 +1001,10 @@ func MainConfigFromTOML(tbl *toml.Table) (MainConfig, error) {
 	if err != nil {
 		return MainConfig{}, err
 	}
+	keymap, err := decodeKeymapConfig(keymapTbl, "keymap")
+	if err != nil {
+		return MainConfig{}, err
+	}
 	appearance, err := decodeAppearanceConfig(appTbl, "appearance")
 	if err != nil {
 		return MainConfig{}, err
@@ -415,6 +1024,7 @@ func MainConfigFromTOML(tbl *toml.Table) (MainConfig, error) {
 
 	return MainConfig{
 		Trigger:    trigger,
+		Keymap:     keymap,
 		Appearance: appearance,
 		AI:         aiCfg,
 		Clipboard:  clipboard,
@@ -426,6 +1036,7 @@ func MainConfigFromTOML(tbl *toml.Table) (MainConfig, error) {
 func (c MainConfig) Encode() string {
 	root := toml.NewTable()
 	root.Set("trigger", toml.TableVal(c.Trigger.toTOML()))
+	root.Set("keymap", toml.TableVal(c.Keymap.toTOML()))
 	root.Set("appearance", toml.TableVal(c.Appearance.toTOML()))
 	root.Set("ai", toml.TableVal(c.AI.toTOML()))
 	root.Set("clipboard", toml.TableVal(c.Clipboard.toTOML()))

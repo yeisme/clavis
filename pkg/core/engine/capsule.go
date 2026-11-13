@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/yeisme/clavis/pkg/core/config"
@@ -14,6 +15,8 @@ type CapsuleContext struct {
 	BundleID         string `json:"bundleId,omitempty"`
 	ProcessName      string `json:"processName,omitempty"`
 	AppName          string `json:"appName,omitempty"`
+	WindowTitle      string `json:"windowTitle,omitempty"`
+	ActiveURL        string `json:"activeUrl,omitempty"`
 	SelectedText     string `json:"selectedText,omitempty"`
 	SurroundingText  string `json:"surroundingText,omitempty"`
 	ClipboardPreview string `json:"clipboardPreview,omitempty"`
@@ -27,6 +30,19 @@ type OmniboxClipboardEntry struct {
 	IsPinned      bool   `json:"isPinned"`
 }
 
+// InstalledAppEntry represents a discovered OS application for the launcher.
+type InstalledAppEntry struct {
+	Name     string `json:"name"`
+	BundleID string `json:"bundleId,omitempty"`
+	Path     string `json:"path,omitempty"`
+}
+
+// ChatTurn represents a single message turn in a multi-turn AI session.
+type ChatTurn struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 // OmniboxItemKind identifies the variant of an OmniboxItem.
 type OmniboxItemKind string
 
@@ -38,7 +54,18 @@ const (
 	ItemGlossaryTerm   OmniboxItemKind = "glossary_term"
 	ItemAIMode         OmniboxItemKind = "ai_mode"
 	ItemSetting        OmniboxItemKind = "setting"
+	ItemUtility        OmniboxItemKind = "utility"
+	ItemInstalledApp   OmniboxItemKind = "installed_app"
+	ItemEmoji          OmniboxItemKind = "emoji"
+	ItemAppIMERule     OmniboxItemKind = "app_ime_rule"
 )
+
+// OmniboxActionSpec describes a contextual primary, secondary, or palette action for an OmniboxItem.
+type OmniboxActionSpec struct {
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	Shortcut string `json:"shortcut,omitempty"`
+}
 
 // OmniboxItem represents a single selectable row in the Omnibox.
 type OmniboxItem struct {
@@ -60,6 +87,10 @@ type OmniboxItem struct {
 	AIMode           string               `json:"aiMode,omitempty"`
 	AIPrompt         string               `json:"aiPrompt,omitempty"`
 	SettingID        string               `json:"settingId,omitempty"`
+	UtilityValue     string               `json:"utilityValue,omitempty"`
+	AppBundleID      string               `json:"appBundleId,omitempty"`
+	AppPath          string               `json:"appPath,omitempty"`
+	IMEMode          config.IMEMode       `json:"imeMode,omitempty"`
 }
 
 // CapsulePhase identifies the current Capsule UI phase.
@@ -89,9 +120,12 @@ type State struct {
 	AIOutput          string                  `json:"aiOutput,omitempty"`
 	AIComplete        bool                    `json:"aiComplete,omitempty"`
 	AIError           string                  `json:"aiError,omitempty"`
+	AIHistory         []ChatTurn              `json:"aiHistory,omitempty"`
+	ActiveAIProfileID string                  `json:"activeAiProfileId,omitempty"`
 	HUDMessage        string                  `json:"hudMessage,omitempty"`
 	Context           CapsuleContext          `json:"context"`
 	ClipboardEntries  []OmniboxClipboardEntry `json:"clipboardEntries,omitempty"`
+	InstalledApps     []InstalledAppEntry     `json:"installedApps,omitempty"`
 }
 
 // NewInitialState returns a hidden initial State.
@@ -103,27 +137,33 @@ func NewInitialState() State {
 type EventType string
 
 const (
-	EventOpenLeader                      EventType = "open_leader"
-	EventOpenOmnibox                     EventType = "open_omnibox"
-	EventUpdateContext                   EventType = "update_context"
-	EventSetClipboardEntries             EventType = "set_clipboard_entries"
-	EventLeaderKeyPress                  EventType = "leader_key_press"
-	EventUpdateQuery                     EventType = "update_query"
-	EventSwitchTab                       EventType = "switch_tab"
-	EventSelectNext                      EventType = "select_next"
-	EventSelectPrevious                  EventType = "select_previous"
-	EventConfirmSelection                EventType = "confirm_selection"
-	EventTogglePinSelectedClipboardItem  EventType = "toggle_pin_selected_clipboard_item"
-	EventDeleteSelectedClipboardItem     EventType = "delete_selected_clipboard_item"
-	EventBackspace                       EventType = "backspace"
-	EventEscape                          EventType = "escape"
-	EventAIChunk                         EventType = "ai_chunk"
-	EventAICompleted                     EventType = "ai_completed"
-	EventAIFailed                        EventType = "ai_failed"
-	EventAcceptAIOutput                  EventType = "accept_ai_output"
-	EventCopyAIOutput                    EventType = "copy_ai_output"
-	EventShowHUD                         EventType = "show_hud"
-	EventDismiss                         EventType = "dismiss"
+	EventOpenLeader                     EventType = "open_leader"
+	EventOpenOmnibox                    EventType = "open_omnibox"
+	EventUpdateContext                  EventType = "update_context"
+	EventSetClipboardEntries            EventType = "set_clipboard_entries"
+	EventSetInstalledApps               EventType = "set_installed_apps"
+	EventLeaderKeyPress                 EventType = "leader_key_press"
+	EventUpdateQuery                    EventType = "update_query"
+	EventSwitchTab                      EventType = "switch_tab"
+	EventSelectNext                     EventType = "select_next"
+	EventSelectPrevious                 EventType = "select_previous"
+	EventConfirmSelection               EventType = "confirm_selection"
+	EventConfirmSecondarySelection      EventType = "confirm_secondary_selection"
+	EventSelectAndConfirmIndex          EventType = "select_and_confirm_index"
+	EventExecuteItemAction              EventType = "execute_item_action"
+	EventTogglePinSelectedClipboardItem EventType = "toggle_pin_selected_clipboard_item"
+	EventDeleteSelectedClipboardItem    EventType = "delete_selected_clipboard_item"
+	EventBackspace                      EventType = "backspace"
+	EventEscape                         EventType = "escape"
+	EventAIChunk                        EventType = "ai_chunk"
+	EventAICompleted                    EventType = "ai_completed"
+	EventAIFailed                       EventType = "ai_failed"
+	EventFollowUpAI                     EventType = "follow_up_ai"
+	EventSelectAIProfile                EventType = "select_ai_profile"
+	EventAcceptAIOutput                 EventType = "accept_ai_output"
+	EventCopyAIOutput                   EventType = "copy_ai_output"
+	EventShowHUD                        EventType = "show_hud"
+	EventDismiss                        EventType = "dismiss"
 )
 
 // Event represents an input event to the CapsuleStateMachine.
@@ -132,11 +172,17 @@ type Event struct {
 	Context          *CapsuleContext         `json:"context,omitempty"`
 	Tab              config.CapsuleTab       `json:"tab,omitempty"`
 	Query            string                  `json:"query,omitempty"`
+	Prompt           string                  `json:"prompt,omitempty"`
+	ProfileID        string                  `json:"profileId,omitempty"`
 	Key              string                  `json:"key,omitempty"`
+	Index            int                     `json:"index,omitempty"`
+	Secondary        bool                    `json:"secondary,omitempty"`
+	ActionID         string                  `json:"actionId,omitempty"`
 	Chunk            string                  `json:"chunk,omitempty"`
 	Error            string                  `json:"error,omitempty"`
 	Message          string                  `json:"message,omitempty"`
 	ClipboardEntries []OmniboxClipboardEntry `json:"clipboardEntries,omitempty"`
+	InstalledApps    []InstalledAppEntry     `json:"installedApps,omitempty"`
 }
 
 // EffectType identifies a side effect emitted by Reduce.
@@ -153,6 +199,7 @@ const (
 	EffectPasteClipboardItem EffectType = "paste_clipboard_item"
 	EffectPinClipboardItem   EffectType = "pin_clipboard_item"
 	EffectDeleteClipboard    EffectType = "delete_clipboard_item"
+	EffectBindAppIMERule     EffectType = "bind_app_ime_rule"
 )
 
 // Effect describes a side effect that the host/coordinator should perform.
@@ -163,10 +210,13 @@ type Effect struct {
 	Mode             string               `json:"mode,omitempty"`
 	Prompt           string               `json:"prompt,omitempty"`
 	SourceText       string               `json:"sourceText,omitempty"`
+	History          []ChatTurn           `json:"history,omitempty"`
+	ProfileID        string               `json:"profileId,omitempty"`
 	Text             string               `json:"text,omitempty"`
 	ClipboardID      string               `json:"clipboardId,omitempty"`
 	ClipboardContent string               `json:"clipboardContent,omitempty"`
 	IsPinned         bool                 `json:"isPinned,omitempty"`
+	IMEMode          config.IMEMode       `json:"imeMode,omitempty"`
 }
 
 // StateMachine wraps State + ClavisConfig with a stateful Handle method.
@@ -177,9 +227,11 @@ type StateMachine struct {
 
 // NewStateMachine constructs a StateMachine with the given config.
 func NewStateMachine(cfg config.ClavisConfig) *StateMachine {
+	st := NewInitialState()
+	st.ActiveAIProfileID = cfg.Main.AI.ActiveProfileID
 	return &StateMachine{
 		config: cfg,
-		state:  NewInitialState(),
+		state:  st,
 	}
 }
 
@@ -191,6 +243,9 @@ func (m *StateMachine) State() State {
 // SetConfig updates the config used for subsequent transitions.
 func (m *StateMachine) SetConfig(cfg config.ClavisConfig) {
 	m.config = cfg
+	if m.state.ActiveAIProfileID == "" {
+		m.state.ActiveAIProfileID = cfg.Main.AI.ActiveProfileID
+	}
 }
 
 // Handle reduces an event and updates internal state, returning emitted effects.
@@ -200,11 +255,21 @@ func (m *StateMachine) Handle(ev Event) []Effect {
 	return effects
 }
 
+func effectiveProfileID(state State, cfg config.ClavisConfig) string {
+	if strings.TrimSpace(state.ActiveAIProfileID) != "" {
+		return strings.TrimSpace(state.ActiveAIProfileID)
+	}
+	return strings.TrimSpace(cfg.Main.AI.ActiveProfileID)
+}
+
 // Reduce is a pure state-transition function: (state, event, config) -> (nextState, effects).
 func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect) {
 	next := cloneState(state)
 	if next.Phase == "" {
 		next.Phase = PhaseHidden
+	}
+	if next.ActiveAIProfileID == "" && cfg.Main.AI.ActiveProfileID != "" {
+		next.ActiveAIProfileID = cfg.Main.AI.ActiveProfileID
 	}
 
 	switch event.Type {
@@ -279,6 +344,28 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		}
 		return next, nil
 
+	case EventSetInstalledApps:
+		apps := make([]InstalledAppEntry, len(event.InstalledApps))
+		copy(apps, event.InstalledApps)
+		next.InstalledApps = apps
+
+		if next.Phase == PhaseOmnibox && next.OmniboxTab == config.TabActions {
+			items := buildOmniboxItems(config.TabActions, next.OmniboxQuery, next, cfg)
+			next.OmniboxItems = items
+			if len(items) == 0 {
+				next.SelectedIndex = 0
+			} else if next.SelectedIndex >= len(items) {
+				next.SelectedIndex = len(items) - 1
+			}
+		}
+		return next, nil
+
+	case EventSelectAIProfile:
+		if id := strings.TrimSpace(event.ProfileID); id != "" {
+			next.ActiveAIProfileID = id
+		}
+		return next, nil
+
 	case EventLeaderKeyPress:
 		if state.Phase != PhaseLeader || event.Key == "" {
 			return next, nil
@@ -288,12 +375,17 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 				return executeLeaderNode(node, state.LeaderPath, state.LeaderBreadcrumbs, next, cfg)
 			}
 		}
+		// '/' (or full-width '／') jumps directly to a clean Actions Omnibox search bar.
+		downgradeQuery := event.Key
+		if event.Key == "/" || event.Key == "／" {
+			downgradeQuery = ""
+		}
 		// Unmatched key automatically downgrades to Actions Omnibox.
-		items := buildOmniboxItems(config.TabActions, event.Key, next, cfg)
+		items := buildOmniboxItems(config.TabActions, downgradeQuery, next, cfg)
 		clearPhaseFields(&next)
 		next.Phase = PhaseOmnibox
 		next.OmniboxTab = config.TabActions
-		next.OmniboxQuery = event.Key
+		next.OmniboxQuery = downgradeQuery
 		next.OmniboxItems = items
 		next.SelectedIndex = 0
 		return next, nil
@@ -348,11 +440,40 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		if state.Phase != PhaseOmnibox || state.SelectedIndex < 0 || state.SelectedIndex >= len(state.OmniboxItems) {
 			return next, nil
 		}
-		return executeOmniboxItem(state.OmniboxItems[state.SelectedIndex], next, cfg)
+		return executeOmniboxItemWithAction(state.OmniboxItems[state.SelectedIndex], "primary", next, cfg)
+
+	case EventConfirmSecondarySelection:
+		if state.Phase != PhaseOmnibox || state.SelectedIndex < 0 || state.SelectedIndex >= len(state.OmniboxItems) {
+			return next, nil
+		}
+		return executeOmniboxItemWithAction(state.OmniboxItems[state.SelectedIndex], "secondary", next, cfg)
+
+	case EventSelectAndConfirmIndex:
+		if state.Phase != PhaseOmnibox || event.Index < 0 || event.Index >= len(state.OmniboxItems) {
+			return next, nil
+		}
+		next.SelectedIndex = event.Index
+		actID := "primary"
+		if event.Secondary {
+			actID = "secondary"
+		}
+		return executeOmniboxItemWithAction(state.OmniboxItems[event.Index], actID, next, cfg)
+
+	case EventExecuteItemAction:
+		if state.Phase != PhaseOmnibox || state.SelectedIndex < 0 || state.SelectedIndex >= len(state.OmniboxItems) {
+			return next, nil
+		}
+		actID := strings.TrimSpace(event.ActionID)
+		if actID == "pin" {
+			return Reduce(state, Event{Type: EventTogglePinSelectedClipboardItem}, cfg)
+		}
+		if actID == "delete" {
+			return Reduce(state, Event{Type: EventDeleteSelectedClipboardItem}, cfg)
+		}
+		return executeOmniboxItemWithAction(state.OmniboxItems[state.SelectedIndex], actID, next, cfg)
 
 	case EventTogglePinSelectedClipboardItem:
 		if state.Phase != PhaseOmnibox ||
-			state.OmniboxTab != config.TabClipboard ||
 			state.SelectedIndex < 0 ||
 			state.SelectedIndex >= len(state.OmniboxItems) {
 			return next, nil
@@ -373,7 +494,7 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		}
 		next.ClipboardEntries[entryIdx].IsPinned = !next.ClipboardEntries[entryIdx].IsPinned
 		newPinned := next.ClipboardEntries[entryIdx].IsPinned
-		updatedItems := buildOmniboxItems(config.TabClipboard, state.OmniboxQuery, next, cfg)
+		updatedItems := buildOmniboxItems(state.OmniboxTab, state.OmniboxQuery, next, cfg)
 		clamped := 0
 		if len(updatedItems) > 0 {
 			if state.SelectedIndex < len(updatedItems) {
@@ -392,7 +513,6 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 
 	case EventDeleteSelectedClipboardItem:
 		if state.Phase != PhaseOmnibox ||
-			state.OmniboxTab != config.TabClipboard ||
 			state.SelectedIndex < 0 ||
 			state.SelectedIndex >= len(state.OmniboxItems) {
 			return next, nil
@@ -408,7 +528,7 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 			}
 		}
 		next.ClipboardEntries = filtered
-		updatedItems := buildOmniboxItems(config.TabClipboard, state.OmniboxQuery, next, cfg)
+		updatedItems := buildOmniboxItems(state.OmniboxTab, state.OmniboxQuery, next, cfg)
 		clamped := 0
 		if len(updatedItems) > 0 {
 			if state.SelectedIndex < len(updatedItems) {
@@ -513,6 +633,53 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		next.AIError = event.Error
 		return next, nil
 
+	case EventFollowUpAI:
+		if state.Phase != PhaseAIStreaming {
+			return next, nil
+		}
+		followUpPrompt := strings.TrimSpace(event.Prompt)
+		if followUpPrompt == "" {
+			followUpPrompt = strings.TrimSpace(event.Query)
+		}
+		if followUpPrompt == "" {
+			return next, nil
+		}
+		if strings.TrimSpace(state.AIPrompt) != "" {
+			userContent := state.AIPrompt
+			if len(state.AIHistory) == 0 && strings.TrimSpace(state.AISourceText) != "" {
+				userContent = state.AIPrompt + "\n\n" + state.AISourceText
+			}
+			next.AIHistory = append(next.AIHistory, ChatTurn{
+				Role:    "user",
+				Content: userContent,
+			})
+		}
+		if strings.TrimSpace(state.AIOutput) != "" {
+			next.AIHistory = append(next.AIHistory, ChatTurn{
+				Role:    "assistant",
+				Content: state.AIOutput,
+			})
+		}
+		next.AIPrompt = followUpPrompt
+		next.AIOutput = ""
+		next.AIComplete = false
+		next.AIError = ""
+		ctxCopy := next.Context
+		histCopy := copyChatTurns(next.AIHistory)
+		profID := effectiveProfileID(next, cfg)
+		return next, []Effect{
+			{Type: EffectCancelAI},
+			{
+				Type:       EffectStartAI,
+				Mode:       next.AIMode,
+				Prompt:     followUpPrompt,
+				SourceText: next.AISourceText,
+				Context:    &ctxCopy,
+				History:    histCopy,
+				ProfileID:  profID,
+			},
+		}
+
 	case EventAcceptAIOutput:
 		if state.Phase != PhaseAIStreaming || state.AIError != "" || state.AIOutput == "" {
 			return next, nil
@@ -579,6 +746,7 @@ func executeLeaderNode(
 	case config.ActionAIRewrite:
 		src := resolveRewriteSourceText(next.Context)
 		ctxCopy := next.Context
+		profID := effectiveProfileID(next, cfg)
 		clearPhaseFields(&next)
 		next.Phase = PhaseAIStreaming
 		next.AIMode = node.Action.Mode
@@ -590,6 +758,7 @@ func executeLeaderNode(
 			Prompt:     node.Action.Prompt,
 			SourceText: src,
 			Context:    &ctxCopy,
+			ProfileID:  profID,
 		}}
 
 	case config.ActionSwitchTab:
@@ -613,7 +782,191 @@ func executeLeaderNode(
 	}
 }
 
+// AvailableItemActions returns the ordered contextual actions for item (Primary first, Secondary second).
+func AvailableItemActions(item OmniboxItem) []OmniboxActionSpec {
+	switch item.Kind {
+	case ItemClipboardEntry:
+		pinLabel := "Pin Item"
+		if item.KeyHint == "Pinned" {
+			pinLabel = "Unpin Item"
+		}
+		return []OmniboxActionSpec{
+			{ID: "paste", Label: "Paste to Active App", Shortcut: "↵"},
+			{ID: "copy", Label: "Copy to Clipboard", Shortcut: "⌘↵"},
+			{ID: "pin", Label: pinLabel, Shortcut: "⌘P"},
+			{ID: "delete", Label: "Delete History Item", Shortcut: "⌘⌫"},
+		}
+	case ItemSnippet:
+		return []OmniboxActionSpec{
+			{ID: "expand", Label: "Insert Snippet", Shortcut: "↵"},
+			{ID: "copy", Label: "Copy Rendered Snippet", Shortcut: "⌘↵"},
+		}
+	case ItemUtility:
+		return []OmniboxActionSpec{
+			{ID: "copy", Label: "Copy Result", Shortcut: "↵"},
+			{ID: "paste", Label: "Insert Result at Cursor", Shortcut: "⌘↵"},
+		}
+	case ItemGlossaryTerm:
+		return []OmniboxActionSpec{
+			{ID: "copy", Label: "Copy Canonical Term", Shortcut: "↵"},
+			{ID: "paste", Label: "Insert Term at Cursor", Shortcut: "⌘↵"},
+		}
+	case ItemEmoji:
+		return []OmniboxActionSpec{
+			{ID: "paste", Label: "Insert Emoji", Shortcut: "↵"},
+			{ID: "copy", Label: "Copy Emoji", Shortcut: "⌘↵"},
+		}
+	case ItemInstalledApp:
+		return []OmniboxActionSpec{
+			{ID: "open", Label: "Open Application", Shortcut: "↵"},
+			{ID: "copy_id", Label: "Copy Bundle ID / Path", Shortcut: "⌘↵"},
+		}
+	case ItemAIMode:
+		return []OmniboxActionSpec{
+			{ID: "run_ai", Label: "Run AI with Context", Shortcut: "↵"},
+			{ID: "ask_only", Label: "Ask AI Without Selection", Shortcut: "⌘↵"},
+		}
+	case ItemAppIMERule:
+		return []OmniboxActionSpec{
+			{ID: "apply_rule", Label: "Apply App IME Rule", Shortcut: "↵"},
+			{ID: "copy_title", Label: "Copy Rule Title", Shortcut: "⌘↵"},
+		}
+	default:
+		return []OmniboxActionSpec{
+			{ID: "primary", Label: "Run Action", Shortcut: "↵"},
+			{ID: "copy_title", Label: "Copy Title", Shortcut: "⌘↵"},
+		}
+	}
+}
+
 func executeOmniboxItem(item OmniboxItem, next State, cfg config.ClavisConfig) (State, []Effect) {
+	return executeOmniboxItemWithAction(item, "primary", next, cfg)
+}
+
+func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State, cfg config.ClavisConfig) (State, []Effect) {
+	actID := strings.ToLower(strings.TrimSpace(actionID))
+	if actID == "" {
+		actID = "primary"
+	}
+
+	// Resolve "secondary" alias to the item's canonical secondary action ID.
+	if actID == "secondary" {
+		specs := AvailableItemActions(item)
+		if len(specs) >= 2 {
+			actID = specs[1].ID
+		} else {
+			actID = "primary"
+		}
+	}
+
+	// Handle explicit cross-item secondary actions before falling through to primary execution.
+	switch actID {
+	case "copy_title":
+		txt := item.Title
+		clearPhaseFields(&next)
+		next.Phase = PhaseHidden
+		return next, []Effect{
+			{Type: EffectCopyText, Text: txt},
+			{Type: EffectClose},
+		}
+	case "copy_id":
+		idTxt := strings.TrimSpace(item.AppBundleID)
+		if idTxt == "" {
+			idTxt = strings.TrimSpace(item.AppPath)
+		}
+		if idTxt == "" {
+			idTxt = item.Title
+		}
+		clearPhaseFields(&next)
+		next.Phase = PhaseHidden
+		return next, []Effect{
+			{Type: EffectCopyText, Text: idTxt},
+			{Type: EffectClose},
+		}
+	case "ask_only":
+		ctxCopy := next.Context
+		profID := effectiveProfileID(next, cfg)
+		clearPhaseFields(&next)
+		next.Phase = PhaseAIStreaming
+		next.AIMode = "ask"
+		next.AIPrompt = item.AIPrompt
+		next.AISourceText = ""
+		return next, []Effect{{
+			Type:       EffectStartAI,
+			Mode:       "ask",
+			Prompt:     item.AIPrompt,
+			SourceText: "",
+			Context:    &ctxCopy,
+			ProfileID:  profID,
+		}}
+	}
+
+	switch item.Kind {
+	case ItemClipboardEntry:
+		if actID == "copy" {
+			txt := item.ClipboardContent
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{
+				{Type: EffectCopyText, Text: txt},
+				{Type: EffectClose},
+			}
+		}
+	case ItemSnippet:
+		if actID == "copy" && item.Snippet != nil {
+			rendered := RenderSnippet(item.Snippet.Content, RenderOptions{
+				Now:           time.Now(),
+				ClipboardText: next.Context.ClipboardPreview,
+				AppName:       next.Context.AppName,
+			})
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{
+				{Type: EffectCopyText, Text: rendered.RenderedText},
+				{Type: EffectClose},
+			}
+		}
+	case ItemUtility:
+		if actID == "paste" {
+			val := item.UtilityValue
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{
+				{Type: EffectApplyAIOutput, Text: val},
+				{Type: EffectClose},
+			}
+		}
+	case ItemGlossaryTerm:
+		if actID == "paste" && item.GlossaryTerm != nil {
+			termText := item.GlossaryTerm.Term
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{
+				{Type: EffectApplyAIOutput, Text: termText},
+				{Type: EffectClose},
+			}
+		}
+	case ItemEmoji:
+		if actID == "copy" {
+			val := item.UtilityValue
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{
+				{Type: EffectCopyText, Text: val},
+				{Type: EffectClose},
+			}
+		}
+	case ItemAppIMERule:
+		ctxCopy := next.Context
+		mode := item.IMEMode
+		clearPhaseFields(&next)
+		next.Phase = PhaseHidden
+		return next, []Effect{
+			{Type: EffectBindAppIMERule, IMEMode: mode, Context: &ctxCopy},
+			{Type: EffectClose},
+		}
+	}
+
 	switch item.Kind {
 	case ItemLeaderAction:
 		if item.LeaderAction == nil {
@@ -631,6 +984,7 @@ func executeOmniboxItem(item OmniboxItem, next State, cfg config.ClavisConfig) (
 		case config.ActionAIRewrite:
 			src := resolveRewriteSourceText(next.Context)
 			ctxCopy := next.Context
+			profID := effectiveProfileID(next, cfg)
 			clearPhaseFields(&next)
 			next.Phase = PhaseAIStreaming
 			next.AIMode = act.Mode
@@ -642,6 +996,7 @@ func executeOmniboxItem(item OmniboxItem, next State, cfg config.ClavisConfig) (
 				Prompt:     act.Prompt,
 				SourceText: src,
 				Context:    &ctxCopy,
+				ProfileID:  profID,
 			}}
 
 		case config.ActionSwitchTab:
@@ -715,6 +1070,7 @@ func executeOmniboxItem(item OmniboxItem, next State, cfg config.ClavisConfig) (
 			src = resolveRewriteSourceText(next.Context)
 		}
 		ctxCopy := next.Context
+		profID := effectiveProfileID(next, cfg)
 		clearPhaseFields(&next)
 		next.Phase = PhaseAIStreaming
 		next.AIMode = item.AIMode
@@ -726,10 +1082,46 @@ func executeOmniboxItem(item OmniboxItem, next State, cfg config.ClavisConfig) (
 			Prompt:     item.AIPrompt,
 			SourceText: src,
 			Context:    &ctxCopy,
+			ProfileID:  profID,
 		}}
 
 	case ItemSetting:
 		act := config.CLIAction("clavis-setting", item.SettingID)
+		ctxCopy := next.Context
+		clearPhaseFields(&next)
+		next.Phase = PhaseHidden
+		return next, []Effect{
+			{Type: EffectRunAction, Action: &act, Context: &ctxCopy},
+			{Type: EffectClose},
+		}
+
+	case ItemUtility:
+		val := item.UtilityValue
+		clearPhaseFields(&next)
+		next.Phase = PhaseHidden
+		return next, []Effect{
+			{Type: EffectCopyText, Text: val},
+			{Type: EffectClose},
+		}
+
+	case ItemEmoji:
+		val := item.UtilityValue
+		clearPhaseFields(&next)
+		next.Phase = PhaseHidden
+		return next, []Effect{
+			{Type: EffectApplyAIOutput, Text: val},
+			{Type: EffectClose},
+		}
+
+	case ItemInstalledApp:
+		target := strings.TrimSpace(item.AppBundleID)
+		if target == "" {
+			target = strings.TrimSpace(item.AppPath)
+		}
+		if target == "" {
+			target = item.Title
+		}
+		act := config.OpenAppAction(target)
 		ctxCopy := next.Context
 		clearPhaseFields(&next)
 		next.Phase = PhaseHidden
@@ -766,52 +1158,229 @@ func resolveLeaderNodes(path []string, root []config.LeaderNode) []config.Leader
 	return current
 }
 
+// ParseOmniboxPrefix inspects rawQuery for a leading quick-route prefix (>, ;, @, ?, :, =),
+// normalizing full-width prefix equivalents (＞, ；, ＠, ？, ：, ＝) typed under Chinese IME.
+func ParseOmniboxPrefix(rawQuery string) (prefix rune, rest string, routed bool) {
+	trimmedLeft := strings.TrimLeft(rawQuery, " \t\u3000")
+	if trimmedLeft == "" {
+		return 0, "", false
+	}
+	firstRune, size := utf8.DecodeRuneInString(trimmedLeft)
+	normFirst := NormalizeFullWidthRune(firstRune)
+	switch normFirst {
+	case '>', ';', '@', '?', ':', '=':
+		return normFirst, strings.TrimSpace(trimmedLeft[size:]), true
+	}
+	lower := strings.ToLower(trimmedLeft)
+	if strings.HasPrefix(lower, "cb ") {
+		return '@', strings.TrimSpace(trimmedLeft[3:]), true
+	}
+	return 0, "", false
+}
+
+func makeClipboardOmniboxItems(entries []OmniboxClipboardEntry) []OmniboxItem {
+	candidates := make([]OmniboxItem, 0, len(entries))
+	for _, entry := range entries {
+		firstLine := firstNonEmptyLine(entry.Content)
+		sub := entry.SourceAppName
+		if sub == "" {
+			sub = "Clipboard"
+		}
+		keyHint := ""
+		icon := "doc.on.clipboard"
+		if entry.IsPinned {
+			keyHint = "Pinned"
+			icon = "pin.fill"
+		}
+		var kws []string
+		if entry.Content != "" {
+			kws = append(kws, entry.Content)
+		}
+		if entry.SourceAppName != "" {
+			kws = append(kws, entry.SourceAppName)
+		}
+		candidates = append(candidates, OmniboxItem{
+			ID:               "clipboard:" + entry.ID,
+			Title:            firstLine,
+			Subtitle:         sub,
+			KeyHint:          keyHint,
+			Icon:             icon,
+			Keywords:         kws,
+			Kind:             ItemClipboardEntry,
+			ClipboardID:      entry.ID,
+			ClipboardContent: entry.Content,
+		})
+	}
+	return candidates
+}
+
+func makeSettingsOmniboxItems() []OmniboxItem {
+	return []OmniboxItem{
+		{
+			ID:        "setting:reload-config",
+			Title:     "Reload Configuration",
+			Subtitle:  "Reload TOML configuration files",
+			Icon:      "arrow.clockwise",
+			Keywords:  []string{"reload", "config", "toml", "settings", "重载配置"},
+			Kind:      ItemSetting,
+			SettingID: "reload-config",
+		},
+		{
+			ID:        "setting:open-config-dir",
+			Title:     "Open Configuration Folder",
+			Subtitle:  "~/.config/clavis",
+			Icon:      "folder",
+			Keywords:  []string{"folder", "open", "config", "settings", "配置目录"},
+			Kind:      ItemSetting,
+			SettingID: "open-config-dir",
+		},
+	}
+}
+
+func makeAppIMERuleItems(ctx CapsuleContext) []OmniboxItem {
+	targetLabel := strings.TrimSpace(ctx.AppName)
+	if targetLabel == "" {
+		targetLabel = strings.TrimSpace(ctx.ProcessName)
+	}
+	if targetLabel == "" {
+		targetLabel = strings.TrimSpace(ctx.BundleID)
+	}
+	if targetLabel == "" {
+		targetLabel = "Current App"
+	}
+	return []OmniboxItem{
+		{
+			ID:       "action:ime-bind-ascii",
+			Title:    "Bind Current App to English (ASCII) IME",
+			Subtitle: fmt.Sprintf("Auto-switch %s to ASCII • 绑定当前应用为英文输入法", targetLabel),
+			KeyHint:  "IME",
+			Icon:     "keyboard",
+			Keywords: []string{"ime", "ascii", "english", "bind", "rule", "绑定", "英文", "输入法", "当前应用"},
+			Kind:     ItemAppIMERule,
+			IMEMode:  config.IMEModeASCII,
+		},
+		{
+			ID:       "action:ime-bind-native",
+			Title:    "Bind Current App to Native (Chinese) IME",
+			Subtitle: fmt.Sprintf("Auto-switch %s to Native IME • 绑定当前应用为中文输入法", targetLabel),
+			KeyHint:  "IME",
+			Icon:     "keyboard.badge.ellipsis",
+			Keywords: []string{"ime", "native", "chinese", "pinyin", "bind", "rule", "绑定", "中文", "拼音", "输入法", "当前应用"},
+			Kind:     ItemAppIMERule,
+			IMEMode:  config.IMEModeNative,
+		},
+		{
+			ID:       "action:ime-unbind-app",
+			Title:    "Unbind Current App IME Rule",
+			Subtitle: fmt.Sprintf("Remove auto-switch rule for %s • 解除当前应用输入法规则", targetLabel),
+			KeyHint:  "IME",
+			Icon:     "keyboard.chevron.compact.down",
+			Keywords: []string{"ime", "unbind", "remove", "clear", "rule", "解绑", "移除", "输入法规则"},
+			Kind:     ItemAppIMERule,
+			IMEMode:  "",
+		},
+	}
+}
+
+func scoreCandidates(candidates []OmniboxItem, query string) []OmniboxItem {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
+		return candidates
+	}
+	type scoredItem struct {
+		origIdx int
+		item    OmniboxItem
+	}
+	var scored []scoredItem
+	for i, cand := range candidates {
+		keyForScoring := strings.ReplaceAll(cand.KeyHint, " ", "")
+		kws := make([]string, 0, len(cand.Keywords)+1)
+		kws = append(kws, cand.Keywords...)
+		if cand.Subtitle != "" {
+			kws = append(kws, cand.Subtitle)
+		}
+		if res, ok := MatchFull(trimmed, cand.Title, keyForScoring, kws); ok {
+			updated := cand
+			updated.Score = res.Score
+			updated.MatchedIndices = res.MatchedLabelIndices
+			scored = append(scored, scoredItem{origIdx: i, item: updated})
+		}
+	}
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].item.Score != scored[j].item.Score {
+			return scored[i].item.Score > scored[j].item.Score
+		}
+		return scored[i].origIdx < scored[j].origIdx
+	})
+	out := make([]OmniboxItem, len(scored))
+	for i, s := range scored {
+		out[i] = s.item
+	}
+	return out
+}
+
 func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg config.ClavisConfig) []OmniboxItem {
+	// Prefix quick-routing in Actions tab: >, ;, @ (or "cb "), ?, :, =
+	if tab == config.TabActions {
+		if prefix, rest, ok := ParseOmniboxPrefix(query); ok {
+			switch prefix {
+			case '>':
+				var cmds []OmniboxItem
+				cmds = append(cmds, flattenLeaderNodes(cfg.Leader.Nodes, nil, nil)...)
+				cmds = append(cmds, makeNormalizeGlossaryItem())
+				cmds = append(cmds, makeAppIMERuleItems(state.Context)...)
+				cmds = append(cmds, makeInstalledAppItems(state.InstalledApps)...)
+				cmds = append(cmds, makeSettingsOmniboxItems()...)
+				return scoreCandidates(cmds, rest)
+			case ';':
+				snips := makeSnippetItems(cfg.Snippets.Items)
+				if rest == "" {
+					return snips
+				}
+				withSemi := scoreCandidates(snips, ";"+rest)
+				withoutSemi := scoreCandidates(snips, rest)
+				if len(withSemi) >= len(withoutSemi) && len(withSemi) > 0 {
+					return withSemi
+				}
+				return withoutSemi
+			case '@':
+				clips := makeClipboardOmniboxItems(state.ClipboardEntries)
+				return scoreCandidates(clips, rest)
+			case '?':
+				aiModes := scoreCandidates(flattenAIModes(cfg.Leader.Nodes, nil, nil), rest)
+				if rest != "" {
+					out := make([]OmniboxItem, 0, 1+len(aiModes))
+					adhoc := makeAdhocAIItem(rest, state.Context)
+					adhoc.Score = 2000
+					out = append(out, adhoc)
+					out = append(out, aiModes...)
+					return out
+				}
+				return aiModes
+			case ':':
+				return SearchEmojis(":" + rest)
+			case '=':
+				return EvaluateUtilities("="+rest, time.Now())
+			}
+		}
+	}
+
 	var candidates []OmniboxItem
 
 	switch tab {
 	case config.TabActions:
 		candidates = append(candidates, flattenLeaderNodes(cfg.Leader.Nodes, nil, nil)...)
 		candidates = append(candidates, makeNormalizeGlossaryItem())
+		candidates = append(candidates, makeAppIMERuleItems(state.Context)...)
 		candidates = append(candidates, makeSnippetItems(cfg.Snippets.Items)...)
+		candidates = append(candidates, makeInstalledAppItems(state.InstalledApps)...)
 		candidates = append(candidates, makeTabSwitchItems(config.TabActions)...)
 
 	case config.TabSnippets:
 		candidates = makeSnippetItems(cfg.Snippets.Items)
 
 	case config.TabClipboard:
-		candidates = make([]OmniboxItem, 0, len(state.ClipboardEntries))
-		for _, entry := range state.ClipboardEntries {
-			firstLine := firstNonEmptyLine(entry.Content)
-			sub := entry.SourceAppName
-			if sub == "" {
-				sub = "Clipboard"
-			}
-			keyHint := ""
-			icon := "doc.on.clipboard"
-			if entry.IsPinned {
-				keyHint = "Pinned"
-				icon = "pin.fill"
-			}
-			var kws []string
-			if entry.Content != "" {
-				kws = append(kws, entry.Content)
-			}
-			if entry.SourceAppName != "" {
-				kws = append(kws, entry.SourceAppName)
-			}
-			candidates = append(candidates, OmniboxItem{
-				ID:               "clipboard:" + entry.ID,
-				Title:            firstLine,
-				Subtitle:         sub,
-				KeyHint:          keyHint,
-				Icon:             icon,
-				Keywords:         kws,
-				Kind:             ItemClipboardEntry,
-				ClipboardID:      entry.ID,
-				ClipboardContent: entry.Content,
-			})
-		}
+		candidates = makeClipboardOmniboxItems(state.ClipboardEntries)
 
 	case config.TabAI:
 		candidates = flattenAIModes(cfg.Leader.Nodes, nil, nil)
@@ -842,26 +1411,7 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 		}
 
 	case config.TabSettings:
-		candidates = []OmniboxItem{
-			{
-				ID:        "setting:reload-config",
-				Title:     "Reload Configuration",
-				Subtitle:  "Reload TOML configuration files",
-				Icon:      "arrow.clockwise",
-				Keywords:  []string{"reload", "config", "toml", "settings"},
-				Kind:      ItemSetting,
-				SettingID: "reload-config",
-			},
-			{
-				ID:        "setting:open-config-dir",
-				Title:     "Open Configuration Folder",
-				Subtitle:  "~/.config/clavis",
-				Icon:      "folder",
-				Keywords:  []string{"folder", "open", "config", "settings"},
-				Kind:      ItemSetting,
-				SettingID: "open-config-dir",
-			},
-		}
+		candidates = makeSettingsOmniboxItems()
 	}
 
 	trimmed := strings.TrimSpace(query)
@@ -869,43 +1419,71 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 		return candidates
 	}
 
-	type scoredItem struct {
-		origIdx int
-		item    OmniboxItem
-	}
-	var scored []scoredItem
-	for i, cand := range candidates {
-		keyForScoring := strings.ReplaceAll(cand.KeyHint, " ", "")
-		kws := make([]string, 0, len(cand.Keywords)+1)
-		kws = append(kws, cand.Keywords...)
-		if cand.Subtitle != "" {
-			kws = append(kws, cand.Subtitle)
-		}
-		if res, ok := MatchFull(trimmed, cand.Title, keyForScoring, kws); ok {
-			updated := cand
-			updated.Score = res.Score
-			updated.MatchedIndices = res.MatchedLabelIndices
-			scored = append(scored, scoredItem{origIdx: i, item: updated})
-		}
-	}
+	scoredItems := scoreCandidates(candidates, trimmed)
 
-	sort.Slice(scored, func(i, j int) bool {
-		if scored[i].item.Score != scored[j].item.Score {
-			return scored[i].item.Score > scored[j].item.Score
-		}
-		return scored[i].origIdx < scored[j].origIdx
-	})
+	var results []OmniboxItem
+	if tab == config.TabActions {
+		utilItems := EvaluateUtilities(trimmed, time.Now())
+		results = append(results, utilItems...)
 
-	results := make([]OmniboxItem, len(scored))
-	for i, s := range scored {
-		results[i] = s.item
+		emojiItems := SearchEmojis(trimmed)
+		normTrimmed := NormalizeFullWidth(trimmed)
+		lowerTrimmed := strings.ToLower(normTrimmed)
+		if strings.HasPrefix(normTrimmed, ":") || lowerTrimmed == "emoji" || strings.HasPrefix(lowerTrimmed, "emoji ") {
+			results = append(results, emojiItems...)
+		} else {
+			results = append(results, scoredItems...)
+			results = append(results, emojiItems...)
+			goto appendAdhocAI
+		}
 	}
 
+	results = append(results, scoredItems...)
+
+appendAdhocAI:
 	if tab == config.TabAI || (tab == config.TabActions && (len(results) == 0 || utf8.RuneCountInString(trimmed) >= 3)) {
 		results = append(results, makeAdhocAIItem(trimmed, state.Context))
 	}
 
 	return results
+}
+
+func makeInstalledAppItems(apps []InstalledAppEntry) []OmniboxItem {
+	if len(apps) == 0 {
+		return nil
+	}
+	items := make([]OmniboxItem, 0, len(apps))
+	for i, app := range apps {
+		idKey := app.BundleID
+		if idKey == "" {
+			idKey = app.Path
+		}
+		if idKey == "" {
+			idKey = fmt.Sprintf("%d:%s", i, app.Name)
+		}
+		sub := "Application"
+		if app.BundleID != "" {
+			sub = "Application • " + app.BundleID
+		} else if app.Path != "" {
+			sub = "Application • " + app.Path
+		}
+		kws := []string{"app", "application", "launch", "open", app.Name}
+		if app.BundleID != "" {
+			kws = append(kws, app.BundleID)
+		}
+		items = append(items, OmniboxItem{
+			ID:          "app:" + idKey,
+			Title:       app.Name,
+			Subtitle:    sub,
+			KeyHint:     "App",
+			Icon:        "app.badge",
+			Keywords:    kws,
+			Kind:        ItemInstalledApp,
+			AppBundleID: app.BundleID,
+			AppPath:     app.Path,
+		})
+	}
+	return items
 }
 
 func makeAdhocAIItem(query string, ctx CapsuleContext) OmniboxItem {
@@ -1142,6 +1720,7 @@ func clearPhaseFields(s *State) {
 	s.AIOutput = ""
 	s.AIComplete = false
 	s.AIError = ""
+	s.AIHistory = nil
 	s.HUDMessage = ""
 }
 
@@ -1162,6 +1741,21 @@ func cloneState(s State) State {
 	if s.ClipboardEntries != nil {
 		out.ClipboardEntries = append([]OmniboxClipboardEntry(nil), s.ClipboardEntries...)
 	}
+	if s.InstalledApps != nil {
+		out.InstalledApps = append([]InstalledAppEntry(nil), s.InstalledApps...)
+	}
+	if s.AIHistory != nil {
+		out.AIHistory = copyChatTurns(s.AIHistory)
+	}
+	return out
+}
+
+func copyChatTurns(turns []ChatTurn) []ChatTurn {
+	if turns == nil {
+		return nil
+	}
+	out := make([]ChatTurn, len(turns))
+	copy(out, turns)
 	return out
 }
 

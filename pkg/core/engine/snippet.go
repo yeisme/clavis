@@ -311,7 +311,7 @@ func (e *SnippetEngine) Feed(r rune, opts FeedOptions) (*SnippetMatch, bool) {
 		for i := 0; i < tlen; i++ {
 			offsetFromEnd := tlen - 1 - i
 			bufRune, ok := e.buffer.runeAtOffsetFromEnd(offsetFromEnd)
-			if !ok || bufRune != entry.triggerRunes[i] {
+			if !ok || !snippetTriggerRuneMatches(bufRune, entry.triggerRunes[i]) {
 				isMatch = false
 				break
 			}
@@ -378,6 +378,17 @@ func snippetMatchesApp(item config.SnippetItem, bundleID, processName string) bo
 				return true
 			}
 		}
+	}
+	return false
+}
+
+func snippetTriggerRuneMatches(typed, expected rune) bool {
+	if typed == expected {
+		return true
+	}
+	// Allow full-width leading/inline punctuation (e.g. '；sig' matching ';sig') typed under CJK IME.
+	if !isSnippetWordRune(expected) && !isSnippetWordRune(typed) {
+		return NormalizeFullWidthRune(typed) == NormalizeFullWidthRune(expected)
 	}
 	return false
 }

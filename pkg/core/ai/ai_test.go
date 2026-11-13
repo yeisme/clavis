@@ -151,3 +151,133 @@ func TestOpenAIClientCancellation(t *testing.T) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 }
+
+func TestAnthropicGeminiAndKeylessOllamaStreaming(t *testing.T) {
+	cfg := config.DefaultAIConfig()
+	glossary := engine.GlossaryEngine{}
+
+	// 1. Anthropic Claude streaming + multi-turn history
+	claudeProf, _ := cfg.ProfileByID("claude")
+	var anthropicReq *http.Request
+	var anthropicBody map[string]any
+
+	anthropicDoer := mockDoer{
+		fn: func(req *http.Request) (*http.Response, error) {
+			anthropicReq = req
+			raw, _ := io.ReadAll(req.Body)
+			_ = json.Unmarshal(raw, &anthropicBody)
+			sse := "event: message_start\ndata: {\"type\":\"message_start\"}\n\n" +
+				"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Claude \"}}\n\n" +
+				"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"reply\"}}\n\n" +
+				"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(sse)),
+			}, nil
+		},
+	}
+
+	client := ai.NewOpenAICompatibleClient(cfg, glossary, anthropicDoer, func(ctx context.Context) (string, error) {
+		return "sk-ant-test", nil
+	})
+	var claudeOut strings.Builder
+	err := client.StreamCompletion(context.Background(), ai.CompletionRequest{
+		Prompt:  "Make it shorter",
+		Profile: &claudeProf,
+		History: []ai.ChatMessage{
+			{Role: "user", Content: "Original draft"},
+			{Role: "assistant", Content: "First revision"},
+		},
+	}, func(d string) {
+		claudeOut.WriteString(d)
+	})
+	if err != nil {
+		t.Fatalf("Anthropic StreamCompletion failed: %v", err)
+	}
+	if claudeOut.String() != "Claude reply" {
+		t.Fatalf("unexpected Anthropic output: %q", claudeOut.String())
+	}
+	if anthropicReq.URL.String() != "https://api.anthropic.com/v1/messages" {
+		t.Fatalf("unexpected Anthropic URL: %s", anthropicReq.URL.String())
+	}
+	if anthropicReq.Header.Get("x-api-key") != "sk-ant-test" || anthropicReq.Header.Get("anthropic-version") != "2023-06-01" {
+		t.Fatalf("missing Anthropic headers: %+v", anthropicReq.Header)
+	}
+	if msgs, ok := anthropicBody["messages"].([]any); !ok || len(msgs) != 3 {
+		t.Fatalf("expected 3 messages in Anthropic payload, got %+v", anthropicBody["messages"])
+	}
+
+	// 2. Gemini streaming + multi-turn history
+	geminiProf, _ := cfg.ProfileByID("gemini")
+	var geminiReq *http.Request
+	var geminiBody map[string]any
+
+	geminiDoer := mockDoer{
+		fn: func(req *http.Request) (*http.Response, error) {
+			geminiReq = req
+			raw, _ := io.ReadAll(req.Body)
+			_ = json.Unmarshal(raw, &geminiBody)
+			sse := "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Gemini \"}]}}]}\n\n" +
+				"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"stream\"}]},\"finishReason\":\"STOP\"}]}\n\n"
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(sse)),
+			}, nil
+		},
+	}
+
+	client.Doer = geminiDoer
+	var geminiOut strings.Builder
+	err = client.StreamCompletion(context.Background(), ai.CompletionRequest{
+		Prompt:  "Follow up",
+		Profile: &geminiProf,
+		History: []ai.ChatMessage{
+			{Role: "user", Content: "Hello"},
+			{Role: "assistant", Content: "Hi there"},
+		},
+	}, func(d string) {
+		geminiOut.WriteString(d)
+	})
+	if err != nil {
+		t.Fatalf("Gemini StreamCompletion failed: %v", err)
+	}
+	if geminiOut.String() != "Gemini stream" {
+		t.Fatalf("unexpected Gemini output: %q", geminiOut.String())
+	}
+	if geminiReq.URL.String() != "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse" {
+		t.Fatalf("unexpected Gemini URL: %s", geminiReq.URL.String())
+	}
+	if contents, ok := geminiBody["contents"].([]any); !ok || len(contents) != 3 {
+		t.Fatalf("expected 3 contents in Gemini payload, got %+v", geminiBody["contents"])
+	}
+
+	// 3. Keyless local Ollama streaming (empty API key permitted on localhost / ollama)
+	ollamaProf, _ := cfg.ProfileByID("ollama")
+	var ollamaReq *http.Request
+	ollamaDoer := mockDoer{
+		fn: func(req *http.Request) (*http.Response, error) {
+			ollamaReq = req
+			sse := "data: {\"choices\":[{\"delta\":{\"content\":\"Local Qwen\"}}]}\n\ndata: [DONE]\n\n"
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(sse)),
+			}, nil
+		},
+	}
+	ollamaClient := ai.NewOpenAICompatibleClient(cfg, glossary, ollamaDoer, func(ctx context.Context) (string, error) {
+		return "", errors.New("no key in keychain")
+	})
+	var ollamaOut strings.Builder
+	err = ollamaClient.StreamCompletion(context.Background(), ai.CompletionRequest{
+		Prompt:  "Hello local",
+		Profile: &ollamaProf,
+	}, func(d string) {
+		ollamaOut.WriteString(d)
+	})
+	if err != nil {
+		t.Fatalf("Keyless Ollama StreamCompletion failed: %v", err)
+	}
+	if ollamaOut.String() != "Local Qwen" || ollamaReq.Header.Get("Authorization") != "" {
+		t.Fatalf("unexpected Ollama response or auth header: out=%q auth=%q", ollamaOut.String(), ollamaReq.Header.Get("Authorization"))
+	}
+}

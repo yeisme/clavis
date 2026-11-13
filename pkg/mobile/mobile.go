@@ -194,6 +194,47 @@ func (s *Session) NormalizeGlossary(text string) string {
 	return ge.NormalizeAliases(text, true, true)
 }
 
+// SwitchAIProfile switches the active AI profile by ID, persists it to config.toml,
+// and updates the in-memory state machine.
+func (s *Session) SwitchAIProfile(profileID string) error {
+	trimmed := strings.TrimSpace(profileID)
+	if trimmed == "" {
+		return errors.New("profileID cannot be empty")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cfg := s.store.Current()
+	profile, ok := cfg.Main.AI.ProfileByID(trimmed)
+	if !ok {
+		return errors.New("unknown AI profile: " + trimmed)
+	}
+
+	mainCfg := cfg.Main
+	mainCfg.AI.ActiveProfileID = profile.ID
+	mainCfg.AI.Provider = profile.Provider
+	mainCfg.AI.Protocol = profile.Protocol
+	mainCfg.AI.BaseURL = profile.BaseURL
+	mainCfg.AI.Model = profile.Model
+	mainCfg.AI.Temperature = profile.Temperature
+	mainCfg.AI.TimeoutSeconds = profile.TimeoutSeconds
+	mainCfg.AI.SystemPrompt = profile.SystemPrompt
+	mainCfg.AI.KeychainAccount = profile.KeychainAccount
+	mainCfg.AI.APIKeyEnvVar = profile.APIKeyEnvVar
+
+	if err := s.store.SaveMain(mainCfg); err != nil {
+		return err
+	}
+	updatedCfg := s.store.Current()
+	s.machine.SetConfig(updatedCfg)
+	_ = s.machine.Handle(engine.Event{
+		Type:      engine.EventSelectAIProfile,
+		ProfileID: profile.ID,
+	})
+	return nil
+}
+
 // StreamAI starts an asynchronous OpenAI-compatible SSE streaming completion and delivers
 // deltas/completion/errors to cb. Returns a CancelToken to abort the request.
 func (s *Session) StreamAI(

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -92,6 +93,29 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 		})
 	}
 
+	// Validate [keymap] (only enforce threshold when TapHoldThresholdMs != 0 or Keymap is initialized)
+	if main.Keymap.TapHoldThresholdMs != 0 && (main.Keymap.TapHoldThresholdMs < 80 || main.Keymap.TapHoldThresholdMs > 500) {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "keymap.tap_hold_threshold_ms", Severity: SeverityError,
+			Message: fmt.Sprintf("tap_hold_threshold_ms must be within 80..500 (got %d)", main.Keymap.TapHoldThresholdMs),
+		})
+	}
+	for i, r := range main.Keymap.Remaps {
+		rPath := fmt.Sprintf("keymap.remaps[%d]", i)
+		if strings.TrimSpace(r.From) == "" {
+			issues = append(issues, ValidationIssue{
+				File: file, KeyPath: rPath + ".from", Severity: SeverityError,
+				Message: "Keymap remap 'from' key cannot be empty",
+			})
+		}
+		if strings.TrimSpace(r.Tap) == "" && strings.TrimSpace(r.Hold) == "" {
+			issues = append(issues, ValidationIssue{
+				File: file, KeyPath: rPath + ".tap", Severity: SeverityError,
+				Message: "Keymap remap rule must specify at least 'tap' or 'hold'",
+			})
+		}
+	}
+
 	theme := strings.ToLower(strings.TrimSpace(main.Appearance.Theme))
 	if theme == "" {
 		issues = append(issues, ValidationIssue{
@@ -105,7 +129,7 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 		})
 	}
 
-	if main.Appearance.CapsuleWidth <= 0 {
+	if math.IsNaN(main.Appearance.CapsuleWidth) || math.IsInf(main.Appearance.CapsuleWidth, 0) || main.Appearance.CapsuleWidth <= 0 {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "appearance.capsule_width", Severity: SeverityError,
 			Message: "capsule_width must be positive",
@@ -130,6 +154,12 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 			Message: "AI provider cannot be empty",
 		})
 	}
+	if main.AI.Protocol != "" && !isValidAIProtocol(main.AI.Protocol) {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "ai.protocol", Severity: SeverityError,
+			Message: fmt.Sprintf("Unsupported AI protocol '%s'", main.AI.Protocol),
+		})
+	}
 	if !isValidHTTPURL(main.AI.BaseURL) {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "ai.base_url", Severity: SeverityError,
@@ -148,17 +178,88 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 			Message: "AI keychain_account cannot be empty",
 		})
 	}
-	if main.AI.Temperature < 0.0 || main.AI.Temperature > 2.0 || math.IsNaN(main.AI.Temperature) {
+	if math.IsNaN(main.AI.Temperature) || math.IsInf(main.AI.Temperature, 0) || main.AI.Temperature < 0.0 || main.AI.Temperature > 2.0 {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "ai.temperature", Severity: SeverityWarning,
 			Message: fmt.Sprintf("AI temperature %v is outside recommended 0.0..2.0 range", main.AI.Temperature),
 		})
 	}
-	if main.AI.TimeoutSeconds <= 0 || math.IsNaN(main.AI.TimeoutSeconds) {
+	if math.IsNaN(main.AI.TimeoutSeconds) || math.IsInf(main.AI.TimeoutSeconds, 0) || main.AI.TimeoutSeconds <= 0 {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "ai.timeout_seconds", Severity: SeverityError,
 			Message: "AI timeout_seconds must be positive",
 		})
+	}
+
+	if len(main.AI.Profiles) > 0 {
+		seenProfiles := make(map[string]struct{}, len(main.AI.Profiles))
+		for i, prof := range main.AI.Profiles {
+			pPath := fmt.Sprintf("ai.profiles[%d]", i)
+			pid := strings.TrimSpace(prof.ID)
+			if pid == "" {
+				issues = append(issues, ValidationIssue{
+					File: file, KeyPath: pPath + ".id", Severity: SeverityError,
+					Message: "AI profile id cannot be empty",
+				})
+			} else if _, dup := seenProfiles[pid]; dup {
+				issues = append(issues, ValidationIssue{
+					File: file, KeyPath: pPath + ".id", Severity: SeverityError,
+					Message: fmt.Sprintf("Duplicate AI profile id '%s'", prof.ID),
+				})
+			} else {
+				seenProfiles[pid] = struct{}{}
+			}
+			if strings.TrimSpace(prof.Provider) == "" {
+				issues = append(issues, ValidationIssue{
+					File: file, KeyPath: pPath + ".provider", Severity: SeverityError,
+					Message: "AI profile provider cannot be empty",
+				})
+			}
+			if prof.Protocol != "" && !isValidAIProtocol(prof.Protocol) {
+				issues = append(issues, ValidationIssue{
+					File: file, KeyPath: pPath + ".protocol", Severity: SeverityError,
+					Message: fmt.Sprintf("Unsupported AI profile protocol '%s'", prof.Protocol),
+				})
+			}
+			if !isValidHTTPURL(prof.BaseURL) {
+				issues = append(issues, ValidationIssue{
+					File: file, KeyPath: pPath + ".base_url", Severity: SeverityError,
+					Message: fmt.Sprintf("AI profile base_url '%s' must be a valid http or https URL with a host", prof.BaseURL),
+				})
+			}
+			if strings.TrimSpace(prof.Model) == "" {
+				issues = append(issues, ValidationIssue{
+					File: file, KeyPath: pPath + ".model", Severity: SeverityError,
+					Message: "AI profile model cannot be empty",
+				})
+			}
+			if strings.TrimSpace(prof.KeychainAccount) == "" && !strings.EqualFold(strings.TrimSpace(prof.Provider), "ollama") {
+				issues = append(issues, ValidationIssue{
+					File: file, KeyPath: pPath + ".keychain_account", Severity: SeverityError,
+					Message: "AI profile keychain_account cannot be empty",
+				})
+			}
+			if math.IsNaN(prof.Temperature) || math.IsInf(prof.Temperature, 0) || prof.Temperature < 0.0 || prof.Temperature > 2.0 {
+				issues = append(issues, ValidationIssue{
+					File: file, KeyPath: pPath + ".temperature", Severity: SeverityWarning,
+					Message: fmt.Sprintf("AI profile temperature %v is outside recommended 0.0..2.0 range", prof.Temperature),
+				})
+			}
+			if math.IsNaN(prof.TimeoutSeconds) || math.IsInf(prof.TimeoutSeconds, 0) || prof.TimeoutSeconds <= 0 {
+				issues = append(issues, ValidationIssue{
+					File: file, KeyPath: pPath + ".timeout_seconds", Severity: SeverityError,
+					Message: "AI profile timeout_seconds must be positive",
+				})
+			}
+		}
+		if strings.TrimSpace(main.AI.ActiveProfileID) != "" {
+			if _, ok := main.AI.ProfileByID(main.AI.ActiveProfileID); !ok {
+				issues = append(issues, ValidationIssue{
+					File: file, KeyPath: "ai.active_profile_id", Severity: SeverityError,
+					Message: fmt.Sprintf("Active AI profile '%s' not found in ai.profiles", main.AI.ActiveProfileID),
+				})
+			}
+		}
 	}
 
 	if main.Clipboard.MaxHistoryItems <= 0 {
@@ -376,6 +477,8 @@ func ValidateIMERules(imeRules IMERulesConfig) []ValidationIssue {
 		path := fmt.Sprintf("rules[%d]", i)
 		bundleID := strings.TrimSpace(rule.BundleID)
 		procName := strings.TrimSpace(rule.ProcessName)
+		urlPat := strings.TrimSpace(rule.URLPattern)
+		titlePat := strings.TrimSpace(rule.TitlePattern)
 
 		if bundleID == "" && procName == "" {
 			issues = append(issues, ValidationIssue{
@@ -384,17 +487,18 @@ func ValidateIMERules(imeRules IMERulesConfig) []ValidationIssue {
 			})
 		}
 		if bundleID != "" {
-			if _, dup := seenBundleIDs[bundleID]; dup {
+			key := bundleID + "\x00" + urlPat + "\x00" + titlePat
+			if _, dup := seenBundleIDs[key]; dup {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: path + ".bundle_id", Severity: SeverityError,
 					Message: fmt.Sprintf("Duplicate IME rule for bundle_id '%s'", rule.BundleID),
 				})
 			} else {
-				seenBundleIDs[bundleID] = struct{}{}
+				seenBundleIDs[key] = struct{}{}
 			}
 		}
 		if procName != "" {
-			lowerProc := strings.ToLower(procName)
+			lowerProc := strings.ToLower(procName) + "\x00" + urlPat + "\x00" + titlePat
 			if _, dup := seenProcessNames[lowerProc]; dup {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: path + ".process_name", Severity: SeverityError,
@@ -404,10 +508,28 @@ func ValidateIMERules(imeRules IMERulesConfig) []ValidationIssue {
 				seenProcessNames[lowerProc] = struct{}{}
 			}
 		}
-		if strings.TrimSpace(rule.InputSourceID) == "" {
+		if titlePat != "" {
+			if _, err := regexp.Compile(titlePat); err != nil {
+				issues = append(issues, ValidationIssue{
+					File: file, KeyPath: path + ".title_pattern", Severity: SeverityError,
+					Message: fmt.Sprintf("Invalid title_pattern regular expression '%s': %v", rule.TitlePattern, err),
+				})
+			}
+		}
+		if rule.PreferredMode != "" && !isValidIMEMode(rule.PreferredMode) {
+			allowed := make([]string, len(AllIMEModes()))
+			for idx, m := range AllIMEModes() {
+				allowed[idx] = string(m)
+			}
+			issues = append(issues, ValidationIssue{
+				File: file, KeyPath: path + ".preferred_mode", Severity: SeverityError,
+				Message: fmt.Sprintf("Unknown preferred_mode '%s'; expected one of: %s", rule.PreferredMode, strings.Join(allowed, ", ")),
+			})
+		}
+		if strings.TrimSpace(rule.InputSourceID) == "" && (rule.PreferredMode == "" || !isValidIMEMode(rule.PreferredMode)) {
 			issues = append(issues, ValidationIssue{
 				File: file, KeyPath: path + ".input_source_id", Severity: SeverityError,
-				Message: "IME rule input_source_id cannot be empty",
+				Message: "IME rule must specify input_source_id when preferred_mode is empty",
 			})
 		}
 	}

@@ -81,6 +81,18 @@ func TestMobileSessionLifecycle(t *testing.T) {
 	if got := sess.NormalizeGlossary("Use clavis daily."); got != "Use Clavis daily." {
 		t.Fatalf("unexpected NormalizeGlossary: %q", got)
 	}
+
+	// SwitchAIProfile
+	if err := sess.SwitchAIProfile("ollama"); err != nil {
+		t.Fatalf("SwitchAIProfile(ollama) failed: %v", err)
+	}
+	cfgAfter, _ := sess.ConfigJSON()
+	if !strings.Contains(cfgAfter, `"activeProfileId":"ollama"`) {
+		t.Fatalf("expected activeProfileId ollama in ConfigJSON: %s", cfgAfter)
+	}
+	if err := sess.SwitchAIProfile("nonexistent"); err == nil {
+		t.Fatal("expected error for unknown profile")
+	}
 }
 
 type mockStreamCallback struct {

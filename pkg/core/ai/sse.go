@@ -3,6 +3,8 @@ package ai
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/yeisme/clavis/pkg/core/config"
 )
 
 // SSEEventKind identifies the type of parsed SSE event.
@@ -14,20 +16,22 @@ const (
 	SSEError
 )
 
-// SSEEvent represents a parsed SSE event from an OpenAI-compatible stream.
+// SSEEvent represents a parsed SSE event from an AI streaming response.
 type SSEEvent struct {
 	Kind SSEEventKind
 	Text string
 }
 
 // SSEStreamParser incrementally parses byte chunks into SSEEvents.
-// It buffers partial lines and multi-byte UTF-8 sequences safely across Feed calls.
+// It buffers partial lines and multi-byte UTF-8 sequences safely across Feed calls,
+// and supports OpenAI-compatible, Anthropic, and Gemini SSE wire formats.
 type SSEStreamParser struct {
-	buf           []byte
-	eventName     string
-	eventID       string
-	dataLines     []string
-	didEmitDone   bool
+	Protocol    config.AIProtocol
+	buf         []byte
+	eventName   string
+	eventID     string
+	dataLines   []string
+	didEmitDone bool
 }
 
 // Feed appends incoming bytes and returns any complete SSEEvents parsed so far.
@@ -45,13 +49,9 @@ func (p *SSEStreamParser) Finish() []SSEEvent {
 	if len(p.buf) > 0 {
 		line := string(p.buf)
 		p.buf = nil
-		if ev, ok := p.processLine(line); ok {
-			events = append(events, ev)
-		}
+		events = append(events, p.processLine(line)...)
 	}
-	if ev, ok := p.dispatchCurrentEvent(); ok {
-		events = append(events, ev)
-	}
+	events = append(events, p.dispatchCurrentEvent()...)
 	return events
 }
 
@@ -64,17 +64,13 @@ func (p *SSEStreamParser) drainCompleteLines(isEOF bool) []SSEEvent {
 		b := p.buf[i]
 		if b == '\n' {
 			line := string(p.buf[lineStart:i])
-			if ev, ok := p.processLine(line); ok {
-				events = append(events, ev)
-			}
+			events = append(events, p.processLine(line)...)
 			i++
 			lineStart = i
 		} else if b == '\r' {
 			if i+1 < len(p.buf) {
 				line := string(p.buf[lineStart:i])
-				if ev, ok := p.processLine(line); ok {
-					events = append(events, ev)
-				}
+				events = append(events, p.processLine(line)...)
 				if p.buf[i+1] == '\n' {
 					i += 2
 				} else {
@@ -83,9 +79,7 @@ func (p *SSEStreamParser) drainCompleteLines(isEOF bool) []SSEEvent {
 				lineStart = i
 			} else if isEOF {
 				line := string(p.buf[lineStart:i])
-				if ev, ok := p.processLine(line); ok {
-					events = append(events, ev)
-				}
+				events = append(events, p.processLine(line)...)
 				i++
 				lineStart = i
 			} else {
@@ -105,12 +99,12 @@ func (p *SSEStreamParser) drainCompleteLines(isEOF bool) []SSEEvent {
 	return events
 }
 
-func (p *SSEStreamParser) processLine(line string) (SSEEvent, bool) {
+func (p *SSEStreamParser) processLine(line string) []SSEEvent {
 	if line == "" {
 		return p.dispatchCurrentEvent()
 	}
 	if strings.HasPrefix(line, ":") {
-		return SSEEvent{}, false
+		return nil
 	}
 
 	var field, value string
@@ -131,14 +125,14 @@ func (p *SSEStreamParser) processLine(line string) (SSEEvent, bool) {
 	case "data":
 		p.dataLines = append(p.dataLines, value)
 	case "event":
-		p.eventName = value
+		p.eventName = strings.TrimSpace(value)
 	case "id":
 		p.eventID = value
 	}
-	return SSEEvent{}, false
+	return nil
 }
 
-func (p *SSEStreamParser) dispatchCurrentEvent() (SSEEvent, bool) {
+func (p *SSEStreamParser) dispatchCurrentEvent() []SSEEvent {
 	eventName := p.eventName
 	lines := p.dataLines
 
@@ -146,51 +140,108 @@ func (p *SSEStreamParser) dispatchCurrentEvent() (SSEEvent, bool) {
 	p.eventID = ""
 	p.dataLines = nil
 
+	proto := p.Protocol
+	if proto == "" {
+		proto = config.ProtocolOpenAICompatible
+	}
+
+	if proto == config.ProtocolAnthropic && eventName == "message_stop" && len(lines) == 0 {
+		p.didEmitDone = true
+		return []SSEEvent{{Kind: SSEDone}}
+	}
+
 	if len(lines) == 0 {
-		return SSEEvent{}, false
+		return nil
 	}
 
 	payload := strings.Join(lines, "\n")
 	trimmed := strings.TrimSpace(payload)
 	if trimmed == "" {
-		return SSEEvent{}, false
+		return nil
 	}
 	if trimmed == "[DONE]" {
 		p.didEmitDone = true
-		return SSEEvent{Kind: SSEDone}, true
+		return []SSEEvent{{Kind: SSEDone}}
 	}
 
 	var rawMap map[string]any
 	if err := json.Unmarshal([]byte(trimmed), &rawMap); err != nil {
 		if eventName == "error" {
-			return SSEEvent{Kind: SSEError, Text: trimmed}, true
+			return []SSEEvent{{Kind: SSEError, Text: trimmed}}
 		}
-		return SSEEvent{Kind: SSEError, Text: "Malformed SSE JSON payload: " + err.Error()}, true
+		return []SSEEvent{{Kind: SSEError, Text: "Malformed SSE JSON payload: " + err.Error()}}
 	}
 
 	if errMsg := extractErrorMessage(rawMap); errMsg != "" {
-		return SSEEvent{Kind: SSEError, Text: errMsg}, true
+		return []SSEEvent{{Kind: SSEError, Text: errMsg}}
 	}
-	if eventName == "error" {
-		return SSEEvent{Kind: SSEError, Text: trimmed}, true
+	if eventName == "error" || rawMap["type"] == "error" {
+		return []SSEEvent{{Kind: SSEError, Text: trimmed}}
 	}
 
-	if choices, ok := rawMap["choices"].([]any); ok && len(choices) > 0 {
-		if first, ok := choices[0].(map[string]any); ok {
-			if delta, ok := first["delta"].(map[string]any); ok {
-				if content, ok := delta["content"].(string); ok && content != "" {
-					return SSEEvent{Kind: SSEDelta, Text: content}, true
-				}
-			}
-			if msg, ok := first["message"].(map[string]any); ok {
-				if content, ok := msg["content"].(string); ok && content != "" {
-					return SSEEvent{Kind: SSEDelta, Text: content}, true
+	switch proto {
+	case config.ProtocolAnthropic:
+		msgType, _ := rawMap["type"].(string)
+		if eventName == "message_stop" || msgType == "message_stop" {
+			p.didEmitDone = true
+			return []SSEEvent{{Kind: SSEDone}}
+		}
+		if eventName == "content_block_delta" || msgType == "content_block_delta" {
+			if delta, ok := rawMap["delta"].(map[string]any); ok {
+				deltaType, _ := delta["type"].(string)
+				if deltaType == "text_delta" || deltaType == "" {
+					if text, ok := delta["text"].(string); ok && text != "" {
+						return []SSEEvent{{Kind: SSEDelta, Text: text}}
+					}
 				}
 			}
 		}
-	}
+		return nil
 
-	return SSEEvent{}, false
+	case config.ProtocolGemini:
+		var out []SSEEvent
+		if candidates, ok := rawMap["candidates"].([]any); ok && len(candidates) > 0 {
+			if first, ok := candidates[0].(map[string]any); ok {
+				if contentObj, ok := first["content"].(map[string]any); ok {
+					if parts, ok := contentObj["parts"].([]any); ok {
+						var sb strings.Builder
+						for _, part := range parts {
+							if pm, ok := part.(map[string]any); ok {
+								if t, ok := pm["text"].(string); ok {
+									sb.WriteString(t)
+								}
+							}
+						}
+						if sb.Len() > 0 {
+							out = append(out, SSEEvent{Kind: SSEDelta, Text: sb.String()})
+						}
+					}
+				}
+				if fr, ok := first["finishReason"].(string); ok && fr != "" {
+					p.didEmitDone = true
+					out = append(out, SSEEvent{Kind: SSEDone})
+				}
+			}
+		}
+		return out
+
+	default:
+		if choices, ok := rawMap["choices"].([]any); ok && len(choices) > 0 {
+			if first, ok := choices[0].(map[string]any); ok {
+				if delta, ok := first["delta"].(map[string]any); ok {
+					if content, ok := delta["content"].(string); ok && content != "" {
+						return []SSEEvent{{Kind: SSEDelta, Text: content}}
+					}
+				}
+				if msg, ok := first["message"].(map[string]any); ok {
+					if content, ok := msg["content"].(string); ok && content != "" {
+						return []SSEEvent{{Kind: SSEDelta, Text: content}}
+					}
+				}
+			}
+		}
+		return nil
+	}
 }
 
 func extractErrorMessage(dict map[string]any) string {

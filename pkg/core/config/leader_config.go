@@ -81,14 +81,14 @@ func isValidCapsuleTab(tab CapsuleTab) bool {
 type LeaderActionType string
 
 const (
-	ActionGroup            LeaderActionType = "group"
-	ActionAIRewrite        LeaderActionType = "ai_rewrite"
-	ActionWindow           LeaderActionType = "window"
-	ActionCLI              LeaderActionType = "cli"
-	ActionOpenApp          LeaderActionType = "open_app"
-	ActionSwitchTab        LeaderActionType = "switch_tab"
-	ActionSnippet          LeaderActionType = "snippet"
-	ActionToggleIME        LeaderActionType = "toggle_ime"
+	ActionGroup             LeaderActionType = "group"
+	ActionAIRewrite         LeaderActionType = "ai_rewrite"
+	ActionWindow            LeaderActionType = "window"
+	ActionCLI               LeaderActionType = "cli"
+	ActionOpenApp           LeaderActionType = "open_app"
+	ActionSwitchTab         LeaderActionType = "switch_tab"
+	ActionSnippet           LeaderActionType = "snippet"
+	ActionToggleIME         LeaderActionType = "toggle_ime"
 	ActionNormalizeGlossary LeaderActionType = "normalize_glossary"
 )
 
