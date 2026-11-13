@@ -3,6 +3,7 @@ package uiapp
 import (
 	"fmt"
 	"runtime"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -42,6 +43,7 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 	}()
 
 	if state.Phase == engine.PhaseHidden {
+		capsuleUI.reset(a)
 		ui.Box(c).Fill()
 		return
 	}
@@ -361,7 +363,7 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 
 		ui.Divider(c)
 		ui.Row(c).FillWidth().Gap(12).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "Press key to trigger • ⌫ Back • Esc Close").
+			ui.Text(c, "Press key to trigger • / Search • ⌫ Back • Esc Close").
 				FontSize(11).
 				TextColor(theme.TextMuted).
 				SingleLine()
@@ -425,6 +427,14 @@ func (a *AppController) renderOmniboxView(
 		return a.handleOmniboxKey(ev.Key, ev.Mods, state)
 	})
 
+	// While the contextual action menu is open, Escape closes only the menu,
+	// wherever the keyboard focus is.
+	if a.omniboxActionMenuOpen(state) {
+		c.OnWindowShortcut(0, ui.KeyEscape, func() {
+			capsuleUI.setActionMenuShown(a, false)
+		})
+	}
+
 	rootCol.Children(func() {
 		query := state.OmniboxQuery
 		in := ui.TextInput(c, &query).
@@ -459,6 +469,15 @@ func (a *AppController) renderOmniboxView(
 			a.uiState.isComposing = in.Composing()
 		}
 
+		// Quick chords (⌥1..⌥9 / Alt+1..9) must be taken before the text
+		// editor types the Option+digit character.
+		in.HandleInput(func(ev ui.InputEvent) bool {
+			if ev.Kind != ui.InputKeyDown || a.uiState.isComposing {
+				return false
+			}
+			return a.handleOmniboxKey(ev.Key, ev.Mods, state)
+		})
+
 		in.OnTextKey(func(k ui.TextKey) bool {
 			if a.uiState.isComposing {
 				switch k.Key {
@@ -473,6 +492,12 @@ func (a *AppController) renderOmniboxView(
 
 		if in.Changed() && query != state.OmniboxQuery {
 			a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: query})
+		}
+
+		if a.omniboxActionMenuOpen(state) {
+			a.renderOmniboxActionMenu(c, theme, state)
+		} else if capsuleUI.actionMenuShown(a) {
+			capsuleUI.setActionMenuShown(a, false)
 		}
 
 		items := state.OmniboxItems
@@ -499,87 +524,148 @@ func (a *AppController) renderOmniboxView(
 				return ""
 			}
 
-			list := ui.List(c, &a.uiState.listState, len(items), func(i int) {
-				item := items[i]
-				isSelected := i == state.SelectedIndex
-				row := ui.Row(c).
-					FillWidth().
-					Padding(7, 10).
-					Radius(8).
-					Gap(10).
-					AlignItems(ui.Center)
-				if isSelected {
-					row.Background(withAlpha(theme.Accent, 0.16)).Border(1, withAlpha(theme.Accent, 0.45))
-				}
-
-				iconColor := theme.TextMuted
-				if isSelected || item.Kind == engine.ItemAIMode || item.Kind == engine.ItemUtility {
-					iconColor = theme.Accent
-				}
-
-				row.Children(func() {
-					a.renderOmniboxRowLeadingIcon(c, item, iconColor)
-
-					if item.Kind == engine.ItemClipboardEntry && item.KeyHint == "Pinned" {
-						ui.Box(c).
-							Padding(2, 6).
-							Radius(4).
-							Background(withAlpha(theme.Accent, 0.16)).
-							Children(func() {
-								ui.Text(c, "PIN").FontSize(10).FontWeight(700).TextColor(theme.Accent).SingleLine()
-							})
+			renderList := func() {
+				list := ui.List(c, &a.uiState.listState, len(items), func(i int) {
+					item := items[i]
+					isSelected := i == state.SelectedIndex
+					row := ui.Row(c).
+						FillWidth().
+						Padding(7, 10).
+						Radius(8).
+						Gap(10).
+						AlignItems(ui.Center)
+					if isSelected {
+						row.Background(withAlpha(theme.Accent, 0.16)).Border(1, withAlpha(theme.Accent, 0.45))
 					}
 
-					ui.Column(c).Grow(1).Gap(2).Children(func() {
-						spans := buildHighlightedSpans(item.Title, item.MatchedIndices, theme.Accent, theme.Text)
-						ui.RichText(c, spans...).FontSize(13).SingleLine()
-						if item.Subtitle != "" {
-							ui.Text(c, item.Subtitle).FontSize(11).TextColor(theme.TextMuted).SingleLine()
+					iconColor := theme.TextMuted
+					if isSelected || item.Kind == engine.ItemAIMode || item.Kind == engine.ItemUtility {
+						iconColor = theme.Accent
+					}
+
+					row.Children(func() {
+						a.renderOmniboxRowLeadingIcon(c, item, iconColor)
+
+						if item.Kind == engine.ItemClipboardEntry && item.KeyHint == "Pinned" {
+							ui.Box(c).
+								Padding(2, 6).
+								Radius(4).
+								Background(withAlpha(theme.Accent, 0.16)).
+								Children(func() {
+									ui.Text(c, "PIN").FontSize(10).FontWeight(700).TextColor(theme.Accent).SingleLine()
+								})
+						}
+
+						ui.Column(c).Grow(1).Gap(2).Children(func() {
+							spans := buildHighlightedSpans(item.Title, item.MatchedIndices, theme.Accent, theme.Text)
+							ui.RichText(c, spans...).FontSize(13).SingleLine()
+							if item.Subtitle != "" {
+								ui.Text(c, item.Subtitle).FontSize(11).TextColor(theme.TextMuted).SingleLine()
+							}
+						})
+
+						// Direct quick-select badge (⌥1..⌥9 / Alt+1..9).
+						if cfg.Main.Appearance.ShowKeyHints && i < 9 {
+							ui.Box(c).
+								Padding(2, 6).
+								Radius(5).
+								Background(theme.Surface).
+								Border(1, withAlpha(theme.Border, 0.8)).
+								Children(func() {
+									ui.Text(c, quickIndexLabel(i)).FontSize(10).TextColor(theme.TextMuted).SingleLine()
+								})
+						}
+
+						if cfg.Main.Appearance.ShowKeyHints && item.KeyHint != "" && item.KeyHint != "Pinned" {
+							ui.Box(c).
+								Padding(2, 7).
+								Radius(5).
+								Background(theme.Surface).
+								Border(1, theme.Border).
+								Children(func() {
+									ui.Text(c, item.KeyHint).FontSize(11).TextColor(theme.TextMuted).SingleLine()
+								})
 						}
 					})
 
-					if cfg.Main.Appearance.ShowKeyHints && item.KeyHint != "" && item.KeyHint != "Pinned" {
-						ui.Box(c).
-							Padding(2, 7).
-							Radius(5).
-							Background(theme.Surface).
-							Border(1, theme.Border).
-							Children(func() {
-								ui.Text(c, item.KeyHint).FontSize(11).TextColor(theme.TextMuted).SingleLine()
-							})
+					if row.RowDoubleClicked() {
+						a.SelectIndex(i)
+						a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
+					} else if row.RowClicked() {
+						a.SelectIndex(i)
+						a.uiState.searchHandle.RequestFocus(c)
 					}
-				})
+				}).FillWidth().Grow(1)
 
-				if row.RowDoubleClicked() {
-					a.SelectIndex(i)
-					a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
-				} else if row.RowClicked() {
-					a.SelectIndex(i)
-					a.uiState.searchHandle.RequestFocus(c)
+				if list.Changed() && selectedIdx >= 0 && selectedIdx < len(items) && selectedIdx != state.SelectedIndex {
+					a.SelectIndex(selectedIdx)
 				}
-			}).FillWidth().Grow(1)
-
-			if list.Changed() && selectedIdx >= 0 && selectedIdx < len(items) && selectedIdx != state.SelectedIndex {
-				a.SelectIndex(selectedIdx)
+				if list.Submitted() {
+					a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
+				}
 			}
-			if list.Submitted() {
-				a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
+
+			// Side-by-side split: results list on the left, rich preview on the right.
+			previewItem, hasPreview := omniboxPreviewItem(state)
+			if hasPreview && a.previewPaneVisible(cfg) {
+				ui.Row(c).FillWidth().Grow(1).Gap(10).AlignItems(ui.Stretch).Children(func() {
+					ui.Column(c).Grow(3).Children(renderList)
+					ui.Column(c).Grow(2).Children(func() {
+						a.renderOmniboxPreviewCard(c, theme, state, previewItem)
+					})
+				})
+			} else {
+				renderList()
 			}
 		}
 
 		ui.Divider(c)
-		ui.Row(c).FillWidth().Gap(10).AlignItems(ui.Center).Children(func() {
-			hint := "↵ Run • ↑↓ Navigate • Tab Switch • Esc Close"
-			if state.OmniboxTab == config.TabClipboard && len(state.OmniboxItems) > 0 {
-				if runtime.GOOS == "darwin" {
-					hint += " • ⌘P Pin • ⌘⌫ Delete"
-				} else {
-					hint += " • Ctrl+P Pin • Ctrl+⌫ Delete"
-				}
+		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
+			prefix := modPrefix()
+			hint := "↵ Run • " + prefix + "↵ Secondary • ↑↓ Navigate • Tab Switch • Esc Close"
+			if selected, ok := selectedOmniboxItem(state); ok && selected.Kind == engine.ItemClipboardEntry {
+				hint += " • " + prefix + "P Pin • " + prefix + "⌫ Delete"
 			}
-			ui.Text(c, hint).FontSize(11).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, hint).FontSize(11).TextColor(theme.TextMuted).SingleLine().Grow(1)
+
+			a.renderOmniboxFooterFrameToggle(c, theme, state, prefix+"I Preview",
+				a.previewPaneVisible(cfg), func() {
+					capsuleUI.togglePreview(a, cfg.Main.Appearance.ShowPreviewPane)
+					a.uiState.searchHandle.RequestFocus(c)
+				})
+			a.renderOmniboxFooterFrameToggle(c, theme, state, prefix+"K Actions",
+				a.omniboxActionMenuOpen(state), func() {
+					a.toggleOmniboxActionMenu()
+					a.uiState.searchHandle.RequestFocus(c)
+				})
 		})
 	})
+}
+
+// renderOmniboxFooterFrameToggle renders a small footer toggle button.
+func (a *AppController) renderOmniboxFooterFrameToggle(
+	c *ui.Context,
+	theme *ui.Theme,
+	_ engine.State,
+	label string,
+	active bool,
+	onClick func(),
+) {
+	btn := ui.ButtonBase(c).
+		Padding(2, 8).
+		Radius(6).
+		FocusRing(false).
+		Background(theme.Surface).
+		Border(1, withAlpha(theme.Border, 0.8))
+	if active {
+		btn.Background(withAlpha(theme.Accent, 0.16)).Border(1, withAlpha(theme.Accent, 0.45))
+	}
+	btn.Children(func() {
+		ui.Text(c, label).FontSize(10).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+	})
+	if btn.Clicked() && onClick != nil {
+		onClick()
+	}
 }
 
 func (a *AppController) renderOmniboxRowLeadingIcon(c *ui.Context, item engine.OmniboxItem, iconColor ui.Color) {
@@ -615,19 +701,59 @@ func (a *AppController) renderOmniboxRowLeadingIcon(c *ui.Context, item engine.O
 }
 
 func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state engine.State) bool {
-	if state.OmniboxTab == config.TabClipboard && len(state.OmniboxItems) > 0 {
-		if mods == ui.Cmd && key == ui.KeyP {
+	// The contextual action menu takes navigation keys while it is open.
+	if a.handleActionMenuKey(key, mods, state) {
+		return true
+	}
+
+	// Direct row quick-select: ⌥1..⌥9 inserts, ⌥⌘1..⌥⌘9 runs the secondary action.
+	if mods == ui.Alt {
+		if idx, ok := rowQuickKeyIndex(key); ok && idx < len(state.OmniboxItems) {
+			a.Dispatch(engine.Event{Type: engine.EventSelectAndConfirmIndex, Index: idx})
+			return true
+		}
+	}
+	if mods == (ui.Alt|primaryMod()) || mods == (ui.Alt|ui.Cmd) {
+		if idx, ok := rowQuickKeyIndex(key); ok && idx < len(state.OmniboxItems) {
+			a.Dispatch(engine.Event{
+				Type:      engine.EventSelectAndConfirmIndex,
+				Index:     idx,
+				Secondary: true,
+			})
+			return true
+		}
+	}
+
+	// Clipboard pin/delete works wherever a clipboard entry is selected
+	// (the Clipboard tab, or '@' prefix routing in the Actions tab).
+	if selected, ok := selectedOmniboxItem(state); ok && selected.Kind == engine.ItemClipboardEntry {
+		if isPrimaryMod(mods) && key == ui.KeyP {
 			a.Dispatch(engine.Event{Type: engine.EventTogglePinSelectedClipboardItem})
 			return true
 		}
-		if mods == ui.Cmd && (key == ui.KeyBackspace || key == ui.KeyDelete) {
+		if isPrimaryMod(mods) && (key == ui.KeyBackspace || key == ui.KeyDelete) {
 			a.Dispatch(engine.Event{Type: engine.EventDeleteSelectedClipboardItem})
 			return true
 		}
 	}
 
-	if mods == ui.Cmd {
+	if isPrimaryMod(mods) {
+		switch {
+		case key == ui.KeyEnter:
+			a.Dispatch(engine.Event{Type: engine.EventConfirmSecondarySelection})
+			return true
+		case key == ui.KeyK:
+			if len(state.OmniboxItems) > 0 {
+				a.toggleOmniboxActionMenu()
+			}
+			return true
+		case key == ui.KeyI:
+			cfg := a.Config()
+			capsuleUI.togglePreview(a, cfg.Main.Appearance.ShowPreviewPane)
+			return true
+		}
 		if idx, ok := numberKeyIndex(key); ok && idx < len(omniboxTabs) {
+			capsuleUI.setActionMenuShown(a, false)
 			a.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: omniboxTabs[idx]})
 			return true
 		}
@@ -645,6 +771,7 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 		return true
 	case key == ui.KeyTab && (mods == 0 || mods == ui.Shift):
 		nextTab := cycleOmniboxTab(state.OmniboxTab, mods == ui.Shift)
+		capsuleUI.setActionMenuShown(a, false)
 		a.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: nextTab})
 		return true
 	case key == ui.KeyEscape && mods == 0:
@@ -656,7 +783,17 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 
 func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, state engine.State) {
 	c.OnWindowShortcut(0, ui.KeyEscape, func() {
+		if a.followUpComposing() {
+			return
+		}
 		a.Dispatch(engine.Event{Type: engine.EventEscape})
+	})
+	// Cycle AI profiles with ⌘⇧M / Ctrl+Shift+M.
+	c.OnWindowShortcut(primaryMod()|ui.Shift, ui.KeyM, func() {
+		activeProf := a.ActiveAIProfile()
+		if nextID := nextAIProfileID(a.Config().Main.AI, activeProf.ID); nextID != "" {
+			_ = a.SelectAIProfile(nextID)
+		}
 	})
 	if state.AIComplete && state.AIError == "" {
 		c.OnWindowShortcut(0, ui.KeyTab, func() {
@@ -665,6 +802,9 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, st
 	}
 	if state.AIError == "" && state.AIOutput != "" {
 		c.OnWindowShortcut(0, ui.KeyEnter, func() {
+			if a.followUpComposing() {
+				return
+			}
 			trimmed := strings.TrimSpace(a.uiState.followUpQuery)
 			if trimmed != "" {
 				a.uiState.followUpQuery = ""
@@ -795,7 +935,40 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, st
 				Label("Follow up with AI").
 				FillWidth()
 
+			// Track IME composition so candidate selection never sends or closes.
+			in.ObserveInput(func(ev ui.InputEvent) {
+				switch ev.Kind {
+				case ui.InputCompose:
+					capsuleUI.setFollowUpComposing(a, ev.Text != "")
+				case ui.InputText, ui.InputCommand:
+					capsuleUI.setFollowUpComposing(a, false)
+				}
+			})
+			if !in.Focused() {
+				capsuleUI.setFollowUpComposing(a, false)
+			} else {
+				capsuleUI.setFollowUpComposing(a, in.Composing())
+			}
+
+			// Quick chords (⌥1..⌥9 / Alt+1..9) must be taken before the text
+			// editor types the Option+digit character.
+			in.HandleInput(func(ev ui.InputEvent) bool {
+				if ev.Kind != ui.InputKeyDown || a.uiState.isComposing {
+					return false
+				}
+				return a.handleOmniboxKey(ev.Key, ev.Mods, state)
+			})
+
 			in.OnTextKey(func(k ui.TextKey) bool {
+				if a.followUpComposing() {
+					switch k.Key {
+					case ui.KeyEnter, ui.KeyEscape, ui.KeyUp, ui.KeyDown, ui.KeyTab:
+						// IME candidate selection keys belong to the input method.
+						return true
+					default:
+						return false
+					}
+				}
 				switch {
 				case k.Key == ui.KeyTab && k.Mods == 0:
 					return true
@@ -962,7 +1135,54 @@ func leaderKeyString(key ui.Key, mods ui.Modifiers) (string, bool) {
 	if key >= ui.Key0 && key <= ui.Key9 && mods == 0 {
 		return string(rune('0' + (key - ui.Key0))), true
 	}
+	// '/' jumps straight to a clean Actions Omnibox search bar.
+	if key == ui.KeySlash && mods == 0 {
+		return "/", true
+	}
 	return "", false
+}
+
+// primaryMod returns the platform's primary shortcut modifier.
+func primaryMod() ui.Modifiers {
+	if runtime.GOOS == "darwin" {
+		return ui.Cmd
+	}
+	return ui.Ctrl
+}
+
+// isPrimaryMod reports whether mods holds the platform primary modifier.
+// ui.Cmd is always accepted so headless tests work on any OS.
+func isPrimaryMod(mods ui.Modifiers) bool {
+	return mods == primaryMod() || mods == ui.Cmd
+}
+
+// modPrefix is the printable label of the primary modifier.
+func modPrefix() string {
+	if runtime.GOOS == "darwin" {
+		return "\u2318"
+	}
+	return "Ctrl+"
+}
+
+// altPrefix is the printable label of the option/alt modifier.
+func altPrefix() string {
+	if runtime.GOOS == "darwin" {
+		return "\u2325"
+	}
+	return "Alt+"
+}
+
+// rowQuickKeyIndex maps digits 1..9 to Omnibox row indices 0..8.
+func rowQuickKeyIndex(key ui.Key) (int, bool) {
+	if key < ui.Key1 || key > ui.Key9 {
+		return 0, false
+	}
+	return int(key - ui.Key1), true
+}
+
+// quickIndexLabel renders the direct quick-select badge for row i.
+func quickIndexLabel(i int) string {
+	return altPrefix() + strconv.Itoa(i+1)
 }
 
 func buildHighlightedSpans(title string, matchedIndices []int, accent, normal ui.Color) []ui.Span {
@@ -1015,8 +1235,4 @@ func buildHighlightedSpans(title string, matchedIndices []int, accent, normal ui
 
 func withAlpha(c ui.Color, alpha float32) ui.Color {
 	return c.Alpha(alpha)
-}
-
-func primaryMod() ui.Modifiers {
-	return ui.Cmd
 }
