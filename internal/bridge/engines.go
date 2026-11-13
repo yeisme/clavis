@@ -1049,38 +1049,40 @@ func (e *IMESwitchDecisionEngine) TemporaryLockASCIIWithState(asciiInputSourceID
 
 	target := strings.TrimSpace(asciiInputSourceID)
 	cur := strings.TrimSpace(currentInputSourceID)
-	if !e.tempLockActive {
-		e.tempLockActive = true
-		e.tempSavedInputSource = cur
-		e.tempSavedWasNative = currentWasNative
-	}
+
+	var dec IMEDecision
 	if target != "" {
 		if target != cur {
-			return IMEDecision{
+			dec = IMEDecision{
 				ShouldSwitch:        true,
 				TargetInputSourceID: target,
 				TargetMode:          config.IMEModeASCII,
 				Reason:              "temporary_lock_ascii",
 			}
-		}
-		// Same input source (e.g. shared Windows HKL): only the conversion mode needs clearing.
-		if currentWasNative {
-			return IMEDecision{
+		} else if currentWasNative {
+			// Same input source (e.g. shared Windows HKL): only the conversion mode needs clearing.
+			dec = IMEDecision{
 				ShouldSwitch: true,
 				TargetMode:   config.IMEModeASCII,
 				Reason:       "temporary_lock_ascii",
 			}
 		}
-		return IMEDecision{}
-	}
-	if currentWasNative {
-		return IMEDecision{
+	} else if currentWasNative {
+		dec = IMEDecision{
 			ShouldSwitch: true,
 			TargetMode:   config.IMEModeASCII,
 			Reason:       "temporary_lock_ascii",
 		}
 	}
-	return IMEDecision{}
+
+	// Only arm tempLockActive when an actual switch is needed so a no-op lock on an
+	// already-ASCII layout never leaves a stale saved slot behind.
+	if dec.ShouldSwitch && !e.tempLockActive {
+		e.tempLockActive = true
+		e.tempSavedInputSource = cur
+		e.tempSavedWasNative = currentWasNative
+	}
+	return dec
 }
 
 // RestoreTemporaryLock restores the input source (or native conversion mode) that was active prior to TemporaryLockASCII.

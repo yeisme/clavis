@@ -795,6 +795,10 @@ func (c *AppController) maybeLockASCIIForLeader() {
 	}
 
 	ctx := context.Background()
+	var prevID string
+	if curBefore, curErr := br.CurrentInputSource(ctx); curErr == nil && !curBefore.IsASCII {
+		prevID = strings.TrimSpace(curBefore.ID)
+	}
 	changed, asciiInfo, err := br.LockTemporaryASCII(ctx)
 	if err != nil {
 		// Bridges without temporary-lock support fall back to the configured default source.
@@ -805,6 +809,9 @@ func (c *AppController) maybeLockASCIIForLeader() {
 	}
 
 	c.mu.Lock()
+	if prevID != "" && c.preLeaderIMESourceID == "" {
+		c.preLeaderIMESourceID = prevID
+	}
 	c.imeLockedForCapsule = true
 	c.skipIMERestore = false
 	c.activeInputSource = asciiInfo
@@ -864,16 +871,12 @@ func (c *AppController) maybeRestoreLockedIME() {
 
 	ctx := context.Background()
 	restored, info, err := br.RestoreTemporaryIME(ctx)
-	if err != nil {
-		// Legacy path: fall back to the remembered source ID when temporary restore is unsupported.
-		if restoreID == "" {
-			return
-		}
-		if err := br.SelectInputSource(ctx, restoreID); err != nil {
-			return
-		}
-		if cur, err := br.CurrentInputSource(ctx); err == nil && cur.ID != "" {
-			info, restored = cur, true
+	if (err != nil || !restored) && restoreID != "" {
+		// Fallback to the remembered pre-Leader non-ASCII source ID if needed.
+		if selErr := br.SelectInputSource(ctx, restoreID); selErr == nil {
+			if cur, curErr := br.CurrentInputSource(ctx); curErr == nil && cur.ID != "" {
+				info, restored = cur, true
+			}
 		}
 	}
 	if restored && info.ID != "" {
@@ -1000,11 +1003,15 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 	gen := c.aiGen
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	c.aiCancel = cancel
-	client := c.AIClient
+	hasClient := c.AIClient != nil
+	var streamClient ai.OpenAICompatibleClient
+	if hasClient {
+		streamClient = *c.AIClient
+	}
 	secStore := c.SecretStore
 	c.mu.Unlock()
 
-	if client == nil {
+	if !hasClient {
 		cancel()
 		c.Dispatch(engine.Event{
 			Type:  engine.EventAIFailed,
@@ -1012,8 +1019,6 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 		})
 		return
 	}
-
-	streamClient := *client
 	streamClient.Config = cfg.Main.AI
 	streamClient.APIKeyProvider = func(context.Context) (string, error) {
 		return secrets.ResolveProfileAPIKey(secStore, profile)
@@ -1564,7 +1569,11 @@ func (c *AppController) TestAIConnectionForProfile(ctx context.Context, profileI
 	c.mu.Lock()
 	c.aiTestStatus = AITestLoading
 	c.aiTestMessage = "Testing connection..."
-	client := c.AIClient
+	hasClient := c.AIClient != nil
+	var streamClient ai.OpenAICompatibleClient
+	if hasClient {
+		streamClient = *c.AIClient
+	}
 	secStore := c.SecretStore
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
@@ -1572,13 +1581,11 @@ func (c *AppController) TestAIConnectionForProfile(ctx context.Context, profileI
 		onRepaint()
 	}
 
-	if client == nil {
+	if !hasClient {
 		err := errors.New("AI client is not configured")
 		c.setAITestResult(AITestError, err.Error())
 		return err
 	}
-
-	streamClient := *client
 	streamClient.Config = cfg.Main.AI
 	streamClient.APIKeyProvider = func(context.Context) (string, error) {
 		return secrets.ResolveProfileAPIKey(secStore, profile)
@@ -1944,7 +1951,9 @@ func (c *AppController) ReloadConfig() bool {
 	var br bridge.HostService
 	if ok {
 		c.StateMachine.SetConfig(cfg)
-		c.Snippets.UpdateSnippets(cfg.Snippets.Items)
+		if c.Snippets != nil {
+			c.Snippets.UpdateSnippets(cfg.Snippets.Items)
+		}
 		c.Glossary = engine.NewGlossaryEngineFromConfig(cfg.Glossary)
 		c.AIClient = ai.NewOpenAICompatibleClient(
 			cfg.Main.AI,

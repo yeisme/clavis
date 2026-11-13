@@ -440,7 +440,13 @@ func TestIMESwitchDecisionEngine_URLTitleSpecificityAndTemporaryLock(t *testing.
 		t.Fatalf("expected ProcessName fallback to match, got %+v", d)
 	}
 
-	// 5. TemporaryLockASCII / RestoreTemporaryLock is independent of app-rule stack
+	// 5. No-op TemporaryLockASCII when already on ASCII must NOT leave a stale temp lock slot
+	noopLock := eng.TemporaryLockASCII("com.apple.keylayout.ABC", "com.apple.keylayout.ABC")
+	if noopLock.ShouldSwitch || eng.IsTemporaryLocked() {
+		t.Fatalf("expected no-op TemporaryLockASCII on ABC not to arm tempLockActive, got %+v (locked=%v)", noopLock, eng.IsTemporaryLocked())
+	}
+
+	// TemporaryLockASCII / RestoreTemporaryLock is independent of app-rule stack
 	lockDec := eng.TemporaryLockASCII("com.apple.keylayout.ABC", "ime.proc.default")
 	if !lockDec.ShouldSwitch || lockDec.TargetInputSourceID != "com.apple.keylayout.ABC" {
 		t.Fatalf("expected TemporaryLockASCII to switch to ABC, got %+v", lockDec)
