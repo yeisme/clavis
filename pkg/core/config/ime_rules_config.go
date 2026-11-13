@@ -1,0 +1,174 @@
+package config
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/yeisme/clavis/pkg/core/toml"
+)
+
+// IMEMode specifies preferred input method behavior for an application.
+type IMEMode string
+
+const (
+	IMEModeASCII  IMEMode = "ascii"
+	IMEModeNative IMEMode = "native"
+	IMEModeKeep   IMEMode = "keep"
+)
+
+func AllIMEModes() []IMEMode {
+	return []IMEMode{IMEModeASCII, IMEModeNative, IMEModeKeep}
+}
+
+func isValidIMEMode(m IMEMode) bool {
+	for _, mode := range AllIMEModes() {
+		if mode == m {
+			return true
+		}
+	}
+	return false
+}
+
+// IMERule defines a per-application IME auto-switching rule.
+type IMERule struct {
+	BundleID       string  `json:"bundleId"`
+	ProcessName    string  `json:"processName,omitempty"`
+	AppName        string  `json:"appName"`
+	InputSourceID  string  `json:"inputSourceId"`
+	PreferredMode  IMEMode `json:"preferredMode"`
+	RestoreOnLeave bool    `json:"restoreOnLeave"`
+}
+
+func decodeIMERule(tbl *toml.Table, path string) (IMERule, error) {
+	bundleID, hasBundle, err := optionalString(tbl, "bundle_id", path)
+	if err != nil {
+		return IMERule{}, err
+	}
+	processName, hasProc, err := optionalString(tbl, "process_name", path)
+	if err != nil {
+		return IMERule{}, err
+	}
+	if !hasBundle && !hasProc {
+		return IMERule{}, &DecodingError{
+			KeyPath: joinPath(path, "bundle_id"),
+			Message: "Missing required 'bundle_id' or 'process_name'",
+		}
+	}
+
+	appName, _, err := optionalString(tbl, "app_name", path)
+	if err != nil {
+		return IMERule{}, err
+	}
+	inputSourceID, err := requiredString(tbl, "input_source_id", path)
+	if err != nil {
+		return IMERule{}, err
+	}
+	rawMode := string(IMEModeASCII)
+	if s, ok, err := optionalString(tbl, "preferred_mode", path); err != nil {
+		return IMERule{}, err
+	} else if ok {
+		rawMode = s
+	}
+	mode := IMEMode(rawMode)
+	if !isValidIMEMode(mode) {
+		allowed := make([]string, len(AllIMEModes()))
+		for i, m := range AllIMEModes() {
+			allowed[i] = string(m)
+		}
+		return IMERule{}, &DecodingError{
+			KeyPath: joinPath(path, "preferred_mode"),
+			Message: fmt.Sprintf("Unknown preferred_mode '%s'; expected one of: %s", rawMode, strings.Join(allowed, ", ")),
+		}
+	}
+
+	restoreOnLeave := true
+	if b, ok, err := optionalBool(tbl, "restore_on_leave", path); err != nil {
+		return IMERule{}, err
+	} else if ok {
+		restoreOnLeave = b
+	}
+
+	return IMERule{
+		BundleID:       bundleID,
+		ProcessName:    processName,
+		AppName:        appName,
+		InputSourceID:  inputSourceID,
+		PreferredMode:  mode,
+		RestoreOnLeave: restoreOnLeave,
+	}, nil
+}
+
+func (r IMERule) toTOML() *toml.Table {
+	t := toml.NewTable()
+	if r.BundleID != "" {
+		t.Set("bundle_id", toml.StringVal(r.BundleID))
+	}
+	if r.ProcessName != "" {
+		t.Set("process_name", toml.StringVal(r.ProcessName))
+	}
+	t.Set("app_name", toml.StringVal(r.AppName))
+	t.Set("input_source_id", toml.StringVal(r.InputSourceID))
+	t.Set("preferred_mode", toml.StringVal(string(r.PreferredMode)))
+	t.Set("restore_on_leave", toml.BoolVal(r.RestoreOnLeave))
+	return t
+}
+
+// IMERulesConfig represents ime-rules.toml.
+type IMERulesConfig struct {
+	Rules []IMERule `json:"rules"`
+}
+
+func DefaultIMERulesConfig() IMERulesConfig {
+	return IMERulesConfig{
+		Rules: []IMERule{
+			{
+				BundleID:       "com.apple.Terminal",
+				AppName:        "Terminal",
+				InputSourceID:  "com.apple.keylayout.ABC",
+				PreferredMode:  IMEModeASCII,
+				RestoreOnLeave: true,
+			},
+			{
+				BundleID:       "com.googlecode.iterm2",
+				AppName:        "iTerm2",
+				InputSourceID:  "com.apple.keylayout.ABC",
+				PreferredMode:  IMEModeASCII,
+				RestoreOnLeave: true,
+			},
+		},
+	}
+}
+
+func DecodeIMERulesConfig(input string) (IMERulesConfig, error) {
+	tbl, err := toml.Parse(input)
+	if err != nil {
+		return IMERulesConfig{}, err
+	}
+	return IMERulesConfigFromTOML(tbl)
+}
+
+func IMERulesConfigFromTOML(tbl *toml.Table) (IMERulesConfig, error) {
+	tables, _, err := optionalTableArray(tbl, "rules", "")
+	if err != nil {
+		return IMERulesConfig{}, err
+	}
+	rules := make([]IMERule, 0, len(tables))
+	for i, itemTbl := range tables {
+		rule, err := decodeIMERule(itemTbl, fmt.Sprintf("rules[%d]", i))
+		if err != nil {
+			return IMERulesConfig{}, err
+		}
+		rules = append(rules, rule)
+	}
+	return IMERulesConfig{Rules: rules}, nil
+}
+
+func (c IMERulesConfig) Encode() string {
+	root := toml.NewTable()
+	vals := make([]toml.Value, len(c.Rules))
+	for i, rule := range c.Rules {
+		vals[i] = toml.TableVal(rule.toTOML())
+	}
+	root.Set("rules", toml.ArrayVal(vals))
+	return toml.Encode(root)
+}

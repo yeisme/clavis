@@ -1,0 +1,20 @@
+{
+  "name": "Clavis",
+  "slug": "clavis",
+  "identifier": "com.yeisme.clavis",
+  "version": "0.1.0",
+  "out": "build",
+  "macos": {
+    "signingIdentity": "-",
+    "infoPlist": {
+      "LSUIElement": true,
+      "NSAccessibilityUsageDescription": "Clavis needs Accessibility permission to resolve cursor position, manage windows, and inject expanded snippets or AI output.",
+      "NSInputMonitoringUsageDescription": "Clavis needs Input Monitoring permission to detect global Leader keys, double-tap modifiers, and inline snippet triggers.",
+      "NSAppleEventsUsageDescription": "Clavis needs Apple Events permission to launch applications and inspect frontmost application context."
+    }
+  },
+  "linux": {
+    "webview": false,
+    "formats": []
+  }
+}
