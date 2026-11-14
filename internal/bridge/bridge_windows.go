@@ -315,6 +315,8 @@ type windowsBridge struct {
 	health hookHealthState
 	// inputEngineReset, when set, drops any in-flight own-IME composition (mouse click etc.).
 	inputEngineReset func()
+	// ime hosts the own input engine (input_engine_windows.go); nil engine when disabled.
+	ime inputEngineState
 }
 
 func (b *windowsBridge) recordExternalIME(app AppIdentity, src host.InputSourceInfo) {
@@ -353,6 +355,8 @@ func newPlatformBridge(opts Options) HostService {
 	b.pbRestorer = NewPasteboardSnapshotRestorer(&windowsPasteboardBackend{bridge: b})
 	b.health.resetCh = make(chan struct{}, 1)
 	b.health.reinstallRes = make(chan bool, 1)
+	b.ime.dirty = make(chan struct{}, 1)
+	b.inputEngineReset = b.resetInputEngine
 	return b
 }
 
@@ -654,11 +658,18 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 	}
 
 	if modName, ok := winVKToModifier(vk); ok && (isDown || isUp) {
+		if vk == vkShift || vk == vkLShift || vk == vkRShift {
+			b.inputEngineHandleKey(vk, info.ScanCode, isDown, time.Now()) // never consumes
+		}
 		otherDown := winOtherModifiersDown(vk)
 		events := b.router.HandleModifier(modName, isDown, otherDown, nowMs)
 		b.emitTriggerEvents(events)
 		r, _, _ := procCallNextHookEx.Call(hhk, uintptr(nCode), wParam, lParam)
 		return r
+	}
+
+	if isDown && b.inputEngineHandleKey(vk, info.ScanCode, true, time.Now()) {
+		return 1
 	}
 
 	if isDown {

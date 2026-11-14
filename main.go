@@ -147,6 +147,7 @@ type desktopApp struct {
 	configWatcher          *watcher.ConfigWatcher
 	capsulePanel           *mygo.Window
 	imePillPanel           *mygo.Window
+	inputUI                *inputEngineUI
 	settingsWin            *mygo.Window
 	tray                   *mygo.Tray
 	permMenuItem           *mygo.MenuItem
@@ -345,6 +346,11 @@ func (a *desktopApp) start() {
 
 	a.setupTray()
 	a.startBridgeAndFallbackShortcut(cfg.Main.Trigger)
+	if ui := a.setupInputEngine(ctx, hostBridge, cfg.Main.InputEngine, controller.SuggestInputCandidates); ui != nil {
+		a.mu.Lock()
+		a.inputUI = ui
+		a.mu.Unlock()
+	}
 
 	cw := watcher.NewConfigWatcher(cfgStore, watcher.WithOnReload(func(watcher.ReloadResult) {
 		a.applyConfigReload()
@@ -672,6 +678,9 @@ func (a *desktopApp) applyConfigReload() {
 			updater.UpdateTriggerConfig(cfg.Main.Trigger)
 			updater.UpdateKeymapConfig(cfg.Main.Keymap)
 			updater.UpdateIMEConfig(cfg.Main.IME, cfg.IMERules)
+		}
+		if h, ok := br.(bridge.InputEngineHost); ok {
+			h.ConfigureInputEngine(cfg.Main.InputEngine)
 		}
 		if sqliteStore != nil {
 			sqliteStore.SetPrivacyFilter(clipboard.NewPrivacyFilterFromConfig(cfg.Main.Clipboard))

@@ -6,6 +6,7 @@ import (
 
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/host"
+	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
 
 // MatchedRule reports which configured rule (if any) applies to app, without mutating the
@@ -60,4 +61,24 @@ type MediaPaster interface {
 // ClipboardSequencer exposes the platform clipboard change counter (optional).
 type ClipboardSequencer interface {
 	ClipboardSequence() int64
+}
+
+// InputEngineView is what the candidate window renders. Anchor is the caret rect captured
+// when composition started (physical screen px, same space as SnapshotContext anchors).
+type InputEngineView struct {
+	View   inputengine.View
+	Raw    string
+	Anchor *host.CursorAnchor
+}
+
+// InputEngineHost is implemented by bridges that host the own input engine (Windows, route B;
+// docs/design/own-input-engine.md). Optional; macOS ignores [input_engine] for now.
+type InputEngineHost interface {
+	// ConfigureInputEngine (re)creates or disables the engine. Disabled → no engine object,
+	// the hook pays a single nil check.
+	ConfigureInputEngine(cfg config.InputEngineConfig)
+	// SetInputEngineViewHandler receives coalesced view updates off the hook thread.
+	SetInputEngineViewHandler(fn func(InputEngineView))
+	// SetInputEngineAICandidates appends async AI suggestions for raw; stale raw is ignored.
+	SetInputEngineAICandidates(raw string, words []string)
 }
