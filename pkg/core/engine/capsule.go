@@ -254,18 +254,18 @@ const (
 
 // Effect describes a side effect that the host/coordinator should perform.
 type Effect struct {
-	Type             EffectType           `json:"type"`
-	Action           *config.LeaderAction `json:"action,omitempty"`
-	Context          *CapsuleContext      `json:"context,omitempty"`
-	Mode             string               `json:"mode,omitempty"`
-	Prompt           string               `json:"prompt,omitempty"`
-	SourceText       string               `json:"sourceText,omitempty"`
-	History          []ChatTurn           `json:"history,omitempty"`
-	ProfileID        string               `json:"profileId,omitempty"`
-	Text             string               `json:"text,omitempty"`
-	ClipboardID      string               `json:"clipboardId,omitempty"`
-	ClipboardContent string               `json:"clipboardContent,omitempty"`
-	ClipboardMedia   *ClipboardMedia      `json:"clipboardMedia,omitempty"`
+	Type             EffectType             `json:"type"`
+	Action           *config.LeaderAction   `json:"action,omitempty"`
+	Context          *CapsuleContext        `json:"context,omitempty"`
+	Mode             string                 `json:"mode,omitempty"`
+	Prompt           string                 `json:"prompt,omitempty"`
+	SourceText       string                 `json:"sourceText,omitempty"`
+	History          []ChatTurn             `json:"history,omitempty"`
+	ProfileID        string                 `json:"profileId,omitempty"`
+	Text             string                 `json:"text,omitempty"`
+	ClipboardID      string                 `json:"clipboardId,omitempty"`
+	ClipboardContent string                 `json:"clipboardContent,omitempty"`
+	ClipboardMedia   *ClipboardMedia        `json:"clipboardMedia,omitempty"`
 	IsPinned         bool                   `json:"isPinned,omitempty"`
 	IMEMode          config.IMEMode         `json:"imeMode,omitempty"`
 	PromptTemplate   *config.PromptTemplate `json:"promptTemplate,omitempty"`

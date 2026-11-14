@@ -63,18 +63,18 @@ const (
 
 // Options configures an AppController.
 type Options struct {
-	ConfigStore     *config.ConfigStore
-	ClipboardStore  clipboard.Store
-	SecretStore     secrets.APIKeyStore
-	Bridge          bridge.HostService
-	AppProvider     apps.AppProvider
-	HTTPDoer        ai.HTTPDoer
-	ClipboardWriter func(text string)
-	BeforeInject    func(ctx context.Context)
-	OpenPath        func(path string) error
-	OnRepaint       func()
-	OnPresentPhase  func(phase engine.CapsulePhase)
-	OnHide          func()
+	ConfigStore           *config.ConfigStore
+	ClipboardStore        clipboard.Store
+	SecretStore           secrets.APIKeyStore
+	Bridge                bridge.HostService
+	AppProvider           apps.AppProvider
+	HTTPDoer              ai.HTTPDoer
+	ClipboardWriter       func(text string)
+	BeforeInject          func(ctx context.Context)
+	OpenPath              func(path string) error
+	OnRepaint             func()
+	OnPresentPhase        func(phase engine.CapsulePhase)
+	OnHide                func()
 	OnOpenSettings        func(tab SettingsTab)
 	OnOpenPromptComposer  func()
 	OnClosePromptComposer func()
@@ -135,13 +135,13 @@ type AppController struct {
 	Glossary       engine.GlossaryEngine
 	Snippets       *engine.SnippetEngine
 
-	httpDoer         ai.HTTPDoer
-	ClipboardWriter  func(text string)
-	BeforeInject     func(ctx context.Context)
-	OpenPath         func(path string) error
-	OnRepaint        func()
-	OnPresentPhase   func(phase engine.CapsulePhase)
-	OnHide           func()
+	httpDoer              ai.HTTPDoer
+	ClipboardWriter       func(text string)
+	BeforeInject          func(ctx context.Context)
+	OpenPath              func(path string) error
+	OnRepaint             func()
+	OnPresentPhase        func(phase engine.CapsulePhase)
+	OnHide                func()
 	OnOpenSettings        func(tab SettingsTab)
 	OnOpenPromptComposer  func()
 	OnClosePromptComposer func()
@@ -230,30 +230,30 @@ func NewAppController(opts Options) *AppController {
 	sm := engine.NewStateMachine(cfg)
 
 	c := &AppController{
-		ConfigStore:      cfgStore,
-		StateMachine:     sm,
-		ClipboardStore:   clipStore,
-		SecretStore:      secStore,
-		Bridge:           opts.Bridge,
-		AppProvider:      appProv,
-		CLIExecutor:      actions.NewCLIExecutor(),
-		Glossary:         glossary,
-		Snippets:         snippets,
-		httpDoer:         opts.HTTPDoer,
-		ClipboardWriter:  opts.ClipboardWriter,
-		BeforeInject:     opts.BeforeInject,
-		OpenPath:         opts.OpenPath,
-		OnRepaint:        opts.OnRepaint,
-		OnPresentPhase:   opts.OnPresentPhase,
-		OnHide:           opts.OnHide,
+		ConfigStore:           cfgStore,
+		StateMachine:          sm,
+		ClipboardStore:        clipStore,
+		SecretStore:           secStore,
+		Bridge:                opts.Bridge,
+		AppProvider:           appProv,
+		CLIExecutor:           actions.NewCLIExecutor(),
+		Glossary:              glossary,
+		Snippets:              snippets,
+		httpDoer:              opts.HTTPDoer,
+		ClipboardWriter:       opts.ClipboardWriter,
+		BeforeInject:          opts.BeforeInject,
+		OpenPath:              opts.OpenPath,
+		OnRepaint:             opts.OnRepaint,
+		OnPresentPhase:        opts.OnPresentPhase,
+		OnHide:                opts.OnHide,
 		OnOpenSettings:        opts.OnOpenSettings,
 		OnOpenPromptComposer:  opts.OnOpenPromptComposer,
 		OnClosePromptComposer: opts.OnClosePromptComposer,
 		OnShowIMEPill:         opts.OnShowIMEPill,
-		OnLanguageChange: opts.OnLanguageChange,
-		appIconCache:     make(map[string]*ui.Bitmap),
-		clipDone:         make(chan struct{}),
-		aiTestStatus:     AITestIdle,
+		OnLanguageChange:      opts.OnLanguageChange,
+		appIconCache:          make(map[string]*ui.Bitmap),
+		clipDone:              make(chan struct{}),
+		aiTestStatus:          AITestIdle,
 		uiState: uiViewState{
 			imeRuleModeDraft: config.IMEModeASCII,
 		},
