@@ -315,7 +315,8 @@ type windowsBridge struct {
 	extSource host.InputSourceInfo
 	haveExt   bool
 
-	health hookHealthState
+	health   hookHealthState
+	triggers *triggerRuntime
 	// inputEngineReset, when set, drops any in-flight own-IME composition (mouse click etc.).
 	inputEngineReset func()
 	// ime hosts the own input engine (input_engine_windows.go); nil engine when disabled.
@@ -361,6 +362,7 @@ func newPlatformBridge(opts Options) HostService {
 		onIME:        opts.OnInputSourceChanged,
 		onIMEFail:    opts.OnIMESwitchFailed,
 		onLayer:      opts.OnKeymapLayerChanged,
+		triggers:     newTriggerRuntime(),
 	}
 	b.pbRestorer = NewPasteboardSnapshotRestorer(&windowsPasteboardBackend{bridge: b})
 	b.health.resetCh = make(chan struct{}, 1)
@@ -675,6 +677,10 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 	}
 
 	if modName, ok := winVKToModifier(vk); ok && (isDown || isUp) {
+		if b.triggers != nil && (vk == vkShift || vk == vkLShift || vk == vkRShift) && b.triggers.doubleShift(modName, isDown, winOtherModifiersDown(vk), nowMs, b.hookIMEComposing(time.Now())) {
+			b.emitTriggerEvents([]host.TriggerEvent{selectionEvent(nowMs)})
+			return 1
+		}
 		if vk == vkShift || vk == vkLShift || vk == vkRShift {
 			b.inputEngineHandleKey(vk, info.ScanCode, isDown, time.Now()) // never consumes
 		}
@@ -686,6 +692,11 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 	}
 
 	if isDown {
+		keyNameForTrigger := winVKToKeyName(vk)
+		if b.triggers != nil && b.triggers.shortcutMatches(keyNameForTrigger, winActiveModifiers()) && !b.hookSecureInput(time.Now()) {
+			b.emitTriggerEvents([]host.TriggerEvent{optimizeEvent(nowMs)})
+			return 1
+		}
 		cache := &keyDownUnicodeCache{lookup: rawWinVKToUnicode}
 		prevCache := activeKeyDownUnicode.Swap(cache)
 		defer activeKeyDownUnicode.Store(prevCache)
@@ -729,6 +740,12 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 
 	r, _, _ := procCallNextHookEx.Call(hhk, uintptr(nCode), wParam, lParam)
 	return r
+}
+
+func (b *windowsBridge) emitWindowsSelectionTrigger() {
+	// Windows has no selection API in this bridge yet. Keep the probe off-hook;
+	// a future UIA provider can replace this without changing hook semantics.
+	// Do not fake a selection: only a provider-confirmed non-empty selection fires.
 }
 
 func (b *windowsBridge) emitTriggerEvents(events []host.TriggerEvent) {

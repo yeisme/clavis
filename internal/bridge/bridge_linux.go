@@ -25,11 +25,13 @@ type linuxBridge struct {
 	pbTracker *selfPasteboardTracker
 	lastText  string
 	seq       atomic.Int64
+	triggers  *triggerRuntime
 }
 
 func newPlatformBridge(Options) HostService {
 	return &linuxBridge{
 		pbTracker: newSelfPasteboardTracker(),
+		triggers:  newTriggerRuntime(),
 	}
 }
 

@@ -28,5 +28,16 @@ func (b *linuxBridge) CaptureEditableField(ctx context.Context) (host.EditableFi
 func (b *linuxBridge) ReplaceEditableField(ctx context.Context, replacement string, onlySelection bool) error {
 	return unsupported(ctx)
 }
-func (b *linuxBridge) UpdateDaemonShortcut(string)                        {}
-func (b *linuxBridge) UpdateSelectionBarConfig(config.SelectionBarConfig) {}
+
+// Linux currently has no global keyboard/mouse hook. Keep the declarations
+// stored for a future backend, but deliberately do not synthesize triggers.
+func (b *linuxBridge) UpdateDaemonShortcut(accel string) {
+	if b.triggers != nil {
+		b.triggers.setShortcut(accel)
+	}
+}
+func (b *linuxBridge) UpdateSelectionBarConfig(cfg config.SelectionBarConfig) {
+	if b.triggers != nil {
+		b.triggers.setSelection(cfg)
+	}
+}
