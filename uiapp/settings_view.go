@@ -243,6 +243,13 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 		); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.DoubleTapIntervalMs = int(v) })
 		}
+		// Which-key pause: the Leader menu shows only if no key follows
+		// within this delay (0 shows it at once).
+		if v, changed := settingsStepper(
+			c, theme, "leader_reveal_delay_ms", float64(trigger.LeaderRevealDelayMs), 0, config.MaxLeaderRevealDelayMs, 20, "ms",
+		); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.LeaderRevealDelayMs = int(v) })
+		}
 
 		a.renderShortcutEditor(c, theme, se, "capsule_shortcut", "option+space",
 			i18n.Tf("settings.trigger.shortcut_caption", trigger.CapsuleShortcut), trigger.CapsuleShortcut,

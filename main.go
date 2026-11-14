@@ -153,28 +153,32 @@ type desktopApp struct {
 	learningStore *storage.LearningStore
 	// learningWriter is the only path hook, commit and UI callers use to
 	// learn: RAM mirror at once, SQLite in coalesced background batches.
-	learningWriter         *storage.LearningWriter
-	clipStore              clipboard.Store
-	mediaStore             *clipboard.MediaStore
-	hostBridge             bridge.HostService
-	controller             *uiapp.AppController
-	supervisor             *daemon.ResidentSupervisor
-	frecencySyncer         *daemon.FrecencySyncer
-	configWatcher          *watcher.ConfigWatcher
-	capsulePanel           *mygo.Window
-	promptPanel            *mygo.Window
-	imePillPanel           *mygo.Window
-	inputUI                *inputEngineUI
-	settingsWin            *mygo.Window
-	tray                   *mygo.Tray
-	permMenuItem           *mygo.MenuItem
-	loginMenuItem          *mygo.MenuItem
-	trayLabelItems         map[string]*mygo.MenuItem
-	bridgeRunning          bool
-	shuttingDown           bool
-	bgWG                   sync.WaitGroup
-	fallbackAccelerators   map[string]host.TriggerKind
-	sessionAnchor          *host.CursorAnchor
+	learningWriter       *storage.LearningWriter
+	clipStore            clipboard.Store
+	mediaStore           *clipboard.MediaStore
+	hostBridge           bridge.HostService
+	controller           *uiapp.AppController
+	supervisor           *daemon.ResidentSupervisor
+	frecencySyncer       *daemon.FrecencySyncer
+	configWatcher        *watcher.ConfigWatcher
+	capsulePanel         *mygo.Window
+	promptPanel          *mygo.Window
+	imePillPanel         *mygo.Window
+	inputUI              *inputEngineUI
+	settingsWin          *mygo.Window
+	tray                 *mygo.Tray
+	permMenuItem         *mygo.MenuItem
+	loginMenuItem        *mygo.MenuItem
+	trayLabelItems       map[string]*mygo.MenuItem
+	bridgeRunning        bool
+	shuttingDown         bool
+	bgWG                 sync.WaitGroup
+	fallbackAccelerators map[string]host.TriggerKind
+	sessionAnchor        *host.CursorAnchor
+	// capsuleRevealed is set once the capsule is visibly on screen for the
+	// current session (after a Leader's reveal delay), and cleared when the
+	// window actually hides.
+	capsuleRevealed        bool
 	imePillLabel           string
 	imePillTimer           *time.Timer
 	imePillGen             atomic.Uint64
@@ -1392,14 +1396,88 @@ func (a *desktopApp) handlePresentPhase(phase engine.CapsulePhase) {
 
 			panel.SetBounds(bounds)
 			if state.Phase == engine.PhaseHUD {
+				panel.SetOpacity(1)
 				panel.ShowInactive()
 			} else {
+				// A Leader menu not yet on screen takes the keyboard focus
+				// at once but stays transparent for the reveal delay: a fast
+				// key sequence runs without the menu ever flashing.
+				a.mu.Lock()
+				revealed := a.capsuleRevealed
+				a.mu.Unlock()
+				delay := capsuleRevealDelay(state.Phase, revealed, cfg.Main.Trigger)
+				if delay > 0 {
+					panel.SetOpacity(0)
+				} else {
+					panel.SetOpacity(1)
+					a.mu.Lock()
+					a.capsuleRevealed = true
+					a.mu.Unlock()
+				}
 				panel.Show()
 				panel.Focus()
+				if delay > 0 {
+					fade := config.NormalizeAnimationMode(cfg.Main.Appearance.Animations) != "off"
+					a.scheduleCapsuleReveal(seq, delay, fade)
+				}
 			}
 			panel.Invalidate()
 		})
 	}()
+}
+
+// capsuleRevealFade is the Leader menu's fade-in once its delay elapses.
+const capsuleRevealFade = 120 * time.Millisecond
+
+// capsuleRevealDelay is how long the capsule stays invisible after it is
+// presented. Only a Leader menu that is not on screen yet waits (which-key
+// style), so a quick key sequence runs without the menu flashing; every
+// other phase, and a Leader already visible (drilling into a group), shows
+// at once.
+func capsuleRevealDelay(phase engine.CapsulePhase, revealed bool, trigger config.TriggerConfig) time.Duration {
+	if phase != engine.PhaseLeader || revealed {
+		return 0
+	}
+	ms := min(max(trigger.LeaderRevealDelayMs, 0), config.MaxLeaderRevealDelayMs)
+	return time.Duration(ms) * time.Millisecond
+}
+
+// scheduleCapsuleReveal fades the capsule in after delay unless the session
+// moved on (presentSeq changed: a newer present, an executed key or a hide).
+func (a *desktopApp) scheduleCapsuleReveal(seq uint64, delay time.Duration, fade bool) {
+	time.AfterFunc(delay, func() {
+		if a.presentSeq.Load() != seq {
+			return
+		}
+		a.mu.Lock()
+		a.capsuleRevealed = true
+		panel := a.capsulePanel
+		a.mu.Unlock()
+		if panel == nil {
+			return
+		}
+		setOpacity := func(v float64) {
+			mygo.RunOnMain(func() {
+				if a.presentSeq.Load() == seq {
+					panel.SetOpacity(v)
+				}
+			})
+		}
+		if !fade {
+			setOpacity(1)
+			return
+		}
+		const steps = 6
+		ticker := time.NewTicker(capsuleRevealFade / steps)
+		defer ticker.Stop()
+		for i := 1; i <= steps; i++ {
+			<-ticker.C
+			if a.presentSeq.Load() != seq {
+				return
+			}
+			setOpacity(float64(i) / steps)
+		}
+	})
 }
 
 func (a *desktopApp) handleHide() {
@@ -1439,6 +1517,11 @@ func (a *desktopApp) handleHide() {
 				panel.Hide()
 				a.lastPanelHideNano.Store(time.Now().UnixNano())
 			}
+			// Hidden for real: the next Leader waits for its reveal again.
+			a.mu.Lock()
+			a.capsuleRevealed = false
+			a.mu.Unlock()
+			panel.SetOpacity(1)
 		})
 	}
 	if delay <= 0 {

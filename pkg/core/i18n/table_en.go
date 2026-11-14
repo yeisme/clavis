@@ -597,4 +597,5 @@ var enTable = map[string]string{
 	"label.Translate Chinese to natural English or English to natural Chinese.":                "Translate Chinese to natural English or English to natural Chinese.",
 	"snippet.expanded_undo_hint":              "Expanded %s · ⌫ to undo",
 	"settings.trigger.snippet_backspace_undo": "Backspace Undoes Expansion",
+	"diag.trigger.leader_reveal_delay.range":  "leader_reveal_delay_ms should be within 0..%d (got %d); clamped",
 }

@@ -598,4 +598,5 @@ var zhTable = map[string]string{
 	"label.Translate Chinese to natural English or English to natural Chinese.":                "中文译为地道英文，或英文译为地道中文。",
 	"snippet.expanded_undo_hint":              "已展开 %s · ⌫ 撤销",
 	"settings.trigger.snippet_backspace_undo": "展开后按 ⌫ 撤销",
+	"diag.trigger.leader_reveal_delay.range":  "leader_reveal_delay_ms 应在 0..%d 之间（当前 %d），已按边界取值",
 }
