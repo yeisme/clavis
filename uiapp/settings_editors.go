@@ -11,6 +11,7 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
 // settingsEditorState holds the draft/editor state of the Settings
@@ -345,14 +346,14 @@ func (a *AppController) renderKeymapControls(c *ui.Context, theme *ui.Theme, cfg
 	se := a.settingsEditor()
 	keymap := cfg.Main.Keymap
 
-	settingsSectionCard(c, theme, "Keymap & Key Remaps", func() {
-		if v, changed := settingsSwitch(c, theme, "Keymap Enabled (keymap.enabled)", "Keymap Enabled", keymap.Enabled); changed {
+	settingsSectionCard(c, theme, i18n.T("settings.card.keymap"), func() {
+		if v, changed := settingsSwitch(c, theme, "Keymap Enabled (keymap.enabled)", i18n.T("settings.keymap.enabled"), keymap.Enabled); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.Enabled = v })
 		}
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "Nav Layer (nav_layer_enabled)").FontSize(12).TextColor(theme.Text).SingleLine().Grow(1)
+			ui.Text(c, i18n.T("settings.keymap.nav_layer_caption")).FontSize(12).TextColor(theme.Text).SingleLine().Grow(1)
 			navLayer := keymap.NavLayerEnabled
-			sw := ui.Switch(c, &navLayer).Label("Nav Layer")
+			sw := ui.Switch(c, &navLayer).Label(i18n.T("settings.keymap.nav_layer"))
 			if sw.Changed() {
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.NavLayerEnabled = navLayer })
 			}
@@ -376,30 +377,30 @@ func (a *AppController) renderKeymapControls(c *ui.Context, theme *ui.Theme, cfg
 		})
 
 		settingsDivider(c)
-		ui.Text(c, "Custom remaps ([[keymap.remaps]])").FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
+		ui.Text(c, i18n.T("settings.keymap.custom_remaps")).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
 
 		remapDrafts := seGet(se, func(s *settingsEditorState) [4]string {
 			return [4]string{s.remapFrom, s.remapTap, s.remapHold, s.remapApps}
 		})
 		from, tap, hold, apps := remapDrafts[0], remapDrafts[1], remapDrafts[2], remapDrafts[3]
 		ui.Grid(c).Columns(2).Gap(6).FillWidth().Children(func() {
-			if v, changed := settingsTextInput(c, "Remap From", "caps_lock", from); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.keymap.remap_from"), "caps_lock", from); changed {
 				seSet(se, func(s *settingsEditorState) { s.remapFrom = v })
 			}
-			if v, changed := settingsTextInput(c, "Remap Tap", "escape", tap); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.keymap.remap_tap"), "escape", tap); changed {
 				seSet(se, func(s *settingsEditorState) { s.remapTap = v })
 			}
-			if v, changed := settingsTextInput(c, "Remap Hold", "nav", hold); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.keymap.remap_hold"), "nav", hold); changed {
 				seSet(se, func(s *settingsEditorState) { s.remapHold = v })
 			}
-			if v, changed := settingsTextInput(c, "Remap Apps", "com.apple.Safari, com.apple.Terminal", apps); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.keymap.remap_apps"), "com.apple.Safari, com.apple.Terminal", apps); changed {
 				seSet(se, func(s *settingsEditorState) { s.remapApps = v })
 			}
 		})
 
 		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
 			newFrom := strings.TrimSpace(seGet(se, func(s *settingsEditorState) string { return s.remapFrom }))
-			if ui.PrimaryButton(c, "Add Remap").Disabled(newFrom == "").Clicked() {
+			if ui.PrimaryButton(c, i18n.T("settings.keymap.add_remap")).Disabled(newFrom == "").Clicked() {
 				rule := config.KeyRemapRule{
 					From:         strings.ToLower(newFrom),
 					Tap:          strings.ToLower(strings.TrimSpace(seGet(se, func(s *settingsEditorState) string { return s.remapTap }))),
@@ -413,11 +414,11 @@ func (a *AppController) renderKeymapControls(c *ui.Context, theme *ui.Theme, cfg
 					s.remapFrom, s.remapTap, s.remapHold, s.remapApps = "", "", "", ""
 				})
 			}
-			settingsHint(c, theme, fmt.Sprintf("%d remap(s)", len(keymap.Remaps)))
+			settingsHint(c, theme, i18n.Tf("settings.keymap.remap_count", len(keymap.Remaps)))
 		})
 
 		if len(keymap.Remaps) == 0 {
-			settingsHint(c, theme, "No custom remaps configured.")
+			settingsHint(c, theme, i18n.T("settings.keymap.no_remaps"))
 			return
 		}
 		for idx, rule := range keymap.Remaps {
@@ -428,7 +429,7 @@ func (a *AppController) renderKeymapControls(c *ui.Context, theme *ui.Theme, cfg
 			}
 			ui.Row(c).Key(fmt.Sprintf("remap:%d:%s", i, r.From)).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, summary).FontSize(11).TextColor(theme.TextMuted).SingleLine().Grow(1)
-				if ui.Button(c, "Delete").Key(fmt.Sprintf("del-remap:%d", i)).Clicked() {
+				if ui.Button(c, i18n.T("common.delete")).Key(fmt.Sprintf("del-remap:%d", i)).Clicked() {
 					_ = a.UpdateMainConfig(func(m *config.MainConfig) {
 						remaps := make([]config.KeyRemapRule, 0, len(m.Keymap.Remaps))
 						for j, item := range m.Keymap.Remaps {
@@ -467,18 +468,18 @@ func splitTokens(raw string) []string {
 func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
 	imeCfg := cfg.Main.IME
 
-	settingsSectionCard(c, theme, "IME Configuration (ime.*)", func() {
+	settingsSectionCard(c, theme, i18n.T("settings.card.ime"), func() {
 		ui.Grid(c).Columns(2).Gap(6).FillWidth().Children(func() {
-			if v, changed := settingsSwitch(c, theme, "IME Auto-Switch (ime.enabled)", "IME Enabled", imeCfg.Enabled); changed {
+			if v, changed := settingsSwitch(c, theme, "IME Auto-Switch (ime.enabled)", i18n.T("settings.ime.enabled"), imeCfg.Enabled); changed {
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.Enabled = v })
 			}
-			if v, changed := settingsSwitch(c, theme, "Lock ASCII on Leader (lock_ascii_on_leader)", "Lock ASCII on Leader", imeCfg.LockASCIIOnLeader); changed {
+			if v, changed := settingsSwitch(c, theme, "Lock ASCII on Leader (lock_ascii_on_leader)", i18n.T("settings.ime.lock_ascii"), imeCfg.LockASCIIOnLeader); changed {
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.LockASCIIOnLeader = v })
 			}
-			if v, changed := settingsSwitch(c, theme, "Show Floating Pill (show_floating_pill)", "Show Floating Pill", imeCfg.ShowFloatingPill); changed {
+			if v, changed := settingsSwitch(c, theme, "Show Floating Pill (show_floating_pill)", i18n.T("settings.ime.floating_pill"), imeCfg.ShowFloatingPill); changed {
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.ShowFloatingPill = v })
 			}
-			if v, changed := settingsSwitch(c, theme, "Show Indicator HUD (show_indicator_hud)", "Show Indicator HUD", imeCfg.ShowIndicatorHUD); changed {
+			if v, changed := settingsSwitch(c, theme, "Show Indicator HUD (show_indicator_hud)", i18n.T("settings.ime.indicator_hud"), imeCfg.ShowIndicatorHUD); changed {
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.ShowIndicatorHUD = v })
 			}
 		})
@@ -507,14 +508,14 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 
 		settingsDivider(c)
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "Installed App Quick-Picker").FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine().Grow(1)
-			settingsHint(c, theme, fmt.Sprintf("%d app(s)", len(a.State().InstalledApps)))
+			ui.Text(c, i18n.T("settings.ime.app_picker")).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine().Grow(1)
+			settingsHint(c, theme, i18n.Tf("settings.ime.app_count", len(a.State().InstalledApps)))
 		})
 		picked := ""
 		ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
 			apps := a.State().InstalledApps
 			if len(apps) == 0 {
-				settingsHint(c, theme, "No installed apps detected yet.")
+				settingsHint(c, theme, i18n.T("settings.ime.no_apps"))
 			}
 			for i, app := range apps {
 				if i >= 6 {
@@ -539,7 +540,7 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 		}
 
 		settingsDivider(c)
-		ui.Text(c, "New IME Rule").FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
+		ui.Text(c, i18n.T("settings.ime.new_rule")).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
 
 		a.mu.Lock()
 		targetDraft := a.uiState.imeRuleTargetDraft
@@ -555,8 +556,8 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.End).Children(func() {
 			ui.Column(c).Gap(2).Grow(2).Children(func() {
 				tIn := ui.TextInput(c, &targetDraft).
-					Placeholder("Bundle ID or Process Name (e.g. com.apple.Safari)...").
-					Label("Rule Target").
+					Placeholder(i18n.T("settings.ime.rule_target_ph")).
+					Label(i18n.T("settings.ime.rule_target")).
 					FillWidth()
 				if tIn.Changed() {
 					a.mu.Lock()
@@ -566,8 +567,8 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 			})
 			ui.Column(c).Gap(2).Grow(1).Children(func() {
 				uIn := ui.TextInput(c, &urlDraft).
-					Placeholder("URL Pattern (optional)...").
-					Label("URL Pattern").
+					Placeholder(i18n.T("settings.ime.url_pattern_ph")).
+					Label(i18n.T("settings.ime.url_pattern")).
 					FillWidth()
 				if uIn.Changed() {
 					a.mu.Lock()
@@ -580,8 +581,8 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.End).Children(func() {
 			ui.Column(c).Gap(2).Grow(1).Children(func() {
 				tiIn := ui.TextInput(c, &titleDraft).
-					Placeholder("Title Pattern (optional)...").
-					Label("Title Pattern").
+					Placeholder(i18n.T("settings.ime.title_pattern_ph")).
+					Label(i18n.T("settings.ime.title_pattern")).
 					FillWidth()
 				if tiIn.Changed() {
 					a.mu.Lock()
@@ -591,8 +592,8 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 			})
 			ui.Column(c).Gap(2).Grow(1).Children(func() {
 				sIn := ui.TextInput(c, &sourceDraft).
-					Placeholder("Input Source ID (default: com.apple.keylayout.ABC)...").
-					Label("Input Source ID").
+					Placeholder(i18n.T("settings.ime.source_id_ph")).
+					Label(i18n.T("settings.ime.source_id")).
 					FillWidth()
 				if sIn.Changed() {
 					a.mu.Lock()
@@ -603,12 +604,12 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 		})
 
 		if msg := regexIssue(titleDraft); msg != "" {
-			settingsBanner(c, theme.Danger, "Title Pattern: invalid regex ("+msg+")")
+			settingsBanner(c, theme.Danger, i18n.Tf("settings.ime.title_regex_bad", msg))
 		} else if strings.TrimSpace(titleDraft) != "" {
-			settingsHint(c, theme, "Title Pattern: valid regex ✓")
+			settingsHint(c, theme, i18n.T("settings.ime.title_regex_ok"))
 		}
 		if msg := regexIssue(urlDraft); msg != "" {
-			settingsBanner(c, theme.Danger, "URL Pattern: invalid regex ("+msg+")")
+			settingsBanner(c, theme.Danger, i18n.Tf("settings.ime.url_regex_bad", msg))
 		}
 
 		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
@@ -656,7 +657,7 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 				curMode = config.IMEModeASCII
 			}
 
-			if ui.PrimaryButton(c, "Add Rule").Disabled(curTarget == "").Clicked() {
+			if ui.PrimaryButton(c, i18n.T("settings.ime.add_rule")).Disabled(curTarget == "").Clicked() {
 				newRule := config.IMERule{
 					AppName:        curTarget,
 					URLPattern:     curURL,
@@ -702,10 +703,10 @@ func (a *AppController) renderIMEKeymapSection(c *ui.Context, theme *ui.Theme, c
 // renderIMERulesCard lists the configured IME rules with delete buttons,
 // newest first.
 func (a *AppController) renderIMERulesCard(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
-	settingsSectionCard(c, theme, "IME Auto-Switch Rules (ime-rules.toml)", func() {
+	settingsSectionCard(c, theme, i18n.T("settings.card.ime_rules"), func() {
 		rules := cfg.IMERules.Rules
 		if len(rules) == 0 {
-			ui.Text(c, "No IME rules configured.").FontSize(12).TextColor(theme.TextMuted)
+			ui.Text(c, i18n.T("settings.ime.no_rules")).FontSize(12).TextColor(theme.TextMuted)
 			return
 		}
 		for i := len(rules) - 1; i >= 0; i-- {
@@ -733,7 +734,7 @@ func (a *AppController) renderIMERulesCard(c *ui.Context, theme *ui.Theme, cfg c
 			ui.Column(c).Key(fmt.Sprintf("ime-rule:%d:%s", idx, targetLabel)).FillWidth().Gap(1).Children(func() {
 				ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 					ui.Text(c, targetLabel).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine().Grow(1)
-					if ui.Button(c, "Delete").Key(fmt.Sprintf("del-ime-rule:%d", idx)).Clicked() {
+					if ui.Button(c, i18n.T("common.delete")).Key(fmt.Sprintf("del-ime-rule:%d", idx)).Clicked() {
 						_ = a.DeleteIMERule(idx)
 					}
 				})
@@ -751,16 +752,16 @@ func (a *AppController) renderIMERulesCard(c *ui.Context, theme *ui.Theme, cfg c
 func (a *AppController) renderAIProfileEditor(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
 	active := a.ActiveAIProfile()
 
-	settingsSectionCard(c, theme, "Active Profile Configuration", func() {
-		settingsHint(c, theme, "Editing AI profile: "+active.ID)
+	settingsSectionCard(c, theme, i18n.T("settings.card.profile_config"), func() {
+		settingsHint(c, theme, i18n.Tf("settings.ai.editing_profile", active.ID))
 		ui.Grid(c).Columns(2).GapX(8).GapY(2).FillWidth().Children(func() {
 			settingsInlineRow(c, theme, "name", 58, func() {
-				if v, changed := settingsTextInput(c, "Profile Name", active.Name, active.Name); changed {
+				if v, changed := settingsTextInput(c, i18n.T("settings.ai.profile_name"), active.Name, active.Name); changed {
 					a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.Name = v })
 				}
 			})
 			settingsInlineRow(c, theme, "provider", 58, func() {
-				if v, changed := settingsTextInput(c, "Profile Provider", "deepseek", active.Provider); changed {
+				if v, changed := settingsTextInput(c, i18n.T("settings.ai.profile_provider"), "deepseek", active.Provider); changed {
 					a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.Provider = strings.TrimSpace(v) })
 				}
 			})
@@ -778,7 +779,7 @@ func (a *AppController) renderAIProfileEditor(c *ui.Context, theme *ui.Theme, cf
 				}
 			})
 			settingsInlineRow(c, theme, "model", 58, func() {
-				if v, changed := settingsTextInput(c, "Profile Model", "model-name", active.Model); changed {
+				if v, changed := settingsTextInput(c, i18n.T("settings.ai.profile_model"), "model-name", active.Model); changed {
 					a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.Model = strings.TrimSpace(v) })
 				}
 			})
@@ -798,22 +799,22 @@ func (a *AppController) renderAIProfileEditor(c *ui.Context, theme *ui.Theme, cf
 			})
 		})
 		settingsInlineRow(c, theme, "base_url", 58, func() {
-			if v, changed := settingsTextInput(c, "Profile Base URL", "https://api.example.com/v1", active.BaseURL); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.ai.profile_base_url"), "https://api.example.com/v1", active.BaseURL); changed {
 				a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.BaseURL = strings.TrimSpace(v) })
 			}
 		})
 		settingsInlineRow(c, theme, "keychain", 58, func() {
-			if v, changed := settingsTextInput(c, "Profile Keychain Account", "clavis.ai.profile", active.KeychainAccount); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.ai.profile_keychain"), "clavis.ai.profile", active.KeychainAccount); changed {
 				a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.KeychainAccount = strings.TrimSpace(v) })
 			}
 		})
 		settingsLabelled(c, theme, "system_prompt", func() {
-			if v, changed := settingsTextArea(c, "System Prompt", "You are a concise assistant...", active.SystemPrompt, 2); changed {
+			if v, changed := settingsTextArea(c, i18n.T("settings.ai.system_prompt"), i18n.T("settings.ai.system_prompt_ph"), active.SystemPrompt, 2); changed {
 				a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.SystemPrompt = v })
 			}
 		})
 		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-			if ui.Button(c, "Delete Profile").Disabled(len(cfg.Main.AI.Profiles) <= 1).Clicked() {
+			if ui.Button(c, i18n.T("settings.ai.delete_profile")).Disabled(len(cfg.Main.AI.Profiles) <= 1).Clicked() {
 				a.deleteAIProfile(active.ID)
 			}
 			settingsHint(c, theme, fmt.Sprintf("%d profile(s) configured", len(cfg.Main.AI.Profiles)))
@@ -824,30 +825,30 @@ func (a *AppController) renderAIProfileEditor(c *ui.Context, theme *ui.Theme, cf
 // renderAIAddProfileCard draws the form that appends a custom AI profile.
 func (a *AppController) renderAIAddProfileCard(c *ui.Context, theme *ui.Theme) {
 	se := a.settingsEditor()
-	settingsSectionCard(c, theme, "Add Custom AI Profile", func() {
+	settingsSectionCard(c, theme, i18n.T("settings.card.add_profile"), func() {
 		draft := seGet(se, func(s *settingsEditorState) config.AIProfile { return s.aiDraftProfile })
 		if draft.ID == "" && draft.Provider == "" && draft.BaseURL == "" && draft.Model == "" {
 			draft = config.AIProfile{Protocol: config.ProtocolOpenAICompatible, Temperature: 0.2, TimeoutSeconds: 30}
 		}
 		ui.Grid(c).Columns(2).GapX(8).GapY(2).FillWidth().Children(func() {
-			if v, changed := settingsTextInput(c, "New Profile ID", "my-profile", draft.ID); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.ai.new_profile_id"), "my-profile", draft.ID); changed {
 				seSet(se, func(s *settingsEditorState) { s.aiDraftProfile.ID = v })
 			}
-			if v, changed := settingsTextInput(c, "New Profile Provider", "openai", draft.Provider); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.ai.new_profile_provider"), "openai", draft.Provider); changed {
 				seSet(se, func(s *settingsEditorState) { s.aiDraftProfile.Provider = v })
 			}
-			if v, changed := settingsTextInput(c, "New Profile Base URL", "https://api.example.com/v1", draft.BaseURL); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.ai.new_profile_base_url"), "https://api.example.com/v1", draft.BaseURL); changed {
 				seSet(se, func(s *settingsEditorState) { s.aiDraftProfile.BaseURL = v })
 			}
-			if v, changed := settingsTextInput(c, "New Profile Model", "model-name", draft.Model); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.ai.new_profile_model"), "model-name", draft.Model); changed {
 				seSet(se, func(s *settingsEditorState) { s.aiDraftProfile.Model = v })
 			}
 		})
 		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-			if ui.PrimaryButton(c, "Add Profile").Clicked() {
+			if ui.PrimaryButton(c, i18n.T("settings.ai.add_profile")).Clicked() {
 				a.addAIProfileDraft()
 			}
-			settingsHint(c, theme, "New profiles persist to config.toml")
+			settingsHint(c, theme, i18n.T("settings.ai.new_profile_hint"))
 		})
 	})
 }
@@ -1188,39 +1189,39 @@ func (a *AppController) renderLeaderSection(c *ui.Context, theme *ui.Theme, cfg 
 	}
 
 	ui.Grid(c).Columns(2).Gap(10).FillWidth().Children(func() {
-		settingsSectionCard(c, theme, fmt.Sprintf("Leader Tree (leader.toml) · %d root node(s)", len(cfg.Leader.Nodes)), func() {
+		settingsSectionCard(c, theme, i18n.Tf("settings.leader.card_title", len(cfg.Leader.Nodes)), func() {
 			a.renderLeaderTree(c, theme, cfg.Leader.Nodes, nil, selectedPath)
 
 			settingsDivider(c)
-			ui.Text(c, "New Root Node").FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
+			ui.Text(c, i18n.T("settings.leader.new_root")).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
 			newKey := seGet(se, func(s *settingsEditorState) string { return s.leaderNewKey })
 			newLabel := seGet(se, func(s *settingsEditorState) string { return s.leaderNewLabel })
 			ui.Row(c).FillWidth().Gap(6).AlignItems(ui.End).Children(func() {
 				ui.Column(c).Gap(2).Width(60).Children(func() {
-					if v, changed := settingsTextInput(c, "New Node Key", "z", newKey); changed {
+					if v, changed := settingsTextInput(c, i18n.T("settings.leader.new_key"), "z", newKey); changed {
 						seSet(se, func(s *settingsEditorState) { s.leaderNewKey = v })
 					}
 				})
 				ui.Column(c).Gap(2).Grow(1).Children(func() {
-					if v, changed := settingsTextInput(c, "New Node Label", "My Action", newLabel); changed {
+					if v, changed := settingsTextInput(c, i18n.T("settings.leader.new_label"), i18n.T("settings.leader.new_label_ph"), newLabel); changed {
 						seSet(se, func(s *settingsEditorState) { s.leaderNewLabel = v })
 					}
 				})
 			})
 			ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-				if ui.PrimaryButton(c, "Add Root Node").Clicked() {
+				if ui.PrimaryButton(c, i18n.T("settings.leader.add_root")).Clicked() {
 					a.addLeaderNode(nil)
 				}
-				settingsHint(c, theme, "Keys must be unique among siblings.")
+				settingsHint(c, theme, i18n.T("settings.leader.keys_unique"))
 			})
 			if msg := seGet(se, func(s *settingsEditorState) string { return s.leaderError }); msg != "" {
 				settingsBanner(c, theme.Danger, msg)
 			}
 		})
 
-		settingsSectionCard(c, theme, "Node Editor", func() {
+		settingsSectionCard(c, theme, i18n.T("settings.leader.node_editor"), func() {
 			if len(selectedPath) == 0 {
-				settingsHint(c, theme, "Select a node in the tree to edit it.")
+				settingsHint(c, theme, i18n.T("settings.leader.select_node"))
 				return
 			}
 			a.renderLeaderNodeEditor(c, theme, cfg, selectedPath)
@@ -1291,17 +1292,17 @@ func (a *AppController) renderLeaderNodeEditor(
 	draft := seGet(se, func(s *settingsEditorState) config.LeaderNode { return s.leaderDraft })
 
 	settingsInlineRow(c, theme, "key", 76, func() {
-		if v, changed := settingsTextInput(c, "Node Key", "k", draft.Key); changed {
+		if v, changed := settingsTextInput(c, i18n.T("settings.leader.node_key"), "k", draft.Key); changed {
 			seSet(se, func(s *settingsEditorState) { s.leaderDraft.Key = strings.TrimSpace(v) })
 		}
 	})
 	settingsInlineRow(c, theme, "label", 76, func() {
-		if v, changed := settingsTextInput(c, "Node Label", "Label", draft.Label); changed {
+		if v, changed := settingsTextInput(c, i18n.T("settings.leader.node_label"), i18n.T("settings.leader.node_label_ph"), draft.Label); changed {
 			seSet(se, func(s *settingsEditorState) { s.leaderDraft.Label = v })
 		}
 	})
 	settingsInlineRow(c, theme, "icon", 76, func() {
-		if v, changed := settingsTextInput(c, "Node Icon", "sparkles", draft.Icon); changed {
+		if v, changed := settingsTextInput(c, i18n.T("settings.leader.node_icon"), "sparkles", draft.Icon); changed {
 			seSet(se, func(s *settingsEditorState) { s.leaderDraft.Icon = strings.TrimSpace(v) })
 		}
 	})
@@ -1318,24 +1319,24 @@ func (a *AppController) renderLeaderNodeEditor(
 	draft = seGet(se, func(s *settingsEditorState) config.LeaderNode { return s.leaderDraft })
 	switch draft.Action.Type {
 	case config.ActionGroup:
-		settingsHint(c, theme, fmt.Sprintf("Group with %d child node(s).", len(draft.Action.Children)))
+		settingsHint(c, theme, i18n.Tf("settings.leader.group_children", len(draft.Action.Children)))
 		settingsDivider(c)
-		ui.Text(c, "New Child Node").FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
+		ui.Text(c, i18n.T("settings.leader.new_child")).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
 		childKey := seGet(se, func(s *settingsEditorState) string { return s.leaderChildKey })
 		childLabel := seGet(se, func(s *settingsEditorState) string { return s.leaderChildLbl })
 		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.End).Children(func() {
 			ui.Column(c).Gap(2).Width(60).Children(func() {
-				if v, changed := settingsTextInput(c, "Child Node Key", "x", childKey); changed {
+				if v, changed := settingsTextInput(c, i18n.T("settings.leader.child_key"), "x", childKey); changed {
 					seSet(se, func(s *settingsEditorState) { s.leaderChildKey = v })
 				}
 			})
 			ui.Column(c).Gap(2).Grow(1).Children(func() {
-				if v, changed := settingsTextInput(c, "Child Node Label", "Child", childLabel); changed {
+				if v, changed := settingsTextInput(c, i18n.T("settings.leader.child_label"), i18n.T("settings.leader.child_label_ph"), childLabel); changed {
 					seSet(se, func(s *settingsEditorState) { s.leaderChildLbl = v })
 				}
 			})
 		})
-		if ui.Button(c, "Add Child Node").Clicked() {
+		if ui.Button(c, i18n.T("settings.leader.add_child")).Clicked() {
 			a.addLeaderNode(path)
 		}
 	case config.ActionWindow:
@@ -1352,12 +1353,12 @@ func (a *AppController) renderLeaderNodeEditor(
 		})
 	case config.ActionAIRewrite:
 		settingsInlineRow(c, theme, "mode", 76, func() {
-			if v, changed := settingsTextInput(c, "Rewrite Mode", "polish", draft.Action.Mode); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.leader.rewrite_mode"), "polish", draft.Action.Mode); changed {
 				seSet(se, func(s *settingsEditorState) { s.leaderDraft.Action.Mode = v })
 			}
 		})
 		settingsLabelled(c, theme, "prompt", func() {
-			if v, changed := settingsTextArea(c, "Rewrite Prompt", "Improve clarity...", draft.Action.Prompt, 2); changed {
+			if v, changed := settingsTextArea(c, i18n.T("settings.leader.rewrite_prompt"), i18n.T("settings.leader.rewrite_prompt_ph"), draft.Action.Prompt, 2); changed {
 				seSet(se, func(s *settingsEditorState) { s.leaderDraft.Action.Prompt = v })
 			}
 		})
@@ -1379,7 +1380,7 @@ func (a *AppController) renderLeaderNodeEditor(
 		})
 	case config.ActionOpenApp:
 		settingsInlineRow(c, theme, "target", 76, func() {
-			if v, changed := settingsTextInput(c, "App Target", "com.apple.Safari", draft.Action.Target); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.leader.app_target"), "com.apple.Safari", draft.Action.Target); changed {
 				seSet(se, func(s *settingsEditorState) { s.leaderDraft.Action.Target = v })
 			}
 		})
@@ -1401,12 +1402,12 @@ func (a *AppController) renderLeaderNodeEditor(
 		})
 	case config.ActionCLI:
 		settingsInlineRow(c, theme, "command", 76, func() {
-			if v, changed := settingsTextInput(c, "CLI Command", "open", draft.Action.Command); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.leader.cli_command"), "open", draft.Action.Command); changed {
 				seSet(se, func(s *settingsEditorState) { s.leaderDraft.Action.Command = v })
 			}
 		})
 		settingsInlineRow(c, theme, "args", 76, func() {
-			if v, changed := settingsTextInput(c, "CLI Args", "-a Safari", strings.Join(draft.Action.Args, " ")); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.leader.cli_args"), "-a Safari", strings.Join(draft.Action.Args, " ")); changed {
 				seSet(se, func(s *settingsEditorState) { s.leaderDraft.Action.Args = splitTokens(v) })
 			}
 		})
@@ -1414,17 +1415,17 @@ func (a *AppController) renderLeaderNodeEditor(
 
 	settingsDivider(c)
 	ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-		if ui.PrimaryButton(c, "Save Node").Clicked() {
+		if ui.PrimaryButton(c, i18n.T("settings.leader.save_node")).Clicked() {
 			a.saveLeaderNode(path)
 		}
-		if ui.Button(c, "Move Up").Clicked() {
+		if ui.Button(c, i18n.T("settings.leader.move_up")).Clicked() {
 			a.moveLeaderSelection(-1)
 		}
-		if ui.Button(c, "Move Down").Clicked() {
+		if ui.Button(c, i18n.T("settings.leader.move_down")).Clicked() {
 			a.moveLeaderSelection(1)
 		}
 		ui.Spacer(c)
-		if ui.Button(c, "Delete Node").Clicked() {
+		if ui.Button(c, i18n.T("settings.leader.delete_node")).Clicked() {
 			a.deleteLeaderSelection()
 		}
 	})
@@ -1441,7 +1442,7 @@ func (a *AppController) addLeaderNode(parentPath []string) {
 		key, label = childKey, childLabel
 	}
 	if key == "" {
-		seSet(se, func(s *settingsEditorState) { s.leaderError = "A node key is required." })
+		seSet(se, func(s *settingsEditorState) { s.leaderError = i18n.T("settings.leader.err_key_required") })
 		return
 	}
 	if label == "" {
@@ -1450,7 +1451,7 @@ func (a *AppController) addLeaderNode(parentPath []string) {
 	cfg := a.ConfigStore.Current()
 	if leaderChildKeyTaken(cfg.Leader.Nodes, parentPath, key) {
 		seSet(se, func(s *settingsEditorState) {
-			s.leaderError = fmt.Sprintf("Duplicate key %q among sibling nodes.", key)
+			s.leaderError = i18n.Tf("settings.leader.err_duplicate_key", key)
 		})
 		return
 	}
@@ -1486,7 +1487,7 @@ func (a *AppController) saveLeaderNode(path []string) {
 	parentPath := path[:max(len(path)-1, 0)]
 	if leaderKeyTaken(cfg.Leader.Nodes, path, draft.Key) {
 		seSet(se, func(s *settingsEditorState) {
-			s.leaderError = fmt.Sprintf("Duplicate key %q among sibling nodes.", draft.Key)
+			s.leaderError = i18n.Tf("settings.leader.err_duplicate_key", draft.Key)
 		})
 		return
 	}
@@ -1567,21 +1568,21 @@ func (a *AppController) renderSnippetsSection(c *ui.Context, theme *ui.Theme, cf
 	}
 
 	ui.Grid(c).Columns(2).Gap(10).FillWidth().Children(func() {
-		settingsSectionCard(c, theme, fmt.Sprintf("Snippets (snippets.toml) · %d item(s)", len(items)), func() {
+		settingsSectionCard(c, theme, i18n.Tf("settings.snippets.card_title", len(items)), func() {
 			query := seGet(se, func(s *settingsEditorState) string { return s.snippetQuery })
-			search := ui.SearchField(c, &query).Label("Search Snippets").Placeholder("Search snippets...").FillWidth()
+			search := ui.SearchField(c, &query).Label(i18n.T("omnibox.placeholder.snippets")).Placeholder(i18n.T("omnibox.placeholder.snippets")).FillWidth()
 			if search.Changed() {
 				seSet(se, func(s *settingsEditorState) { s.snippetQuery = query })
 			}
 			ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-				if ui.PrimaryButton(c, "New Snippet").Clicked() {
+				if ui.PrimaryButton(c, i18n.T("settings.snippets.new_snippet")).Clicked() {
 					seSet(se, func(s *settingsEditorState) {
 						s.snippetIsNew = true
 						s.snippetSelected = ""
 						s.snippetDraft = config.SnippetItem{WordBoundary: true, AppBundleIDs: []string{}, ProcessNames: []string{}}
 					})
 				}
-				settingsHint(c, theme, "Select an item to edit it.")
+				settingsHint(c, theme, i18n.T("settings.snippets.select_item"))
 			})
 			settingsDivider(c)
 			matches := 0
@@ -1608,44 +1609,44 @@ func (a *AppController) renderSnippetsSection(c *ui.Context, theme *ui.Theme, cf
 				}
 			}
 			if matches == 0 {
-				settingsHint(c, theme, "No snippets match.")
+				settingsHint(c, theme, i18n.T("omnibox.empty.snippets"))
 			}
 		})
 
-		settingsSectionCard(c, theme, "Snippet Editor", func() {
+		settingsSectionCard(c, theme, i18n.T("settings.snippets.editor"), func() {
 			draft := seGet(se, func(s *settingsEditorState) config.SnippetItem { return s.snippetDraft })
 			settingsInlineRow(c, theme, "id", 74, func() {
-				if v, changed := settingsTextInput(c, "Snippet ID", "my-snippet", draft.ID); changed {
+				if v, changed := settingsTextInput(c, i18n.T("settings.snippets.id"), "my-snippet", draft.ID); changed {
 					seSet(se, func(s *settingsEditorState) { s.snippetDraft.ID = v })
 				}
 			})
 			settingsInlineRow(c, theme, "trigger", 74, func() {
-				if v, changed := settingsTextInput(c, "Snippet Trigger", ";sig", draft.Trigger); changed {
+				if v, changed := settingsTextInput(c, i18n.T("settings.snippets.trigger"), ";sig", draft.Trigger); changed {
 					seSet(se, func(s *settingsEditorState) { s.snippetDraft.Trigger = v })
 				}
 			})
 			settingsInlineRow(c, theme, "description", 74, func() {
-				if v, changed := settingsTextInput(c, "Snippet Description", "What it expands to", draft.Description); changed {
+				if v, changed := settingsTextInput(c, i18n.T("settings.snippets.description"), i18n.T("settings.snippets.description_ph"), draft.Description); changed {
 					seSet(se, func(s *settingsEditorState) { s.snippetDraft.Description = v })
 				}
 			})
-			if v, changed := settingsSwitch(c, theme, "word_boundary", "Word Boundary", draft.WordBoundary); changed {
+			if v, changed := settingsSwitch(c, theme, "word_boundary", i18n.T("settings.snippets.word_boundary"), draft.WordBoundary); changed {
 				seSet(se, func(s *settingsEditorState) { s.snippetDraft.WordBoundary = v })
 			}
 			settingsInlineRow(c, theme, "app_bundle_ids", 74, func() {
-				if v, changed := settingsTextInput(c, "Snippet App Bundle IDs", "com.apple.Safari", strings.Join(draft.AppBundleIDs, ", ")); changed {
+				if v, changed := settingsTextInput(c, i18n.T("settings.snippets.bundle_ids"), "com.apple.Safari", strings.Join(draft.AppBundleIDs, ", ")); changed {
 					seSet(se, func(s *settingsEditorState) { s.snippetDraft.AppBundleIDs = splitTokens(v) })
 				}
 			})
 			settingsInlineRow(c, theme, "process_names", 74, func() {
-				if v, changed := settingsTextInput(c, "Snippet Process Names", "Safari", strings.Join(draft.ProcessNames, ", ")); changed {
+				if v, changed := settingsTextInput(c, i18n.T("settings.snippets.process_names"), "Safari", strings.Join(draft.ProcessNames, ", ")); changed {
 					seSet(se, func(s *settingsEditorState) { s.snippetDraft.ProcessNames = splitTokens(v) })
 				}
 			})
 
 			draft = seGet(se, func(s *settingsEditorState) config.SnippetItem { return s.snippetDraft })
 			content := draft.Content
-			area := ui.TextArea(c, &content).Label("Snippet Content").Placeholder("Expanded text...").Lines(2, 6).FillWidth()
+			area := ui.TextArea(c, &content).Label(i18n.T("settings.snippets.content")).Placeholder(i18n.T("settings.snippets.content_ph")).Lines(2, 6).FillWidth()
 			if area.Changed() {
 				seSet(se, func(s *settingsEditorState) { s.snippetDraft.Content = content })
 			}
@@ -1670,15 +1671,15 @@ func (a *AppController) renderSnippetsSection(c *ui.Context, theme *ui.Theme, cf
 				Background(theme.Background).
 				Border(1, theme.Border).
 				Children(func() {
-					ui.Text(c, "Live Preview").FontSize(10).TextColor(theme.TextMuted).SingleLine()
+					ui.Text(c, i18n.T("settings.snippets.live_preview")).FontSize(10).TextColor(theme.TextMuted).SingleLine()
 					ui.Text(c, rendered.RenderedText).FontSize(12).TextColor(theme.Text)
 				})
 
 			ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-				if ui.PrimaryButton(c, "Save Snippet").Clicked() {
+				if ui.PrimaryButton(c, i18n.T("settings.snippets.save")).Clicked() {
 					a.saveSnippetDraft()
 				}
-				if ui.Button(c, "Delete Snippet").Disabled(seGet(se, func(s *settingsEditorState) bool { return s.snippetIsNew })).Clicked() {
+				if ui.Button(c, i18n.T("settings.snippets.delete")).Disabled(seGet(se, func(s *settingsEditorState) bool { return s.snippetIsNew })).Clicked() {
 					a.deleteSnippetDraft()
 				}
 			})
@@ -1693,7 +1694,7 @@ func (a *AppController) saveSnippetDraft() {
 	draft.ID = strings.TrimSpace(draft.ID)
 	draft.Trigger = strings.TrimSpace(draft.Trigger)
 	if draft.ID == "" || draft.Trigger == "" {
-		a.setSettingsStatus("Snippet id and trigger are required")
+		a.setSettingsStatus(i18n.T("settings.snippets.err_required"))
 		return
 	}
 	if draft.AppBundleIDs == nil {
@@ -1766,16 +1767,16 @@ func (a *AppController) renderGlossarySection(c *ui.Context, theme *ui.Theme, cf
 	}
 
 	ui.Grid(c).Columns(2).Gap(10).FillWidth().Children(func() {
-		settingsSectionCard(c, theme, fmt.Sprintf("Glossary (glossary.toml) · %d term(s)", len(terms)), func() {
+		settingsSectionCard(c, theme, i18n.Tf("settings.glossary.card_title", len(terms)), func() {
 			ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-				if ui.PrimaryButton(c, "New Term").Clicked() {
+				if ui.PrimaryButton(c, i18n.T("settings.glossary.new_term")).Clicked() {
 					seSet(se, func(s *settingsEditorState) {
 						s.glossaryIsNew = true
 						s.glossarySelected = ""
 						s.glossaryDraft = config.GlossaryTerm{Aliases: []string{}}
 					})
 				}
-				settingsHint(c, theme, "Select a term to edit it.")
+				settingsHint(c, theme, i18n.T("settings.glossary.select_term"))
 			})
 			settingsDivider(c)
 			for _, term := range terms {
@@ -1801,30 +1802,30 @@ func (a *AppController) renderGlossarySection(c *ui.Context, theme *ui.Theme, cf
 			settingsDivider(c)
 			draft := seGet(se, func(s *settingsEditorState) config.GlossaryTerm { return s.glossaryDraft })
 			settingsInlineRow(c, theme, "term", 76, func() {
-				if v, changed := settingsTextInput(c, "Glossary Term", "Kubernetes", draft.Term); changed {
+				if v, changed := settingsTextInput(c, i18n.T("settings.glossary.term"), "Kubernetes", draft.Term); changed {
 					seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Term = v })
 				}
 			})
 			settingsInlineRow(c, theme, "aliases", 76, func() {
-				if v, changed := settingsTextInput(c, "Glossary Aliases", "k8s, kube", strings.Join(draft.Aliases, ", ")); changed {
+				if v, changed := settingsTextInput(c, i18n.T("settings.glossary.aliases"), "k8s, kube", strings.Join(draft.Aliases, ", ")); changed {
 					seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Aliases = splitTokens(v) })
 				}
 			})
 			settingsInlineRow(c, theme, "category", 76, func() {
-				if v, changed := settingsTextInput(c, "Glossary Category", "product", draft.Category); changed {
+				if v, changed := settingsTextInput(c, i18n.T("settings.glossary.category"), "product", draft.Category); changed {
 					seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Category = v })
 				}
 			})
 			settingsInlineRow(c, theme, "hint", 76, func() {
-				if v, changed := settingsTextInput(c, "Glossary Hint", "Keep this spelling", draft.Hint); changed {
+				if v, changed := settingsTextInput(c, i18n.T("settings.glossary.hint"), i18n.T("settings.glossary.hint_ph"), draft.Hint); changed {
 					seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Hint = v })
 				}
 			})
 			ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-				if ui.PrimaryButton(c, "Save Term").Clicked() {
+				if ui.PrimaryButton(c, i18n.T("settings.glossary.save")).Clicked() {
 					a.saveGlossaryDraft()
 				}
-				if ui.Button(c, "Delete Term").Disabled(seGet(se, func(s *settingsEditorState) bool { return s.glossaryIsNew })).Clicked() {
+				if ui.Button(c, i18n.T("settings.glossary.delete")).Disabled(seGet(se, func(s *settingsEditorState) bool { return s.glossaryIsNew })).Clicked() {
 					a.deleteGlossaryDraft()
 				}
 			})
@@ -1840,7 +1841,7 @@ func (a *AppController) saveGlossaryDraft() {
 	draft := seGet(se, func(s *settingsEditorState) config.GlossaryTerm { return s.glossaryDraft })
 	draft.Term = strings.TrimSpace(draft.Term)
 	if draft.Term == "" {
-		a.setSettingsStatus("A glossary term is required")
+		a.setSettingsStatus(i18n.T("settings.glossary.err_required"))
 		return
 	}
 	if draft.Category == "" {
@@ -1899,30 +1900,30 @@ func (a *AppController) renderClipboardCard(c *ui.Context, theme *ui.Theme, cfg 
 	se := a.settingsEditor()
 	clip := cfg.Main.Clipboard
 
-	settingsSectionCard(c, theme, "Clipboard History (clipboard.*)", func() {
-		if v, changed := settingsSwitch(c, theme, "Clipboard History (clipboard.enabled)", "Clipboard Enabled", clip.Enabled); changed {
+	settingsSectionCard(c, theme, i18n.T("settings.card.clipboard"), func() {
+		if v, changed := settingsSwitch(c, theme, "Clipboard History (clipboard.enabled)", i18n.T("settings.clipboard.enabled"), clip.Enabled); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.Enabled = v })
 		}
-		if v, changed := settingsSwitch(c, theme, "Ignore Concealed Types (ignore_concealed_types)", "Ignore Concealed Types", clip.IgnoreConcealedTypes); changed {
+		if v, changed := settingsSwitch(c, theme, "Ignore Concealed Types (ignore_concealed_types)", i18n.T("settings.clipboard.ignore_concealed"), clip.IgnoreConcealedTypes); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.IgnoreConcealedTypes = v })
 		}
 		if v, changed := settingsStepper(c, theme, "max_history_items", float64(clip.MaxHistoryItems), 10, 2000, 10, ""); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.MaxHistoryItems = int(v) })
 		}
-		if v, changed := settingsStepper(c, theme, "retention_days", float64(clip.RetentionDays), 1, 365, 1, "days"); changed {
+		if v, changed := settingsStepper(c, theme, "retention_days", float64(clip.RetentionDays), 1, 365, 1, i18n.T("common.days")); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.RetentionDays = int(v) })
 		}
 
 		settingsDivider(c)
-		ui.Text(c, "Excluded Apps (excluded_bundle_ids)").FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
+		ui.Text(c, i18n.T("settings.clipboard.excluded_apps")).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
 		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.End).Children(func() {
 			ui.Column(c).Gap(2).Grow(1).Children(func() {
-				if v, changed := settingsTextInput(c, "Excluded Bundle ID", "com.example.app", seGet(se, func(s *settingsEditorState) string { return s.clipExcludeDraft })); changed {
+				if v, changed := settingsTextInput(c, i18n.T("settings.clipboard.excluded_id"), "com.example.app", seGet(se, func(s *settingsEditorState) string { return s.clipExcludeDraft })); changed {
 					seSet(se, func(s *settingsEditorState) { s.clipExcludeDraft = v })
 				}
 			})
 			pending := strings.TrimSpace(seGet(se, func(s *settingsEditorState) string { return s.clipExcludeDraft }))
-			if ui.Button(c, "Add Exclusion").Disabled(pending == "").Clicked() {
+			if ui.Button(c, i18n.T("settings.clipboard.add_exclusion")).Disabled(pending == "").Clicked() {
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) {
 					if slices.Contains(m.Clipboard.ExcludedBundleIDs, pending) {
 						return
@@ -1936,7 +1937,7 @@ func (a *AppController) renderClipboardCard(c *ui.Context, theme *ui.Theme, cfg 
 			idx, id := i, bundleID
 			ui.Row(c).Key(fmt.Sprintf("clip-excl:%d:%s", idx, id)).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, id).FontSize(11).TextColor(theme.TextMuted).SingleLine().Grow(1)
-				if ui.Button(c, "Remove").Key(fmt.Sprintf("clip-excl-remove:%d", idx)).Clicked() {
+				if ui.Button(c, i18n.T("settings.clipboard.remove")).Key(fmt.Sprintf("clip-excl-remove:%d", idx)).Clicked() {
 					_ = a.UpdateMainConfig(func(m *config.MainConfig) {
 						kept := make([]string, 0, len(m.Clipboard.ExcludedBundleIDs))
 						for j, item := range m.Clipboard.ExcludedBundleIDs {

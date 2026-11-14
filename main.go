@@ -24,7 +24,12 @@ import (
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/host"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 	"github.com/yeisme/clavis/uiapp"
+
+	// MyGo controls and menus speak the app language once the zh-Hans
+	// catalog is compiled in.
+	_ "github.com/egoist/mygo/locales/zh-Hans"
 )
 
 const (
@@ -144,6 +149,7 @@ type desktopApp struct {
 	tray                   *mygo.Tray
 	permMenuItem           *mygo.MenuItem
 	loginMenuItem          *mygo.MenuItem
+	trayLabelItems         map[string]*mygo.MenuItem
 	bridgeRunning          bool
 	fallbackAccelerator    string
 	sessionAnchor          *host.CursorAnchor
@@ -168,6 +174,14 @@ func (a *desktopApp) start() {
 	cfg, err := cfgStore.LoadOrInitialize()
 	if err != nil {
 		cfg = config.DefaultConfig()
+	}
+	// Resolve the UI language before the first frame renders: an explicit
+	// [appearance].language wins; "auto" follows the OS preferred languages.
+	i18n.SetPreferredLanguagesProvider(mygo.App.PreferredLanguages)
+	i18n.SetLanguage(i18n.ResolveLanguage(cfg.Main.Appearance.Language, i18n.PreferredLanguages()))
+	mygo.App.SetLanguages("en", "zh-Hans")
+	if tag := i18n.Current().Tag(); tag != "en" {
+		mygo.App.SetLocale(tag)
 	}
 
 	var sqliteStore *storage.SQLiteClipboardStore
@@ -223,11 +237,12 @@ func (a *desktopApp) start() {
 		OpenPath: func(p string) error {
 			return mygo.Shell.OpenPath(p)
 		},
-		OnRepaint:      a.handleRepaint,
-		OnPresentPhase: a.handlePresentPhase,
-		OnHide:         a.handleHide,
-		OnOpenSettings: a.handleOpenSettings,
-		OnShowIMEPill:  a.handleShowIMEPill,
+		OnRepaint:        a.handleRepaint,
+		OnPresentPhase:   a.handlePresentPhase,
+		OnHide:           a.handleHide,
+		OnOpenSettings:   a.handleOpenSettings,
+		OnShowIMEPill:    a.handleShowIMEPill,
+		OnLanguageChange: a.handleLanguageChange,
 	})
 
 	initW, initH := uiapp.PreferredCapsuleSize(engine.PhaseLeader, cfg.Main.Appearance)
@@ -263,7 +278,7 @@ func (a *desktopApp) start() {
 
 	pillW, pillH := uiapp.PreferredIMEPillSize()
 	imePillPanel := mygo.NewWindow(mygo.WindowOptions{
-		Title:         "Clavis IME",
+		Title:         i18n.T("tray.ime_window"),
 		Width:         pillW,
 		Height:        pillH,
 		Panel:         true,
@@ -285,7 +300,7 @@ func (a *desktopApp) start() {
 	})
 
 	settingsWin := mygo.NewWindow(mygo.WindowOptions{
-		Title:     "Clavis Settings",
+		Title:     i18n.T("tray.settings_window"),
 		Width:     960,
 		Height:    640,
 		MinWidth:  760,
@@ -332,13 +347,13 @@ func (a *desktopApp) start() {
 
 func (a *desktopApp) setupTray() {
 	permItem := &mygo.MenuItem{
-		Label: "Permissions: Checking…",
+		Label: i18n.T("tray.permissions_checking"),
 		Click: func(*mygo.MenuItem, *mygo.Window) {
 			a.openSettings(uiapp.SettingsTabPermissions)
 		},
 	}
 	loginItem := &mygo.MenuItem{
-		Label:   "Open at Login",
+		Label:   i18n.T("tray.open_at_login"),
 		Type:    mygo.MenuItemCheckbox,
 		Checked: mygo.App.OpenAtLogin(),
 		Click: func(item *mygo.MenuItem, _ *mygo.Window) {
@@ -353,26 +368,26 @@ func (a *desktopApp) setupTray() {
 		permItem,
 		mygo.Separator(),
 		{
-			Label: "Open Capsule",
+			Label: i18n.T("tray.open_capsule"),
 			Click: func(*mygo.MenuItem, *mygo.Window) {
 				a.openOmnibox(config.TabActions)
 			},
 		},
 		{
-			Label: "Clipboard History",
+			Label: i18n.T("tray.clipboard_history"),
 			Click: func(*mygo.MenuItem, *mygo.Window) {
 				a.openOmnibox(config.TabClipboard)
 			},
 		},
 		mygo.Separator(),
 		{
-			Label: "Reload Configuration",
+			Label: i18n.T("common.reload"),
 			Click: func(*mygo.MenuItem, *mygo.Window) {
 				a.reloadConfiguration()
 			},
 		},
 		{
-			Label: "Open Config Folder",
+			Label: i18n.T("settings.configs.open_dir"),
 			Click: func(*mygo.MenuItem, *mygo.Window) {
 				a.mu.Lock()
 				ctrl := a.controller
@@ -383,7 +398,7 @@ func (a *desktopApp) setupTray() {
 			},
 		},
 		{
-			Label: "Settings…",
+			Label: i18n.T("tray.settings"),
 			Click: func(*mygo.MenuItem, *mygo.Window) {
 				a.openSettings(uiapp.SettingsTabGeneral)
 			},
@@ -392,12 +407,28 @@ func (a *desktopApp) setupTray() {
 		loginItem,
 		mygo.Separator(),
 		{
-			Label: "Quit Clavis",
+			Label: i18n.T("tray.quit"),
 			Click: func(*mygo.MenuItem, *mygo.Window) {
 				mygo.App.Quit()
 			},
 		},
 	})
+
+	// Keep the localized items addressable so a language switch can relabel
+	// them without rebuilding the tray.
+	labelled := map[string]*mygo.MenuItem{
+		"permissions_checking": permItem,
+		"open_capsule":         itemByLabel(menu, i18n.T("tray.open_capsule")),
+		"clipboard_history":    itemByLabel(menu, i18n.T("tray.clipboard_history")),
+		"reload":               itemByLabel(menu, i18n.T("common.reload")),
+		"open_config":          itemByLabel(menu, i18n.T("settings.configs.open_dir")),
+		"settings":             itemByLabel(menu, i18n.T("tray.settings")),
+		"quit":                 itemByLabel(menu, i18n.T("tray.quit")),
+		"open_at_login":        loginItem,
+	}
+	a.mu.Lock()
+	a.trayLabelItems = labelled
+	a.mu.Unlock()
 
 	tray, err := mygo.NewTray(mygo.TrayOptions{
 		ID:             "clavis-tray",
@@ -574,7 +605,56 @@ func (a *desktopApp) applyConfigReload() {
 		}
 		a.startBridgeAndFallbackShortcut(cfg.Main.Trigger.CapsuleShortcut)
 	}
+	// A language change on disk takes effect on the next reload.
+	a.syncLanguageFromConfig(cfg)
 	go a.refreshPermissionsAsync()
+}
+
+// syncLanguageFromConfig re-resolves the UI language after a config change
+// and refreshes what the toolkit holds outside the view tree (tray labels,
+// window titles, MyGo's own controls).
+func (a *desktopApp) syncLanguageFromConfig(cfg config.ClavisConfig) {
+	prev := i18n.Current()
+	i18n.SetLanguage(i18n.ResolveLanguage(cfg.Main.Appearance.Language, i18n.PreferredLanguages()))
+	if i18n.Current() == prev {
+		return
+	}
+	if tag := i18n.Current().Tag(); tag != "en" {
+		mygo.App.SetLocale(tag)
+	}
+	mygo.RunOnMain(func() {
+		a.refreshTrayLabels()
+		if a.settingsWin != nil {
+			a.settingsWin.SetTitle(i18n.T("tray.settings_window"))
+		}
+		if a.imePillPanel != nil {
+			a.imePillPanel.SetTitle(i18n.T("tray.ime_window"))
+		}
+	})
+	a.handleRepaint()
+}
+
+// handleLanguageChange is the controller hook fired when the language is
+// changed from the Settings UI.
+func (a *desktopApp) handleLanguageChange() {
+	a.mu.Lock()
+	ctrl := a.controller
+	a.mu.Unlock()
+	if ctrl == nil {
+		return
+	}
+	a.syncLanguageFromConfig(ctrl.Config())
+}
+
+func (a *desktopApp) refreshTrayLabels() {
+	a.mu.Lock()
+	items := a.trayLabelItems
+	a.mu.Unlock()
+	for key, item := range items {
+		if item != nil {
+			item.SetLabel(i18n.T("tray." + key))
+		}
+	}
 }
 
 func (a *desktopApp) refreshPermissionsAsync() {
@@ -1165,25 +1245,35 @@ func clampScreenAxis(pos, size, start, span, margin float64) float64 {
 
 func formatPermissionsMenuLabel(status host.PermissionStatus, err error, caps host.Capabilities) string {
 	if err != nil {
-		return "Permissions: Check Failed"
+		return i18n.T("tray.permissions_failed")
 	}
 	if !caps.Accessibility && !caps.InputMonitoring {
-		return "Permissions: Standard Mode"
+		return i18n.T("tray.permissions_standard")
 	}
 	if status.Accessibility && status.InputMonitoring {
-		return "Permissions: All Granted"
+		return i18n.T("tray.permissions_all")
 	}
 	var missing []string
 	if caps.Accessibility && !status.Accessibility {
-		missing = append(missing, "Accessibility")
+		missing = append(missing, i18n.T("settings.perm.accessibility"))
 	}
 	if caps.InputMonitoring && !status.InputMonitoring {
-		missing = append(missing, "Input Monitoring")
+		missing = append(missing, i18n.T("settings.perm.input_monitoring"))
 	}
 	if len(missing) == 0 {
-		return "Permissions: Granted"
+		return i18n.T("tray.permissions_granted")
 	}
-	return "Permissions: Grant " + strings.Join(missing, " & ")
+	return i18n.Tf("tray.permissions_grant", strings.Join(missing, " & "))
+}
+
+// itemByLabel finds the menu item showing label, for tray relabeling.
+func itemByLabel(menu *mygo.Menu, label string) *mygo.MenuItem {
+	for _, item := range menu.Items() {
+		if item.Label == label {
+			return item
+		}
+	}
+	return nil
 }
 
 func toMyGoAccelerator(shortcut string) string {

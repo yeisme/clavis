@@ -9,6 +9,7 @@ import (
 	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/pkg/core/ai"
 	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
 // Settings section indices. The first five mirror SettingsTab so that
@@ -38,14 +39,14 @@ type settingsSectionMeta struct {
 // settingsSections returns the ordered navigation rail entries.
 func settingsSections() []settingsSectionMeta {
 	return []settingsSectionMeta{
-		{settingsSectionGeneral, "general", "General & Triggers", "bolt", "Triggers, appearance and shortcuts", SettingsTabGeneral},
-		{settingsSectionIMEKeymap, "ime-keymap", "IME & Keymap", "keyboard", "Key remaps, tap/hold and per-app input sources", SettingsTabIMEKeymap},
-		{settingsSectionLeader, "leader", "Leader Tree", "command", "Recursive leader.toml key tree", SettingsTabGeneral},
-		{settingsSectionSnippets, "snippets", "Snippets", "text.badge.plus", "snippets.toml master-detail editor", SettingsTabGeneral},
-		{settingsSectionGlossary, "glossary", "Glossary & Clipboard", "character.book.closed", "glossary.toml and clipboard history", SettingsTabGeneral},
-		{settingsSectionAI, "ai", "AI & Keychain", "sparkles", "Profiles, providers, keys and connection tests", SettingsTabAI},
-		{settingsSectionPermissions, "permissions", "Permissions & Diagnostics", "gearshape", "Permissions, runtime diagnostics and validation", SettingsTabPermissions},
-		{settingsSectionConfigs, "configs", "Configs", "folder", "TOML files and the configuration directory", SettingsTabConfigs},
+		{settingsSectionGeneral, "general", i18n.T("settings.section.general"), "bolt", i18n.T("settings.section.general.hint"), SettingsTabGeneral},
+		{settingsSectionIMEKeymap, "ime-keymap", i18n.T("settings.section.ime"), "keyboard", i18n.T("settings.section.ime.hint"), SettingsTabIMEKeymap},
+		{settingsSectionLeader, "leader", i18n.T("settings.section.leader"), "command", i18n.T("settings.section.leader.hint"), SettingsTabGeneral},
+		{settingsSectionSnippets, "snippets", i18n.T("omnibox.tab.snippets"), "text.badge.plus", i18n.T("settings.section.snippets.hint"), SettingsTabGeneral},
+		{settingsSectionGlossary, "glossary", i18n.T("settings.section.glossary"), "character.book.closed", i18n.T("settings.section.glossary.hint"), SettingsTabGeneral},
+		{settingsSectionAI, "ai", i18n.T("settings.section.ai"), "sparkles", i18n.T("settings.section.ai.hint"), SettingsTabAI},
+		{settingsSectionPermissions, "permissions", i18n.T("settings.section.permissions"), "gearshape", i18n.T("settings.section.permissions.hint"), SettingsTabPermissions},
+		{settingsSectionConfigs, "configs", i18n.T("settings.section.configs"), "folder", i18n.T("settings.section.configs.hint"), SettingsTabConfigs},
 	}
 }
 
@@ -109,7 +110,7 @@ func (a *AppController) SettingsView(c *ui.Context) {
 
 	section := normalizeSettingsSection(selectedTab)
 
-	ui.Row(c).Fill().Background(theme.Background).Children(func() {
+	applyTextLocale(ui.Row(c).Fill().Background(theme.Background)).Children(func() {
 		a.renderSettingsSidebar(c, section, cfg)
 		ui.Box(c).Width(1).FillHeight().Background(theme.Border)
 		ui.Column(c).FillHeight().Grow(1).Padding(10, 14).Gap(8).Children(func() {
@@ -127,7 +128,7 @@ func (a *AppController) SettingsView(c *ui.Context) {
 func (a *AppController) renderSettingsSidebar(c *ui.Context, section int, cfg config.ClavisConfig) {
 	selected := settingsSectionKey(section)
 	sb := ui.Sidebar(c, &selected, func() {
-		ui.SidebarSection(c, "Configuration Center", nil, func() {
+		ui.SidebarSection(c, i18n.T("settings.center"), nil, func() {
 			for _, meta := range settingsSections() {
 				item := meta
 				ui.SidebarItem(c, item.Key, SemanticIconSVG(item.Icon), item.Label).Children(func() {
@@ -222,7 +223,7 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 	trigger := cfg.Main.Trigger
 	appearance := cfg.Main.Appearance
 
-	settingsSectionCard(c, theme, "Trigger Controls (trigger.*)", func() {
+	settingsSectionCard(c, theme, i18n.T("settings.card.trigger"), func() {
 		settingsInlineRow(c, theme, "leader_key", 110, func() {
 			ui.Column(c).Gap(2).Grow(1).Children(func() {
 				if v, changed := settingsPillGrid(c, theme, "leader-key", 3, triggerPresets(), trigger.LeaderKey); changed {
@@ -244,7 +245,7 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 		}
 
 		recording := seGet(se, func(s *settingsEditorState) bool { return s.recordingShortcut })
-		ui.Text(c, fmt.Sprintf("capsule_shortcut: %s", trigger.CapsuleShortcut)).
+		ui.Text(c, i18n.Tf("settings.trigger.shortcut_caption", trigger.CapsuleShortcut)).
 			FontSize(11).
 			TextColor(theme.TextMuted).
 			SingleLine()
@@ -288,29 +289,34 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 						return true
 					})
 				box.Children(func() {
-					ui.Text(c, "Press shortcut... (Esc cancels)").
+					ui.Text(c, i18n.T("settings.trigger.recording")).
 						FontSize(11).
 						TextColor(theme.Accent).
 						SingleLine()
 				})
 			} else {
-				if ui.PrimaryButton(c, "Record Shortcut").Clicked() {
+				if ui.PrimaryButton(c, i18n.T("settings.trigger.record")).Clicked() {
 					seSet(se, func(s *settingsEditorState) { s.recordingShortcut = true })
 				}
 			}
 		})
 
 		if v, changed := settingsSwitch(
-			c, theme, "snippet_expansion_enabled", "Snippet Expansion", trigger.SnippetExpansionEnabled,
+			c, theme, "snippet_expansion_enabled", i18n.T("settings.trigger.snippet_expansion"), trigger.SnippetExpansionEnabled,
 		); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.SnippetExpansionEnabled = v })
 		}
 	})
 
-	settingsSectionCard(c, theme, "Appearance (appearance.*)", func() {
+	settingsSectionCard(c, theme, i18n.T("settings.card.appearance"), func() {
 		settingsInlineRow(c, theme, "theme", 110, func() {
 			if v, changed := settingsPills(c, theme, "theme", []string{"system", "light", "dark"}, appearance.Theme); changed {
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.Theme = v })
+			}
+		})
+		settingsInlineRow(c, theme, "language", 110, func() {
+			if v, changed := settingsPills(c, theme, "language", i18n.AllLanguages(), appearance.Language); changed {
+				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.Language = v })
 			}
 		})
 		ui.Grid(c).Columns(2).GapX(10).GapY(4).FillWidth().Children(func() {
@@ -328,10 +334,10 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 			}
 		})
 		ui.Grid(c).Columns(2).GapX(10).GapY(4).FillWidth().Children(func() {
-			if v, changed := settingsSwitch(c, theme, "show_key_hints", "Show Key Hints", appearance.ShowKeyHints); changed {
+			if v, changed := settingsSwitch(c, theme, "show_key_hints", i18n.T("settings.appearance.key_hints"), appearance.ShowKeyHints); changed {
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.ShowKeyHints = v })
 			}
-			if v, changed := settingsSwitch(c, theme, "show_preview_pane", "Show Preview Pane", appearance.ShowPreviewPane); changed {
+			if v, changed := settingsSwitch(c, theme, "show_preview_pane", i18n.T("settings.appearance.preview_pane"), appearance.ShowPreviewPane); changed {
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.ShowPreviewPane = v })
 			}
 		})
@@ -341,7 +347,7 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 	statusMsg := a.settingsStatus
 	a.mu.Unlock()
 	ui.Row(c).FillWidth().Gap(10).AlignItems(ui.Center).Children(func() {
-		if ui.PrimaryButton(c, "Reload Configuration").Clicked() {
+		if ui.PrimaryButton(c, i18n.T("common.reload")).Clicked() {
 			a.ReloadConfig()
 		}
 		if statusMsg != "" {
@@ -366,9 +372,9 @@ func (a *AppController) renderSettingsAISection(
 		profiles = config.DefaultAIProfiles()
 	}
 
-	settingsSectionCard(c, theme, "AI Profiles & Provider Configuration", func() {
+	settingsSectionCard(c, theme, i18n.T("settings.card.ai_profiles"), func() {
 		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "Active Profile").FontSize(11).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, i18n.T("settings.ai.active_profile")).FontSize(11).TextColor(theme.TextMuted).SingleLine()
 			for _, prof := range profiles {
 				p := prof
 				isActive := strings.EqualFold(p.ID, activeProfile.ID)
@@ -405,7 +411,7 @@ func (a *AppController) renderSettingsAISection(
 			envVarStr = secrets.DefaultEnvVarForProvider(activeProfile.Provider)
 		}
 		if envVarStr == "" {
-			envVarStr = "(none / keyless)"
+			envVarStr = i18n.T("settings.ai.none_keyless")
 		}
 
 		ui.Grid(c).Columns(2).GapX(10).GapY(2).FillWidth().Children(func() {
@@ -436,12 +442,12 @@ func (a *AppController) renderAIKeychainCard(
 	testStatus AITestStatus,
 	testMsg string,
 ) {
-	settingsSectionCard(c, theme, "API Key & Keychain", func() {
-		keyStatusLabel := "Not configured"
+	settingsSectionCard(c, theme, i18n.T("settings.card.api_key"), func() {
+		keyStatusLabel := i18n.T("settings.ai.key_not_configured")
 		keyStatusColor := theme.Warning
 		switch keySource {
 		case secrets.KeySourceKeychain:
-			keyStatusLabel = "Configured in Keychain (••••••••)"
+			keyStatusLabel = i18n.T("settings.ai.key_in_keychain")
 			keyStatusColor = theme.Success
 		case secrets.KeySourceEnv:
 			envName := strings.TrimSpace(activeProfile.APIKeyEnvVar)
@@ -451,17 +457,17 @@ func (a *AppController) renderAIKeychainCard(
 			if envName == "" {
 				envName = "API_KEY"
 			}
-			keyStatusLabel = fmt.Sprintf("Configured via %s env (••••••••)", envName)
+			keyStatusLabel = i18n.Tf("settings.ai.key_via_env", envName)
 			keyStatusColor = theme.Success
 		default:
 			if ai.IsKeylessAllowed(activeProfile.Provider, activeProfile.BaseURL) {
-				keyStatusLabel = "Local / Keyless (optional)"
+				keyStatusLabel = i18n.T("settings.ai.key_local")
 				keyStatusColor = theme.Success
 			}
 		}
 
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "Key Status").FontSize(11).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, i18n.T("settings.ai.key_status")).FontSize(11).TextColor(theme.TextMuted).SingleLine()
 			ui.Spacer(c)
 			ui.Text(c, keyStatusLabel).FontSize(11).FontWeight(600).TextColor(keyStatusColor).SingleLine()
 		})
@@ -471,8 +477,8 @@ func (a *AppController) renderAIKeychainCard(
 		a.mu.Unlock()
 		keyInput := ui.TextInput(c, &draft).
 			Password().
-			Placeholder("Enter API key (stored securely in Keychain)...").
-			Label("API Key").
+			Placeholder(i18n.T("settings.ai.key_placeholder")).
+			Label(i18n.T("settings.ai.key_label")).
 			FillWidth()
 		if keyInput.Changed() {
 			a.mu.Lock()
@@ -485,17 +491,17 @@ func (a *AppController) renderAIKeychainCard(
 		a.mu.Unlock()
 
 		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-			if ui.PrimaryButton(c, "Save Key").Disabled(strings.TrimSpace(currentDraft) == "").Clicked() {
+			if ui.PrimaryButton(c, i18n.T("settings.ai.save_key")).Disabled(strings.TrimSpace(currentDraft) == "").Clicked() {
 				_ = a.SaveAPIKey(currentDraft)
 			}
-			if ui.Button(c, "Clear Key").Clicked() {
+			if ui.Button(c, i18n.T("settings.ai.clear_key")).Clicked() {
 				_ = a.DeleteAPIKey()
 			}
 		})
 
 		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
 			svc := c.Services()
-			testLabel := "Test Connection"
+			testLabel := i18n.T("settings.ai.test_connection")
 			if testStatus == AITestLoading {
 				testLabel = "Testing..."
 			}
@@ -537,9 +543,9 @@ func (a *AppController) renderAIKeychainCard(
 // renderSettingsPermissionsSection draws permissions, diagnostics and the
 // configuration validation banners.
 func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *ui.Theme, diag DiagnosticsSnapshot) {
-	settingsSectionCard(c, theme, "Permissions", func() {
+	settingsSectionCard(c, theme, i18n.T("settings.card.permissions"), func() {
 		svc := c.Services()
-		renderPermRow(c, theme, "Accessibility", diag.Permissions.Accessibility, func() {
+		renderPermRow(c, theme, i18n.T("settings.perm.accessibility"), diag.Permissions.Accessibility, func() {
 			go func() {
 				_, _ = a.PromptPermission("accessibility")
 				svc.Invalidate()
@@ -548,7 +554,7 @@ func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *u
 			_ = a.OpenPermissionSettings("accessibility")
 		})
 
-		renderPermRow(c, theme, "Input Monitoring", diag.Permissions.InputMonitoring, func() {
+		renderPermRow(c, theme, i18n.T("settings.perm.input_monitoring"), diag.Permissions.InputMonitoring, func() {
 			go func() {
 				_, _ = a.PromptPermission("input_monitoring")
 				svc.Invalidate()
@@ -559,7 +565,7 @@ func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *u
 	})
 
 	ui.Grid(c).Columns(2).Gap(10).FillWidth().Children(func() {
-		settingsSectionCard(c, theme, "Runtime Diagnostics", func() {
+		settingsSectionCard(c, theme, i18n.T("settings.card.diagnostics"), func() {
 			secureInput := "false"
 			if v, ok := diag.Permissions.Details["secureInput"]; ok && v != "" {
 				secureInput = v
@@ -569,22 +575,22 @@ func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *u
 				activeIME = diag.ActiveInputSource.ID
 			}
 			if activeIME == "" {
-				activeIME = "Unknown"
+				activeIME = i18n.T("settings.diag.unknown")
 			}
 			layer := strings.TrimSpace(diag.ActiveKeymapLayer)
 			if layer == "" {
 				layer = "base"
 			}
 
-			settingsKeyValueRow(c, theme, "Active Keymap Layer", layer)
-			settingsKeyValueRow(c, theme, "Secure Input", secureInput)
-			settingsKeyValueRow(c, theme, "Monitor Running", fmt.Sprintf("%v", diag.MonitorRunning))
-			settingsKeyValueRow(c, theme, "Recovery Count", fmt.Sprintf("%d", diag.RecoveryCount))
-			settingsKeyValueRow(c, theme, "Active Input Source", activeIME)
+			settingsKeyValueRow(c, theme, i18n.T("settings.diag.layer"), layer)
+			settingsKeyValueRow(c, theme, i18n.T("settings.diag.secure_input"), secureInput)
+			settingsKeyValueRow(c, theme, i18n.T("settings.diag.monitor"), fmt.Sprintf("%v", diag.MonitorRunning))
+			settingsKeyValueRow(c, theme, i18n.T("settings.diag.recovery"), fmt.Sprintf("%d", diag.RecoveryCount))
+			settingsKeyValueRow(c, theme, i18n.T("settings.diag.input_source"), activeIME)
 
 			ui.Row(c).FillWidth().Gap(8).Children(func() {
 				svc := c.Services()
-				if ui.Button(c, "Refresh").Clicked() {
+				if ui.Button(c, i18n.T("settings.diag.refresh")).Clicked() {
 					go func() {
 						_, _ = a.RefreshPermissions(context.Background())
 						svc.Invalidate()
@@ -601,9 +607,9 @@ func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *u
 func renderConfigValidationCard(c *ui.Context, a *AppController, theme *ui.Theme) {
 	errs := a.ConfigStore.LastErrors()
 	warns := a.ConfigStore.LastWarnings()
-	settingsSectionCard(c, theme, "Configuration Validation", func() {
+	settingsSectionCard(c, theme, i18n.T("settings.card.validation"), func() {
 		if len(errs) == 0 && len(warns) == 0 {
-			ui.Text(c, "All configuration files are valid.").FontSize(12).TextColor(theme.Success)
+			ui.Text(c, i18n.T("settings.validation.ok")).FontSize(12).TextColor(theme.Success)
 			return
 		}
 		for i, err := range errs {
@@ -614,7 +620,7 @@ func renderConfigValidationCard(c *ui.Context, a *AppController, theme *ui.Theme
 				Radius(6).
 				Background(withAlpha(theme.Danger, 0.12)).
 				Children(func() {
-					ui.Text(c, "ERROR: "+err.Error()).FontSize(11).TextColor(theme.Danger)
+					applyProseLineHeight(ui.Text(c, i18n.Tf("settings.validation.error", err.Error()))).FontSize(11).TextColor(theme.Danger)
 				})
 		}
 		for i, w := range warns {
@@ -625,7 +631,7 @@ func renderConfigValidationCard(c *ui.Context, a *AppController, theme *ui.Theme
 				Radius(6).
 				Background(withAlpha(theme.Warning, 0.12)).
 				Children(func() {
-					ui.Text(c, fmt.Sprintf("WARNING [%s %s]: %s", w.File, w.KeyPath, w.Message)).
+					applyProseLineHeight(ui.Text(c, i18n.Tf("settings.validation.warning", w.File, w.KeyPath, w.Message))).
 						FontSize(11).
 						TextColor(theme.Warning)
 				})
@@ -640,17 +646,17 @@ func (a *AppController) renderSettingsConfigsSection(c *ui.Context, theme *ui.Th
 		dir = "~/.config/clavis"
 	}
 
-	settingsSectionCard(c, theme, "Configuration Directory", func() {
+	settingsSectionCard(c, theme, i18n.T("settings.card.config_dir"), func() {
 		ui.Row(c).FillWidth().Gap(10).AlignItems(ui.Center).Children(func() {
 			renderSemanticIcon(c, "folder", 14, theme.Accent)
 			ui.Text(c, dir).FontSize(12).TextColor(theme.Text).Grow(1)
-			if ui.PrimaryButton(c, "Open Config Folder").Clicked() {
+			if ui.PrimaryButton(c, i18n.T("settings.configs.open_dir")).Clicked() {
 				_ = a.OpenConfigDirectory()
 			}
 		})
 	})
 
-	settingsSectionCard(c, theme, "TOML Configuration Files", func() {
+	settingsSectionCard(c, theme, i18n.T("settings.card.toml_files"), func() {
 		for _, kind := range config.AllConfigFileKinds() {
 			k := kind
 			ui.Row(c).Key("cfgfile:"+string(k)).FillWidth().Padding(3, 0).AlignItems(ui.Center).Children(func() {
@@ -658,7 +664,7 @@ func (a *AppController) renderSettingsConfigsSection(c *ui.Context, theme *ui.Th
 					ui.Text(c, string(k)).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
 					ui.Text(c, configFileDescription(k)).FontSize(11).TextColor(theme.TextMuted).SingleLine()
 				})
-				if ui.Button(c, "Open").Key("open:" + string(k)).Clicked() {
+				if ui.Button(c, i18n.T("common.open")).Key("open:" + string(k)).Clicked() {
 					_ = a.OpenConfigFile(k)
 				}
 			})
@@ -674,19 +680,19 @@ func renderPermRow(
 	onPrompt func(),
 	onOpenSettings func(),
 ) {
-	statusText := "Not Granted"
+	statusText := i18n.T("settings.perm.not_granted")
 	statusColor := theme.Warning
 	if granted {
-		statusText = "Granted"
+		statusText = i18n.T("settings.perm.granted")
 		statusColor = theme.Success
 	}
 	ui.Row(c).Key("perm:" + label).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
 		ui.Text(c, label).FontSize(13).TextColor(theme.Text).SingleLine().Grow(1)
 		ui.Text(c, statusText).FontSize(12).FontWeight(600).TextColor(statusColor).SingleLine()
-		if ui.Button(c, "Prompt").Key("prompt:"+label).Clicked() && onPrompt != nil {
+		if ui.Button(c, i18n.T("settings.perm.prompt")).Key("prompt:"+label).Clicked() && onPrompt != nil {
 			onPrompt()
 		}
-		if ui.Button(c, "Open Settings").Key("settings:"+label).Clicked() && onOpenSettings != nil {
+		if ui.Button(c, i18n.T("settings.perm.open_settings")).Key("settings:"+label).Clicked() && onOpenSettings != nil {
 			onOpenSettings()
 		}
 	})
@@ -725,15 +731,15 @@ func settingsKeyValueRow(c *ui.Context, theme *ui.Theme, key, val string) {
 func configFileDescription(kind config.ConfigFileKind) string {
 	switch kind {
 	case config.FileMain:
-		return "Triggers, keymap, appearance, AI profiles, clipboard, and IME settings"
+		return i18n.T("settings.configs.desc.main")
 	case config.FileLeader:
-		return "Leader key tree, submenus, and actions"
+		return i18n.T("settings.configs.desc.leader")
 	case config.FileSnippets:
-		return "Inline text expansion snippets"
+		return i18n.T("settings.configs.desc.snippets")
 	case config.FileGlossary:
-		return "Canonical domain glossary terms and aliases"
+		return i18n.T("settings.configs.desc.glossary")
 	case config.FileIMERules:
-		return "Per-application IME auto-switch rules"
+		return i18n.T("settings.configs.desc.ime_rules")
 	default:
 		return ""
 	}

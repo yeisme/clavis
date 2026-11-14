@@ -25,6 +25,7 @@ import (
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/host"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
 // SettingsTab identifies one of the 5 native Settings tabs.
@@ -41,11 +42,11 @@ const (
 // SettingsTabNames returns the ordered display names for the 5 Settings tabs.
 func SettingsTabNames() []string {
 	return []string{
-		"General & Triggers",
-		"AI & Keychain",
-		"IME & Keymap",
-		"Permissions & Diagnostics",
-		"Configs",
+		i18n.T("settings.tab.general"),
+		i18n.T("settings.tab.ai"),
+		i18n.T("settings.tab.ime"),
+		i18n.T("settings.tab.permissions"),
+		i18n.T("settings.tab.configs"),
 	}
 }
 
@@ -75,6 +76,9 @@ type Options struct {
 	OnHide          func()
 	OnOpenSettings  func(tab SettingsTab)
 	OnShowIMEPill   func(label string, anchor *host.CursorAnchor)
+	// OnLanguageChange fires when a config save or reload switches the UI
+	// language, so the shell relabels the tray and window titles.
+	OnLanguageChange func()
 }
 
 type clipTask struct {
@@ -121,15 +125,16 @@ type AppController struct {
 	Glossary       engine.GlossaryEngine
 	Snippets       *engine.SnippetEngine
 
-	httpDoer        ai.HTTPDoer
-	ClipboardWriter func(text string)
-	BeforeInject    func(ctx context.Context)
-	OpenPath        func(path string) error
-	OnRepaint       func()
-	OnPresentPhase  func(phase engine.CapsulePhase)
-	OnHide          func()
-	OnOpenSettings  func(tab SettingsTab)
-	OnShowIMEPill   func(label string, anchor *host.CursorAnchor)
+	httpDoer         ai.HTTPDoer
+	ClipboardWriter  func(text string)
+	BeforeInject     func(ctx context.Context)
+	OpenPath         func(path string) error
+	OnRepaint        func()
+	OnPresentPhase   func(phase engine.CapsulePhase)
+	OnHide           func()
+	OnOpenSettings   func(tab SettingsTab)
+	OnShowIMEPill    func(label string, anchor *host.CursorAnchor)
+	OnLanguageChange func()
 
 	// Decoded application icon bitmap cache
 	iconMu       sync.Mutex
@@ -205,27 +210,28 @@ func NewAppController(opts Options) *AppController {
 	sm := engine.NewStateMachine(cfg)
 
 	c := &AppController{
-		ConfigStore:     cfgStore,
-		StateMachine:    sm,
-		ClipboardStore:  clipStore,
-		SecretStore:     secStore,
-		Bridge:          opts.Bridge,
-		AppProvider:     appProv,
-		CLIExecutor:     actions.NewCLIExecutor(),
-		Glossary:        glossary,
-		Snippets:        snippets,
-		httpDoer:        opts.HTTPDoer,
-		ClipboardWriter: opts.ClipboardWriter,
-		BeforeInject:    opts.BeforeInject,
-		OpenPath:        opts.OpenPath,
-		OnRepaint:       opts.OnRepaint,
-		OnPresentPhase:  opts.OnPresentPhase,
-		OnHide:          opts.OnHide,
-		OnOpenSettings:  opts.OnOpenSettings,
-		OnShowIMEPill:   opts.OnShowIMEPill,
-		appIconCache:    make(map[string]*ui.Bitmap),
-		clipDone:        make(chan struct{}),
-		aiTestStatus:    AITestIdle,
+		ConfigStore:      cfgStore,
+		StateMachine:     sm,
+		ClipboardStore:   clipStore,
+		SecretStore:      secStore,
+		Bridge:           opts.Bridge,
+		AppProvider:      appProv,
+		CLIExecutor:      actions.NewCLIExecutor(),
+		Glossary:         glossary,
+		Snippets:         snippets,
+		httpDoer:         opts.HTTPDoer,
+		ClipboardWriter:  opts.ClipboardWriter,
+		BeforeInject:     opts.BeforeInject,
+		OpenPath:         opts.OpenPath,
+		OnRepaint:        opts.OnRepaint,
+		OnPresentPhase:   opts.OnPresentPhase,
+		OnHide:           opts.OnHide,
+		OnOpenSettings:   opts.OnOpenSettings,
+		OnShowIMEPill:    opts.OnShowIMEPill,
+		OnLanguageChange: opts.OnLanguageChange,
+		appIconCache:     make(map[string]*ui.Bitmap),
+		clipDone:         make(chan struct{}),
+		aiTestStatus:     AITestIdle,
 		uiState: uiViewState{
 			imeRuleModeDraft: config.IMEModeASCII,
 		},
@@ -549,7 +555,7 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 		c.writeClipboardText(eff.Text)
 		c.Dispatch(engine.Event{
 			Type:    engine.EventShowHUD,
-			Message: "Copied to clipboard",
+			Message: i18n.T("hud.copied"),
 		})
 
 	case engine.EffectPinClipboardItem:
@@ -591,7 +597,7 @@ func (c *AppController) bindAppIMERule(eff engine.Effect, state engine.State) {
 	processName := strings.TrimSpace(appCtx.ProcessName)
 	appName := strings.TrimSpace(appCtx.AppName)
 	if bundleID == "" && processName == "" {
-		c.ShowToastOrHUD("No active app detected")
+		c.ShowToastOrHUD(i18n.T("hud.no_active_app"))
 		return
 	}
 	if appName == "" {
@@ -637,9 +643,9 @@ func (c *AppController) bindAppIMERule(eff engine.Effect, state engine.State) {
 
 	var notice string
 	if mode == "" {
-		notice = fmt.Sprintf("Unbound IME rule for %s", label)
+		notice = i18n.Tf("hud.ime_unbound", label)
 	} else {
-		notice = fmt.Sprintf("Bound %s → %s IME", label, strings.ToUpper(string(mode)))
+		notice = i18n.Tf("hud.ime_bound", label, strings.ToUpper(string(mode)))
 	}
 
 	updated := c.ConfigStore.Current()
@@ -948,7 +954,7 @@ func (c *AppController) SelectAIProfile(id string) error {
 	c.refreshAPIKeySourceLocked()
 	c.aiTestStatus = AITestIdle
 	c.aiTestMessage = ""
-	c.settingsStatus = fmt.Sprintf("Active AI profile: %s", profile.Name)
+	c.settingsStatus = i18n.Tf("settings.status.active_profile", profile.Name)
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
 
@@ -1015,7 +1021,7 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 		cancel()
 		c.Dispatch(engine.Event{
 			Type:  engine.EventAIFailed,
-			Error: "AI client is not configured",
+			Error: i18n.T("settings.ai.not_configured"),
 		})
 		return
 	}
@@ -1203,21 +1209,21 @@ func (c *AppController) runAction(act config.LeaderAction, actionCtx engine.Caps
 			if err != nil {
 				c.Dispatch(engine.Event{
 					Type:    engine.EventShowHUD,
-					Message: fmt.Sprintf("Command failed: %v", err),
+					Message: i18n.Tf("hud.command_failed", err),
 				})
 				return
 			}
 			if res.TimedOut {
 				c.Dispatch(engine.Event{
 					Type:    engine.EventShowHUD,
-					Message: "Command timed out",
+					Message: i18n.T("hud.command_timeout"),
 				})
 				return
 			}
 			if res.ExitCode != 0 {
 				c.Dispatch(engine.Event{
 					Type:    engine.EventShowHUD,
-					Message: fmt.Sprintf("Command exited with code %d", res.ExitCode),
+					Message: i18n.Tf("hud.command_exit_code", res.ExitCode),
 				})
 			}
 		}()
@@ -1247,7 +1253,7 @@ func (c *AppController) runAction(act config.LeaderAction, actionCtx engine.Caps
 		}
 		c.Dispatch(engine.Event{
 			Type:    engine.EventShowHUD,
-			Message: fmt.Sprintf("Snippet %q not found", act.SnippetID),
+			Message: i18n.Tf("hud.snippet_not_found", act.SnippetID),
 		})
 
 	case config.ActionToggleIME:
@@ -1271,13 +1277,13 @@ func (c *AppController) handleInternalSettingCommand(args []string) {
 	switch sub {
 	case "reload-config":
 		if c.ReloadConfig() {
-			c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: "Configuration reloaded"})
+			c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.T("hud.config_reloaded")})
 		} else {
-			c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: "Configuration reload failed"})
+			c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.T("hud.config_reload_failed")})
 		}
 	case "open-config-dir":
 		if err := c.OpenConfigDirectory(); err != nil {
-			c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: fmt.Sprintf("Open folder failed: %v", err)})
+			c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.Tf("hud.open_folder_failed", err)})
 		}
 	case "ai":
 		c.OpenSettings(SettingsTabAI)
@@ -1318,7 +1324,7 @@ func (c *AppController) toggleIME() {
 		ctx := context.Background()
 		sources, err := br.InputSources(ctx)
 		if err != nil || len(sources) == 0 {
-			c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: "No input sources available"})
+			c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.T("hud.no_input_sources")})
 			return
 		}
 		current, err := br.CurrentInputSource(ctx)
@@ -1343,7 +1349,7 @@ func (c *AppController) toggleIME() {
 			}
 		}
 		if err := br.SelectInputSource(ctx, next.ID); err != nil {
-			c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: fmt.Sprintf("IME switch failed: %v", err)})
+			c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.Tf("hud.ime_switch_failed", err)})
 			return
 		}
 		c.NotifyIMESwitch(next, nil)
@@ -1351,7 +1357,7 @@ func (c *AppController) toggleIME() {
 		if name == "" {
 			name = next.ID
 		}
-		c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: "IME: " + name})
+		c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.Tf("hud.ime_switched", name)})
 	}()
 }
 
@@ -1363,16 +1369,16 @@ func (c *AppController) normalizeGlossary(actionCtx engine.CapsuleContext) {
 	if strings.TrimSpace(actionCtx.SelectedText) != "" {
 		normalized := glossary.NormalizeAliases(actionCtx.SelectedText, true, true)
 		c.injectTextAsync(normalized, 0, 0)
-		c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: "Normalized glossary terms"})
+		c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.T("hud.normalized_glossary")})
 		return
 	}
 	if strings.TrimSpace(actionCtx.ClipboardPreview) != "" {
 		normalized := glossary.NormalizeAliases(actionCtx.ClipboardPreview, true, true)
 		c.writeClipboardText(normalized)
-		c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: "Normalized clipboard terms"})
+		c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.T("hud.normalized_clipboard")})
 		return
 	}
-	c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: "No text selected to normalize"})
+	c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.T("hud.no_selection")})
 }
 
 // OpenOmnibox syncs clipboard history, installed apps, and frontmost context before opening the Omnibox.
@@ -1568,7 +1574,7 @@ func (c *AppController) TestAIConnectionForProfile(ctx context.Context, profileI
 
 	c.mu.Lock()
 	c.aiTestStatus = AITestLoading
-	c.aiTestMessage = "Testing connection..."
+	c.aiTestMessage = i18n.T("settings.ai.testing")
 	hasClient := c.AIClient != nil
 	var streamClient ai.OpenAICompatibleClient
 	if hasClient {
@@ -1582,7 +1588,7 @@ func (c *AppController) TestAIConnectionForProfile(ctx context.Context, profileI
 	}
 
 	if !hasClient {
-		err := errors.New("AI client is not configured")
+		err := errors.New(i18n.T("settings.ai.not_configured"))
 		c.setAITestResult(AITestError, err.Error())
 		return err
 	}
@@ -1612,7 +1618,7 @@ func (c *AppController) TestAIConnectionForProfile(ctx context.Context, profileI
 	if summary == "" {
 		summary = "OK"
 	}
-	c.setAITestResult(AITestSuccess, "Connected: "+summary)
+	c.setAITestResult(AITestSuccess, i18n.Tf("settings.ai.connected", summary))
 	return nil
 }
 
@@ -1638,12 +1644,12 @@ func (c *AppController) SaveAPIKey(apiKey string) error {
 		acct = c.ConfigStore.Current().Main.AI.KeychainAccount
 	}
 	if err := c.SecretStore.SaveKey(acct, apiKey); err != nil {
-		c.setSettingsStatus(fmt.Sprintf("Failed to save API key: %v", err))
+		c.setSettingsStatus(i18n.Tf("settings.status.save_api_key_failed", err))
 		return err
 	}
 	c.mu.Lock()
 	c.refreshAPIKeySourceLocked()
-	c.settingsStatus = "API key saved"
+	c.settingsStatus = i18n.T("settings.status.api_key_saved")
 	c.uiState.apiKeyDraft = ""
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
@@ -1664,12 +1670,12 @@ func (c *AppController) DeleteAPIKey() error {
 		acct = c.ConfigStore.Current().Main.AI.KeychainAccount
 	}
 	if err := c.SecretStore.DeleteKey(acct); err != nil && !errors.Is(err, secrets.ErrSecretNotFound) {
-		c.setSettingsStatus(fmt.Sprintf("Failed to delete API key: %v", err))
+		c.setSettingsStatus(i18n.Tf("settings.status.delete_api_key_failed", err))
 		return err
 	}
 	c.mu.Lock()
 	c.refreshAPIKeySourceLocked()
-	c.settingsStatus = "API key cleared"
+	c.settingsStatus = i18n.T("settings.status.api_key_cleared")
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
 	if onRepaint != nil {
@@ -1721,7 +1727,7 @@ func (c *AppController) UpdateMainConfig(mutate func(main *config.MainConfig)) e
 	mutate(&mainCfg)
 
 	if err := c.ConfigStore.SaveMain(mainCfg); err != nil {
-		c.setSettingsStatus(fmt.Sprintf("Failed to save settings: %v", err))
+		c.setSettingsStatus(i18n.Tf("settings.status.save_failed", err))
 		return err
 	}
 
@@ -1732,19 +1738,34 @@ func (c *AppController) UpdateMainConfig(mutate func(main *config.MainConfig)) e
 		c.AIClient.Config = updated.Main.AI
 	}
 	c.refreshAPIKeySourceLocked()
-	c.settingsStatus = "Settings saved"
+	c.settingsStatus = i18n.T("settings.status.saved")
 	br := c.Bridge
 	onRepaint := c.OnRepaint
+	onLanguageChange := c.OnLanguageChange
+	langChanged := syncAppearanceLanguage(updated)
 	c.mu.Unlock()
 
 	if br != nil {
 		br.UpdateKeymapConfig(updated.Main.Keymap)
 		br.UpdateIMEConfig(updated.Main.IME, updated.IMERules)
 	}
+	if langChanged && onLanguageChange != nil {
+		onLanguageChange()
+	}
 	if onRepaint != nil {
 		onRepaint()
 	}
 	return nil
+}
+
+// syncAppearanceLanguage applies [appearance].language of cfg, resolving
+// "auto" against the system preference, and reports whether the language
+// changed. It runs on config save/reload so views, tray and diagnostics
+// speak one language.
+func syncAppearanceLanguage(cfg config.ClavisConfig) bool {
+	prev := i18n.Current()
+	i18n.SetLanguage(i18n.ResolveLanguage(cfg.Main.Appearance.Language, i18n.PreferredLanguages()))
+	return i18n.Current() != prev
 }
 
 // AddIMERule validates and appends an IME auto-switch rule to ime-rules.toml,
@@ -1779,7 +1800,7 @@ func (c *AppController) AddIMERule(rule config.IMERule) error {
 	rulesCfg.Rules = append(append([]config.IMERule(nil), rulesCfg.Rules...), rule)
 
 	if err := c.ConfigStore.SaveIMERules(rulesCfg); err != nil {
-		c.setSettingsStatus(fmt.Sprintf("Failed to add IME rule: %v", err))
+		c.setSettingsStatus(i18n.Tf("settings.status.add_ime_rule_failed", err))
 		return err
 	}
 
@@ -1790,7 +1811,7 @@ func (c *AppController) AddIMERule(rule config.IMERule) error {
 	c.uiState.imeRuleURLDraft = ""
 	c.uiState.imeRuleTitleDraft = ""
 	c.uiState.imeRuleSourceDraft = ""
-	c.settingsStatus = "IME rule added"
+	c.settingsStatus = i18n.T("settings.status.ime_rule_added")
 	br := c.Bridge
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
@@ -1820,14 +1841,14 @@ func (c *AppController) DeleteIMERule(index int) error {
 	rulesCfg := config.IMERulesConfig{Rules: rules}
 
 	if err := c.ConfigStore.SaveIMERules(rulesCfg); err != nil {
-		c.setSettingsStatus(fmt.Sprintf("Failed to delete IME rule: %v", err))
+		c.setSettingsStatus(i18n.Tf("settings.status.delete_ime_rule_failed", err))
 		return err
 	}
 
 	updated := c.ConfigStore.Current()
 	c.mu.Lock()
 	c.StateMachine.SetConfig(updated)
-	c.settingsStatus = "IME rule deleted"
+	c.settingsStatus = i18n.T("settings.status.ime_rule_deleted")
 	br := c.Bridge
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
@@ -1844,13 +1865,13 @@ func (c *AppController) DeleteIMERule(index int) error {
 // SaveLeaderConfig persists leader.toml, refreshes the state machine, and repaints.
 func (c *AppController) SaveLeaderConfig(leaderCfg config.LeaderConfig) error {
 	if err := c.ConfigStore.SaveLeader(leaderCfg); err != nil {
-		c.setSettingsStatus(fmt.Sprintf("Failed to save leader config: %v", err))
+		c.setSettingsStatus(i18n.Tf("settings.status.save_leader_failed", err))
 		return err
 	}
 	updated := c.ConfigStore.Current()
 	c.mu.Lock()
 	c.StateMachine.SetConfig(updated)
-	c.settingsStatus = fmt.Sprintf("Leader config saved (%d nodes)", len(updated.Leader.Nodes))
+	c.settingsStatus = i18n.Tf("settings.status.leader_saved", len(updated.Leader.Nodes))
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
 	if onRepaint != nil {
@@ -1862,7 +1883,7 @@ func (c *AppController) SaveLeaderConfig(leaderCfg config.LeaderConfig) error {
 // SaveSnippetsConfig persists snippets.toml, hot-reloads the snippet engine, and repaints.
 func (c *AppController) SaveSnippetsConfig(snippetsCfg config.SnippetsConfig) error {
 	if err := c.ConfigStore.SaveSnippets(snippetsCfg); err != nil {
-		c.setSettingsStatus(fmt.Sprintf("Failed to save snippets: %v", err))
+		c.setSettingsStatus(i18n.Tf("settings.status.save_snippets_failed", err))
 		return err
 	}
 	updated := c.ConfigStore.Current()
@@ -1871,7 +1892,7 @@ func (c *AppController) SaveSnippetsConfig(snippetsCfg config.SnippetsConfig) er
 	if c.Snippets != nil {
 		c.Snippets.UpdateSnippets(updated.Snippets.Items)
 	}
-	c.settingsStatus = fmt.Sprintf("Snippets saved (%d items)", len(updated.Snippets.Items))
+	c.settingsStatus = i18n.Tf("settings.status.snippets_saved", len(updated.Snippets.Items))
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
 	if onRepaint != nil {
@@ -1883,7 +1904,7 @@ func (c *AppController) SaveSnippetsConfig(snippetsCfg config.SnippetsConfig) er
 // SaveGlossaryConfig persists glossary.toml, hot-reloads the glossary and AI client engines, and repaints.
 func (c *AppController) SaveGlossaryConfig(glossaryCfg config.GlossaryConfig) error {
 	if err := c.ConfigStore.SaveGlossary(glossaryCfg); err != nil {
-		c.setSettingsStatus(fmt.Sprintf("Failed to save glossary: %v", err))
+		c.setSettingsStatus(i18n.Tf("settings.status.save_glossary_failed", err))
 		return err
 	}
 	updated := c.ConfigStore.Current()
@@ -1893,7 +1914,7 @@ func (c *AppController) SaveGlossaryConfig(glossaryCfg config.GlossaryConfig) er
 	if c.AIClient != nil {
 		c.AIClient.GlossaryEngine = c.Glossary
 	}
-	c.settingsStatus = fmt.Sprintf("Glossary saved (%d terms)", len(updated.Glossary.Terms))
+	c.settingsStatus = i18n.Tf("settings.status.glossary_saved", len(updated.Glossary.Terms))
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
 	if onRepaint != nil {
@@ -1905,13 +1926,13 @@ func (c *AppController) SaveGlossaryConfig(glossaryCfg config.GlossaryConfig) er
 // SaveIMERulesConfig persists ime-rules.toml, refreshes the state machine, and updates the host bridge.
 func (c *AppController) SaveIMERulesConfig(imeRulesCfg config.IMERulesConfig) error {
 	if err := c.ConfigStore.SaveIMERules(imeRulesCfg); err != nil {
-		c.setSettingsStatus(fmt.Sprintf("Failed to save IME rules: %v", err))
+		c.setSettingsStatus(i18n.Tf("settings.status.save_ime_rules_failed", err))
 		return err
 	}
 	updated := c.ConfigStore.Current()
 	c.mu.Lock()
 	c.StateMachine.SetConfig(updated)
-	c.settingsStatus = fmt.Sprintf("IME rules saved (%d rules)", len(updated.IMERules.Rules))
+	c.settingsStatus = i18n.Tf("settings.status.ime_rules_saved", len(updated.IMERules.Rules))
 	br := c.Bridge
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
@@ -1962,18 +1983,23 @@ func (c *AppController) ReloadConfig() bool {
 			c.resolveAPIKey,
 		)
 		c.refreshAPIKeySourceLocked()
-		c.settingsStatus = "Configuration reloaded"
+		c.settingsStatus = i18n.T("hud.config_reloaded")
 		br = c.Bridge
 	} else {
 		errs := c.ConfigStore.LastErrors()
-		c.settingsStatus = fmt.Sprintf("Reload failed (%d error(s)); kept last valid config", len(errs))
+		c.settingsStatus = i18n.Tf("settings.status.reload_failed", len(errs))
 	}
 	onRepaint := c.OnRepaint
+	onLanguageChange := c.OnLanguageChange
+	langChanged := syncAppearanceLanguage(cfg)
 	c.mu.Unlock()
 
 	if ok && br != nil {
 		br.UpdateKeymapConfig(cfg.Main.Keymap)
 		br.UpdateIMEConfig(cfg.Main.IME, cfg.IMERules)
+	}
+	if langChanged && onLanguageChange != nil {
+		onLanguageChange()
 	}
 	if onRepaint != nil {
 		onRepaint()

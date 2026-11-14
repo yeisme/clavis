@@ -11,6 +11,7 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
 // capsuleEphemeralStore keeps per-controller ephemeral UI state for the
@@ -270,9 +271,9 @@ func (a *AppController) renderOmniboxActionMenu(c *ui.Context, theme *ui.Theme, 
 	card.Children(func() {
 		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 			renderSemanticIcon(c, "command", 11, theme.Accent)
-			ui.Text(c, "Actions").FontSize(11).FontWeight(700).TextColor(theme.Text).SingleLine()
+			ui.Text(c, i18n.T("omnibox.tab.actions")).FontSize(11).FontWeight(700).TextColor(theme.Text).SingleLine()
 			ui.Spacer(c)
-			ui.Text(c, "↑↓ Select • ↵ Run • Esc Close").
+			ui.Text(c, i18n.T("preview.menu_hint")).
 				FontSize(10).
 				TextColor(theme.TextMuted).
 				SingleLine()
@@ -331,7 +332,7 @@ func (a *AppController) renderOmniboxPreviewCard(
 	card.Children(func() {
 		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 			renderSemanticIcon(c, previewIcon(item), 12, theme.Accent)
-			ui.Text(c, "Preview").FontSize(11).FontWeight(700).TextColor(theme.Text).SingleLine()
+			ui.Text(c, i18n.T("preview.title")).FontSize(11).FontWeight(700).TextColor(theme.Text).SingleLine()
 			ui.Spacer(c)
 			ui.Text(c, previewKindLabel(item)).FontSize(10).TextColor(theme.TextMuted).SingleLine()
 		})
@@ -361,12 +362,11 @@ func (a *AppController) renderOmniboxPreviewBody(
 		source := strings.TrimSpace(item.Subtitle)
 		ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
 			previewBadge(c, theme, "clipboard", source, false)
-			if item.KeyHint == "Pinned" {
-				previewBadge(c, theme, "pin.fill", "Pinned", true)
+			if item.KeyHint == engine.KeyHintPinned {
+				previewBadge(c, theme, "pin.fill", i18n.T("common.pinned"), true)
 			}
 		})
-		ui.Text(c, fmt.Sprintf("%d chars • %d lines",
-			utf8.RuneCountInString(content), previewLineCount(content))).
+		ui.Text(c, i18n.Tf("preview.clipboard_stats", utf8.RuneCountInString(content), previewLineCount(content))).
 			FontSize(10).
 			TextColor(theme.TextMuted).
 			SingleLine()
@@ -380,18 +380,18 @@ func (a *AppController) renderOmniboxPreviewBody(
 		}
 		ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
 			previewBadge(c, theme, "text.badge.plus", snippet.Trigger, true)
-			bounds := "Word boundary off"
+			bounds := i18n.T("preview.word_boundary_off")
 			if snippet.WordBoundary {
-				bounds = "Word boundary on"
+				bounds = i18n.T("preview.word_boundary_on")
 			}
 			ui.Text(c, bounds).FontSize(10).TextColor(theme.TextMuted).SingleLine()
 		})
-		scope := "Any app"
+		scope := i18n.T("preview.any_app")
 		if len(snippet.AppBundleIDs) > 0 {
 			scope = strings.Join(snippet.AppBundleIDs, ", ")
 		}
-		ui.Text(c, "Scope: "+scope).FontSize(10).TextColor(theme.TextMuted).SingleLine()
-		ui.Text(c, "Template").FontSize(10).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+		ui.Text(c, i18n.Tf("preview.scope", scope)).FontSize(10).TextColor(theme.TextMuted).SingleLine()
+		ui.Text(c, i18n.T("preview.template")).FontSize(10).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
 		renderPreviewLines(c, theme, snippet.Content, 24)
 		rendered := engine.RenderSnippet(snippet.Content, engine.RenderOptions{
 			TriggerLength: utf8.RuneCountInString(snippet.Trigger),
@@ -399,7 +399,7 @@ func (a *AppController) renderOmniboxPreviewBody(
 			ClipboardText: state.Context.ClipboardPreview,
 			AppName:       state.Context.AppName,
 		})
-		ui.Text(c, "Rendered").FontSize(10).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+		ui.Text(c, i18n.T("preview.rendered")).FontSize(10).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
 		renderPreviewLines(c, theme, rendered.RenderedText, 24)
 
 	case engine.ItemGlossaryTerm:
@@ -414,11 +414,11 @@ func (a *AppController) renderOmniboxPreviewBody(
 				previewBadge(c, theme, "tag", term.Category, true)
 			}
 		})
-		aliases := "None"
+		aliases := i18n.T("common.none")
 		if len(term.Aliases) > 0 {
 			aliases = strings.Join(term.Aliases, ", ")
 		}
-		ui.Text(c, "Aliases: "+aliases).FontSize(11).TextColor(theme.Text).SingleLine()
+		ui.Text(c, i18n.Tf("preview.aliases", aliases)).FontSize(11).TextColor(theme.Text).SingleLine()
 		if term.Hint != "" {
 			ui.Text(c, term.Hint).FontSize(10).TextColor(theme.TextMuted).SingleLine()
 		}
@@ -427,11 +427,11 @@ func (a *AppController) renderOmniboxPreviewBody(
 		ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
 			mode := item.AIMode
 			if mode == "" {
-				mode = "ask"
+				mode = i18n.T("ai.mode.ask")
 			}
-			previewBadge(c, theme, "sparkles", "mode: "+mode, true)
+			previewBadge(c, theme, "sparkles", i18n.Tf("preview.ai_mode", mode), true)
 		})
-		ui.Text(c, "Prompt").FontSize(10).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+		ui.Text(c, i18n.T("preview.prompt")).FontSize(10).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
 		prompt := item.AIPrompt
 		if prompt == "" {
 			prompt = item.Title
@@ -439,12 +439,12 @@ func (a *AppController) renderOmniboxPreviewBody(
 		renderPreviewLines(c, theme, prompt, 32)
 
 	case engine.ItemUtility:
-		ui.Text(c, "Value").FontSize(10).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+		ui.Text(c, i18n.T("preview.value")).FontSize(10).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
 		renderPreviewLines(c, theme, item.UtilityValue, 16)
 
 	case engine.ItemAppIMERule:
 		ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
-			previewBadge(c, theme, "keyboard", "IME "+string(item.IMEMode), true)
+			previewBadge(c, theme, "keyboard", i18n.Tf("preview.ime_mode", string(item.IMEMode)), true)
 		})
 		ui.Text(c, item.Title).FontSize(12).TextColor(theme.Text).SingleLine()
 		if item.Subtitle != "" {
@@ -526,7 +526,7 @@ func renderPreviewLines(c *ui.Context, theme *ui.Theme, text string, limit int) 
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		ui.Text(c, line).FontSize(11).TextColor(theme.Text).SingleLine()
+		applyProseLineHeight(ui.Text(c, line)).FontSize(11).TextColor(theme.Text).SingleLine()
 	}
 }
 
@@ -556,21 +556,21 @@ func previewLineCount(text string) int {
 func previewKindLabel(item engine.OmniboxItem) string {
 	switch item.Kind {
 	case engine.ItemClipboardEntry:
-		return "Clipboard"
+		return i18n.T("preview.kind.clipboard")
 	case engine.ItemSnippet:
-		return "Snippet"
+		return i18n.T("preview.kind.snippet")
 	case engine.ItemGlossaryTerm:
-		return "Glossary"
+		return i18n.T("preview.kind.glossary")
 	case engine.ItemAIMode:
-		return "AI Mode"
+		return i18n.T("preview.kind.ai")
 	case engine.ItemUtility:
-		return "Utility"
+		return i18n.T("preview.kind.utility")
 	case engine.ItemAppIMERule:
-		return "IME Rule"
+		return i18n.T("preview.kind.ime_rule")
 	case engine.ItemInstalledApp:
-		return "App"
+		return i18n.T("preview.kind.app")
 	default:
-		return "Item"
+		return i18n.T("preview.kind.item")
 	}
 }
 

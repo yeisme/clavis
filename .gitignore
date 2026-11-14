@@ -1,6 +1,7 @@
 build/
 .mygo/
 .pi/
+.pi-bg/
 *.db
 *.db-wal
 *.db-shm

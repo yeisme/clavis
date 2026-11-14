@@ -12,6 +12,7 @@ import (
 	"github.com/egoist/mygo/ui/markdown"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
 var omniboxTabs = []config.CapsuleTab{
@@ -53,7 +54,7 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 		root.Radius(radius)
 	}
 
-	card := ui.Column(c).Fill().Radius(radius).Clip()
+	card := applyTextLocale(ui.Column(c).Fill().Radius(radius).Clip())
 	if !prefs.ReduceTransparency {
 		card.Material(glass.Glass{Native: c.Vibrancy()})
 		if prefs.HighContrast {
@@ -103,13 +104,13 @@ func IMEPillView(c *ui.Context, label string) {
 		c.Root().Radius(999)
 	}
 
-	pill := ui.Row(c).
+	pill := applyTextLocale(ui.Row(c).
 		Fill().
 		Padding(4, 10).
 		Radius(999).
 		Center().
 		Gap(5).
-		Clip()
+		Clip())
 	if !prefs.ReduceTransparency {
 		pill.Material(glass.Glass{Native: c.Vibrancy()})
 		pill.Border(1, withAlpha(theme.Border, 0.55))
@@ -158,7 +159,7 @@ func (a *AppController) renderCapsuleHeader(
 		switch state.Phase {
 		case engine.PhaseLeader:
 			crumbs := make([]string, 0, 1+len(state.LeaderBreadcrumbs))
-			crumbs = append(crumbs, "Leader")
+			crumbs = append(crumbs, i18n.T("leader.root"))
 			crumbs = append(crumbs, state.LeaderBreadcrumbs...)
 			ui.Text(c, strings.Join(crumbs, " › ")).
 				FontSize(13).
@@ -197,9 +198,9 @@ func (a *AppController) renderCapsuleHeader(
 		case engine.PhaseAIStreaming:
 			modeLabel := state.AIMode
 			if modeLabel == "" {
-				modeLabel = "ask"
+				modeLabel = i18n.T("ai.mode.ask")
 			}
-			ui.Text(c, "AI • "+modeLabel).FontSize(13).FontWeight(600).TextColor(theme.Text).SingleLine()
+			ui.Text(c, i18n.Tf("ai.header", modeLabel)).FontSize(13).FontWeight(600).TextColor(theme.Text).SingleLine()
 
 			// Active AI Profile pill (clickable to cycle profiles)
 			activeProf := a.ActiveAIProfile()
@@ -227,15 +228,15 @@ func (a *AppController) renderCapsuleHeader(
 				}
 			}
 
-			statusText := "Streaming..."
+			statusText := i18n.T("ai.status.streaming")
 			statusBg := withAlpha(theme.Accent, 0.15)
 			statusFg := theme.Accent
 			if state.AIError != "" {
-				statusText = "Error"
+				statusText = i18n.T("common.error")
 				statusBg = withAlpha(theme.Danger, 0.16)
 				statusFg = theme.Danger
 			} else if state.AIComplete {
-				statusText = "Done"
+				statusText = i18n.T("common.done")
 				statusBg = withAlpha(theme.Success, 0.16)
 				statusFg = theme.Success
 			}
@@ -315,7 +316,7 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 		ui.Scroll(c).FillWidth().Grow(1).Children(func() {
 			if len(state.LeaderNodes) == 0 {
 				ui.Box(c).FillWidth().Padding(24).Center().Children(func() {
-					ui.Text(c, "No leader actions configured").TextColor(theme.TextMuted)
+					ui.Text(c, i18n.T("leader.empty")).TextColor(theme.TextMuted)
 				})
 				return
 			}
@@ -363,7 +364,7 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 
 		ui.Divider(c)
 		ui.Row(c).FillWidth().Gap(12).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "Press key to trigger • / Search • ⌫ Back • Esc Close").
+			ui.Text(c, i18n.T("leader.footer")).
 				FontSize(11).
 				TextColor(theme.TextMuted).
 				SingleLine()
@@ -442,7 +443,7 @@ func (a *AppController) renderOmniboxView(
 			AutoFocus().
 			Search().
 			Placeholder(omniboxPlaceholder(state.OmniboxTab)).
-			Label("Omnibox Search").
+			Label(i18n.T("omnibox.search_label")).
 			FillWidth()
 
 		if query != "" {
@@ -546,13 +547,13 @@ func (a *AppController) renderOmniboxView(
 					row.Children(func() {
 						a.renderOmniboxRowLeadingIcon(c, item, iconColor)
 
-						if item.Kind == engine.ItemClipboardEntry && item.KeyHint == "Pinned" {
+						if item.Kind == engine.ItemClipboardEntry && item.KeyHint == engine.KeyHintPinned {
 							ui.Box(c).
 								Padding(2, 6).
 								Radius(4).
 								Background(withAlpha(theme.Accent, 0.16)).
 								Children(func() {
-									ui.Text(c, "PIN").FontSize(10).FontWeight(700).TextColor(theme.Accent).SingleLine()
+									ui.Text(c, i18n.T("omnibox.pin_badge")).FontSize(10).FontWeight(700).TextColor(theme.Accent).SingleLine()
 								})
 						}
 
@@ -576,7 +577,7 @@ func (a *AppController) renderOmniboxView(
 								})
 						}
 
-						if cfg.Main.Appearance.ShowKeyHints && item.KeyHint != "" && item.KeyHint != "Pinned" {
+						if cfg.Main.Appearance.ShowKeyHints && item.KeyHint != "" && item.KeyHint != engine.KeyHintPinned {
 							ui.Box(c).
 								Padding(2, 7).
 								Radius(5).
@@ -622,18 +623,18 @@ func (a *AppController) renderOmniboxView(
 		ui.Divider(c)
 		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
 			prefix := modPrefix()
-			hint := "↵ Run • " + prefix + "↵ Secondary • ↑↓ Navigate • Tab Switch • Esc Close"
+			hint := i18n.Tf("omnibox.footer.hint", prefix, prefix)
 			if selected, ok := selectedOmniboxItem(state); ok && selected.Kind == engine.ItemClipboardEntry {
-				hint += " • " + prefix + "P Pin • " + prefix + "⌫ Delete"
+				hint += i18n.Tf("omnibox.footer.hint_clipboard", prefix, prefix)
 			}
 			ui.Text(c, hint).FontSize(11).TextColor(theme.TextMuted).SingleLine().Grow(1)
 
-			a.renderOmniboxFooterFrameToggle(c, theme, state, prefix+"I Preview",
+			a.renderOmniboxFooterFrameToggle(c, theme, state, prefix+i18n.T("omnibox.footer.preview"),
 				a.previewPaneVisible(cfg), func() {
 					capsuleUI.togglePreview(a, cfg.Main.Appearance.ShowPreviewPane)
 					a.uiState.searchHandle.RequestFocus(c)
 				})
-			a.renderOmniboxFooterFrameToggle(c, theme, state, prefix+"K Actions",
+			a.renderOmniboxFooterFrameToggle(c, theme, state, prefix+i18n.T("omnibox.footer.actions"),
 				a.omniboxActionMenuOpen(state), func() {
 					a.toggleOmniboxActionMenu()
 					a.uiState.searchHandle.RequestFocus(c)
@@ -823,7 +824,7 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, st
 	ui.Column(c).FillWidth().Grow(1).Padding(12, 14).Gap(8).Children(func() {
 		if state.AISourceText != "" {
 			srcRunes := utf8.RuneCountInString(state.AISourceText)
-			headerLabel := fmt.Sprintf("Source Text (%d chars)", srcRunes)
+			headerLabel := i18n.Tf("ai.source_text", srcRunes)
 			toggle := ui.ButtonBase(c).
 				FillWidth().
 				Padding(6, 10).
@@ -873,10 +874,10 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, st
 					ui.Scroll(c).FillWidth().Children(func() {
 						ui.Column(c).FillWidth().Gap(4).Children(func() {
 							for idx, turn := range state.AIHistory {
-								roleLabel := "You"
+								roleLabel := i18n.T("ai.role_you")
 								roleColor := theme.Accent
 								if strings.EqualFold(turn.Role, "assistant") {
-									roleLabel = "AI"
+									roleLabel = i18n.T("omnibox.tab.ai")
 									roleColor = theme.TextMuted
 								}
 								ui.Row(c).
@@ -900,13 +901,13 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, st
 				})
 		}
 
-		ui.Scroll(c).
+		applyProseLineHeight(ui.Scroll(c).
 			FillWidth().
 			Grow(1).
 			Padding(10, 12).
 			Radius(10).
 			Background(theme.Surface).
-			Border(1, theme.Border).
+			Border(1, theme.Border)).
 			Children(func() {
 				switch {
 				case state.AIError != "":
@@ -920,7 +921,7 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, st
 							ui.Text(c, state.AIError).FontSize(13).TextColor(theme.Danger)
 						})
 				case state.AIOutput == "":
-					ui.Text(c, "Generating response...").FontSize(13).TextColor(theme.TextMuted)
+					ui.Text(c, i18n.T("ai.generating")).FontSize(13).TextColor(theme.TextMuted)
 				default:
 					markdown.View(c, state.AIOutput, &a.uiState.mdOpts)
 				}
@@ -931,8 +932,8 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, st
 			followUp := a.uiState.followUpQuery
 			in := ui.TextInput(c, &followUp).
 				Bind(&a.uiState.followUpHandle).
-				Placeholder("Follow up with AI (Tab to focus, Enter to send)...").
-				Label("Follow up with AI").
+				Placeholder(i18n.T("ai.followup_placeholder")).
+				Label(i18n.T("ai.followup_label")).
 				FillWidth()
 
 			// Track IME composition so candidate selection never sends or closes.
@@ -1005,15 +1006,12 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, st
 			canAccept := state.AIError == "" && state.AIOutput != ""
 			canCopy := state.AIOutput != ""
 
-			replaceBtn := ui.PrimaryButton(c, "⏎ Replace").Disabled(!canAccept)
+			replaceBtn := ui.PrimaryButton(c, i18n.T("ai.replace")).Disabled(!canAccept)
 			if replaceBtn.Clicked() && canAccept {
 				a.Dispatch(engine.Event{Type: engine.EventAcceptAIOutput})
 			}
 
-			copyLabel := "⌘C Copy"
-			if runtime.GOOS != "darwin" {
-				copyLabel = "Ctrl+C Copy"
-			}
+			copyLabel := modPrefix() + "C " + i18n.T("common.copy")
 			copyBtn := ui.Button(c, copyLabel).Disabled(!canCopy)
 			if copyBtn.Clicked() && canCopy {
 				a.Dispatch(engine.Event{Type: engine.EventCopyAIOutput})
@@ -1021,9 +1019,9 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, st
 
 			ui.Spacer(c)
 
-			cancelLabel := "Esc Cancel"
+			cancelLabel := i18n.T("ai.cancel")
 			if state.AIComplete {
-				cancelLabel = "Esc Close"
+				cancelLabel = i18n.T("ai.close")
 			}
 			if ui.Button(c, cancelLabel).Clicked() {
 				a.Dispatch(engine.Event{Type: engine.EventEscape})
@@ -1042,17 +1040,17 @@ func (a *AppController) renderHUDView(c *ui.Context, theme *ui.Theme, state engi
 func omniboxTabLabel(tab config.CapsuleTab) string {
 	switch tab {
 	case config.TabActions:
-		return "Actions"
+		return i18n.T("omnibox.tab.actions")
 	case config.TabClipboard:
-		return "Clipboard"
+		return i18n.T("omnibox.tab.clipboard")
 	case config.TabSnippets:
-		return "Snippets"
+		return i18n.T("omnibox.tab.snippets")
 	case config.TabAI:
-		return "AI"
+		return i18n.T("omnibox.tab.ai")
 	case config.TabGlossary:
-		return "Glossary"
+		return i18n.T("omnibox.tab.glossary")
 	case config.TabSettings:
-		return "Settings"
+		return i18n.T("common.settings")
 	default:
 		return string(tab)
 	}
@@ -1061,30 +1059,30 @@ func omniboxTabLabel(tab config.CapsuleTab) string {
 func omniboxPlaceholder(tab config.CapsuleTab) string {
 	switch tab {
 	case config.TabClipboard:
-		return "Search clipboard history..."
+		return i18n.T("omnibox.placeholder.clipboard")
 	case config.TabSnippets:
-		return "Search snippets..."
+		return i18n.T("omnibox.placeholder.snippets")
 	case config.TabAI:
-		return "Search AI actions or type a prompt..."
+		return i18n.T("omnibox.placeholder.ai")
 	case config.TabGlossary:
-		return "Search glossary terms..."
+		return i18n.T("omnibox.placeholder.glossary")
 	default:
-		return "Search actions, snippets, or ask AI..."
+		return i18n.T("omnibox.placeholder.default")
 	}
 }
 
 func omniboxEmptyText(tab config.CapsuleTab) string {
 	switch tab {
 	case config.TabClipboard:
-		return "No clipboard items"
+		return i18n.T("omnibox.empty.clipboard")
 	case config.TabSnippets:
-		return "No matching snippets"
+		return i18n.T("omnibox.empty.snippets")
 	case config.TabAI:
-		return "Type a prompt to ask AI"
+		return i18n.T("omnibox.empty.ai")
 	case config.TabGlossary:
-		return "No matching glossary terms"
+		return i18n.T("omnibox.empty.glossary")
 	default:
-		return "No matching results"
+		return i18n.T("omnibox.empty.default")
 	}
 }
 

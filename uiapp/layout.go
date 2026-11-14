@@ -7,6 +7,7 @@ import (
 
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
 const (
@@ -36,6 +37,12 @@ func PreferredCapsuleSize(phase engine.CapsulePhase, appearance config.Appearanc
 	}
 	if w > maxCapsuleWidth {
 		w = maxCapsuleWidth
+	}
+	// Chinese UI text runs wider per character: unless the user asked for
+	// something even larger, keep a wider floor so hint lines and rows
+	// don't crowd (the user's own larger setting always wins).
+	if i18n.IsChinese() && w < defaultCapsuleWidth+40 {
+		w = defaultCapsuleWidth + 40
 	}
 
 	switch phase {
@@ -93,17 +100,51 @@ func PreferredIMEPillSize() (width, height int) {
 	return pillShortWidth, pillShortHeight
 }
 
+// runeWidthUnits returns how many "Latin widths" a rune occupies: CJK,
+// fullwidth forms and CJK punctuation are double-width, everything else
+// (including combining marks) single. It is the estimator behind the pill
+// and capsule sizing so Chinese text gets the room it actually needs.
+func runeWidthUnits(r rune) int {
+	switch {
+	case r >= 0x1100 && r <= 0x115F, // Hangul Jamo
+		r >= 0x2E80 && r <= 0x303E, // CJK radicals, Kangxi, CJK symbols
+		r >= 0x3041 && r <= 0x33FF, // kana, CJK compatibility
+		r >= 0x3400 && r <= 0x4DBF, // CJK ext A
+		r >= 0x4E00 && r <= 0x9FFF, // CJK unified
+		r >= 0xA000 && r <= 0xA4CF, // Yi
+		r >= 0xAC00 && r <= 0xD7A3, // Hangul syllables
+		r >= 0xF900 && r <= 0xFAFF, // CJK compatibility ideographs
+		r >= 0xFE30 && r <= 0xFE4F, // CJK compatibility forms
+		r >= 0xFF00 && r <= 0xFF60, // fullwidth forms
+		r >= 0xFFE0 && r <= 0xFFE6,
+		r == 0x3000: // ideographic space
+		return 2
+	default:
+		return 1
+	}
+}
+
+// textWidthUnits estimates the rendered width of s in "Latin widths".
+func textWidthUnits(s string) int {
+	units := 0
+	for _, r := range s {
+		units += runeWidthUnits(r)
+	}
+	return units
+}
+
 // PreferredPillSizeForLabel sizes the floating non-activating pill for a given label.
 // Short IME badges ("EN", "中", <= 3 runes) stay compact, while longer status/layer notices
 // such as "LAYER • NAV" or "Bound Notes → ASCII" scale the width up (capped at 340) so the
-// text renders without truncation and without the panel ever stealing focus.
+// text renders without truncation and without the panel ever stealing focus. Width is
+// estimated in CJK-aware units: a Chinese label needs roughly twice the room of Latin.
 func PreferredPillSizeForLabel(label string) (width, height int) {
 	trimmed := strings.TrimSpace(label)
 	runeCount := utf8.RuneCountInString(trimmed)
 	if runeCount <= 3 {
 		return pillShortWidth, pillShortHeight
 	}
-	w := pillTextBasePad + runeCount*pillRuneWidthEst
+	w := pillTextBasePad + textWidthUnits(trimmed)*pillRuneWidthEst
 	if w < pillShortWidth {
 		w = pillShortWidth
 	}
