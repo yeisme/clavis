@@ -61,10 +61,23 @@ const (
 	AITestError   AITestStatus = "error"
 )
 
+// ClipboardSearcher narrows clipboard querying to Search so AppController can
+// route Clipboard tab queries to SQLite FTS5 (or MemoryStore fallback) without
+// coupling pkg/core/engine to storage.
+type ClipboardSearcher interface {
+	Search(ctx context.Context, query string, limit int) ([]clipboard.ClipboardItem, error)
+}
+
+const (
+	defaultClipboardMirrorLimit   = 50
+	defaultClipboardSearchDebounce = 50 * time.Millisecond
+)
+
 // Options configures an AppController.
 type Options struct {
 	ConfigStore           *config.ConfigStore
 	ClipboardStore        clipboard.Store
+	ClipboardSearcher     ClipboardSearcher
 	SecretStore           secrets.APIKeyStore
 	Bridge                bridge.HostService
 	AppProvider           apps.AppProvider
@@ -85,8 +98,9 @@ type Options struct {
 }
 
 type clipTask struct {
-	gen uint64
-	fn  func(ctx context.Context) error
+	gen       uint64
+	syncAfter bool
+	fn        func(ctx context.Context) error
 }
 
 // uiViewState holds UI-thread widget handles and ephemeral view state.
@@ -124,10 +138,11 @@ type uiViewState struct {
 type AppController struct {
 	mu sync.Mutex
 
-	ConfigStore    *config.ConfigStore
-	StateMachine   *engine.StateMachine
-	ClipboardStore clipboard.Store
-	SecretStore    secrets.APIKeyStore
+	ConfigStore       *config.ConfigStore
+	StateMachine      *engine.StateMachine
+	ClipboardStore    clipboard.Store
+	ClipboardSearcher ClipboardSearcher
+	SecretStore       secrets.APIKeyStore
 	Bridge         bridge.HostService
 	AppProvider    apps.AppProvider
 	AIClient       *ai.OpenAICompatibleClient
@@ -177,6 +192,23 @@ type AppController struct {
 	clipDone   chan struct{}
 	clipGen    atomic.Uint64
 
+	// Generation-based incremental clipboard mirror sync state
+	clipSyncMu       sync.Mutex
+	clipSynced       bool
+	clipSyncedHasGen bool
+	clipSyncedGen    uint64
+	clipSyncedLimit  int
+
+	// Debounced async clipboard search state
+	clipBaseCtx        context.Context
+	clipBaseCancel     context.CancelFunc
+	clipSearchSeq      atomic.Uint64
+	clipSearchMu       sync.Mutex
+	clipSearchTimer    *time.Timer
+	clipSearchTimerSeq uint64
+	clipSearchDebounce time.Duration
+	clipSearchCancel   context.CancelFunc
+
 	// Runtime diagnostics & settings status
 	apiKeySource      secrets.APIKeySource
 	permissionStatus  host.PermissionStatus
@@ -214,6 +246,10 @@ func NewAppController(opts Options) *AppController {
 	if clipStore == nil {
 		clipStore = clipboard.NewMemoryStore(clipboard.NewPrivacyFilterFromConfig(cfg.Main.Clipboard))
 	}
+	clipSearcher := opts.ClipboardSearcher
+	if clipSearcher == nil && clipStore != nil {
+		clipSearcher = clipStore
+	}
 
 	secStore := opts.SecretStore
 	if secStore == nil {
@@ -228,11 +264,16 @@ func NewAppController(opts Options) *AppController {
 	glossary := engine.NewGlossaryEngineFromConfig(cfg.Glossary)
 	snippets := engine.NewSnippetEngineFromConfig(cfg.Snippets)
 	sm := engine.NewStateMachine(cfg)
+	if clipSearcher != nil {
+		sm.SetExternalClipboardSearch(true)
+	}
+	clipBaseCtx, clipBaseCancel := context.WithCancel(context.Background())
 
 	c := &AppController{
 		ConfigStore:           cfgStore,
 		StateMachine:          sm,
 		ClipboardStore:        clipStore,
+		ClipboardSearcher:     clipSearcher,
 		SecretStore:           secStore,
 		Bridge:                opts.Bridge,
 		AppProvider:           appProv,
@@ -253,6 +294,9 @@ func NewAppController(opts Options) *AppController {
 		OnLanguageChange:      opts.OnLanguageChange,
 		appIconCache:          make(map[string]*ui.Bitmap),
 		clipDone:              make(chan struct{}),
+		clipBaseCtx:           clipBaseCtx,
+		clipBaseCancel:        clipBaseCancel,
+		clipSearchDebounce:    defaultClipboardSearchDebounce,
 		aiTestStatus:          AITestIdle,
 		uiState: uiViewState{
 			imeRuleModeDraft: config.IMEModeASCII,
@@ -294,6 +338,12 @@ func (c *AppController) Close() {
 	}
 	c.hudGen++
 	c.mu.Unlock()
+
+	cancelSeq := c.clipSearchSeq.Add(1)
+	c.cancelClipboardSearch(cancelSeq)
+	if c.clipBaseCancel != nil {
+		c.clipBaseCancel()
+	}
 
 	c.clipMu.Lock()
 	if !c.clipClosed {
@@ -461,7 +511,41 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 	}
 	next := c.StateMachine.State()
 	onRepaint := c.OnRepaint
+	hasSearcher := c.ClipboardSearcher != nil
+
+	var searchSeq uint64
+	var searchQuery string
+	var searchImmediate bool
+	var cancelSearchSeq uint64
+	if hasSearcher {
+		if next.Phase == engine.PhaseOmnibox && next.OmniboxTab == config.TabClipboard {
+			trimmedNext := strings.TrimSpace(next.OmniboxQuery)
+			trimmedPrev := strings.TrimSpace(prev.OmniboxQuery)
+			if trimmedNext == "" {
+				if prev.Phase == engine.PhaseOmnibox && prev.OmniboxTab == config.TabClipboard && trimmedPrev != "" {
+					cancelSearchSeq = c.clipSearchSeq.Add(1)
+				}
+			} else if ev.Type == engine.EventOpenOmnibox || ev.Type == engine.EventSwitchTab {
+				searchSeq = c.clipSearchSeq.Add(1)
+				searchQuery = trimmedNext
+				searchImmediate = true
+			} else if (ev.Type == engine.EventUpdateQuery || ev.Type == engine.EventBackspace) &&
+				(prev.Phase != engine.PhaseOmnibox || prev.OmniboxTab != config.TabClipboard || trimmedNext != trimmedPrev) {
+				searchSeq = c.clipSearchSeq.Add(1)
+				searchQuery = trimmedNext
+			}
+		} else if prev.Phase == engine.PhaseOmnibox && prev.OmniboxTab == config.TabClipboard {
+			cancelSearchSeq = c.clipSearchSeq.Add(1)
+		}
+	}
 	c.mu.Unlock()
+
+	if cancelSearchSeq != 0 {
+		c.cancelClipboardSearch(cancelSearchSeq)
+	}
+	if searchSeq != 0 {
+		c.scheduleClipboardSearch(searchSeq, searchQuery, searchImmediate)
+	}
 
 	if prev.Phase != engine.PhaseLeader && next.Phase == engine.PhaseLeader {
 		c.maybeLockASCIIForLeader()
@@ -534,7 +618,8 @@ func stateChanged(a, b engine.State) bool {
 		a.OmniboxTab != b.OmniboxTab ||
 		a.OmniboxQuery != b.OmniboxQuery ||
 		a.SelectedIndex != b.SelectedIndex ||
-		len(a.OmniboxItems) != len(b.OmniboxItems) ||
+		a.ClipboardSearchQuery != b.ClipboardSearchQuery ||
+		!omniboxItemIDsEqual(a.OmniboxItems, b.OmniboxItems) ||
 		len(a.LeaderPath) != len(b.LeaderPath) ||
 		len(a.LeaderNodes) != len(b.LeaderNodes) ||
 		a.AIOutput != b.AIOutput ||
@@ -544,6 +629,18 @@ func stateChanged(a, b engine.State) bool {
 		len(a.AIHistory) != len(b.AIHistory) ||
 		len(a.InstalledApps) != len(b.InstalledApps) ||
 		a.HUDMessage != b.HUDMessage
+}
+
+func omniboxItemIDsEqual(a, b []engine.OmniboxItem) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ID != b[i].ID || a[i].KeyHint != b[i].KeyHint {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
@@ -1269,11 +1366,12 @@ func (c *AppController) runClipboardWorker() {
 		c.clipMu.Unlock()
 
 		ctx := context.Background()
-		if c.ClipboardStore != nil {
+		if task.fn != nil && (c.ClipboardStore != nil || !task.syncAfter) {
 			_ = task.fn(ctx)
-			if c.clipGen.Load() == task.gen {
-				c.syncClipboardEntries(ctx)
-			}
+		}
+		if task.syncAfter && c.ClipboardStore != nil && c.clipGen.Load() == task.gen {
+			c.syncClipboardEntries(ctx)
+			c.refreshActiveClipboardSearch(ctx)
 		}
 	}
 }
@@ -1282,24 +1380,70 @@ func (c *AppController) enqueueClipboardTask(fn func(ctx context.Context) error)
 	gen := c.clipGen.Add(1)
 	c.clipMu.Lock()
 	if !c.clipClosed {
-		c.clipQueue = append(c.clipQueue, clipTask{gen: gen, fn: fn})
+		c.clipQueue = append(c.clipQueue, clipTask{gen: gen, syncAfter: true, fn: fn})
 		c.clipCond.Signal()
 	}
 	c.clipMu.Unlock()
+}
+
+func (c *AppController) enqueueClipboardSearchTask(fn func(ctx context.Context) error) {
+	c.clipMu.Lock()
+	if !c.clipClosed {
+		c.clipQueue = append(c.clipQueue, clipTask{syncAfter: false, fn: fn})
+		c.clipCond.Signal()
+	}
+	c.clipMu.Unlock()
+}
+
+func (c *AppController) clipboardMirrorLimit() int {
+	limit := c.ConfigStore.Current().Main.Clipboard.MaxHistoryItems
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > defaultClipboardMirrorLimit {
+		limit = defaultClipboardMirrorLimit
+	}
+	return limit
 }
 
 func (c *AppController) syncClipboardEntries(ctx context.Context) {
 	if c.ClipboardStore == nil {
 		return
 	}
-	limit := c.ConfigStore.Current().Main.Clipboard.MaxHistoryItems
-	if limit <= 0 {
-		limit = 200
+	limit := c.clipboardMirrorLimit()
+
+	var gen uint64
+	var hasGen bool
+	if gt, ok := c.ClipboardStore.(clipboard.GenerationTracker); ok {
+		gen = gt.Generation()
+		hasGen = true
+		c.clipSyncMu.Lock()
+		unchanged := c.clipSynced && c.clipSyncedHasGen && c.clipSyncedGen == gen && c.clipSyncedLimit == limit
+		c.clipSyncMu.Unlock()
+		if unchanged {
+			return
+		}
 	}
+
 	items, err := c.ClipboardStore.Recent(ctx, limit)
 	if err != nil {
 		return
 	}
+
+	c.clipSyncMu.Lock()
+	c.clipSynced = true
+	c.clipSyncedHasGen = hasGen
+	c.clipSyncedGen = gen
+	c.clipSyncedLimit = limit
+	c.clipSyncMu.Unlock()
+
+	c.Dispatch(engine.Event{
+		Type:             engine.EventSetClipboardEntries,
+		ClipboardEntries: clipboardItemsToEntries(items),
+	})
+}
+
+func clipboardItemsToEntries(items []clipboard.ClipboardItem) []engine.OmniboxClipboardEntry {
 	entries := make([]engine.OmniboxClipboardEntry, len(items))
 	for i, it := range items {
 		entries[i] = engine.OmniboxClipboardEntry{
@@ -1310,9 +1454,140 @@ func (c *AppController) syncClipboardEntries(ctx context.Context) {
 			Media:         engineClipboardMedia(it.Media),
 		}
 	}
+	return entries
+}
+
+func (c *AppController) cancelClipboardSearch(seq uint64) {
+	c.clipSearchMu.Lock()
+	if seq < c.clipSearchSeq.Load() {
+		c.clipSearchMu.Unlock()
+		return
+	}
+	if c.clipSearchTimer != nil {
+		c.clipSearchTimer.Stop()
+		c.clipSearchTimer = nil
+	}
+	if c.clipSearchCancel != nil {
+		c.clipSearchCancel()
+		c.clipSearchCancel = nil
+	}
+	c.clipSearchMu.Unlock()
+}
+
+func (c *AppController) scheduleClipboardSearch(seq uint64, query string, immediate bool) {
+	c.clipSearchMu.Lock()
+	if seq < c.clipSearchSeq.Load() {
+		c.clipSearchMu.Unlock()
+		return
+	}
+	if c.clipSearchTimer != nil {
+		c.clipSearchTimer.Stop()
+		c.clipSearchTimer = nil
+	}
+	if c.clipSearchCancel != nil {
+		c.clipSearchCancel()
+		c.clipSearchCancel = nil
+	}
+	c.clipSearchTimerSeq = seq
+	debounce := c.clipSearchDebounce
+	if immediate || debounce <= 0 {
+		baseCtx := c.clipBaseCtx
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		searchCtx, cancel := context.WithCancel(baseCtx)
+		c.clipSearchCancel = cancel
+		c.clipSearchMu.Unlock()
+		c.enqueueClipboardSearchTask(func(context.Context) error {
+			c.executeClipboardSearch(searchCtx, seq, query)
+			return nil
+		})
+		return
+	}
+
+	c.clipSearchTimer = time.AfterFunc(debounce, func() {
+		c.clipSearchMu.Lock()
+		if c.clipSearchSeq.Load() != seq || c.clipSearchTimerSeq != seq {
+			c.clipSearchMu.Unlock()
+			return
+		}
+		c.clipSearchTimer = nil
+		baseCtx := c.clipBaseCtx
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		searchCtx, cancel := context.WithCancel(baseCtx)
+		c.clipSearchCancel = cancel
+		c.clipSearchMu.Unlock()
+
+		c.enqueueClipboardSearchTask(func(context.Context) error {
+			c.executeClipboardSearch(searchCtx, seq, query)
+			return nil
+		})
+	})
+	c.clipSearchMu.Unlock()
+}
+
+func (c *AppController) refreshActiveClipboardSearch(ctx context.Context) {
+	st := c.State()
+	if st.Phase != engine.PhaseOmnibox || st.OmniboxTab != config.TabClipboard {
+		return
+	}
+	query := strings.TrimSpace(st.OmniboxQuery)
+	if query == "" {
+		return
+	}
+	seq := c.clipSearchSeq.Load()
+	c.executeClipboardSearch(ctx, seq, query)
+}
+
+func (c *AppController) executeClipboardSearch(ctx context.Context, seq uint64, query string) {
+	if c.clipSearchSeq.Load() != seq || ctx.Err() != nil {
+		return
+	}
+	st := c.State()
+	if st.Phase != engine.PhaseOmnibox || st.OmniboxTab != config.TabClipboard || strings.TrimSpace(st.OmniboxQuery) != query {
+		return
+	}
+	c.mu.Lock()
+	searcher := c.ClipboardSearcher
+	c.mu.Unlock()
+	if searcher == nil {
+		return
+	}
+
+	var genBefore uint64
+	var hasGen bool
+	if gt, ok := c.ClipboardStore.(clipboard.GenerationTracker); ok {
+		genBefore = gt.Generation()
+		hasGen = true
+	}
+
+	items, err := searcher.Search(ctx, query, c.clipboardMirrorLimit())
+	if err != nil {
+		return
+	}
+
+	// Generation + query stale-result guards.
+	if c.clipSearchSeq.Load() != seq || ctx.Err() != nil {
+		return
+	}
+	if hasGen {
+		if gt, ok := c.ClipboardStore.(clipboard.GenerationTracker); ok {
+			if gt.Generation() != genBefore {
+				return
+			}
+		}
+	}
+	stAfter := c.State()
+	if stAfter.Phase != engine.PhaseOmnibox || stAfter.OmniboxTab != config.TabClipboard || strings.TrimSpace(stAfter.OmniboxQuery) != query {
+		return
+	}
+
 	c.Dispatch(engine.Event{
-		Type:             engine.EventSetClipboardEntries,
-		ClipboardEntries: entries,
+		Type:             engine.EventSetClipboardSearchResults,
+		Query:            query,
+		ClipboardEntries: clipboardItemsToEntries(items),
 	})
 }
 
