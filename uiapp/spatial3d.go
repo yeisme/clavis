@@ -43,7 +43,7 @@ func TiltCard3D(c *ui.Context, key string, cfg config.AppearanceConfig, opts Til
 		accent = c.Theme().Accent
 	}
 	card := ui.Box(c).Size(w, h).Radius(r).Background(c.Theme().Surface).
-		Shadow(0, 4, 18, 0, ui.RGBA(0, 0, 0, 42)).Key(key)
+		Shadow(0, 4, 18, 0, ui.RGBA(0, 0, 0, 42.0/255)).Key(key)
 	if !Spatial3DEnabled(c, cfg) {
 		card.Children(children)
 		return card
@@ -57,7 +57,7 @@ func TiltCard3D(c *ui.Context, key string, cfg config.AppearanceConfig, opts Til
 	}
 	lift := card.AnimateTo(key+"-lift", target, ui.Snappy)
 	card.TranslateZ(14*lift).RotateX(-2*lift).RotateY(3*lift).Perspective(860).
-		BackfaceHidden().Shadow(0, 8*lift+4, 22, 0, ui.RGBA(0, 0, 0, 40+30*lift))
+		BackfaceHidden().Shadow(0, 8*lift+4, 22, 0, ui.RGBA(0, 0, 0, (40+30*lift)/255))
 	card.Children(func() {
 		if children != nil {
 			children()
@@ -120,8 +120,8 @@ func TactileKeycap3D(c *ui.Context, keyLabel string, active bool, accent bool, c
 		fill = c.Theme().Accent
 	}
 	cap := ui.Box(c).MinWidth(30).Height(30).Padding(4, 8).Radius(8).Background(fill).
-		InsetShadow(0, 1, 2, 0, ui.RGBA(255, 255, 255, 50)).
-		Shadow(0, 3, 2, 0, ui.RGBA(0, 0, 0, 65)).Center()
+		InsetShadow(0, 1, 2, 0, ui.RGBA(255, 255, 255, 50.0/255)).
+		Shadow(0, 3, 2, 0, ui.RGBA(0, 0, 0, 65.0/255)).Center()
 	if Spatial3DEnabled(c, cfg) {
 		target := float32(0)
 		if active {
@@ -131,7 +131,13 @@ func TactileKeycap3D(c *ui.Context, keyLabel string, active bool, accent bool, c
 		cap.TranslateZ(-2 * pressed).Perspective(500)
 		cap.Translate(0, 1.5*pressed).Scale(.96+.04*(1-pressed), .96+.04*(1-pressed))
 	}
-	cap.Children(func() { ui.Text(c, keyLabel).TextColor(c.Theme().Text).FontSize(12).FontWeight(600) })
+	// Text on the accent fill takes AccentText; dark digits on blue were
+	// unreadable on the chosen candidate.
+	ink := c.Theme().Text
+	if accent {
+		ink = c.Theme().AccentText
+	}
+	cap.Children(func() { ui.Text(c, keyLabel).TextColor(ink).FontSize(12).FontWeight(600) })
 	return cap
 }
 
@@ -171,12 +177,12 @@ func ColorSwatch3D(c *ui.Context, hexColor string, size float32, cfg config.Appe
 		size = 44
 	}
 	colour := ui.Hex(strings.TrimSpace(hexColor))
-	swatch := ui.Box(c).Size(size, size).Radius(size*.22).Background(colour).Border(1, ui.RGBA(255, 255, 255, 76)).
-		Shadow(0, 4, 10, 0, ui.RGBA(0, 0, 0, 48))
+	swatch := ui.Box(c).Size(size, size).Radius(size*.22).Background(colour).Border(1, ui.RGBA(255, 255, 255, 76.0/255)).
+		Shadow(0, 4, 10, 0, ui.RGBA(0, 0, 0, 48.0/255))
 	if Spatial3DEnabled(c, cfg) {
 		swatch.RotateX(4).RotateY(-5).TranslateZ(4).Perspective(600)
 	}
-	swatch.InsetShadow(-1, -1, 3, 0, ui.RGBA(255, 255, 255, 64))
+	swatch.InsetShadow(-1, -1, 3, 0, ui.RGBA(255, 255, 255, 64.0/255))
 	return swatch
 }
 

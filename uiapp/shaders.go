@@ -108,7 +108,7 @@ func RenderLiquidOrb(c *ui.Context, size float32, active bool, cfg config.Appear
 			return
 		}
 		p.Fill(r, accent.Alpha(210), size/2)
-		p.Fill(ui.Rect{X: r.X + r.W*.2, Y: r.Y + r.H*.14, W: r.W * .3, H: r.H * .22}, ui.RGBA(255, 255, 255, 58), size/4)
+		p.Fill(ui.Rect{X: r.X + r.W*.2, Y: r.Y + r.H*.14, W: r.W * .3, H: r.H * .22}, ui.RGBA(255, 255, 255, 58.0/255), size/4)
 	})
 }
 
