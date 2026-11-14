@@ -12,6 +12,7 @@ import (
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/i18n"
+	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
 
 // TestVisualSnapshots renders every transient surface (Leader, Omnibox,
@@ -139,6 +140,26 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool) {
 		lbl := label
 		pw, ph := PreferredPillSizeForLabel(lbl)
 		shoot("08-pill-"+string(rune('a'+i)), func(c *ui.Context) { IMEPillView(c, lbl) }, pw, ph, 3, nil)
+	}
+
+	// Own input engine candidate window: a mid-composition page with the
+	// selection on the first cell and an AI suggestion, in both orientations.
+	view := inputengine.View{
+		Composing: true,
+		Preedit:   "shu'ru'fa",
+		Candidates: []inputengine.Candidate{
+			{Text: "输入法"}, {Text: "书如法"}, {Text: "输入"}, {Text: "舒"}, {Text: "输"},
+			{Text: "输入法候选窗", AI: true},
+		},
+		Selected: 0,
+		Page:     0,
+		HasNext:  true,
+	}
+	for _, orientation := range []string{"horizontal", "vertical"} {
+		app := appearance
+		app.CandidateBarOrientation = orientation
+		cw, ch := PreferredCandidatePanelSizeFor(view, app)
+		shoot("11-candidates-"+orientation, func(c *ui.Context) { InputCandidateViewFor(c, view, app) }, cw, ch, 2, nil)
 	}
 
 	f.ctrl.OpenSettings(SettingsTabGeneral)
