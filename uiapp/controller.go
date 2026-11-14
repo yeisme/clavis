@@ -262,6 +262,10 @@ func NewAppController(opts Options) *AppController {
 		cfgStore = config.NewConfigStore(cfgDir)
 	}
 	cfg := cfgStore.Current()
+	// The candidate window reads its appearance from a package global; publish
+	// it now, not on the first Capsule frame, which may be long after the
+	// first composition.
+	SetCandidateAppearance(cfg.Main.Appearance)
 
 	clipStore := opts.ClipboardStore
 	if clipStore == nil {
@@ -2350,6 +2354,7 @@ func (c *AppController) UpdateMainConfig(mutate func(main *config.MainConfig)) e
 	}
 
 	updated := c.ConfigStore.Current()
+	SetCandidateAppearance(updated.Main.Appearance)
 	c.mu.Lock()
 	c.StateMachine.SetConfig(updated)
 	if c.AIClient != nil {
@@ -2617,6 +2622,7 @@ func (c *AppController) ReloadConfig() bool {
 	var br bridge.HostService
 	if ok {
 		c.StateMachine.SetConfig(cfg)
+		SetCandidateAppearance(cfg.Main.Appearance)
 		if c.Snippets != nil {
 			c.Snippets.UpdateSnippets(cfg.Snippets.Items)
 		}

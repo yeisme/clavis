@@ -186,7 +186,7 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool) {
 	shoot("09b-settings-general-full", f.ctrl.SettingsView, 960, 1000, 1.5, nil)
 	f.ctrl.OpenSettings(SettingsTabIMEKeymap)
 	shoot("10-settings-ime", f.ctrl.SettingsView, 960, 640, 1.5, nil)
-	shoot("10b-settings-ime-full", f.ctrl.SettingsView, 960, 1100, 1.5, nil)
+	shoot("10b-settings-ime-full", f.ctrl.SettingsView, 960, 1500, 1.5, nil)
 	// The window's minimum size: two narrow columns.
 	shoot("10c-settings-ime-min", f.ctrl.SettingsView, 760, 500, 1.5, nil)
 	for _, sec := range []struct {

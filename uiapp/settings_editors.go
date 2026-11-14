@@ -614,6 +614,7 @@ func (a *AppController) renderIMEKeymapSection(c *ui.Context, theme *ui.Theme, c
 		ui.Column(c).FillWidth().Gap(10).Children(func() {
 			a.renderKeymapControls(c, theme, cfg)
 			a.renderIMEConfig(c, theme, cfg)
+			a.renderInputEngineCard(c, theme, cfg)
 		})
 		a.renderIMERulesCard(c, theme, cfg)
 	})
