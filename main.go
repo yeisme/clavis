@@ -214,6 +214,15 @@ func (a *desktopApp) start() {
 			}
 			ctrl.NotifyIMESwitch(info, nil)
 		}),
+		bridge.WithOnIMESwitchFailed(func(err error) {
+			a.mu.Lock()
+			ctrl := a.controller
+			a.mu.Unlock()
+			if ctrl == nil {
+				return
+			}
+			ctrl.NotifyIMESwitchFailed(err)
+		}),
 		bridge.WithOnKeymapLayerChanged(func(layer string) {
 			a.mu.Lock()
 			ctrl := a.controller

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/yeisme/clavis/pkg/core/i18n"
@@ -140,6 +141,19 @@ type IMERulesConfig struct {
 }
 
 func DefaultIMERulesConfig() IMERulesConfig {
+	return DefaultIMERulesConfigFor(runtime.GOOS)
+}
+
+// DefaultIMERulesConfigFor returns the default per-app IME rules for goos. Windows has no
+// bundle IDs, so its defaults target process names and use mode-only switching (no HKL), which
+// works with a single shared IME such as Microsoft Pinyin.
+func DefaultIMERulesConfigFor(goos string) IMERulesConfig {
+	if goos == "windows" {
+		return IMERulesConfig{Rules: []IMERule{
+			{ProcessName: "WindowsTerminal.exe", AppName: "Windows Terminal", PreferredMode: IMEModeASCII, RestoreOnLeave: true},
+			{ProcessName: "Code.exe", AppName: "Visual Studio Code", PreferredMode: IMEModeASCII, RestoreOnLeave: true},
+		}}
+	}
 	return IMERulesConfig{
 		Rules: []IMERule{
 			{

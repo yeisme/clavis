@@ -1133,6 +1133,13 @@ func isSelfClavisApp(app AppIdentity) bool {
 
 // EvaluateAppActivation determines whether switching to app should change the input source.
 func (e *IMESwitchDecisionEngine) EvaluateAppActivation(app AppIdentity, currentInputSourceID string) IMEDecision {
+	return e.EvaluateAppActivationWithState(app, currentInputSourceID, false)
+}
+
+// EvaluateAppActivationWithState is EvaluateAppActivation for platforms whose IME keeps a single
+// input source for both scripts (Windows Microsoft Pinyin): currentIsNative records the live
+// conversion mode so restore_on_leave can return to native mode even when the HKL is unchanged.
+func (e *IMESwitchDecisionEngine) EvaluateAppActivationWithState(app AppIdentity, currentInputSourceID string, currentIsNative bool) IMEDecision {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -1156,9 +1163,13 @@ func (e *IMESwitchDecisionEngine) EvaluateAppActivation(app AppIdentity, current
 	if matched {
 		if !e.inRuleSession {
 			e.inRuleSession = true
-			if rule.RestoreOnLeave && (effectiveCurrent != "" || e.tempSavedWasNative) {
+			wasNative := currentIsNative
+			if e.tempLockActive {
+				wasNative = e.tempSavedWasNative
+			}
+			if rule.RestoreOnLeave && (effectiveCurrent != "" || wasNative) {
 				e.savedInputSourceID = effectiveCurrent
-				e.savedWasNative = e.tempSavedWasNative
+				e.savedWasNative = wasNative
 				e.shouldRestoreOnLeave = true
 			} else {
 				e.savedInputSourceID = ""

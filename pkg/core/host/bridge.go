@@ -32,7 +32,16 @@ type InputSourceInfo struct {
 	Name     string `json:"name"`
 	Language string `json:"language,omitempty"`
 	IsASCII  bool   `json:"isAscii"`
+	// Mode is the live conversion mode of an IME that keeps one input source for both
+	// scripts (Windows Microsoft Pinyin 中/英): InputModeNative or InputModeASCII.
+	// Empty when the platform reports script by input source alone (macOS).
+	Mode string `json:"mode,omitempty"`
 }
+
+const (
+	InputModeNative = "native"
+	InputModeASCII  = "ascii"
+)
 
 // ContextSnapshot captures the active frontmost application and text context.
 type ContextSnapshot struct {

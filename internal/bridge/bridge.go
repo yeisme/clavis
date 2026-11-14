@@ -45,6 +45,9 @@ type Options struct {
 	IMERules             config.IMERulesConfig
 	OnInputSourceChanged func(host.InputSourceInfo)
 	OnKeymapLayerChanged func(layer string)
+	// OnIMESwitchFailed reports an IME auto-switch that the platform could not apply, so the UI
+	// can surface it instead of failing silently. Currently emitted by the Windows bridge.
+	OnIMESwitchFailed func(err error)
 }
 
 // Option mutates bridge Options.
@@ -76,6 +79,13 @@ func WithIMEConfig(imeCfg config.IMEConfig, rules config.IMERulesConfig) Option 
 func WithOnInputSourceChanged(fn func(host.InputSourceInfo)) Option {
 	return func(o *Options) {
 		o.OnInputSourceChanged = fn
+	}
+}
+
+// WithOnIMESwitchFailed registers a callback for IME switches that could not be applied.
+func WithOnIMESwitchFailed(fn func(err error)) Option {
+	return func(o *Options) {
+		o.OnIMESwitchFailed = fn
 	}
 }
 

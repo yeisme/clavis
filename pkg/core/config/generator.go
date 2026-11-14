@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 )
 
 // DefaultConfigGenerator creates default commented TOML config files if missing.
@@ -38,6 +40,23 @@ func GenerateIfMissing(dir string) ([]string, error) {
 
 // DefaultContent returns the default commented TOML content for a given ConfigFileKind.
 func DefaultContent(kind ConfigFileKind) string {
+	return DefaultContentFor(kind, runtime.GOOS)
+}
+
+// DefaultContentFor returns the default commented TOML for kind on goos. Only the IME parts
+// differ: Windows gets an HKL default input source and process_name based rules.
+func DefaultContentFor(kind ConfigFileKind, goos string) string {
+	if goos == "windows" {
+		switch kind {
+		case FileMain:
+			return strings.Replace(defaultMainTOML,
+				`default_input_source_id = "com.apple.keylayout.ABC"`,
+				`# Windows HKL id of the ASCII layout (en-US); see Settings > IME for installed sources
+default_input_source_id = "`+WindowsDefaultInputSourceID+`"`, 1)
+		case FileIMERules:
+			return defaultIMERulesTOMLWindows
+		}
+	}
 	switch kind {
 	case FileMain:
 		return defaultMainTOML
@@ -330,6 +349,26 @@ restore_on_leave = true
 bundle_id = "com.googlecode.iterm2"
 app_name = "iTerm2"
 input_source_id = "com.apple.keylayout.ABC"
+preferred_mode = "ascii"
+restore_on_leave = true
+`
+
+const defaultIMERulesTOMLWindows = `# Clavis per-application input method rules (Windows)
+# Match by process_name (".exe" optional, case-insensitive).
+# preferred_mode: "ascii", "native", or "keep". Without input_source_id the rule only toggles the
+# IME conversion mode (e.g. Microsoft Pinyin 中/英), which works with a single installed IME.
+# Optional: input_source_id = "0x04090409" switches to a specific keyboard layout (HKL).
+# Optional context matchers: url_pattern = "*github.com*", title_pattern = ".*VIM.*"
+
+[[rules]]
+process_name = "WindowsTerminal.exe"
+app_name = "Windows Terminal"
+preferred_mode = "ascii"
+restore_on_leave = true
+
+[[rules]]
+process_name = "Code.exe"
+app_name = "Visual Studio Code"
 preferred_mode = "ascii"
 restore_on_leave = true
 `

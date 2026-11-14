@@ -177,6 +177,7 @@ type AppController struct {
 	monitorRunning    bool
 	recoveryCount     int
 	activeInputSource host.InputSourceInfo
+	lastIMEError      string
 	cachedBundleID    string
 	cachedProcessName string
 	cachedAppName     string
@@ -666,7 +667,9 @@ func (c *AppController) bindAppIMERule(eff engine.Effect, state engine.State) {
 	if br != nil {
 		br.UpdateIMEConfig(updated.Main.IME, updated.IMERules)
 		if mode != "" {
-			_ = br.SetIMEMode(context.Background(), mode)
+			if err := br.SetIMEMode(context.Background(), mode); err != nil && !errors.Is(err, errors.ErrUnsupported) {
+				c.NotifyIMESwitchFailed(err)
+			}
 		}
 	}
 	c.ShowToastOrHUD(notice)
@@ -732,6 +735,18 @@ func (c *AppController) stopHUDTimer() {
 
 // FormatIMEPillLabel formats a short floating pill label ("EN", "中", or input source name).
 func FormatIMEPillLabel(info host.InputSourceInfo) string {
+	// A shared CJK IME (Windows Microsoft Pinyin) reports its live 中/英 conversion mode.
+	switch info.Mode {
+	case host.InputModeASCII:
+		return "EN"
+	case host.InputModeNative:
+		if lang := strings.ToLower(strings.TrimSpace(info.Language)); strings.HasPrefix(lang, "ja") {
+			return "あ"
+		} else if strings.HasPrefix(lang, "ko") {
+			return "한"
+		}
+		return "中"
+	}
 	if info.IsASCII {
 		return "EN"
 	}
@@ -755,6 +770,34 @@ func FormatIMEPillLabel(info host.InputSourceInfo) string {
 		return strings.TrimSpace(info.ID)
 	}
 	return "EN"
+}
+
+// FormatInputSourceStatus renders a readable "<name> · 中/EN" line for settings and diagnostics.
+func FormatInputSourceStatus(info host.InputSourceInfo) string {
+	name := strings.TrimSpace(info.Name)
+	if name == "" {
+		name = strings.TrimSpace(info.ID)
+	}
+	if name == "" {
+		return i18n.T("settings.diag.unknown")
+	}
+	label := FormatIMEPillLabel(info)
+	if label == name {
+		return name
+	}
+	return name + " · " + label
+}
+
+// NotifyIMESwitchFailed records an IME switch the bridge could not apply and surfaces it in the
+// HUD/pill and the settings diagnostics card, so failures are never silent.
+func (c *AppController) NotifyIMESwitchFailed(err error) {
+	if err == nil {
+		return
+	}
+	c.mu.Lock()
+	c.lastIMEError = err.Error()
+	c.mu.Unlock()
+	c.ShowToastOrHUD(i18n.Tf("hud.ime_switch_failed", err.Error()))
 }
 
 // NotifyIMESwitch updates the active input source and triggers OnShowIMEPill when ShowFloatingPill is enabled.
@@ -1982,6 +2025,23 @@ func (c *AppController) SaveIMERulesConfig(imeRulesCfg config.IMERulesConfig) er
 	return nil
 }
 
+// CurrentInputSource returns the live input source from the bridge (falling back to the last
+// observed one), used by the Settings IME card.
+func (c *AppController) CurrentInputSource(ctx context.Context) (host.InputSourceInfo, error) {
+	c.mu.Lock()
+	br := c.Bridge
+	last := c.activeInputSource
+	c.mu.Unlock()
+	if br == nil {
+		return last, nil
+	}
+	cur, err := br.CurrentInputSource(ctx)
+	if err != nil {
+		return last, err
+	}
+	return cur, nil
+}
+
 // AvailableInputSources returns the OS input sources for Settings pickers (empty on error/unavailable).
 func (c *AppController) AvailableInputSources(ctx context.Context) []host.InputSourceInfo {
 	if ctx == nil {
@@ -2185,6 +2245,8 @@ type DiagnosticsSnapshot struct {
 	RecoveryCount     int
 	ActiveInputSource host.InputSourceInfo
 	ActiveKeymapLayer string
+	// LastIMEError is the most recent IME switch failure reported by the bridge.
+	LastIMEError string
 }
 
 // Diagnostics returns a thread-safe snapshot of permission and monitor diagnostics.
@@ -2197,6 +2259,7 @@ func (c *AppController) Diagnostics() DiagnosticsSnapshot {
 		RecoveryCount:     c.recoveryCount,
 		ActiveInputSource: c.activeInputSource,
 		ActiveKeymapLayer: c.activeKeymapLayer,
+		LastIMEError:      c.lastIMEError,
 	}
 	c.mu.Unlock()
 	if br != nil {

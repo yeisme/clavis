@@ -525,13 +525,7 @@ func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *u
 			if v, ok := diag.Permissions.Details["secureInput"]; ok && v != "" {
 				secureInput = v
 			}
-			activeIME := diag.ActiveInputSource.Name
-			if activeIME == "" {
-				activeIME = diag.ActiveInputSource.ID
-			}
-			if activeIME == "" {
-				activeIME = i18n.T("settings.diag.unknown")
-			}
+			activeIME := FormatInputSourceStatus(diag.ActiveInputSource)
 			layer := strings.TrimSpace(diag.ActiveKeymapLayer)
 			if layer == "" {
 				layer = "base"
@@ -542,6 +536,9 @@ func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *u
 			settingsKeyValueRow(c, theme, i18n.T("settings.diag.monitor"), fmt.Sprintf("%v", diag.MonitorRunning))
 			settingsKeyValueRow(c, theme, i18n.T("settings.diag.recovery"), fmt.Sprintf("%d", diag.RecoveryCount))
 			settingsKeyValueRow(c, theme, i18n.T("settings.diag.input_source"), activeIME)
+			if diag.LastIMEError != "" {
+				settingsKeyValueRow(c, theme, i18n.T("settings.diag.ime_error"), diag.LastIMEError)
+			}
 
 			ui.Row(c).FillWidth().Gap(8).Children(func() {
 				svc := c.Services()

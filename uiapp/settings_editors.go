@@ -3,7 +3,9 @@ package uiapp
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -11,6 +13,7 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
+	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
@@ -488,21 +491,19 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.SwitchDelayMs = int(v) })
 		}
 
-		sources := a.AvailableInputSources(context.Background())
-		ids := make([]string, 0, len(sources)+1)
-		ids = append(ids, "")
-		for _, src := range sources {
-			if strings.TrimSpace(src.ID) != "" {
-				ids = append(ids, src.ID)
-			}
+		ctx := context.Background()
+		if cur, err := a.CurrentInputSource(ctx); err == nil {
+			settingsKeyValueRow(c, theme, i18n.T("settings.ime.current_source"), FormatInputSourceStatus(cur))
 		}
+		sources := a.AvailableInputSources(ctx)
+		labels, ids := inputSourceOptions(sources, imeCfg.DefaultInputSourceID)
 		settingsInlineRow(c, theme, "default_input_source_id", 130, func() {
 			current := imeCfg.DefaultInputSourceID
-			if !slices.Contains(ids, current) {
-				ids = append(ids, current)
-			}
-			if v, changed := settingsSelect(c, ids, current); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.DefaultInputSourceID = v })
+			curLabel := labels[slices.Index(ids, current)]
+			if v, changed := settingsSelect(c, labels, curLabel); changed {
+				if i := slices.Index(labels, v); i >= 0 {
+					_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.DefaultInputSourceID = ids[i] })
+				}
 			}
 		})
 
@@ -527,7 +528,7 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 					label = entry.BundleID
 				}
 				if ui.Button(c, label).Key("ime-app:" + entry.BundleID).Clicked() {
-					picked = entry.BundleID
+					picked = imeRuleTargetForApp(entry, runtime.GOOS)
 				}
 			}
 		})
@@ -666,15 +667,64 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 					PreferredMode:  curMode,
 					RestoreOnLeave: true,
 				}
-				if strings.Contains(curTarget, ".") {
-					newRule.BundleID = curTarget
-				} else {
-					newRule.ProcessName = curTarget
-				}
+				newRule.BundleID, newRule.ProcessName = imeRuleTargetFields(curTarget, runtime.GOOS)
 				_ = a.AddIMERule(newRule)
 			}
 		})
 	})
+}
+
+// inputSourceOptions returns parallel select labels and IDs for the default input source picker.
+// Labels are readable ("中文(简体，中国) (0x08040804)") and always unique; current is kept even
+// when it is not installed so the select never drops the configured value.
+func inputSourceOptions(sources []host.InputSourceInfo, current string) (labels, ids []string) {
+	labels = []string{""}
+	ids = []string{""}
+	for _, src := range sources {
+		id := strings.TrimSpace(src.ID)
+		if id == "" || slices.Contains(ids, id) {
+			continue
+		}
+		label := id
+		if name := strings.TrimSpace(src.Name); name != "" && name != id {
+			label = name + " (" + id + ")"
+		}
+		labels = append(labels, label)
+		ids = append(ids, id)
+	}
+	if !slices.Contains(ids, current) {
+		labels = append(labels, current)
+		ids = append(ids, current)
+	}
+	return labels, ids
+}
+
+// imeRuleTargetFields maps a typed rule target to (bundle_id, process_name). Windows has no bundle
+// IDs, so "Code.exe" must become process_name there; elsewhere a dotted target is a bundle ID.
+func imeRuleTargetFields(target, goos string) (bundleID, processName string) {
+	target = strings.TrimSpace(target)
+	if goos == "windows" || !strings.Contains(target, ".") {
+		return "", target
+	}
+	return target, ""
+}
+
+// imeRuleTargetForApp picks the rule target for an installed app: its bundle ID on macOS, its
+// executable name on Windows (mygo reports .lnk paths / AUMIDs as IDs there).
+func imeRuleTargetForApp(app engine.InstalledAppEntry, goos string) string {
+	if goos != "windows" {
+		return app.BundleID
+	}
+	for _, p := range []string{app.Path, app.BundleID} {
+		p = strings.TrimSpace(p)
+		if strings.EqualFold(filepath.Ext(p), ".exe") {
+			return filepath.Base(strings.ReplaceAll(p, "\\", "/"))
+		}
+	}
+	if name := strings.TrimSpace(app.Name); name != "" {
+		return name + ".exe"
+	}
+	return app.BundleID
 }
 
 // regexIssue returns a description of why pattern is not a valid regex.

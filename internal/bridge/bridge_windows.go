@@ -266,8 +266,12 @@ type windowsBridge struct {
 	pbTracker    *selfPasteboardTracker
 	pbRestorer   *PasteboardSnapshotRestorer
 	onIME        func(host.InputSourceInfo)
+	onIMEFail    func(error)
 	onLayer      func(string)
 	lastLayer    string
+
+	lastIMEFailMsg string
+	lastIMEFailAt  time.Time
 }
 
 func newPlatformBridge(opts Options) HostService {
@@ -279,6 +283,7 @@ func newPlatformBridge(opts Options) HostService {
 		windowCalc:   NewWindowLayoutCalculator(),
 		pbTracker:    newSelfPasteboardTracker(),
 		onIME:        opts.OnInputSourceChanged,
+		onIMEFail:    opts.OnIMESwitchFailed,
 		onLayer:      opts.OnKeymapLayerChanged,
 	}
 	b.pbRestorer = NewPasteboardSnapshotRestorer(&windowsPasteboardBackend{bridge: b})
@@ -620,6 +625,9 @@ func (b *windowsBridge) runTriggerWorker(ctx context.Context, queue <-chan host.
 	}
 }
 
+// runIMEObserver polls the foreground app and IME state every 200ms. It applies per-app rules
+// and reports every observed change of (HKL, 中/英 conversion mode) through onIME, so the pill
+// also reflects manual switches (Win+Space, Shift toggling Microsoft Pinyin).
 func (b *windowsBridge) runIMEObserver(ctx context.Context) {
 	defer close(b.imeDone)
 	ticker := time.NewTicker(200 * time.Millisecond)
@@ -628,6 +636,7 @@ func (b *windowsBridge) runIMEObserver(ctx context.Context) {
 	var (
 		prevApp     AppIdentity
 		havePrevApp bool
+		tracker     imeChangeTracker
 	)
 
 	for {
@@ -660,41 +669,55 @@ func (b *windowsBridge) runIMEObserver(ctx context.Context) {
 			prevApp = app
 			havePrevApp = true
 
-			if !enabled {
+			// Clavis' own windows have their own IME state; observing them would flash the pill
+			// whenever the capsule opens.
+			if isSelfClavisApp(app) {
 				continue
 			}
 			cur, err := b.CurrentInputSource(ctx)
 			if err != nil {
 				continue
 			}
-			decision := b.imeEngine.EvaluateAppActivation(app, cur.ID)
-			if !decision.ShouldSwitch {
-				continue
-			}
+			changed := tracker.Observe(cur)
 
-			// Honor the configured settle delay so fast alt-tab chains do not flap the layout.
-			delayMs = min(max(delayMs, 0), 1000)
-			if delayMs > 0 {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(time.Duration(delayMs) * time.Millisecond):
-				}
-				if latestApp, _ := winForegroundApp(); appIdentityChanged(latestApp, app) {
+			if enabled {
+				decision := b.imeEngine.EvaluateAppActivationWithState(app, cur.ID, cur.Mode == host.InputModeNative)
+				if decision.ShouldSwitch && b.applyRuleDecision(ctx, app, decision, delayMs) {
+					if updated, err := b.CurrentInputSource(ctx); err == nil {
+						tracker.Observe(updated)
+						if onIME != nil {
+							onIME(updated)
+						}
+					}
 					continue
 				}
 			}
-
-			if !b.applyIMEDecision(ctx, decision) {
-				continue
-			}
-			if onIME != nil {
-				if updated, err := b.CurrentInputSource(ctx); err == nil {
-					onIME(updated)
-				}
+			if changed && onIME != nil {
+				onIME(cur)
 			}
 		}
 	}
+}
+
+// applyRuleDecision honors the settle delay, then applies decision. Failures are reported.
+func (b *windowsBridge) applyRuleDecision(ctx context.Context, app AppIdentity, decision IMEDecision, delayMs int) bool {
+	// Honor the configured settle delay so fast alt-tab chains do not flap the layout.
+	delayMs = min(max(delayMs, 0), 1000)
+	if delayMs > 0 {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(time.Duration(delayMs) * time.Millisecond):
+		}
+		if latestApp, _ := winForegroundApp(); appIdentityChanged(latestApp, app) {
+			return false
+		}
+	}
+	if err := b.applyIMEDecision(ctx, decision); err != nil {
+		b.reportIMEFailure(fmt.Errorf("%s: %w", app.ProcessName, err))
+		return false
+	}
+	return true
 }
 
 func winForegroundApp() (AppIdentity, uintptr) {
@@ -1165,71 +1188,42 @@ func (b *windowsBridge) InputSources(ctx context.Context) ([]host.InputSourceInf
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	cnt, _, _ := procGetKeyboardLayoutList.Call(0, 0)
-	if cnt == 0 {
-		return nil, nil
-	}
-	hkls := make([]uintptr, cnt)
-	got, _, _ := procGetKeyboardLayoutList.Call(cnt, uintptr(unsafe.Pointer(&hkls[0])))
-	out := make([]host.InputSourceInfo, 0, got)
-	for i := uintptr(0); i < got; i++ {
-		out = append(out, hklToInputSourceInfo(hkls[i]))
+	hkls := winInstalledHKLs()
+	out := make([]host.InputSourceInfo, 0, len(hkls))
+	for _, h := range hkls {
+		out = append(out, winInputSourceInfo(h, winHKLFriendlyName(h), winIMEState{HKL: h}))
 	}
 	return out, nil
 }
 
+// CurrentInputSource reports the foreground HKL plus, for CJK IMEs, the live 中/英 conversion
+// mode (Mode/IsASCII), so Microsoft Pinyin in English mode is labelled EN.
 func (b *windowsBridge) CurrentInputSource(ctx context.Context) (host.InputSourceInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return host.InputSourceInfo{}, err
 	}
-	hwnd, _, _ := procGetForegroundWindow.Call()
-	var tid uintptr
-	if hwnd != 0 {
-		tid, _, _ = procGetWindowThreadProcessId.Call(hwnd, 0)
-	}
-	hkl, _, _ := procGetKeyboardLayout.Call(tid)
-	return hklToInputSourceInfo(hkl), nil
+	st := winReadIMEState()
+	return winInputSourceInfo(st.HKL, winHKLFriendlyName(st.HKL), st), nil
 }
 
+// SelectInputSource switches the foreground window to an installed HKL (full id or bare LANGID).
+// It fails when the layout is not installed or the switch is not observed, so callers can fall
+// back to a conversion-mode switch instead of silently doing nothing.
 func (b *windowsBridge) SelectInputSource(ctx context.Context, id string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	trimmed := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(id), "0x"))
-	val, err := strconv.ParseUint(trimmed, 16, 64)
+	hkl, err := resolveInstalledHKL(winInstalledHKLs(), id)
 	if err != nil {
-		return fmt.Errorf("windows: invalid HKL input source id %q: %w", id, err)
+		return err
 	}
-	hkl := uintptr(val)
-	// If only a 16-bit langID (e.g. 0x0409) was supplied, match against installed layouts.
-	if val <= 0xFFFF {
-		if sources, err := b.InputSources(ctx); err == nil {
-			for _, s := range sources {
-				if strings.EqualFold(s.Language, fmt.Sprintf("0x%04x", val)) {
-					if full, err := strconv.ParseUint(strings.TrimPrefix(s.ID, "0x"), 16, 64); err == nil {
-						hkl = uintptr(full)
-						break
-					}
-				}
-			}
-		}
-	}
-
-	hwnd, _, _ := procGetForegroundWindow.Call()
-	if hwnd != 0 {
-		procPostMessageW.Call(hwnd, wmInputLangChangeRequest, 0, hkl)
-		return nil
-	}
-	r, _, callErr := procActivateKeyboardLayout.Call(hkl, klfActivate)
-	if r == 0 {
-		return fmt.Errorf("windows: ActivateKeyboardLayout failed: %w", callErr)
-	}
-	return nil
+	return winSelectHKL(hkl)
 }
 
-// SetIMEMode toggles the Windows IMM32 Chinese/English conversion state on the active window's
-// default IME window (clearing IME_CMODE_NATIVE for IMEModeASCII and setting it for IMEModeNative),
-// falling back to HKL input source selection if no IMM32 window is present.
+// SetIMEMode switches the foreground IME between native (中) and ASCII (英) and verifies the
+// result. Strategies, in order: WM_IME_CONTROL on the default IME window, ImmGetContext +
+// ImmSetConversionStatus, then an HKL switch to an installed English / CJK layout. The returned
+// error lists every attempt so callers can surface it.
 func (b *windowsBridge) SetIMEMode(ctx context.Context, mode config.IMEMode) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -1240,56 +1234,49 @@ func (b *windowsBridge) SetIMEMode(ctx context.Context, mode config.IMEMode) err
 	if mode != config.IMEModeASCII && mode != config.IMEModeNative {
 		return fmt.Errorf("windows: unsupported IME mode %q", mode)
 	}
+	wantNative := mode == config.IMEModeNative
+	if winIMEModeSatisfied(winReadIMEState(), wantNative) {
+		return nil
+	}
 
-	hwnd, _, _ := procGetForegroundWindow.Call()
-	if hwnd != 0 {
-		imeWnd, _, _ := procImmGetDefaultIMEWnd.Call(hwnd)
-		if imeWnd != 0 {
-			convMode, _, _ := procSendMessageW.Call(imeWnd, wmIMEControl, imcGetConversionMode, 0)
-			var nextMode uintptr
-			if mode == config.IMEModeASCII {
-				nextMode = convMode &^ uintptr(imeCmodeNative)
-			} else {
-				nextMode = convMode | uintptr(imeCmodeNative)
-			}
-			procSendMessageW.Call(imeWnd, wmIMEControl, imcSetConversionMode, nextMode)
+	var attempts []string
+	for _, step := range []struct {
+		name string
+		fn   func(bool) error
+	}{{"WM_IME_CONTROL", winSetModeViaIMEWnd}, {"ImmSetConversionStatus", winSetModeViaContext}} {
+		if err := step.fn(wantNative); err != nil {
+			attempts = append(attempts, step.name+": "+err.Error())
+			continue
+		}
+		if winIMEModeSatisfied(winReadIMEState(), wantNative) {
 			return nil
 		}
+		attempts = append(attempts, step.name+": state unchanged after set")
 	}
 
-	sources, err := b.InputSources(ctx)
-	if err != nil {
-		return err
-	}
-	if mode == config.IMEModeASCII {
-		for _, s := range sources {
-			if s.IsASCII {
-				return b.SelectInputSource(ctx, s.ID)
-			}
+	b.mu.Lock()
+	preferred := strings.TrimSpace(b.imeCfg.DefaultInputSourceID)
+	b.mu.Unlock()
+	if hkl, ok := winTargetHKLForMode(winInstalledHKLs(), wantNative, preferred); ok {
+		if err := winSelectHKL(hkl); err != nil {
+			attempts = append(attempts, "HKL switch: "+err.Error())
+		} else if st := winReadIMEState(); !wantNative || !st.ConvKnown || winIMEModeSatisfied(st, true) {
+			// An English layout is ASCII by definition; a CJK layout with unknown conversion
+			// state is the best we can do.
+			return nil
+		} else {
+			attempts = append(attempts, "HKL switch: IME still in English mode")
 		}
-		return b.SelectInputSource(ctx, "0x0409")
+	} else {
+		attempts = append(attempts, "HKL switch: no matching input source installed")
 	}
-	for _, s := range sources {
-		if !s.IsASCII {
-			return b.SelectInputSource(ctx, s.ID)
-		}
-	}
-	return errors.New("windows: no native IME input source available")
+	return fmt.Errorf("windows: could not switch IME to %s (%s)", mode, strings.Join(attempts, "; "))
 }
 
-// winIsNativeConversionMode reports whether the foreground window's default IME window currently
-// has IMM32 native (e.g. Chinese) conversion mode active for its shared keyboard layout.
+// winIsNativeConversionMode reports whether the foreground IME is open in native conversion mode.
 func winIsNativeConversionMode() bool {
-	hwnd, _, _ := procGetForegroundWindow.Call()
-	if hwnd == 0 {
-		return false
-	}
-	imeWnd, _, _ := procImmGetDefaultIMEWnd.Call(hwnd)
-	if imeWnd == 0 {
-		return false
-	}
-	convMode, _, _ := procSendMessageW.Call(imeWnd, wmIMEControl, imcGetConversionMode, 0)
-	return (convMode & uintptr(imeCmodeNative)) != 0
+	st := winReadIMEState()
+	return st.ConvKnown && st.Open && st.Native
 }
 
 // asciiInputSourceIDLocked picks the ASCII input source to lock to during a Leader/Capsule
@@ -1336,7 +1323,8 @@ func (b *windowsBridge) LockTemporaryASCII(ctx context.Context) (bool, host.Inpu
 		return false, cur, nil
 	}
 
-	if !b.applyIMEDecision(ctx, dec) {
+	if err := b.applyIMEDecision(ctx, dec); err != nil {
+		b.reportIMEFailure(err)
 		return false, cur, nil
 	}
 
@@ -1358,7 +1346,8 @@ func (b *windowsBridge) RestoreTemporaryIME(ctx context.Context) (bool, host.Inp
 		return false, cur, nil
 	}
 
-	if !b.applyIMEDecision(ctx, dec) {
+	if err := b.applyIMEDecision(ctx, dec); err != nil {
+		b.reportIMEFailure(err)
 		return false, cur, nil
 	}
 
@@ -1369,29 +1358,48 @@ func (b *windowsBridge) RestoreTemporaryIME(ctx context.Context) (bool, host.Inp
 }
 
 // applyIMEDecision applies a switch decision, preferring an explicit input source and falling
-// back to a mode-only switch. It reports whether any switch was applied successfully.
-func (b *windowsBridge) applyIMEDecision(ctx context.Context, decision IMEDecision) bool {
+// back to a mode-only switch. A restored native decision also re-opens native conversion after the
+// HKL switch. The returned error describes every failed strategy.
+func (b *windowsBridge) applyIMEDecision(ctx context.Context, decision IMEDecision) error {
+	var selErr error
 	if decision.TargetInputSourceID != "" {
-		if err := b.SelectInputSource(ctx, decision.TargetInputSourceID); err == nil {
-			return true
-		}
-		if decision.TargetMode == "" {
-			return false
+		if selErr = b.SelectInputSource(ctx, decision.TargetInputSourceID); selErr == nil {
+			if decision.TargetMode == config.IMEModeNative {
+				return b.SetIMEMode(ctx, decision.TargetMode)
+			}
+			return nil
 		}
 	}
 	if decision.TargetMode == "" {
-		return false
+		if selErr == nil {
+			selErr = errors.New("windows: empty IME decision")
+		}
+		return selErr
 	}
-	return b.SetIMEMode(ctx, decision.TargetMode) == nil
+	if err := b.SetIMEMode(ctx, decision.TargetMode); err != nil {
+		return errors.Join(selErr, err)
+	}
+	return nil
 }
 
-func hklToInputSourceInfo(hkl uintptr) host.InputSourceInfo {
-	langID := uint16(hkl & 0xFFFF)
-	return host.InputSourceInfo{
-		ID:       fmt.Sprintf("0x%08x", uint64(hkl)),
-		Name:     fmt.Sprintf("HKL 0x%04x", langID),
-		Language: fmt.Sprintf("0x%04x", langID),
-		IsASCII:  langID == 0x0409,
+// reportIMEFailure surfaces an IME switch failure through OnIMESwitchFailed, throttling repeats
+// of the same message so a flapping foreground window cannot spam the HUD.
+func (b *windowsBridge) reportIMEFailure(err error) {
+	if err == nil {
+		return
+	}
+	msg := err.Error()
+	now := time.Now()
+	b.mu.Lock()
+	cb := b.onIMEFail
+	if msg == b.lastIMEFailMsg && now.Sub(b.lastIMEFailAt) < 5*time.Second {
+		cb = nil
+	} else {
+		b.lastIMEFailMsg, b.lastIMEFailAt = msg, now
+	}
+	b.mu.Unlock()
+	if cb != nil {
+		cb(err)
 	}
 }
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/yeisme/clavis/pkg/core/i18n"
@@ -953,10 +954,36 @@ type IMEConfig struct {
 	ShowFloatingPill     bool   `json:"showFloatingPill"`
 }
 
+// WindowsDefaultInputSourceID is the en-US keyboard layout HKL, formatted like
+// the Windows bridge reports input source IDs.
+const WindowsDefaultInputSourceID = "0x04090409"
+
+// DefaultInputSourceIDFor returns the platform default ASCII input source ID.
+func DefaultInputSourceIDFor(goos string) string {
+	if goos == "windows" {
+		return WindowsDefaultInputSourceID
+	}
+	return "com.apple.keylayout.ABC"
+}
+
+// NormalizeInputSourceIDFor maps input source IDs that cannot exist on goos
+// (e.g. macOS "com.apple.*" layouts copied to Windows) to the platform default.
+func NormalizeInputSourceIDFor(goos, id string) string {
+	if goos == "windows" && strings.HasPrefix(strings.ToLower(strings.TrimSpace(id)), "com.apple.") {
+		return WindowsDefaultInputSourceID
+	}
+	return id
+}
+
 func DefaultIMEConfig() IMEConfig {
+	return DefaultIMEConfigFor(runtime.GOOS)
+}
+
+// DefaultIMEConfigFor returns IME defaults for the given GOOS.
+func DefaultIMEConfigFor(goos string) IMEConfig {
 	return IMEConfig{
 		Enabled:              true,
-		DefaultInputSourceID: "com.apple.keylayout.ABC",
+		DefaultInputSourceID: DefaultInputSourceIDFor(goos),
 		ShowIndicatorHUD:     true,
 		SwitchDelayMs:        50,
 		LockASCIIOnLeader:    true,
@@ -977,7 +1004,7 @@ func decodeIMEConfig(tbl *toml.Table, path string) (IMEConfig, error) {
 	if s, ok, err := optionalString(tbl, "default_input_source_id", path); err != nil {
 		return cfg, err
 	} else if ok {
-		cfg.DefaultInputSourceID = s
+		cfg.DefaultInputSourceID = NormalizeInputSourceIDFor(runtime.GOOS, s)
 	}
 	if b, ok, err := optionalBool(tbl, "show_indicator_hud", path); err != nil {
 		return cfg, err
