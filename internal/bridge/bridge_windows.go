@@ -315,7 +315,8 @@ type windowsBridge struct {
 	extSource host.InputSourceInfo
 	haveExt   bool
 
-	health hookHealthState
+	health   hookHealthState
+	triggers *triggerRuntime
 	// inputEngineReset, when set, drops any in-flight own-IME composition (mouse click etc.).
 	inputEngineReset func()
 	// ime hosts the own input engine (input_engine_windows.go); nil engine when disabled.
@@ -361,11 +362,19 @@ func newPlatformBridge(opts Options) HostService {
 		onIME:        opts.OnInputSourceChanged,
 		onIMEFail:    opts.OnIMESwitchFailed,
 		onLayer:      opts.OnKeymapLayerChanged,
+		triggers:     newTriggerRuntime(),
 	}
 	b.pbRestorer = NewPasteboardSnapshotRestorer(&windowsPasteboardBackend{bridge: b})
 	b.health.resetCh = make(chan struct{}, 1)
 	b.health.reinstallRes = make(chan bool, 1)
 	b.ime.dirty = make(chan struct{}, 1)
+	b.ime.anchorFn = func(ctx context.Context) (host.CursorAnchor, bool) {
+		_, hwnd := winForegroundApp()
+		if a, ok := resolveWinCaretAnchor(hwnd); ok {
+			return a, true
+		}
+		return resolveWinMouseAnchor()
+	}
 	b.inputEngineReset = b.resetInputEngine
 	return b
 }
@@ -668,6 +677,10 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 	}
 
 	if modName, ok := winVKToModifier(vk); ok && (isDown || isUp) {
+		if b.triggers != nil && (vk == vkShift || vk == vkLShift || vk == vkRShift) && b.triggers.doubleShift(modName, isDown, winOtherModifiersDown(vk), nowMs, b.hookIMEComposing(time.Now())) {
+			b.emitTriggerEvents([]host.TriggerEvent{selectionEvent(nowMs)})
+			return 1
+		}
 		if vk == vkShift || vk == vkLShift || vk == vkRShift {
 			b.inputEngineHandleKey(vk, info.ScanCode, isDown, time.Now()) // never consumes
 		}
@@ -678,33 +691,61 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 		return r
 	}
 
-	if isDown && b.inputEngineHandleKey(vk, info.ScanCode, true, time.Now()) {
-		return 1
-	}
-
 	if isDown {
-		if b.shiftDown {
-			b.shiftHadKey = true
-		}
-		keyName := winVKToKeyName(vk)
-		if b.inlineEnabled.Load() && b.callInline(host.InlineKeyEvent{KeyName: keyName, Rune: winVKToUnicode(vk, info.ScanCode), KeyCode: vk, Modifiers: winActiveModifiers(), IsDown: true, TimestampMs: nowMs}) {
+		keyNameForTrigger := winVKToKeyName(vk)
+		if b.triggers != nil && b.triggers.shortcutMatches(keyNameForTrigger, winActiveModifiers()) && !b.hookSecureInput(time.Now()) {
+			b.emitTriggerEvents([]host.TriggerEvent{optimizeEvent(nowMs)})
 			return 1
 		}
-		mods := winActiveModifiers()
-		unicodeStr := winVKToUnicode(vk, info.ScanCode)
-		// Under IMM32 a shared HKL keeps native (Chinese) conversion mode active; keystrokes then
-		// belong to the IME candidate buffer rather than to committed text.
-		now := time.Now()
-		imeComposing := b.hookIMEComposing(now)
-		events, consume := b.router.HandleKeyDownWithIME(keyName, unicodeStr, mods, vk == vkBack, b.hookSecureInput(now), imeComposing, nowMs)
-		b.emitTriggerEvents(events)
-		if consume {
+		cache := &keyDownUnicodeCache{lookup: rawWinVKToUnicode}
+		prevCache := activeKeyDownUnicode.Swap(cache)
+		defer activeKeyDownUnicode.Store(prevCache)
+
+		var keyName string
+		var mods []string
+		if dispatchWinKeyDown(vk, info.ScanCode, cache, winKeyDownHooks{
+			inputEngine: func() bool {
+				return b.inputEngineHandleKey(vk, info.ScanCode, true, time.Now())
+			},
+			onFallback: func() {
+				if b.shiftDown {
+					b.shiftHadKey = true
+				}
+				keyName = winVKToKeyName(vk)
+				mods = winActiveModifiers()
+			},
+			inline: func(unicodeStr string) bool {
+				return b.inlineEnabled.Load() && b.callInline(host.InlineKeyEvent{
+					KeyName:     keyName,
+					Rune:        unicodeStr,
+					KeyCode:     vk,
+					Modifiers:   mods,
+					IsDown:      true,
+					TimestampMs: nowMs,
+				})
+			},
+			router: func(unicodeStr string) bool {
+				// Under IMM32 a shared HKL keeps native (Chinese) conversion mode active; keystrokes then
+				// belong to the IME candidate buffer rather than to committed text.
+				now := time.Now()
+				imeComposing := b.hookIMEComposing(now)
+				events, consume := b.router.HandleKeyDownWithIME(keyName, unicodeStr, mods, vk == vkBack, b.hookSecureInput(now), imeComposing, nowMs)
+				b.emitTriggerEvents(events)
+				return consume
+			},
+		}) {
 			return 1
 		}
 	}
 
 	r, _, _ := procCallNextHookEx.Call(hhk, uintptr(nCode), wParam, lParam)
 	return r
+}
+
+func (b *windowsBridge) emitWindowsSelectionTrigger() {
+	// Windows has no selection API in this bridge yet. Keep the probe off-hook;
+	// a future UIA provider can replace this without changing hook semantics.
+	// Do not fake a selection: only a provider-confirmed non-empty selection fires.
 }
 
 func (b *windowsBridge) emitTriggerEvents(events []host.TriggerEvent) {
@@ -1817,7 +1858,16 @@ func winActiveModifiers() []string {
 	return mods
 }
 
+var activeKeyDownUnicode atomic.Pointer[keyDownUnicodeCache]
+
 func winVKToUnicode(vk uint16, scanCode uint32) string {
+	if c := activeKeyDownUnicode.Load(); c != nil {
+		return c.Resolve(vk, scanCode)
+	}
+	return rawWinVKToUnicode(vk, scanCode)
+}
+
+func rawWinVKToUnicode(vk uint16, scanCode uint32) string {
 	var keyState [256]byte
 	if winVKDown(vkLShift) || winVKDown(vkRShift) || winVKDown(vkShift) {
 		keyState[vkShift] = 0x80

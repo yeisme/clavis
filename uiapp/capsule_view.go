@@ -7,7 +7,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/markdown"
 	"github.com/yeisme/clavis/pkg/core/config"
@@ -26,13 +25,15 @@ var omniboxTabs = []config.CapsuleTab{
 // CapsuleView renders the native MyGo Capsule UI for the current CapsulePhase.
 func (a *AppController) CapsuleView(c *ui.Context) {
 	cfg := a.Config()
+	appearance := cfg.Main.Appearance
+	SetCandidateAppearance(appearance)
 	state := a.State()
 	diag := a.Diagnostics()
-	theme := resolveAppearanceTheme(c, cfg.Main.Appearance.Theme)
+	theme := resolveAppearanceTheme(c, appearance.Theme)
 	c.SetTheme(theme)
 	prefs := c.Preferences()
-	radius := NormalizeCornerRadius(cfg.Main.Appearance)
-	profile := appMotionProfile(c, cfg.Main.Appearance)
+	radius := NormalizeCornerRadius(appearance)
+	profile := appMotionProfile(c, appearance)
 	DisableAnimationsFor(c, profile)
 	a.uiState.lastExitHideDelay = profile.ExitHideDelay()
 
@@ -63,38 +64,39 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 	} else {
 		card = card.Transition(profile.capsuleEnterTransition())
 	}
-	if !prefs.ReduceTransparency {
-		card.Material(glass.Glass{Native: c.Vibrancy()})
-		if prefs.HighContrast {
-			card.Border(1.5, theme.Border)
-		} else {
-			card.Border(1, withAlpha(theme.Border, 0.5))
+	card = applyCapsuleCardSurface(c, card, theme, appearance)
+
+	renderInteractivePhase := func() {
+		a.renderCapsuleHeader(c, theme, cfg, state, diag)
+		ui.Divider(c)
+		switch state.Phase {
+		case engine.PhaseLeader:
+			a.renderLeaderView(c, theme, state)
+		case engine.PhaseOmnibox:
+			a.renderOmniboxView(c, theme, cfg, state)
+		case engine.PhaseAIStreaming:
+			a.renderAIStreamingView(c, theme, cfg, state)
 		}
-	} else {
-		borderW := float32(1)
-		if prefs.HighContrast {
-			borderW = 1.5
-		}
-		card.Background(theme.Background).Border(borderW, theme.Border)
 	}
 
 	card.Children(func() {
-		switch state.Phase {
-		case engine.PhaseHUD:
+		if state.Phase == engine.PhaseHUD {
 			a.renderHUDView(c, theme, state)
-		case engine.PhaseLeader:
-			a.renderCapsuleHeader(c, theme, cfg, state, diag)
-			ui.Divider(c)
-			a.renderLeaderView(c, theme, state)
-		case engine.PhaseOmnibox:
-			a.renderCapsuleHeader(c, theme, cfg, state, diag)
-			ui.Divider(c)
-			a.renderOmniboxView(c, theme, cfg, state)
-		case engine.PhaseAIStreaming:
-			a.renderCapsuleHeader(c, theme, cfg, state, diag)
-			ui.Divider(c)
-			a.renderAIStreamingView(c, theme, cfg, state)
+			return
 		}
+		if isClassicPreset(appearance) {
+			renderInteractivePhase()
+			return
+		}
+		stageIdx, _ := capsuleStageIndex(state.Phase)
+		stageCfg := effectiveSpatialAppearance(c, appearance)
+		StageContainer3D(c, "capsule", stageIdx, stageCfg, func() {
+			col := ui.Column(c).Fill()
+			if Spatial3DEnabled(c, stageCfg) && stageIdx != 0 && appearance.CapsuleWidth > 720 {
+				col.Padding(0, 6)
+			}
+			col.Children(renderInteractivePhase)
+		})
 	})
 }
 
@@ -125,7 +127,13 @@ func (a *AppController) renderCapsuleHeader(
 	state engine.State,
 	diag DiagnosticsSnapshot,
 ) {
-	ui.Row(c).FillWidth().Padding(10, 14).Gap(8).AlignItems(ui.Center).Children(func() {
+	header := ui.Row(c).FillWidth().Padding(10, 14).Gap(8).AlignItems(ui.Center)
+	if state.Phase == engine.PhaseAIStreaming && !isClassicPreset(cfg.Main.Appearance) {
+		header.Draw(func(p *ui.Painter, r ui.Rect) {
+			drawCapsuleAIHeaderGlow(c, p, r, theme, cfg.Main.Appearance, state)
+		})
+	}
+	header.Children(func() {
 		// Clavis brand badge with command icon
 		ui.Row(c).
 			Padding(3, 8).

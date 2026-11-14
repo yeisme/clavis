@@ -22,6 +22,11 @@ type MemoryStore struct {
 	generation atomic.Uint64
 }
 
+var (
+	_ Store             = (*MemoryStore)(nil)
+	_ GenerationTracker = (*MemoryStore)(nil)
+)
+
 // NewMemoryStore constructs an empty MemoryStore with the given PrivacyFilter.
 func NewMemoryStore(filter PrivacyFilter) *MemoryStore {
 	return &MemoryStore{

@@ -50,15 +50,48 @@ type ResidentSupervisor struct {
 	total             atomic.Uint64
 	cancel            context.CancelFunc
 	done              chan struct{}
+	intervalReset     chan time.Duration
 }
 
 func NewResidentSupervisor(cfg config.DaemonConfig) *ResidentSupervisor {
-	s := &ResidentSupervisor{cfg: cfg, started: time.Now(), done: make(chan struct{})}
+	s := &ResidentSupervisor{cfg: cfg, started: time.Now()}
 	s.lastInteraction.Store(s.started.UnixNano())
 	return s
 }
+
+func watchdogInterval(cfg config.DaemonConfig) time.Duration {
+	interval := time.Duration(cfg.WatchdogIntervalMs) * time.Millisecond
+	if interval <= 0 {
+		return time.Second
+	}
+	return interval
+}
+
+// UpdateConfig hot-reloads daemon thresholds and resets the watchdog ticker if WatchdogIntervalMs changed.
+func (s *ResidentSupervisor) UpdateConfig(cfg config.DaemonConfig) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	oldInterval := watchdogInterval(s.cfg)
+	s.cfg = cfg
+	newInterval := watchdogInterval(cfg)
+	resetCh := s.intervalReset
+	s.mu.Unlock()
+	if resetCh != nil && newInterval != oldInterval {
+		select {
+		case <-resetCh:
+		default:
+		}
+		select {
+		case resetCh <- newInterval:
+		default:
+		}
+	}
+}
+
 func (s *ResidentSupervisor) RegisterCompactionHook(h CompactionHook) {
-	if h == nil {
+	if s == nil || h == nil {
 		return
 	}
 	s.mu.Lock()
@@ -66,7 +99,7 @@ func (s *ResidentSupervisor) RegisterCompactionHook(h CompactionHook) {
 	s.mu.Unlock()
 }
 func (s *ResidentSupervisor) RegisterWatchdogProbe(p WatchdogProbe) {
-	if p == nil {
+	if s == nil || p == nil {
 		return
 	}
 	s.mu.Lock()
@@ -75,12 +108,18 @@ func (s *ResidentSupervisor) RegisterWatchdogProbe(p WatchdogProbe) {
 	s.mu.Unlock()
 }
 func (s *ResidentSupervisor) RecordInteraction() {
+	if s == nil {
+		return
+	}
 	s.lastInteraction.Store(time.Now().UnixNano())
 	s.mu.Lock()
 	s.idleCompacted = false
 	s.mu.Unlock()
 }
 func (s *ResidentSupervisor) RecordKeystroke(latencyNs int64, committedRunes int) {
+	if s == nil {
+		return
+	}
 	now := time.Now()
 	s.lastInteraction.Store(now.UnixNano())
 	s.total.Add(1)
@@ -101,54 +140,86 @@ func (s *ResidentSupervisor) trimLocked(now time.Time) {
 	}
 }
 func (s *ResidentSupervisor) Start(ctx context.Context) {
-	if s.cancel != nil {
+	if s == nil {
 		return
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	s.cancel = cancel
-	interval := time.Duration(s.cfg.WatchdogIntervalMs) * time.Millisecond
-	if interval <= 0 {
-		interval = time.Second
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	s.mu.Lock()
+	if s.cancel != nil {
+		s.mu.Unlock()
+		return
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	resetCh := make(chan time.Duration, 1)
+	s.cancel = cancel
+	s.done = done
+	s.intervalReset = resetCh
+	interval := watchdogInterval(s.cfg)
+	s.mu.Unlock()
+
 	go func() {
-		defer close(s.done)
+		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
+			case newInterval := <-resetCh:
+				if newInterval > 0 {
+					ticker.Reset(newInterval)
+				}
 			case <-ticker.C:
-				s.watchdog(ctx)
+				s.watchdog(runCtx)
 			}
 		}
 	}()
 }
 func (s *ResidentSupervisor) Stop() {
-	if s.cancel != nil {
-		s.cancel()
-		<-s.done
-		s.cancel = nil
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	cancel := s.cancel
+	done := s.done
+	s.cancel = nil
+	s.done = nil
+	s.intervalReset = nil
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
 	}
 }
 func (s *ResidentSupervisor) watchdog(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	now := time.Now()
-	if now.Sub(time.Unix(0, s.lastInteraction.Load())) >= time.Duration(s.cfg.IdleCompactSeconds)*time.Second {
-		s.mu.Lock()
-		doCompact := !s.idleCompacted
+	s.mu.Lock()
+	cfg := s.cfg
+	var doCompact bool
+	if cfg.IdleCompactSeconds > 0 && now.Sub(time.Unix(0, s.lastInteraction.Load())) >= time.Duration(cfg.IdleCompactSeconds)*time.Second {
+		doCompact = !s.idleCompacted
 		if doCompact {
 			s.idleCompacted = true
 		}
-		s.mu.Unlock()
-		if doCompact {
-			s.compact(ctx)
-		}
 	}
-	s.mu.Lock()
 	probes := append([]WatchdogProbe(nil), s.probes...)
 	healthy := append([]bool(nil), s.probeHealthy...)
 	s.mu.Unlock()
+	if doCompact {
+		s.compact(ctx)
+	}
 	for i, p := range probes {
+		if ctx.Err() != nil {
+			return
+		}
 		ok, err := p(ctx)
 		if err != nil {
 			ok = false
@@ -162,9 +233,12 @@ func (s *ResidentSupervisor) watchdog(ctx context.Context) {
 		}
 		s.mu.Unlock()
 	}
+	if ctx.Err() != nil {
+		return
+	}
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	if s.cfg.MaxMemoryMB > 0 && m.HeapAlloc > uint64(s.cfg.MaxMemoryMB)*1024*1024 {
+	if cfg.MaxMemoryMB > 0 && m.HeapAlloc > uint64(cfg.MaxMemoryMB)*1024*1024 {
 		last := time.Unix(0, s.lastMemoryCompact.Load())
 		if now.Sub(last) >= time.Minute {
 			s.lastMemoryCompact.Store(now.UnixNano())
@@ -183,6 +257,9 @@ func (s *ResidentSupervisor) compact(ctx context.Context) {
 	}
 }
 func (s *ResidentSupervisor) Snapshot() HealthSnapshot {
+	if s == nil {
+		return HealthSnapshot{}
+	}
 	now := time.Now()
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)

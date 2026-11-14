@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -180,7 +181,12 @@ func newLearningWriter(store *LearningStore, opts LearningWriterOptions, persist
 // prevWord, "" at a sentence start). It never blocks on storage: safe on
 // the keyboard hook thread.
 func (w *LearningWriter) QueueIMECommit(pinyinKey, word, prevWord string, pinned bool) {
-	if word == "" {
+	// Same normalization as LearningStore.RecordIMECommit, so the async and
+	// the synchronous path persist and mirror identical keys.
+	pinyinKey = truncateUTF8(strings.TrimSpace(pinyinKey), MaxMirrorKeyBytes)
+	word = truncateUTF8(word, MaxMirrorKeyBytes)
+	prevWord = truncateUTF8(prevWord, MaxMirrorKeyBytes)
+	if pinyinKey == "" || word == "" {
 		return
 	}
 	now := time.Now().UTC().UnixNano()
@@ -212,6 +218,7 @@ func (w *LearningWriter) QueueIMECommit(pinyinKey, word, prevWord string, pinned
 // QueueItemUse records an Omnibox item execution for frecency ranking. It
 // never blocks on storage: safe on the UI thread.
 func (w *LearningWriter) QueueItemUse(itemID string, now time.Time) {
+	itemID = truncateUTF8(itemID, MaxMirrorItemIDBytes)
 	if itemID == "" {
 		return
 	}
@@ -236,6 +243,9 @@ func (w *LearningWriter) QueueItemUse(itemID string, now time.Time) {
 // persistence-only (no RAM mirror); at most maxPendingPrompts rows wait,
 // the oldest dropping first.
 func (w *LearningWriter) QueuePromptVersion(promptID, trigger, rawDraft, finalOutput, preset string) {
+	if promptID == "" && finalOutput == "" {
+		return
+	}
 	pv := promptVersion{promptID, trigger, rawDraft, finalOutput, preset, time.Now().UTC().UnixNano()}
 	w.mu.Lock()
 	w.pending.prompts = append(w.pending.prompts, pv)
@@ -345,18 +355,25 @@ func (w *LearningWriter) Stats() LearningWriterStats {
 }
 
 // mirrorIMECommit applies one commit to the RAM mirror (what LookupBoost and
-// CustomWordsForPrefix read).
+// CustomWordsForPrefix read), honoring the mirror caps exactly as
+// RecordIMECommit does.
 func (s *LearningStore) mirrorIMECommit(pinyinKey, word, prevWord string, pinned bool, now int64) {
 	s.mu.Lock()
 	k := lexKey{pinyinKey, word, ""}
-	v := s.lex[k]
+	v, exists := s.lex[k]
+	if !exists && len(s.lex) >= MaxLexMirrorEntries {
+		evictLexEntries(s.lex, MaxLexMirrorEntries)
+	}
 	v.frequency++
 	v.lastUsed = now
 	v.pinned = v.pinned || pinned
 	s.lex[k] = v
 	if prevWord != "" {
 		bk := [2]string{prevWord, word}
-		b := s.bigrams[bk]
+		b, bexists := s.bigrams[bk]
+		if !bexists && len(s.bigrams) >= MaxBigramMirrorEntries {
+			evictBigramEntries(s.bigrams, MaxBigramMirrorEntries)
+		}
 		b.frequency++
 		b.lastUsed = now
 		s.bigrams[bk] = b
@@ -364,16 +381,15 @@ func (s *LearningStore) mirrorIMECommit(pinyinKey, word, prevWord string, pinned
 	s.mu.Unlock()
 }
 
-// mirrorItemUse applies one item use to the frecency mirror.
+// mirrorItemUse applies one item use to the bounded frecency mirror.
 func (s *LearningStore) mirrorItemUse(itemID string, ns int64) {
 	s.mu.Lock()
-	v := s.uses[itemID]
-	if len(v) == 0 {
-		v = []int64{ns, 1}
-	} else {
-		v[0] = max(v[0], ns)
-		v[1]++
+	v, exists := s.uses[itemID]
+	if !exists && len(s.uses) >= MaxUsesMirrorEntries {
+		evictUseEntries(s.uses, MaxUsesMirrorEntries)
 	}
+	v.lastUsed = max(v.lastUsed, ns)
+	v.count++
 	s.uses[itemID] = v
 	s.mu.Unlock()
 }

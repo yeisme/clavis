@@ -5,11 +5,55 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"time"
+	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
+
+const maxPendingIMECommits = 256
+
+// inputEngineConfigEqual reports whether two [input_engine] configs are
+// equivalent. Callers use it to skip an engine rebuild on config reload: the
+// rebuild loads the lexicon (possibly compiling a Rime dictionary) and resets
+// any in-flight composition, so an unrelated edit (theme, language, …) must
+// not trigger it.
+func inputEngineConfigEqual(a, b config.InputEngineConfig) bool {
+	return a.Enabled == b.Enabled &&
+		a.Mode == b.Mode &&
+		a.Scheme == b.Scheme &&
+		a.CandidateCount == b.CandidateCount &&
+		a.MixedEnglish == b.MixedEnglish &&
+		a.AutoPairPunctuation == b.AutoPairPunctuation &&
+		a.ShiftToggleASCII == b.ShiftToggleASCII &&
+		a.UserLearning == b.UserLearning &&
+		a.IMKSocketPath == b.IMKSocketPath &&
+		slices.Equal(a.FuzzyPinyin, b.FuzzyPinyin) &&
+		slices.Equal(a.CustomDictPaths, b.CustomDictPaths)
+}
+
+// InputEngineCommit describes one committed candidate from the own input engine.
+type InputEngineCommit struct {
+	PinyinKey string
+	Word      string
+	PrevWord  string
+	Pinned    bool
+	// LatencyNs is the hook-side latency from key arrival to commit decision,
+	// measured inside the hook thread (no I/O, no allocation).
+	LatencyNs int64
+}
+
+// InputEngineLearningHost is optionally implemented by bridges that host the own input
+// engine, allowing runtime injection of the RAM-only user frequency provider and an
+// off-hook commit callback without importing internal/storage.
+type InputEngineLearningHost interface {
+	UpdateInputEngineLearning(userFreq inputengine.UserFrequencyProvider, onCommit func(InputEngineCommit))
+}
 
 // Virtual-key codes used by the input engine mapping (duplicated untagged for testability).
 const (
@@ -28,14 +72,18 @@ const (
 
 // inputEngineOptionsFromConfig converts [input_engine] config into inputengine.Options.
 // Returns ok=false when the own input engine is disabled or configured for a non-hook mode,
-// preserving the zero-overhead disabled default.
-func inputEngineOptionsFromConfig(cfg config.InputEngineConfig, cacheDir string) (inputengine.Options, bool) {
+// preserving the zero-overhead disabled default. When user_learning is false, UserFrequency
+// is forced to nil so learning stays completely inert.
+func inputEngineOptionsFromConfig(cfg config.InputEngineConfig, cacheDir string, userFreq inputengine.UserFrequencyProvider) (inputengine.Options, bool) {
 	if !cfg.Enabled || (cfg.Mode != "" && cfg.Mode != "inline_hook" && cfg.Mode != "dual") {
 		return inputengine.Options{}, false
 	}
 	resolvedCache := strings.TrimSpace(cacheDir)
 	if resolvedCache == "" && len(cfg.CustomDictPaths) > 0 {
 		resolvedCache = defaultInputEngineCacheDir()
+	}
+	if !cfg.UserLearning {
+		userFreq = nil
 	}
 	return inputengine.Options{
 		CandidateCount:   cfg.CandidateCount,
@@ -44,15 +92,165 @@ func inputEngineOptionsFromConfig(cfg config.InputEngineConfig, cacheDir string)
 		FuzzyPinyin:      slices.Clone(cfg.FuzzyPinyin),
 		CustomDictPaths:  slices.Clone(cfg.CustomDictPaths),
 		DictCacheDir:     resolvedCache,
+		UserFrequency:    userFreq,
 	}, true
 }
 
-func newInputEngineFromConfig(cfg config.InputEngineConfig, cacheDir string) *inputengine.Engine {
-	opts, ok := inputEngineOptionsFromConfig(cfg, cacheDir)
+func newInputEngineFromConfig(cfg config.InputEngineConfig, cacheDir string, userFreq inputengine.UserFrequencyProvider) *inputengine.Engine {
+	opts, ok := inputEngineOptionsFromConfig(cfg, cacheDir, userFreq)
 	if !ok {
 		return nil
 	}
 	return inputengine.New(opts)
+}
+
+// inputEngineCommitTracker extracts committed candidates on the hook thread without doing any
+// SQL or I/O, buffering commits for the off-hook view/worker goroutine to persist.
+type inputEngineCommitTracker struct {
+	mu       sync.Mutex
+	prevWord string
+	pending  []InputEngineCommit
+}
+
+func (t *inputEngineCommitTracker) resetPrev() {
+	t.mu.Lock()
+	t.prevWord = ""
+	t.mu.Unlock()
+}
+
+func (t *inputEngineCommitTracker) pushCommit(pinyinKey, word string, latencyNs int64) {
+	t.mu.Lock()
+	if len(t.pending) < maxPendingIMECommits {
+		t.pending = append(t.pending, InputEngineCommit{
+			PinyinKey: pinyinKey,
+			Word:      word,
+			PrevWord:  t.prevWord,
+			LatencyNs: latencyNs,
+		})
+	}
+	t.prevWord = word
+	t.mu.Unlock()
+}
+
+func (t *inputEngineCommitTracker) hasPending() bool {
+	t.mu.Lock()
+	n := len(t.pending)
+	t.mu.Unlock()
+	return n > 0
+}
+
+func (t *inputEngineCommitTracker) drain(dst []InputEngineCommit) []InputEngineCommit {
+	t.mu.Lock()
+	if len(t.pending) > 0 {
+		dst = append(dst, t.pending...)
+		t.pending = t.pending[:0]
+	}
+	t.mu.Unlock()
+	return dst
+}
+
+func (t *inputEngineCommitTracker) handleKey(eng *inputengine.Engine, k inputengine.Key, learn bool) inputengine.Result {
+	// start measures key-arrival → commit-decision latency for the resident
+	// telemetry (P50/P99). time.Now is ~20ns and allocates nothing, so this is
+	// safe on the hook thread.
+	start := time.Now()
+	switch k.Kind {
+	case inputengine.KeyShiftDown:
+		return eng.HandleKey(k)
+	case inputengine.KeyShiftUp:
+		res := eng.HandleKey(k)
+		if res.Changed || res.Commit != "" {
+			t.resetPrev()
+		}
+		return res
+	case inputengine.KeyEscape, inputengine.KeyEnter:
+		res := eng.HandleKey(k)
+		t.resetPrev()
+		return res
+	case inputengine.KeyLetter, inputengine.KeyBackspace, inputengine.KeyApostrophe,
+		inputengine.KeyPagePrev, inputengine.KeyPageNext:
+		if k.Chord {
+			res := eng.HandleKey(k)
+			if res.Changed {
+				t.resetPrev()
+			}
+			return res
+		}
+		return eng.HandleKey(k)
+	}
+
+	if k.Chord || k.Kind == inputengine.KeyNavigation {
+		res := eng.HandleKey(k)
+		if res.Changed {
+			t.resetPrev()
+		}
+		return res
+	}
+
+	if !learn || eng.Raw() == "" {
+		res := eng.HandleKey(k)
+		if res.Commit != "" {
+			t.resetPrev()
+		}
+		return res
+	}
+
+	preView := eng.View()
+	res := eng.HandleKey(k)
+	if res.Commit == "" || !preView.Composing {
+		return res
+	}
+
+	word, ok := committedCandidateWord(preView, k, res.Commit, eng.Raw() == "")
+	if !ok || word == "" {
+		t.resetPrev()
+		return res
+	}
+
+	var pinyinKey string
+	if eng.Raw() == "" {
+		pinyinKey = strings.ReplaceAll(preView.Preedit, "'", "")
+	} else {
+		postPreedit := eng.View().Preedit
+		if postPreedit != "" && strings.HasSuffix(preView.Preedit, "'"+postPreedit) {
+			consumed := strings.TrimSuffix(preView.Preedit, "'"+postPreedit)
+			pinyinKey = strings.ReplaceAll(consumed, "'", "")
+		}
+	}
+
+	if pinyinKey != "" {
+		t.pushCommit(pinyinKey, word, time.Since(start).Nanoseconds())
+	} else {
+		t.resetPrev()
+	}
+	return res
+}
+
+func committedCandidateWord(preView inputengine.View, k inputengine.Key, commit string, fullCommit bool) (string, bool) {
+	switch k.Kind {
+	case inputengine.KeySpace:
+		idx := preView.Selected
+		if idx >= 0 && idx < len(preView.Candidates) && commit == preView.Candidates[idx].Text {
+			return preView.Candidates[idx].Text, true
+		}
+	case inputengine.KeyDigit:
+		idx := int(k.Rune-'0') - 1
+		if idx >= 0 && idx < len(preView.Candidates) && commit == preView.Candidates[idx].Text {
+			return preView.Candidates[idx].Text, true
+		}
+	default:
+		if fullCommit && len(preView.Candidates) > 0 {
+			cand := preView.Candidates[0].Text
+			expected := cand
+			if k.Rune != 0 {
+				expected += string(k.Rune)
+			}
+			if commit == expected {
+				return cand, true
+			}
+		}
+	}
+	return "", false
 }
 
 func defaultInputEngineCacheDir() string {
@@ -109,16 +307,86 @@ func engineKeyForVK(vk uint16, text string, chord bool) (inputengine.Key, bool) 
 
 // utf16Units encodes s for KEYEVENTF_UNICODE SendInput (surrogate pairs for non-BMP).
 func utf16Units(s string) []uint16 {
-	var out []uint16
-	for _, r := range s {
-		if r >= 0x10000 {
-			r -= 0x10000
-			out = append(out, uint16(0xD800+(r>>10)), uint16(0xDC00+(r&0x3FF)))
-			continue
-		}
-		out = append(out, uint16(r))
+	return utf16.Encode([]rune(s))
+}
+
+// inputEngineKeyForInline is the platform-neutral mapping used by macOS' CGEventTap and
+// unit-tested on every platform. Rune carries the layout-decoded printable character.
+func inputEngineKeysForInline(ev host.InlineKeyEvent) ([]inputengine.Key, bool) {
+	if strings.EqualFold(ev.KeyName, "shift_tap") {
+		return []inputengine.Key{{Kind: inputengine.KeyShiftDown}, {Kind: inputengine.KeyShiftUp}}, true
 	}
-	return out
+	chord := false
+	for _, mod := range ev.Modifiers {
+		switch strings.ToLower(mod) {
+		case "ctrl", "control", "alt", "option", "cmd", "command", "meta":
+			chord = true
+		}
+	}
+	name := strings.ToLower(ev.KeyName)
+	r, _ := utf8.DecodeRuneInString(ev.Rune)
+	if r != utf8.RuneError {
+		r = unicode.ToLower(r)
+	}
+	k := inputengine.Key{Rune: r, Chord: chord}
+	switch {
+	case name == "space":
+		k.Kind = inputengine.KeySpace
+	case name == "return" || name == "enter":
+		k.Kind = inputengine.KeyEnter
+	case name == "backspace" || name == "delete":
+		k.Kind = inputengine.KeyBackspace
+	case name == "escape":
+		k.Kind = inputengine.KeyEscape
+	case name == "tab" || name == "left" || name == "right" || name == "up" || name == "down" || name == "home" || name == "end" || name == "pageup" || name == "pagedown" || (len(name) > 1 && name[0] == 'f'):
+		k.Kind = inputengine.KeyNavigation
+	case name == "'" || name == "quote":
+		k.Kind = inputengine.KeyApostrophe
+	case name == "-" || name == "minus":
+		k.Kind = inputengine.KeyPagePrev
+	case name == "=" || name == "equal":
+		k.Kind = inputengine.KeyPageNext
+	case r >= 'a' && r <= 'z':
+		k.Kind = inputengine.KeyLetter
+	case r >= '0' && r <= '9':
+		k.Kind = inputengine.KeyDigit
+	case r == '\'':
+		k.Kind = inputengine.KeyApostrophe
+	case r == '-':
+		k.Kind = inputengine.KeyPagePrev
+	case r == '=':
+		k.Kind = inputengine.KeyPageNext
+	default:
+		if chord {
+			k.Kind = inputengine.KeyNavigation
+		} else {
+			return nil, false
+		}
+	}
+	return []inputengine.Key{k}, true
+}
+
+func inputEngineKeyForInline(ev host.InlineKeyEvent) (inputengine.Key, bool) {
+	keys, ok := inputEngineKeysForInline(ev)
+	if !ok || len(keys) != 1 {
+		return inputengine.Key{}, false
+	}
+	return keys[0], true
+}
+
+func inputEngineCommitUnits(s string) []uint16 { return utf16.Encode([]rune(s)) }
+
+// emitInputEngineCommit posts UTF-16 chunks synchronously. The poster is injectable for tests.
+func emitInputEngineCommit(s string, post func([]uint16)) {
+	units := inputEngineCommitUnits(s)
+	for len(units) > 0 {
+		n := len(units)
+		if n > 20 {
+			n = 20
+		}
+		post(units[:n])
+		units = units[n:]
+	}
 }
 
 // inputEngineEligible applies design §6 rules 3/5 + password guard: the engine only takes over

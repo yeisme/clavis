@@ -113,9 +113,17 @@ func (b *windowsBridge) handleMouseProc(nCode int32, wParam uintptr, lParam uint
 		info := (*msllHookStruct)(nativePtr(lParam))
 		b.health.lastHookTick.Store(info.Time)
 		if isMouseButtonDown(wParam) {
+			if b.triggers != nil {
+				b.triggers.autoSelectMouseDown()
+			}
 			select {
 			case b.health.resetCh <- struct{}{}:
 			default:
+			}
+		} else if isMouseButtonUp(wParam) && b.triggers != nil && b.triggers.autoSelectMouseUp() {
+			if enabled, mode := b.triggers.selectionMode(); enabled && mode == "auto_select" {
+				// UI Automation/selection reads are never performed in this callback.
+				go b.emitWindowsSelectionTrigger()
 			}
 		}
 	}

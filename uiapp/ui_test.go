@@ -1400,7 +1400,10 @@ func TestDispatch_HideBeforeHUDAndTimerSurvives(t *testing.T) {
 	setShortHUD := func(t *testing.T, ctrl *AppController) {
 		t.Helper()
 		cfg := ctrl.Config()
-		cfg.Main.Appearance.HUDDurationMs = 60
+		// 500ms: long enough that the headless -race frames between dispatch
+		// and the PhaseHUD assertion cannot outlast the timer, yet still short
+		// enough to auto-dismiss well inside the 1s waitUntil below.
+		cfg.Main.Appearance.HUDDurationMs = 500
 		if err := os.WriteFile(filepath.Join(ctrl.ConfigStore.Directory(), string(config.FileMain)), []byte(cfg.Main.Encode()), 0o600); err != nil {
 			t.Fatalf("write config: %v", err)
 		}

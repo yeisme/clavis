@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,7 +37,7 @@ func (a *desktopApp) setupInputEngine(ctx context.Context, br bridge.HostService
 		return nil
 	}
 	u := &inputEngineUI{host: h}
-	u.ai = aiDebouncer{delay: inputengine.AIDebounce, suggest: suggest, deliver: h.SetInputEngineAICandidates}
+	u.ai = newInputEngineAIDebouncer(br, inputengine.AIDebounce, suggest, h.SetInputEngineAICandidates)
 	w, hgt := uiapp.PreferredCandidatePanelSize(inputengine.View{})
 	u.panel = mygo.NewWindow(mygo.WindowOptions{
 		Title: "Clavis Input", Width: w, Height: hgt,
@@ -99,15 +100,53 @@ type suggestFunc func(ctx context.Context, raw, appName string) []string
 // aiDebouncer fires suggest once raw has been stable for delay; any newer raw cancels the
 // in-flight request and bumps gen so late replies are dropped (design §5).
 type aiDebouncer struct {
-	delay   time.Duration
-	suggest suggestFunc
-	deliver func(raw string, words []string)
+	delay      time.Duration
+	suggest    suggestFunc
+	deliver    func(raw string, words []string)
+	resolveApp func(ctx context.Context) string
 
 	mu     sync.Mutex
 	last   string
 	gen    uint64
 	timer  *time.Timer
 	cancel context.CancelFunc
+}
+
+func newInputEngineAIDebouncer(br bridge.HostService, delay time.Duration, suggest suggestFunc, deliver func(raw string, words []string)) aiDebouncer {
+	return aiDebouncer{
+		delay:   delay,
+		suggest: suggest,
+		deliver: deliver,
+		resolveApp: func(ctx context.Context) string {
+			return resolveInputEngineAppName(ctx, br)
+		},
+	}
+}
+
+func resolveInputEngineAppName(ctx context.Context, br bridge.HostService) string {
+	if br == nil {
+		return ""
+	}
+	if rep, ok := br.(bridge.ForegroundIMEReporter); ok {
+		if st, ok := rep.ForegroundIMEStatus(); ok {
+			if name := firstNonEmptyAppLabel(st.App.ProcessName, st.App.BundleID); name != "" {
+				return name
+			}
+		}
+	}
+	if snap, err := br.SnapshotContext(ctx); err == nil {
+		return firstNonEmptyAppLabel(snap.AppName, snap.ProcessName, snap.BundleID)
+	}
+	return ""
+}
+
+func firstNonEmptyAppLabel(candidates ...string) string {
+	for _, c := range candidates {
+		if t := strings.TrimSpace(c); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 func (d *aiDebouncer) Changed(ctx context.Context, raw string, composing bool) {
@@ -141,7 +180,11 @@ func (d *aiDebouncer) Changed(ctx context.Context, raw string, composing bool) {
 		rctx, cancel := context.WithCancel(ctx)
 		d.cancel = cancel
 		d.mu.Unlock()
-		words := d.suggest(rctx, raw, "")
+		var appName string
+		if d.resolveApp != nil {
+			appName = d.resolveApp(rctx)
+		}
+		words := d.suggest(rctx, raw, appName)
 		cancel()
 		d.mu.Lock()
 		fresh := d.gen == gen

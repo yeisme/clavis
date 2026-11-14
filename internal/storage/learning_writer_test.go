@@ -13,7 +13,7 @@ import (
 // mirrorOnlyStore is a LearningStore without a database, for tests that
 // stand in their own persist function.
 func mirrorOnlyStore() *LearningStore {
-	return &LearningStore{lex: make(map[lexKey]lexValue), bigrams: make(map[[2]string]lexValue), uses: make(map[string][]int64)}
+	return &LearningStore{lex: make(map[lexKey]lexValue), bigrams: make(map[[2]string]lexValue), uses: make(map[string]useValue)}
 }
 
 // recordingSink is a persist function that takes `delay` per batch, as a

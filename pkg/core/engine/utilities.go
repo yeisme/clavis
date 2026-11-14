@@ -782,9 +782,9 @@ func parseColor(s string) ([3]int, bool) {
 			M := ll - 0.1055613458*a - 0.0638541728*bb
 			S := ll - 0.0894841775*a - 1.291485548*bb
 			l3, m3, s3 := L*L*L, M*M*M, S*S*S
-			r := 4.0767416621*l3 - 3.3077115913*m3 + 0.2309699292*s3
-			g := -1.2684380046*l3 + 2.6097574011*m3 - 0.3413193965*s3
-			b := -0.0041960863*l3 - 0.7034186147*m3 + 1.707614701*s3
+			r := linearToSRGB(4.0767416621*l3 - 3.3077115913*m3 + 0.2309699292*s3)
+			g := linearToSRGB(-1.2684380046*l3 + 2.6097574011*m3 - 0.3413193965*s3)
+			b := linearToSRGB(-0.0041960863*l3 - 0.7034186147*m3 + 1.707614701*s3)
 			clamp := func(x float64) int {
 				if x < 0 {
 					x = 0
@@ -869,10 +869,48 @@ func hslRGB(h, s, l float64) [3]int {
 	}
 	return [3]int{int(r*255 + .5), int(g*255 + .5), int(b*255 + .5)}
 }
+func srgbToLinear(u float64) float64 {
+	if u <= 0.04045 {
+		return u / 12.92
+	}
+	return math.Pow((u+0.055)/1.055, 2.4)
+}
+
+func linearToSRGB(u float64) float64 {
+	if u <= 0.0031308 {
+		return 12.92 * u
+	}
+	return 1.055*math.Pow(u, 1.0/2.4) - 0.055
+}
+
 func colorOKLCH(c [3]int) string {
-	r, g, b := float64(c[0])/255, float64(c[1])/255, float64(c[2])/255
-	l := 0.5 * (r + g + b)
-	return fmt.Sprintf("%.3f %.3f %.1f", l, 0.0, 0.0)
+	r := srgbToLinear(float64(c[0]) / 255.0)
+	g := srgbToLinear(float64(c[1]) / 255.0)
+	b := srgbToLinear(float64(c[2]) / 255.0)
+
+	l := 0.4122214708*r + 0.5363325363*g + 0.0514459929*b
+	m := 0.2119034982*r + 0.6806995451*g + 0.1073969566*b
+	s := 0.0883024619*r + 0.2817188376*g + 0.6299787005*b
+
+	l_ := math.Cbrt(l)
+	m_ := math.Cbrt(m)
+	s_ := math.Cbrt(s)
+
+	L := 0.2104542553*l_ + 0.7936177850*m_ - 0.0040720468*s_
+	a := 1.9779984951*l_ - 2.4285922050*m_ + 0.4505937099*s_
+	bb := 0.0259040371*l_ + 0.7827717662*m_ - 0.8086757660*s_
+
+	C := math.Hypot(a, bb)
+	h := 0.0
+	if C <= 1e-6 {
+		C = 0
+	} else {
+		h = math.Atan2(bb, a) * 180 / math.Pi
+		if h < 0 {
+			h += 360
+		}
+	}
+	return fmt.Sprintf("%.3f %.4f %.2f", L, C, h)
 }
 
 func colorHSL(c [3]int) string {

@@ -53,7 +53,15 @@ func (b *windowsBridge) CaptureEditableField(ctx context.Context) (host.Editable
 func (b *windowsBridge) ReplaceEditableField(ctx context.Context, replacement string, onlySelection bool) error {
 	return unsupported(ctx)
 }
-func (b *windowsBridge) UpdateDaemonShortcut(string)                        {}
-func (b *windowsBridge) UpdateSelectionBarConfig(config.SelectionBarConfig) {}
+func (b *windowsBridge) UpdateDaemonShortcut(accel string) {
+	if b.triggers != nil {
+		b.triggers.setShortcut(accel)
+	}
+}
+func (b *windowsBridge) UpdateSelectionBarConfig(cfg config.SelectionBarConfig) {
+	if b.triggers != nil {
+		b.triggers.setSelection(cfg)
+	}
+}
 
 var _ = strings.TrimSpace

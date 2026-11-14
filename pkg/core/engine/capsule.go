@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/yeisme/clavis/pkg/core/config"
@@ -148,29 +149,32 @@ const (
 
 // State is the immutable snapshot of the Capsule state machine.
 type State struct {
-	Phase             CapsulePhase            `json:"phase"`
-	LeaderPath        []string                `json:"leaderPath,omitempty"`
-	LeaderBreadcrumbs []string                `json:"leaderBreadcrumbs,omitempty"`
-	LeaderNodes       []config.LeaderNode     `json:"leaderNodes,omitempty"`
-	OmniboxTab        config.CapsuleTab       `json:"omniboxTab,omitempty"`
-	OmniboxQuery      string                  `json:"omniboxQuery,omitempty"`
-	OmniboxItems      []OmniboxItem           `json:"omniboxItems,omitempty"`
-	SelectedIndex     int                     `json:"selectedIndex"`
-	AIMode            string                  `json:"aiMode,omitempty"`
-	AIPrompt          string                  `json:"aiPrompt,omitempty"`
-	AISourceText      string                  `json:"aiSourceText,omitempty"`
-	AIOutput          string                  `json:"aiOutput,omitempty"`
-	AIComplete        bool                    `json:"aiComplete,omitempty"`
-	AIError           string                  `json:"aiError,omitempty"`
-	AIHistory         []ChatTurn              `json:"aiHistory,omitempty"`
-	AIOptimizerPreset string                  `json:"aiOptimizerPreset,omitempty"`
-	ActiveAIProfileID string                  `json:"activeAiProfileId,omitempty"`
-	HUDMessage        string                  `json:"hudMessage,omitempty"`
-	Context           CapsuleContext          `json:"context"`
-	ClipboardEntries  []OmniboxClipboardEntry `json:"clipboardEntries,omitempty"`
-	InstalledApps     []InstalledAppEntry     `json:"installedApps,omitempty"`
-	FrecencyScores    map[string]int          `json:"frecencyScores,omitempty"`
-	ListeningPorts    []PortEntry             `json:"listeningPorts,omitempty"`
+	Phase                   CapsulePhase            `json:"phase"`
+	LeaderPath              []string                `json:"leaderPath,omitempty"`
+	LeaderBreadcrumbs       []string                `json:"leaderBreadcrumbs,omitempty"`
+	LeaderNodes             []config.LeaderNode     `json:"leaderNodes,omitempty"`
+	OmniboxTab              config.CapsuleTab       `json:"omniboxTab,omitempty"`
+	OmniboxQuery            string                  `json:"omniboxQuery,omitempty"`
+	OmniboxItems            []OmniboxItem           `json:"omniboxItems,omitempty"`
+	SelectedIndex           int                     `json:"selectedIndex"`
+	AIMode                  string                  `json:"aiMode,omitempty"`
+	AIPrompt                string                  `json:"aiPrompt,omitempty"`
+	AISourceText            string                  `json:"aiSourceText,omitempty"`
+	AIOutput                string                  `json:"aiOutput,omitempty"`
+	AIComplete              bool                    `json:"aiComplete,omitempty"`
+	AIError                 string                  `json:"aiError,omitempty"`
+	AIHistory               []ChatTurn              `json:"aiHistory,omitempty"`
+	AIOptimizerPreset       string                  `json:"aiOptimizerPreset,omitempty"`
+	ActiveAIProfileID       string                  `json:"activeAiProfileId,omitempty"`
+	HUDMessage              string                  `json:"hudMessage,omitempty"`
+	Context                 CapsuleContext          `json:"context"`
+	ClipboardEntries        []OmniboxClipboardEntry `json:"clipboardEntries,omitempty"`
+	ClipboardSearchExternal bool                    `json:"clipboardSearchExternal,omitempty"`
+	ClipboardSearchQuery    string                  `json:"clipboardSearchQuery,omitempty"`
+	ClipboardSearchEntries  []OmniboxClipboardEntry `json:"clipboardSearchEntries,omitempty"`
+	InstalledApps           []InstalledAppEntry     `json:"installedApps,omitempty"`
+	FrecencyScores          map[string]int          `json:"frecencyScores,omitempty"`
+	ListeningPorts          []PortEntry             `json:"listeningPorts,omitempty"`
 }
 
 // NewInitialState returns a hidden initial State.
@@ -186,6 +190,7 @@ const (
 	EventOpenOmnibox                    EventType = "open_omnibox"
 	EventUpdateContext                  EventType = "update_context"
 	EventSetClipboardEntries            EventType = "set_clipboard_entries"
+	EventSetClipboardSearchResults      EventType = "set_clipboard_search_results"
 	EventSetInstalledApps               EventType = "set_installed_apps"
 	EventSetFrecencyScores              EventType = "set_frecency_scores"
 	EventSetListeningPorts              EventType = "set_listening_ports"
@@ -304,6 +309,12 @@ func (m *StateMachine) SetConfig(cfg config.ClavisConfig) {
 	}
 }
 
+// SetExternalClipboardSearch enables or disables external (e.g. SQLite FTS5)
+// search resolution for non-empty Clipboard tab queries.
+func (m *StateMachine) SetExternalClipboardSearch(enabled bool) {
+	m.state.ClipboardSearchExternal = enabled
+}
+
 // Handle reduces an event and updates internal state, returning emitted effects.
 func (m *StateMachine) Handle(ev Event) []Effect {
 	next, effects := Reduce(m.state, ev, m.config)
@@ -365,8 +376,8 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		if tab == "" {
 			tab = config.TabActions
 		}
-		items := buildOmniboxItems(tab, event.Query, next, cfg)
 		clearPhaseFields(&next)
+		items := buildOmniboxItems(tab, event.Query, next, cfg)
 		next.Phase = PhaseOmnibox
 		next.OmniboxTab = tab
 		next.OmniboxQuery = event.Query
@@ -393,30 +404,35 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		next.ClipboardEntries = entries
 
 		if next.Phase == PhaseOmnibox && next.OmniboxTab == config.TabClipboard {
+			if next.ClipboardSearchExternal && strings.TrimSpace(next.OmniboxQuery) != "" {
+				return next, nil
+			}
 			items := buildOmniboxItems(config.TabClipboard, next.OmniboxQuery, next, cfg)
-			preservedIdx := 0
-			foundPrev := false
-			if previousSelectedID != "" {
-				for idx, it := range items {
-					if it.ID == previousSelectedID {
-						preservedIdx = idx
-						foundPrev = true
-						break
-					}
-				}
-			}
-			if !foundPrev {
-				if len(items) == 0 {
-					preservedIdx = 0
-				} else if next.SelectedIndex < len(items) {
-					preservedIdx = next.SelectedIndex
-				} else {
-					preservedIdx = len(items) - 1
-				}
-			}
 			next.OmniboxItems = items
-			next.SelectedIndex = preservedIdx
+			next.SelectedIndex = preserveClipboardSelectionIndex(items, previousSelectedID, next.SelectedIndex)
 		}
+		return next, nil
+
+	case EventSetClipboardSearchResults:
+		if next.Phase != PhaseOmnibox || next.OmniboxTab != config.TabClipboard {
+			return next, nil
+		}
+		trimmedQuery := strings.TrimSpace(event.Query)
+		if trimmedQuery == "" || strings.TrimSpace(next.OmniboxQuery) != trimmedQuery {
+			return next, nil
+		}
+		var previousSelectedID string
+		if next.SelectedIndex >= 0 && next.SelectedIndex < len(next.OmniboxItems) {
+			previousSelectedID = next.OmniboxItems[next.SelectedIndex].ID
+		}
+		entries := make([]OmniboxClipboardEntry, len(event.ClipboardEntries))
+		copy(entries, event.ClipboardEntries)
+		next.ClipboardSearchQuery = trimmedQuery
+		next.ClipboardSearchEntries = entries
+
+		items := makeClipboardOmniboxItems(entries)
+		next.OmniboxItems = items
+		next.SelectedIndex = preserveClipboardSelectionIndex(items, previousSelectedID, 0)
 		return next, nil
 
 	case EventSetFrecencyScores:
@@ -486,6 +502,28 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		if state.Phase != PhaseOmnibox {
 			return next, nil
 		}
+		if state.OmniboxTab == config.TabClipboard && next.ClipboardSearchExternal {
+			next.OmniboxQuery = event.Query
+			trimmed := strings.TrimSpace(event.Query)
+			if trimmed == "" {
+				next.ClipboardSearchQuery = ""
+				next.ClipboardSearchEntries = nil
+				next.OmniboxItems = makeClipboardOmniboxItems(next.ClipboardEntries)
+				next.SelectedIndex = 0
+				return next, nil
+			}
+			if next.ClipboardSearchQuery == trimmed {
+				next.OmniboxItems = makeClipboardOmniboxItems(next.ClipboardSearchEntries)
+				next.SelectedIndex = 0
+				return next, nil
+			}
+			if len(next.OmniboxItems) == 0 {
+				next.SelectedIndex = 0
+			} else if next.SelectedIndex >= len(next.OmniboxItems) {
+				next.SelectedIndex = len(next.OmniboxItems) - 1
+			}
+			return next, nil
+		}
 		items := buildOmniboxItems(state.OmniboxTab, event.Query, next, cfg)
 		next.OmniboxQuery = event.Query
 		next.OmniboxItems = items
@@ -501,8 +539,8 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		if tab == "" {
 			tab = config.TabActions
 		}
-		items := buildOmniboxItems(tab, query, next, cfg)
 		clearPhaseFields(&next)
+		items := buildOmniboxItems(tab, query, next, cfg)
 		next.Phase = PhaseOmnibox
 		next.OmniboxTab = tab
 		next.OmniboxQuery = query
@@ -581,11 +619,29 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 				break
 			}
 		}
-		if entryIdx == -1 {
+		searchIdx := -1
+		for i := range next.ClipboardSearchEntries {
+			if next.ClipboardSearchEntries[i].ID == selected.ClipboardID {
+				searchIdx = i
+				break
+			}
+		}
+		if entryIdx == -1 && searchIdx == -1 && (!next.ClipboardSearchExternal || selected.ClipboardID == "") {
 			return next, nil
 		}
-		next.ClipboardEntries[entryIdx].IsPinned = !next.ClipboardEntries[entryIdx].IsPinned
-		newPinned := next.ClipboardEntries[entryIdx].IsPinned
+		wasPinned := selected.KeyHint == KeyHintPinned
+		if entryIdx >= 0 {
+			wasPinned = next.ClipboardEntries[entryIdx].IsPinned
+		} else if searchIdx >= 0 {
+			wasPinned = next.ClipboardSearchEntries[searchIdx].IsPinned
+		}
+		newPinned := !wasPinned
+		if entryIdx >= 0 {
+			next.ClipboardEntries[entryIdx].IsPinned = newPinned
+		}
+		if searchIdx >= 0 {
+			next.ClipboardSearchEntries[searchIdx].IsPinned = newPinned
+		}
 		updatedItems := buildOmniboxItems(state.OmniboxTab, state.OmniboxQuery, next, cfg)
 		clamped := 0
 		if len(updatedItems) > 0 {
@@ -620,6 +676,15 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 			}
 		}
 		next.ClipboardEntries = filtered
+		if len(next.ClipboardSearchEntries) > 0 {
+			filteredSearch := make([]OmniboxClipboardEntry, 0, len(next.ClipboardSearchEntries))
+			for _, e := range next.ClipboardSearchEntries {
+				if e.ID != selected.ClipboardID {
+					filteredSearch = append(filteredSearch, e)
+				}
+			}
+			next.ClipboardSearchEntries = filteredSearch
+		}
 		updatedItems := buildOmniboxItems(state.OmniboxTab, state.OmniboxQuery, next, cfg)
 		clamped := 0
 		if len(updatedItems) > 0 {
@@ -658,6 +723,28 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 			}
 			qRunes := []rune(state.OmniboxQuery)
 			updatedQuery := string(qRunes[:len(qRunes)-1])
+			if state.OmniboxTab == config.TabClipboard && next.ClipboardSearchExternal {
+				next.OmniboxQuery = updatedQuery
+				trimmed := strings.TrimSpace(updatedQuery)
+				if trimmed == "" {
+					next.ClipboardSearchQuery = ""
+					next.ClipboardSearchEntries = nil
+					next.OmniboxItems = makeClipboardOmniboxItems(next.ClipboardEntries)
+					next.SelectedIndex = 0
+					return next, nil
+				}
+				if next.ClipboardSearchQuery == trimmed {
+					next.OmniboxItems = makeClipboardOmniboxItems(next.ClipboardSearchEntries)
+					next.SelectedIndex = 0
+					return next, nil
+				}
+				if len(next.OmniboxItems) == 0 {
+					next.SelectedIndex = 0
+				} else if next.SelectedIndex >= len(next.OmniboxItems) {
+					next.SelectedIndex = len(next.OmniboxItems) - 1
+				}
+				return next, nil
+			}
 			items := buildOmniboxItems(state.OmniboxTab, updatedQuery, next, cfg)
 			next.OmniboxQuery = updatedQuery
 			next.OmniboxItems = items
@@ -948,10 +1035,6 @@ func AvailableItemActions(item OmniboxItem) []OmniboxActionSpec {
 			{ID: "copy_title", Label: i18n.T("engine.action.copy_item_title"), Shortcut: modKey() + "↵"},
 		}
 	}
-}
-
-func executeOmniboxItem(item OmniboxItem, next State, cfg config.ClavisConfig) (State, []Effect) {
-	return executeOmniboxItemWithAction(item, "primary", next, cfg)
 }
 
 func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State, cfg config.ClavisConfig) (State, []Effect) {
@@ -1669,6 +1752,16 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 		candidates = makeSnippetItems(cfg.Snippets.Items)
 
 	case config.TabClipboard:
+		if state.ClipboardSearchExternal {
+			trimmed := strings.TrimSpace(query)
+			if trimmed == "" {
+				return makeClipboardOmniboxItems(state.ClipboardEntries)
+			}
+			if state.ClipboardSearchQuery == trimmed {
+				return makeClipboardOmniboxItems(state.ClipboardSearchEntries)
+			}
+			return nil
+		}
 		candidates = makeClipboardOmniboxItems(state.ClipboardEntries)
 
 	case config.TabAI:
@@ -1992,16 +2085,47 @@ func keywordsForAction(act config.LeaderAction) []string {
 }
 
 func firstNonEmptyLine(s string) string {
-	trimmed := strings.TrimSpace(s)
-	if trimmed == "" {
+	start := 0
+	for start < len(s) {
+		r, size := utf8.DecodeRuneInString(s[start:])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		start += size
+	}
+	if start >= len(s) {
 		return s
 	}
-	for _, line := range strings.Split(strings.ReplaceAll(trimmed, "\r\n", "\n"), "\n") {
-		if line != "" {
-			return line
+	rest := s[start:]
+	nl := strings.IndexByte(rest, '\n')
+	if nl < 0 {
+		return strings.TrimRightFunc(rest, unicode.IsSpace)
+	}
+	line := rest[:nl]
+	if len(line) > 0 && line[len(line)-1] == '\r' {
+		line = line[:len(line)-1]
+	}
+	return line
+}
+
+func preserveClipboardSelectionIndex(items []OmniboxItem, previousSelectedID string, fallbackIdx int) int {
+	if len(items) == 0 {
+		return 0
+	}
+	if previousSelectedID != "" {
+		for idx, it := range items {
+			if it.ID == previousSelectedID {
+				return idx
+			}
 		}
 	}
-	return s
+	if fallbackIdx < 0 {
+		return 0
+	}
+	if fallbackIdx < len(items) {
+		return fallbackIdx
+	}
+	return len(items) - 1
 }
 
 func clearPhaseFields(s *State) {
@@ -2012,6 +2136,8 @@ func clearPhaseFields(s *State) {
 	s.OmniboxQuery = ""
 	s.OmniboxItems = nil
 	s.SelectedIndex = 0
+	s.ClipboardSearchQuery = ""
+	s.ClipboardSearchEntries = nil
 	s.AIMode = ""
 	s.AIPrompt = ""
 	s.AISourceText = ""
@@ -2039,6 +2165,9 @@ func cloneState(s State) State {
 	}
 	if s.ClipboardEntries != nil {
 		out.ClipboardEntries = append([]OmniboxClipboardEntry(nil), s.ClipboardEntries...)
+	}
+	if s.ClipboardSearchEntries != nil {
+		out.ClipboardSearchEntries = append([]OmniboxClipboardEntry(nil), s.ClipboardSearchEntries...)
 	}
 	if s.InstalledApps != nil {
 		out.InstalledApps = append([]InstalledAppEntry(nil), s.InstalledApps...)

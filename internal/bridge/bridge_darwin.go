@@ -41,6 +41,7 @@ const (
 	kCGEventTapOptionDefault uint32 = 0
 
 	kCGEventLeftMouseDown          uint32 = 1
+	kCGEventLeftMouseUp            uint32 = 2
 	kCGEventRightMouseDown         uint32 = 3
 	kCGEventKeyDown                uint32 = 10
 	kCGEventKeyUp                  uint32 = 11
@@ -505,6 +506,7 @@ type darwinBridge struct {
 	onTrigger    func(host.TriggerEvent)
 
 	tapRecoveries  atomic.Int64
+	triggers       *triggerRuntime
 	lastBundleIDMu sync.RWMutex
 	lastBundleID   string
 
@@ -521,8 +523,14 @@ type darwinBridge struct {
 	inlineMu      sync.RWMutex
 	inlineHandler func(host.InlineKeyEvent) bool
 	inlineEnabled atomic.Bool
+	ime           inputEngineState
 	shiftDown     bool
 	shiftHadKey   bool
+	// shiftToggle, when non-nil, is the pending bare-Shift ASCII toggle. It is
+	// deferred while the selection bar's double-shift is armed so that one
+	// double tap cannot both flip 中/英 and open the selection bar.
+	shiftMu     sync.Mutex
+	shiftToggle *time.Timer
 }
 
 func newPlatformBridge(opts Options) HostService {
@@ -535,8 +543,14 @@ func newPlatformBridge(opts Options) HostService {
 		pbTracker:    newSelfPasteboardTracker(),
 		onIME:        opts.OnInputSourceChanged,
 		onLayer:      opts.OnKeymapLayerChanged,
+		triggers:     newTriggerRuntime(),
 	}
 	b.pbRestorer = NewPasteboardSnapshotRestorer(&darwinPasteboardBackend{bridge: b})
+	b.ime.dirty = make(chan struct{}, 1)
+	b.ime.anchorFn = func(ctx context.Context) (host.CursorAnchor, bool) {
+		a, err := b.FastCaretAnchor(ctx)
+		return a, err == nil
+	}
 	return b
 }
 
@@ -788,7 +802,7 @@ func (b *darwinBridge) runEventTap(ctx context.Context, ready chan<- error) {
 	b.mu.Unlock()
 
 	mask := uint64(1<<kCGEventKeyDown) | uint64(1<<kCGEventKeyUp) | uint64(1<<kCGEventFlagsChanged) |
-		uint64(1<<kCGEventLeftMouseDown) | uint64(1<<kCGEventRightMouseDown)
+		uint64(1<<kCGEventLeftMouseDown) | uint64(1<<kCGEventLeftMouseUp) | uint64(1<<kCGEventRightMouseDown)
 	port := cgEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault, mask, cb, 0)
 	if port == 0 {
 		ready <- errors.New("darwin: CGEventTapCreate failed (check Input Monitoring / Accessibility permission)")
@@ -858,22 +872,49 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 		// A click moves the insertion point / focus: drop any pending double-tap and snippet buffer.
 		b.router.leaderDetector.Reset()
 		b.router.doubleTapDetector.Reset()
-		b.emitTriggerEvents([]host.TriggerEvent{{
-			Kind:        host.TriggerSnippetReset,
-			TimestampMs: nowMs,
-		}})
+		if eventType == kCGEventLeftMouseDown && b.triggers != nil {
+			b.triggers.autoSelectMouseDown()
+		}
+		b.emitTriggerEvents([]host.TriggerEvent{{Kind: host.TriggerSnippetReset, TimestampMs: nowMs}})
+		return event
+	case kCGEventLeftMouseUp:
+		if b.triggers != nil && b.triggers.autoSelectMouseUp() {
+			if enabled, mode := b.triggers.selectionMode(); enabled && mode == "auto_select" {
+				// AX is cross-process IPC; never perform it on the CGEventTap callback.
+				go func(ts int64) {
+					if snap, err := b.CaptureEditableField(context.Background()); err == nil && strings.TrimSpace(snap.SelectedText) != "" {
+						b.emitTriggerEvents([]host.TriggerEvent{selectionEvent(ts)})
+					}
+				}(nowMs)
+			}
+		}
 		return event
 
 	case kCGEventFlagsChanged:
 		modName, isDown, otherDown := darwinModifierEvent(keyCode, flags)
 		if modName == "shift" {
+			if b.triggers != nil && b.triggers.doubleShift(modName, isDown, otherDown, nowMs, false) {
+				// A completed double tap belongs to the selection bar: cancel the
+				// deferred ASCII toggle queued by the first tap.
+				b.cancelShiftToggle()
+				b.emitTriggerEvents([]host.TriggerEvent{selectionEvent(nowMs)})
+				b.shiftDown = false
+				return 0
+			}
 			if isDown {
 				b.shiftDown = true
 				b.shiftHadKey = false
 			}
 			if !isDown && b.shiftDown && !b.shiftHadKey && b.inlineEnabled.Load() && !isSecureEventInputEnabled() && !b.isIMKInputSource() {
-				_ = b.callInline(host.InlineKeyEvent{KeyName: "shift_tap", KeyCode: keyCode, IsDown: true, TimestampMs: nowMs})
 				b.shiftDown = false
+				// With double-shift selection armed, the first tap must wait out the
+				// double-tap window before it flips 中/英; otherwise one gesture would
+				// both switch the input mode and open the selection bar.
+				if armed, _ := b.triggers.selectionDoubleShiftArmed(); armed {
+					b.deferShiftToggle(host.InlineKeyEvent{KeyName: "shift_tap", KeyCode: keyCode, IsDown: true, TimestampMs: nowMs})
+				} else {
+					_ = b.callInline(host.InlineKeyEvent{KeyName: "shift_tap", KeyCode: keyCode, IsDown: true, TimestampMs: nowMs})
+				}
 				return 0
 			}
 			if !isDown {
@@ -908,6 +949,10 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 		}
 		keyName := darwinKeyCodeToName(keyCode)
 		mods := darwinFlagsToModifiers(flags)
+		if b.triggers != nil && b.triggers.shortcutMatches(keyName, mods) && !isSecureEventInputEnabled() {
+			b.emitTriggerEvents([]host.TriggerEvent{optimizeEvent(nowMs)})
+			return 0
+		}
 		if b.keymapEngine != nil && b.keymapEngine.IsEnabled() && keyName != "" {
 			outcome := b.keymapEngine.HandleKeyEvent(keyName, true, mods, b.cachedFrontmostBundleID(), nowMs)
 			b.notifyLayerIfChanged(outcome.LayerActive)
@@ -2644,4 +2689,38 @@ func darwinKeyCodeToName(code uint16) string {
 	default:
 		return ""
 	}
+}
+
+// cancelShiftToggle drops a deferred bare-Shift ASCII toggle.
+func (b *darwinBridge) cancelShiftToggle() {
+	b.shiftMu.Lock()
+	if b.shiftToggle != nil {
+		b.shiftToggle.Stop()
+		b.shiftToggle = nil
+	}
+	b.shiftMu.Unlock()
+}
+
+// deferShiftToggle queues a bare-Shift ASCII toggle until the selection bar's
+// double-tap window elapses. Completing the double tap cancels it, so exactly
+// one of the two behaviours runs per gesture.
+func (b *darwinBridge) deferShiftToggle(ev host.InlineKeyEvent) {
+	armed, windowMs := b.triggers.selectionDoubleShiftArmed()
+	if !armed || windowMs <= 0 {
+		_ = b.callInline(ev)
+		return
+	}
+	b.shiftMu.Lock()
+	if b.shiftToggle != nil {
+		b.shiftToggle.Stop()
+	}
+	b.shiftToggle = time.AfterFunc(time.Duration(windowMs)*time.Millisecond, func() {
+		b.shiftMu.Lock()
+		b.shiftToggle = nil
+		b.shiftMu.Unlock()
+		if b.inlineEnabled.Load() && !isSecureEventInputEnabled() && !b.isIMKInputSource() {
+			_ = b.callInline(ev)
+		}
+	})
+	b.shiftMu.Unlock()
 }
