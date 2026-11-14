@@ -114,6 +114,24 @@ func (s *Session) ConfigJSON() (string, error) {
 	return string(raw), nil
 }
 
+// PromptsJSON returns prompt templates as JSON for gomobile clients.
+func (s *Session) PromptsJSON() (string, error) {
+	s.mu.Lock()
+	cfg := s.store.Current().Prompts
+	s.mu.Unlock()
+	b, e := json.Marshal(cfg)
+	return string(b), e
+}
+
+// ComponentsJSON returns widgets, sources, and scripts as JSON for gomobile clients.
+func (s *Session) ComponentsJSON() (string, error) {
+	s.mu.Lock()
+	cfg := s.store.Current().Components
+	s.mu.Unlock()
+	b, e := json.Marshal(cfg)
+	return string(b), e
+}
+
 // HandleEventJSON parses an engine.Event JSON payload, advances the Capsule state machine,
 // and returns JSON containing {"state": ..., "effects": [...]}.
 func (s *Session) HandleEventJSON(eventJSON string) (string, error) {

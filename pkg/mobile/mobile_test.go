@@ -93,6 +93,14 @@ func TestMobileSessionLifecycle(t *testing.T) {
 	if err := sess.SwitchAIProfile("nonexistent"); err == nil {
 		t.Fatal("expected error for unknown profile")
 	}
+	promptsJSON, err := sess.PromptsJSON()
+	if err != nil || !strings.Contains(promptsJSON, "code-review") {
+		t.Fatalf("unexpected PromptsJSON: %v %s", err, promptsJSON)
+	}
+	componentsJSON, err := sess.ComponentsJSON()
+	if err != nil || !strings.Contains(componentsJSON, "ime_wpm") {
+		t.Fatalf("unexpected ComponentsJSON: %v %s", err, componentsJSON)
+	}
 }
 
 type mockStreamCallback struct {

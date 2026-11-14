@@ -41,6 +41,8 @@ func Validate(cfg ClavisConfig) []ValidationIssue {
 	issues = append(issues, ValidateSnippets(cfg.Snippets)...)
 	issues = append(issues, ValidateGlossary(cfg.Glossary)...)
 	issues = append(issues, ValidateIMERules(cfg.IMERules)...)
+	issues = append(issues, ValidatePrompts(cfg.Prompts)...)
+	issues = append(issues, ValidateComponents(cfg.Components)...)
 	return issues
 }
 
@@ -283,6 +285,37 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 			File: file, KeyPath: "clipboard.retention_days", Severity: SeverityError,
 			Message: i18n.T("diag.clipboard.retention_days.nonneg"),
 		})
+	}
+
+	if main.Appearance.VisualPreset != "" && main.Appearance.VisualPreset != "spatial_3d" && main.Appearance.VisualPreset != "liquid_glass" && main.Appearance.VisualPreset != "classic" {
+		issues = append(issues, ValidationIssue{File: file, KeyPath: "appearance.visual_preset", Severity: SeverityError, Message: "unsupported visual preset"})
+	}
+	if main.Appearance.CandidateBarOrientation != "" && main.Appearance.CandidateBarOrientation != "horizontal" && main.Appearance.CandidateBarOrientation != "vertical" {
+		issues = append(issues, ValidationIssue{File: file, KeyPath: "appearance.candidate_bar_orientation", Severity: SeverityError, Message: "unsupported candidate bar orientation"})
+	}
+	if main.Appearance.GlassClarity < 0 || main.Appearance.GlassClarity > 1 || math.IsNaN(main.Appearance.GlassClarity) || math.IsInf(main.Appearance.GlassClarity, 0) {
+		issues = append(issues, ValidationIssue{File: file, KeyPath: "appearance.glass_clarity", Severity: SeverityError, Message: "glass_clarity must be within 0..1"})
+	}
+	if main.InputEngine.Mode != "" && main.InputEngine.Mode != "inline_hook" && main.InputEngine.Mode != "native_imk" && main.InputEngine.Mode != "dual" && main.InputEngine.Mode != "off" {
+		issues = append(issues, ValidationIssue{File: file, KeyPath: "input_engine.mode", Severity: SeverityError, Message: "unsupported input engine mode"})
+	}
+	if main.InputEngine.Scheme != "" && main.InputEngine.Scheme != "quanpin" && main.InputEngine.Scheme != "xiaohe" && main.InputEngine.Scheme != "ziranma" && main.InputEngine.Scheme != "microsoft" && main.InputEngine.Scheme != "sogou" && main.InputEngine.Scheme != "pinyin_plus" {
+		issues = append(issues, ValidationIssue{File: file, KeyPath: "input_engine.scheme", Severity: SeverityError, Message: "unsupported input engine scheme"})
+	}
+	if main.InputEngine.CandidateCount < 3 || main.InputEngine.CandidateCount > 9 {
+		issues = append(issues, ValidationIssue{File: file, KeyPath: "input_engine.candidate_count", Severity: SeverityError, Message: "candidate_count must be within 3..9"})
+	}
+	if main.SelectionBar.TriggerMode != "" && main.SelectionBar.TriggerMode != "auto_select" && main.SelectionBar.TriggerMode != "double_shift" && main.SelectionBar.TriggerMode != "disabled" {
+		issues = append(issues, ValidationIssue{File: file, KeyPath: "selection_bar.trigger_mode", Severity: SeverityError, Message: "unsupported selection trigger mode"})
+	}
+	if main.Daemon.IdleCompactSeconds < 10 || main.Daemon.IdleCompactSeconds > 3600 {
+		issues = append(issues, ValidationIssue{File: file, KeyPath: "daemon.idle_compact_seconds", Severity: SeverityError, Message: "idle_compact_seconds must be within 10..3600"})
+	}
+	if main.Daemon.MaxMemoryMB < 24 || main.Daemon.MaxMemoryMB > 512 {
+		issues = append(issues, ValidationIssue{File: file, KeyPath: "daemon.max_memory_mb", Severity: SeverityError, Message: "max_memory_mb must be within 24..512"})
+	}
+	if main.Daemon.WatchdogIntervalMs < 500 || main.Daemon.WatchdogIntervalMs > 60000 {
+		issues = append(issues, ValidationIssue{File: file, KeyPath: "daemon.watchdog_interval_ms", Severity: SeverityError, Message: "watchdog_interval_ms must be within 500..60000"})
 	}
 
 	if main.IME.Enabled && strings.TrimSpace(main.IME.DefaultInputSourceID) == "" {

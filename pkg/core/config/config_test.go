@@ -20,8 +20,8 @@ func TestDefaultGeneratorIdempotencyAndValidity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateIfMissing failed: %v", err)
 	}
-	if len(created1) != 5 {
-		t.Fatalf("expected 5 created files, got %d: %v", len(created1), created1)
+	if len(created1) != 7 {
+		t.Fatalf("expected 7 created files, got %d: %v", len(created1), created1)
 	}
 
 	// Modify config.toml to verify subsequent generation preserves user edits
@@ -69,13 +69,46 @@ func TestDefaultGeneratorIdempotencyAndValidity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode ime-rules: %v", err)
 	}
+	prompts, err := config.DecodePromptsConfig(config.DefaultContent(config.FilePrompts))
+	if err != nil {
+		t.Fatalf("decode prompts: %v", err)
+	}
+	components, err := config.DecodeComponentsConfig(config.DefaultContent(config.FileComponents))
+	if err != nil {
+		t.Fatalf("decode components: %v", err)
+	}
 
-	parsed := config.ClavisConfig{Main: m, Leader: l, Snippets: s, Glossary: g, IMERules: ime}
+	parsed := config.ClavisConfig{Main: m, Leader: l, Snippets: s, Glossary: g, IMERules: ime, Prompts: prompts, Components: components}
 	if !reflect.DeepEqual(parsed, config.DefaultConfig()) {
 		t.Fatalf("parsed default TOML does not match DefaultConfig()\nparsed: %+v\ndefault: %+v", parsed, config.DefaultConfig())
 	}
 	if issues := config.Validate(parsed); len(issues) != 0 {
 		t.Fatalf("expected 0 validation issues on default config, got %+v", issues)
+	}
+}
+
+func TestUnifiedInputSchemas(t *testing.T) {
+	cfg := config.DefaultMainConfig()
+	if cfg.InputEngine.Enabled || cfg.InputEngine.CandidateCount != 7 || cfg.Appearance.VisualPreset != "spatial_3d" || cfg.Daemon.MaxMemoryMB != 64 {
+		t.Fatalf("unexpected defaults: %+v", cfg)
+	}
+	cfg.InputEngine.Mode = "invalid"
+	if !hasIssue(config.ValidateMain(cfg), "input_engine.mode", config.SeverityError) {
+		t.Fatal("expected invalid input engine mode")
+	}
+	p := config.DefaultPromptsConfig()
+	if len(p.Items) < 5 {
+		t.Fatalf("expected rich prompt defaults")
+	}
+	if _, err := config.DecodePromptsConfig(p.Encode()); err != nil {
+		t.Fatalf("prompt roundtrip: %v", err)
+	}
+	c := config.DefaultComponentsConfig()
+	if len(c.Widgets) == 0 || len(c.Sources) == 0 {
+		t.Fatalf("expected component defaults")
+	}
+	if _, err := config.DecodeComponentsConfig(c.Encode()); err != nil {
+		t.Fatalf("component roundtrip: %v", err)
 	}
 }
 
@@ -612,11 +645,11 @@ preferred_mode = "ascii"
 	if err := store.SaveAll(fullCfg); err != nil {
 		t.Fatalf("SaveAll failed: %v", err)
 	}
-	if store.Current().Main.Appearance.CapsuleWidth != 720 || len(store.SavedDigests()) != 5 {
+	if store.Current().Main.Appearance.CapsuleWidth != 720 || len(store.SavedDigests()) != 7 {
 		t.Fatalf("unexpected state after SaveAll: width=%v digests=%d", store.Current().Main.Appearance.CapsuleWidth, len(store.SavedDigests()))
 	}
 	if !store.Reload() {
-		t.Fatalf("Reload after all 5 Save* calls failed: %+v", store.LastErrors())
+		t.Fatalf("Reload after all Save* calls failed: %+v", store.LastErrors())
 	}
 }
 
