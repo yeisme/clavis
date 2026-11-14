@@ -16,7 +16,9 @@ Clavis is a keyboard-first, non-activating floating **Capsule** launcher and pro
 | **Clipboard History** | SQLite + FTS5 persistence (`plugins/sqlite`) with privacy filters (concealed types & excluded bundle IDs), pin (`⌘P` / `Ctrl+P`) and delete (`⌘⌫` / `Ctrl+⌫`) in both Clipboard tab and `@` prefix view |
 | **Inline Snippets** | Boundary-aware trigger expansion with dynamic tokens (`{{cursor}}`, `{{clipboard}}`, `{{date}}`, `{{time}}`, `{{app}}`), full-width leading punctuation tolerance (`；sig` → `;sig`), active IME preedit suppression, mouse/focus/navigation context resets, and OS Secure Input protection |
 | **Window Management** | `left_half`, `right_half`, `top_half`, `bottom_half`, `maximize`, `center`, `next_display`, `previous_display`, `restore` |
-| **Vector & Native Icons** | Embedded vector SVG icon set (`ui.MustParseSVG`) across all platforms with automatic macOS `plugins/sfsymbols` rendering and Retina app icon extraction (`mygo.Shell.InstalledApps` / `FileIcon`) |
+| **中文本地化 / Chinese i18n** | Pure-Go `en` / `zh-CN` string tables, `language = "auto" | "zh-CN" | "en"`, localized HUD/tray/settings/diagnostics, CJK fallback fonts, and IME-safe composition handling / 纯 Go 字符串表、中文 HUD/托盘/设置/诊断、CJK 字体回退，保留输入法组合态安全逻辑 |
+| **动画 / Motion** | 60fps non-blocking capsule/HUD/list/AI/snippet motion with `full` / `reduced` / `off` modes and system Reduce Motion support / 支持完整、减少、关闭三档并尊重系统减少动态效果 |
+| **Vector & Native Icons** | Unified currentColor SVG icons with 16/20/24 optical sizes, HUD/empty-state/tray glyphs, macOS `plugins/sfsymbols`, multi-size PNG and Windows ICO / 统一矢量图标、光学尺寸、多尺寸应用图标及 Windows ICO |
 
 ## Architecture & Project Layout
 
@@ -28,6 +30,7 @@ clavis/
 ├── main_test.go            # Smoke-check, Capsule & IME pill screen coordinate clamping, and tray icon tests
 ├── mygo.json               # MyGo v0.9.0 bundle manifest, NSIS installer config & macOS privacy usage descriptions
 ├── resources/icon.png      # High-craft squircle application icon (512x512 RGBA PNG)
+├── resources/icon.ico      # Multi-entry Windows icon (16–256px PNG entries)
 ├── uiapp/                  # Native MyGo UI & controller (AppController, CapsuleView, IMEPillView, SettingsView, SVG/SF Symbols)
 ├── internal/
 │   ├── apps/               # Installed application discovery & Retina icon cache (MyGoAppProvider + MockAppProvider)
@@ -102,11 +105,27 @@ On first launch, Clavis automatically creates `~/.config/clavis/` with default T
 
 | File | Purpose |
 | --- | --- |
-| `config.toml` | `[trigger]`, `[appearance]` (`show_preview_pane`), `[ai]` + `[[ai.profiles]]` (`deepseek` default, `ollama`, `claude`, `gemini`), `[clipboard]`, `[ime]` (`lock_ascii_on_leader`, `show_floating_pill`, `switch_delay_ms`), and `[keymap]` + `[[keymap.remaps]]` settings. Raw API keys (`api_key`) are rejected—store keys in the OS credential store via **Settings → AI & Keychain** or the profile's `api_key_env_var` (`DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`). |
+| `config.toml` | `[trigger]`, `[appearance]` (`language`, `animations`, `show_preview_pane`), `[ai]` + `[[ai.profiles]]` (`deepseek` default, `ollama`, `claude`, `gemini`), `[clipboard]`, `[ime]` (`lock_ascii_on_leader`, `show_floating_pill`, `switch_delay_ms`), and `[keymap]` + `[[keymap.remaps]]` settings. Raw API keys (`api_key`) are rejected—store keys in the OS credential store via **Settings → AI & Keychain** or the profile's `api_key_env_var` (`DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`). |
 | `leader.toml` | Recursive `[[nodes]]` key tree supporting `group`, `ai_rewrite`, `window`, `cli`, `open_app`, `switch_tab`, `snippet`, `toggle_ime`, and `normalize_glossary`. Editable visually under **Settings → Leader Tree**. |
 | `snippets.toml` | `[[snippets]]` inline expansion triggers, content templates, `word_boundary`, and optional `app_bundle_ids` / `process_names` scoping. Editable visually under **Settings → Snippets**. |
 | `glossary.toml` | `[[terms]]` canonical terms, `aliases`, `hint`, and `category` used for AI prompt injection and local `normalize_glossary` replacement. Editable visually under **Settings → Glossary & Clipboard**. |
 | `ime-rules.toml` | `[[rules]]` per-app and per-context rules with `bundle_id`, `process_name`, `url_pattern`, `title_pattern`, optional `input_source_id`, `preferred_mode` (`ascii`, `native`, `keep`), and `restore_on_leave`. When `input_source_id` is omitted, Clavis switches directly by `preferred_mode`. Editable visually under **Settings → IME & Keymap** or bound instantly from Omnibox (`>Bind Current App`). |
+
+## Language & Motion / 语言与动画
+
+Clavis keeps configuration keys and enum values stable while translating only display text. Set the language in `config.toml`:
+
+```toml
+[appearance]
+language = "auto"       # auto follows macOS/Windows/Linux UI language
+# language = "zh-CN"    # force Simplified Chinese
+# language = "en"       # force English
+animations = "auto"     # auto | full | reduced | off
+```
+
+`auto` language uses the system preference; `auto` animation mode respects the platform Reduce Motion preference. `full` enables capsule scale/fade, staggered results, HUD slide/fade, AI cursor pulse, error shake and snippet flash. `reduced` keeps subtle opacity/color changes and removes spatial motion; `off` jumps to settled frames. The setting is hot-reloadable and does not rewrite older config files until the user explicitly saves.
+
+`auto` 会跟随 macOS/Windows/Linux 的系统语言；动画 `auto` 会尊重系统“减少动态效果”。`full` 启用胶囊缩放淡入、列表交错、HUD 滑入淡出、AI 光标脉冲、错误抖动与片段高亮；`reduced` 保留轻微透明度/颜色变化并移除位移动画；`off` 直接显示最终状态。
 
 ## Omnibox Prefix Quick-Routing
 
