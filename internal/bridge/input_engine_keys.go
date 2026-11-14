@@ -14,6 +14,25 @@ import (
 
 const maxPendingIMECommits = 256
 
+// inputEngineConfigEqual reports whether two [input_engine] configs are
+// equivalent. Callers use it to skip an engine rebuild on config reload: the
+// rebuild loads the lexicon (possibly compiling a Rime dictionary) and resets
+// any in-flight composition, so an unrelated edit (theme, language, …) must
+// not trigger it.
+func inputEngineConfigEqual(a, b config.InputEngineConfig) bool {
+	return a.Enabled == b.Enabled &&
+		a.Mode == b.Mode &&
+		a.Scheme == b.Scheme &&
+		a.CandidateCount == b.CandidateCount &&
+		a.MixedEnglish == b.MixedEnglish &&
+		a.AutoPairPunctuation == b.AutoPairPunctuation &&
+		a.ShiftToggleASCII == b.ShiftToggleASCII &&
+		a.UserLearning == b.UserLearning &&
+		a.IMKSocketPath == b.IMKSocketPath &&
+		slices.Equal(a.FuzzyPinyin, b.FuzzyPinyin) &&
+		slices.Equal(a.CustomDictPaths, b.CustomDictPaths)
+}
+
 // InputEngineCommit describes one committed candidate from the own input engine.
 type InputEngineCommit struct {
 	PinyinKey string

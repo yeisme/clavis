@@ -32,6 +32,14 @@ type inputEngineState struct {
 	anchor       atomic.Pointer[host.CursorAnchor]
 	started      atomic.Bool
 	cacheDir     string
+
+	// cfgMu guards lastCfg/cfgApplied: the [input_engine] config last built into
+	// eng. Rebuilding is expensive (dictionary load, possibly a Rime YAML
+	// compile) and drops any in-flight composition, so a reload that leaves the
+	// section untouched must be a no-op.
+	cfgMu      sync.Mutex
+	lastCfg    config.InputEngineConfig
+	cfgApplied bool
 }
 
 func (st *inputEngineState) buildEngine(cfg config.InputEngineConfig) *inputengine.Engine {
@@ -53,6 +61,17 @@ func (b *windowsBridge) UpdateInputEngineLearning(userFreq inputengine.UserFrequ
 // ConfigureInputEngine implements InputEngineHost.
 func (b *windowsBridge) ConfigureInputEngine(cfg config.InputEngineConfig) {
 	st := &b.ime
+	// A reload that does not change [input_engine] must not rebuild the engine:
+	// the build loads the lexicon (and may compile a Rime dictionary) and
+	// Reset() would discard whatever the user is currently composing.
+	st.cfgMu.Lock()
+	if st.cfgApplied && inputEngineConfigEqual(st.lastCfg, cfg) {
+		st.cfgMu.Unlock()
+		return
+	}
+	st.lastCfg, st.cfgApplied = cfg, true
+	st.cfgMu.Unlock()
+
 	eng := st.buildEngine(cfg)
 	st.commits.resetPrev()
 	if eng == nil {
