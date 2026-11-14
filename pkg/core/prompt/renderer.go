@@ -103,6 +103,9 @@ func RenderPrompt(t config.PromptTemplate, values map[string]string, ctx RenderC
 			if s, ok := by[x.Name]; ok {
 				v = s.Default
 			}
+			if v == "" {
+				v = x.Default
+			}
 		}
 		if x.Name == "cursor" {
 			cursor = b.Len()

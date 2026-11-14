@@ -88,8 +88,12 @@ func (p ParsedTemplate) Slots(t config.PromptTemplate) []config.PromptSlot {
 			continue
 		}
 		seen[x.Name] = true
-		required := x.Kind == "" || x.Kind == "text"
-		out = append(out, config.PromptSlot{Name: x.Name, Label: x.Name, Kind: x.Kind, Default: x.Default, Options: x.Options, Required: required})
+		kind := x.Kind
+		if kind == "" {
+			kind = "text"
+		}
+		required := kind == "text"
+		out = append(out, config.PromptSlot{Name: x.Name, Label: x.Name, Kind: kind, Default: x.Default, Options: x.Options, Required: required})
 	}
 	return out
 }

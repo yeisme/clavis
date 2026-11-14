@@ -146,6 +146,7 @@ type desktopApp struct {
 	controller             *uiapp.AppController
 	configWatcher          *watcher.ConfigWatcher
 	capsulePanel           *mygo.Window
+	promptPanel            *mygo.Window
 	imePillPanel           *mygo.Window
 	inputUI                *inputEngineUI
 	settingsWin            *mygo.Window
@@ -253,12 +254,14 @@ func (a *desktopApp) start() {
 		OpenPath: func(p string) error {
 			return mygo.Shell.OpenPath(p)
 		},
-		OnRepaint:        a.handleRepaint,
-		OnPresentPhase:   a.handlePresentPhase,
-		OnHide:           a.handleHide,
-		OnOpenSettings:   a.handleOpenSettings,
-		OnShowIMEPill:    a.handleShowIMEPill,
-		OnLanguageChange: a.handleLanguageChange,
+		OnRepaint:             a.handleRepaint,
+		OnPresentPhase:        a.handlePresentPhase,
+		OnHide:                a.handleHide,
+		OnOpenSettings:        a.handleOpenSettings,
+		OnOpenPromptComposer:  a.handleOpenPromptComposer,
+		OnClosePromptComposer: a.handleClosePromptComposer,
+		OnShowIMEPill:         a.handleShowIMEPill,
+		OnLanguageChange:      a.handleLanguageChange,
 	})
 
 	initW, initH := uiapp.PreferredCapsuleSize(engine.PhaseLeader, cfg.Main.Appearance)
@@ -290,6 +293,35 @@ func (a *desktopApp) start() {
 			return
 		}
 		controller.Dispatch(engine.Event{Type: engine.EventDismiss})
+	})
+
+	promptW, promptH := uiapp.PreferredPromptComposerPanelSize(2)
+	promptPanel := mygo.NewWindow(mygo.WindowOptions{
+		Title:         i18n.T("prompts.composer_title"),
+		Width:         promptW,
+		Height:        promptH,
+		Panel:         true,
+		Hidden:        true,
+		Frameless:     true,
+		Transparent:   true,
+		Vibrancy:      mygo.VibrancyGlass,
+		CornerRadius:  int(uiapp.NormalizeCornerRadius(cfg.Main.Appearance)),
+		DisableResize: true,
+		AlwaysOnTop:   true,
+		SkipTaskbar:   true,
+		Content:       ui.View(controller.PromptComposerView),
+	})
+	promptPanel.OnClose(func(e *mygo.CloseEvent) {
+		e.PreventDefault()
+		controller.ClosePromptComposer()
+	})
+	promptPanel.OnBlur(func() {
+		if a.isInPresentTransition() {
+			return
+		}
+		if controller.PromptComposerOpen() {
+			controller.ClosePromptComposer()
+		}
 	})
 
 	pillW, pillH := uiapp.PreferredIMEPillSize()
@@ -340,6 +372,7 @@ func (a *desktopApp) start() {
 	a.hostBridge = hostBridge
 	a.controller = controller
 	a.capsulePanel = capsulePanel
+	a.promptPanel = promptPanel
 	a.imePillPanel = imePillPanel
 	a.settingsWin = settingsWin
 	a.mu.Unlock()
@@ -712,6 +745,9 @@ func (a *desktopApp) syncLanguageFromConfig(cfg config.ClavisConfig) {
 		if a.imePillPanel != nil {
 			a.imePillPanel.SetTitle(i18n.T("tray.ime_window"))
 		}
+		if a.promptPanel != nil {
+			a.promptPanel.SetTitle(i18n.T("prompts.composer_title"))
+		}
 	})
 	a.handleRepaint()
 }
@@ -831,6 +867,7 @@ func (a *desktopApp) runClipboardPoller(ctx context.Context) {
 func (a *desktopApp) handleRepaint() {
 	a.mu.Lock()
 	capWin := a.capsulePanel
+	promptWin := a.promptPanel
 	setWin := a.settingsWin
 	pillWin := a.imePillPanel
 	ctrl := a.controller
@@ -848,6 +885,9 @@ func (a *desktopApp) handleRepaint() {
 			}
 		}
 		capWin.Invalidate()
+	}
+	if promptWin != nil && promptWin.IsVisible() {
+		promptWin.Invalidate()
 	}
 	if setWin != nil {
 		setWin.Invalidate()
@@ -1093,15 +1133,21 @@ func (a *desktopApp) handleHide() {
 func (a *desktopApp) beforeInject(ctx context.Context) {
 	a.mu.Lock()
 	panel := a.capsulePanel
+	promptWin := a.promptPanel
 	a.mu.Unlock()
-	if panel == nil {
+	if panel == nil && promptWin == nil {
 		return
 	}
 	wasVisible := false
 	mygo.RunOnMain(func() {
-		if panel.IsVisible() {
+		if panel != nil && panel.IsVisible() {
 			wasVisible = true
 			panel.Hide()
+			a.lastPanelHideNano.Store(time.Now().UnixNano())
+		}
+		if promptWin != nil && promptWin.IsVisible() {
+			wasVisible = true
+			promptWin.Hide()
 			a.lastPanelHideNano.Store(time.Now().UnixNano())
 		}
 	})
@@ -1121,6 +1167,54 @@ func (a *desktopApp) beforeInject(ctx context.Context) {
 		case <-time.After(wait):
 		}
 	}
+}
+
+func (a *desktopApp) handleOpenPromptComposer() {
+	a.markPresentTransition(350 * time.Millisecond)
+	a.mu.Lock()
+	anchor := a.sessionAnchor
+	a.mu.Unlock()
+
+	var anchorCopy *host.CursorAnchor
+	if anchor != nil && anchor.Valid {
+		c := *anchor
+		anchorCopy = &c
+	}
+
+	go mygo.RunOnMain(func() {
+		a.mu.Lock()
+		win := a.promptPanel
+		ctrl := a.controller
+		a.mu.Unlock()
+		if win == nil || ctrl == nil || !ctrl.PromptComposerOpen() {
+			return
+		}
+		a.markPresentTransition(180 * time.Millisecond)
+		w, h := uiapp.PreferredPromptComposerPanelSize(ctrl.PromptComposerSlotCount())
+		bounds := computeCapsuleBounds(anchorCopy, mygo.Screen.CursorScreenPoint(), bridge.Size{
+			Width:  float64(w),
+			Height: float64(h),
+		}, mygo.Screen.Displays())
+		win.SetBounds(bounds)
+		win.Show()
+		win.Focus()
+		win.Invalidate()
+	})
+}
+
+func (a *desktopApp) handleClosePromptComposer() {
+	go mygo.RunOnMain(func() {
+		a.mu.Lock()
+		win := a.promptPanel
+		a.mu.Unlock()
+		if win == nil {
+			return
+		}
+		if win.IsVisible() {
+			win.Hide()
+			a.lastPanelHideNano.Store(time.Now().UnixNano())
+		}
+	})
 }
 
 func (a *desktopApp) handleOpenSettings(_ uiapp.SettingsTab) {

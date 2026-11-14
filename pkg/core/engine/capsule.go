@@ -128,6 +128,7 @@ type OmniboxItem struct {
 	AppPath          string                 `json:"appPath,omitempty"`
 	IMEMode          config.IMEMode         `json:"imeMode,omitempty"`
 	PromptTemplate   *config.PromptTemplate `json:"promptTemplate,omitempty"`
+	OptimizerPreset  string                 `json:"optimizerPreset,omitempty"`
 	ScriptID         string                 `json:"scriptId,omitempty"`
 	Port             int                    `json:"port,omitempty"`
 	PortPID          int                    `json:"portPid,omitempty"`
@@ -162,6 +163,7 @@ type State struct {
 	AIComplete        bool                    `json:"aiComplete,omitempty"`
 	AIError           string                  `json:"aiError,omitempty"`
 	AIHistory         []ChatTurn              `json:"aiHistory,omitempty"`
+	AIOptimizerPreset string                  `json:"aiOptimizerPreset,omitempty"`
 	ActiveAIProfileID string                  `json:"activeAiProfileId,omitempty"`
 	HUDMessage        string                  `json:"hudMessage,omitempty"`
 	Context           CapsuleContext          `json:"context"`
@@ -247,6 +249,7 @@ const (
 	EffectPinClipboardItem   EffectType = "pin_clipboard_item"
 	EffectDeleteClipboard    EffectType = "delete_clipboard_item"
 	EffectBindAppIMERule     EffectType = "bind_app_ime_rule"
+	EffectOpenPromptComposer EffectType = "open_prompt_composer"
 )
 
 // Effect describes a side effect that the host/coordinator should perform.
@@ -263,8 +266,10 @@ type Effect struct {
 	ClipboardID      string               `json:"clipboardId,omitempty"`
 	ClipboardContent string               `json:"clipboardContent,omitempty"`
 	ClipboardMedia   *ClipboardMedia      `json:"clipboardMedia,omitempty"`
-	IsPinned         bool                 `json:"isPinned,omitempty"`
-	IMEMode          config.IMEMode       `json:"imeMode,omitempty"`
+	IsPinned         bool                   `json:"isPinned,omitempty"`
+	IMEMode          config.IMEMode         `json:"imeMode,omitempty"`
+	PromptTemplate   *config.PromptTemplate `json:"promptTemplate,omitempty"`
+	OptimizerPreset  string                 `json:"optimizerPreset,omitempty"`
 }
 
 // StateMachine wraps State + ClavisConfig with a stateful Handle method.
@@ -315,7 +320,7 @@ func (m *StateMachine) rebuildCandidateCorpus() {
 	items = append(items, makeInstalledAppItems(m.state.InstalledApps)...)
 	for _, p := range m.config.Prompts.Items {
 		x := p
-		items = append(items, OmniboxItem{ID: "prompt:" + p.ID, Title: p.Title, Subtitle: p.Description, KeyHint: p.Trigger, Keywords: []string{p.Trigger, p.Category}, Kind: ItemPromptTemplate, PromptTemplate: &x})
+		items = append(items, OmniboxItem{ID: "prompt:" + p.ID, Title: p.Title, Subtitle: p.Description, KeyHint: p.Trigger, Icon: "wand.and.stars", Keywords: []string{p.Trigger, p.Category}, Kind: ItemPromptTemplate, PromptTemplate: &x})
 	}
 	for _, x := range m.config.Components.Scripts {
 		if x.Enabled {
@@ -757,13 +762,14 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		return next, []Effect{
 			{Type: EffectCancelAI},
 			{
-				Type:       EffectStartAI,
-				Mode:       next.AIMode,
-				Prompt:     followUpPrompt,
-				SourceText: next.AISourceText,
-				Context:    &ctxCopy,
-				History:    histCopy,
-				ProfileID:  profID,
+				Type:            EffectStartAI,
+				Mode:            next.AIMode,
+				Prompt:          followUpPrompt,
+				SourceText:      next.AISourceText,
+				Context:         &ctxCopy,
+				History:         histCopy,
+				ProfileID:       profID,
+				OptimizerPreset: next.AIOptimizerPreset,
 			},
 		}
 
@@ -930,6 +936,11 @@ func AvailableItemActions(item OmniboxItem) []OmniboxActionSpec {
 		return []OmniboxActionSpec{
 			{ID: "apply_rule", Label: i18n.T("engine.action.apply_rule"), Shortcut: "↵"},
 			{ID: "copy_title", Label: i18n.T("engine.action.copy_title"), Shortcut: modKey() + "↵"},
+		}
+	case ItemPromptTemplate:
+		return []OmniboxActionSpec{
+			{ID: "compose", Label: i18n.T("engine.action.compose_prompt"), Shortcut: "↵"},
+			{ID: "copy_template", Label: i18n.T("engine.action.copy_template"), Shortcut: modKey() + "↵"},
 		}
 	default:
 		return []OmniboxActionSpec{
@@ -1161,6 +1172,42 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 		}
 
 	case ItemAIMode:
+		if item.AIMode == "optimize" {
+			draft := strings.TrimSpace(item.AIPrompt)
+			src := ""
+			if draft == "" {
+				draft = strings.TrimSpace(next.Context.SelectedText)
+			} else if strings.TrimSpace(next.Context.SelectedText) != "" {
+				src = next.Context.SelectedText
+			}
+			if draft == "" {
+				return next, nil
+			}
+			preset := strings.TrimSpace(item.OptimizerPreset)
+			if preset == "" {
+				preset = strings.TrimSpace(cfg.Prompts.DefaultOptimizerPreset)
+			}
+			if preset == "" {
+				preset = "coding"
+			}
+			ctxCopy := next.Context
+			profID := effectiveProfileID(next, cfg)
+			clearPhaseFields(&next)
+			next.Phase = PhaseAIStreaming
+			next.AIMode = "optimize"
+			next.AIPrompt = draft
+			next.AISourceText = src
+			next.AIOptimizerPreset = preset
+			return next, []Effect{{
+				Type:            EffectStartAI,
+				Mode:            "optimize",
+				Prompt:          draft,
+				SourceText:      src,
+				Context:         &ctxCopy,
+				ProfileID:       profID,
+				OptimizerPreset: preset,
+			}}
+		}
 		var src string
 		if item.AIMode == "ask" {
 			if strings.TrimSpace(next.Context.SelectedText) != "" {
@@ -1217,12 +1264,23 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 		if item.PromptTemplate == nil {
 			return next, nil
 		}
+		if actID == "copy_template" {
+			tplText := item.PromptTemplate.Template
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{
+				{Type: EffectCopyText, Text: tplText},
+				{Type: EffectClose},
+			}
+		}
+		tpl := *item.PromptTemplate
 		ctxCopy := next.Context
 		clearPhaseFields(&next)
-		next.Phase = PhaseAIStreaming
-		next.AIMode = "prompt"
-		next.AIPrompt = item.PromptTemplate.Template
-		return next, []Effect{{Type: EffectStartAI, Mode: "prompt", Prompt: item.PromptTemplate.Template, Context: &ctxCopy, ProfileID: effectiveProfileID(next, cfg)}}
+		next.Phase = PhaseHidden
+		return next, []Effect{
+			{Type: EffectOpenPromptComposer, PromptTemplate: &tpl, Context: &ctxCopy},
+			{Type: EffectClose},
+		}
 
 	case ItemScriptCommand:
 		for _, spec := range cfg.Components.Scripts {
@@ -1499,6 +1557,12 @@ func scoreCandidatesWithFrecency(candidates []OmniboxItem, query string, frecenc
 }
 
 func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg config.ClavisConfig) []OmniboxItem {
+	// Inline prompt optimizer prefix (e.g. "//draft") takes precedence over single-'/' prompts routing.
+	if tab == config.TabActions || tab == config.TabAI {
+		if draft, ok := matchInlineOptimizePrefix(query, cfg); ok {
+			return makeOptimizePromptItems(draft, state.Context, cfg)
+		}
+	}
 	// Configured source prefixes take precedence over built-in routes.
 	if tab == config.TabActions {
 		for _, src := range cfg.Components.Sources {
@@ -1508,7 +1572,7 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 			rest := strings.TrimSpace(strings.TrimPrefix(query, src.Prefix))
 			switch src.ID {
 			case "prompts":
-				return scoreCandidatesWithFrecency(cfgPromptItems(cfg), rest, state.FrecencyScores)
+				return matchPromptItems(cfgPromptItems(cfg, state.Context), query, rest, src.Prefix, state.FrecencyScores)
 			case "scripts":
 				var scripts []OmniboxItem
 				for _, x := range cfg.Components.Scripts {
@@ -1570,9 +1634,9 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 			case '=':
 				return EvaluateUtilities("="+rest, time.Now())
 			case '/':
-				// Prompt templates use slash triggers; the prefix is accepted when
-				// callers pass a full-width or explicit route through Actions.
-				return scoreCandidates(cfgPromptItems(cfg), rest)
+				if sourceEnabled(cfg.Components.Sources, "prompts") {
+					return matchPromptItems(cfgPromptItems(cfg, state.Context), query, rest, "/", state.FrecencyScores)
+				}
 			}
 		}
 	}
@@ -1584,7 +1648,7 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 		candidates = append(candidates, flattenLeaderNodes(cfg.Leader.Nodes, nil, nil)...)
 		candidates = append(candidates, makeNormalizeGlossaryItem())
 		if sourceEnabled(cfg.Components.Sources, "prompts") {
-			candidates = append(candidates, cfgPromptItems(cfg)...)
+			candidates = append(candidates, cfgPromptItems(cfg, state.Context)...)
 		}
 		if sourceEnabled(cfg.Components.Sources, "scripts") {
 			for _, s := range cfg.Components.Scripts {
@@ -1946,6 +2010,7 @@ func clearPhaseFields(s *State) {
 	s.AIComplete = false
 	s.AIError = ""
 	s.AIHistory = nil
+	s.AIOptimizerPreset = ""
 	s.HUDMessage = ""
 }
 
@@ -2014,11 +2079,176 @@ func sourceEnabled(sources []config.SourceModuleSpec, id string) bool {
 	return true
 }
 
-func cfgPromptItems(cfg config.ClavisConfig) []OmniboxItem {
+func promptMatchesApp(p config.PromptTemplate, ctx CapsuleContext) bool {
+	if len(p.AppBundleIDs) == 0 {
+		return true
+	}
+	bundleID := strings.TrimSpace(ctx.BundleID)
+	procName := strings.TrimSpace(ctx.ProcessName)
+	for _, id := range p.AppBundleIDs {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			continue
+		}
+		if bundleID != "" && strings.EqualFold(trimmed, bundleID) {
+			return true
+		}
+		if bundleID == "" && procName != "" && strings.EqualFold(trimmed, procName) {
+			return true
+		}
+	}
+	return false
+}
+
+func cfgPromptItems(cfg config.ClavisConfig, ctx CapsuleContext) []OmniboxItem {
 	items := make([]OmniboxItem, 0, len(cfg.Prompts.Items))
 	for _, p := range cfg.Prompts.Items {
+		if !promptMatchesApp(p, ctx) {
+			continue
+		}
 		x := p
-		items = append(items, OmniboxItem{ID: "prompt:" + p.ID, Title: p.Title, Subtitle: p.Description, KeyHint: p.Trigger, Keywords: []string{p.Trigger, p.Category}, Kind: ItemPromptTemplate, PromptTemplate: &x, Score: 1000})
+		kws := []string{p.Trigger, p.Category, p.ID}
+		if bare := strings.TrimLeft(strings.TrimSpace(p.Trigger), "/!"); bare != "" && bare != p.Trigger {
+			kws = append(kws, bare)
+		}
+		items = append(items, OmniboxItem{
+			ID:             "prompt:" + p.ID,
+			Title:          p.Title,
+			Subtitle:       p.Description,
+			KeyHint:        p.Trigger,
+			Icon:           "wand.and.stars",
+			Keywords:       kws,
+			Kind:           ItemPromptTemplate,
+			PromptTemplate: &x,
+			Score:          1000,
+		})
+	}
+	return items
+}
+
+func matchPromptItems(items []OmniboxItem, fullQuery, rest, prefix string, frecency map[string]int) []OmniboxItem {
+	if strings.TrimSpace(rest) == "" {
+		return items
+	}
+	scored := scoreCandidatesWithFrecency(items, rest, frecency)
+	trimmedFull := strings.TrimSpace(fullQuery)
+	lowerRest := strings.ToLower(strings.TrimSpace(rest))
+	for i := range scored {
+		if scored[i].PromptTemplate == nil {
+			continue
+		}
+		trig := strings.TrimSpace(scored[i].PromptTemplate.Trigger)
+		bare := strings.TrimSpace(strings.TrimPrefix(trig, prefix))
+		if strings.EqualFold(trig, trimmedFull) || (bare != "" && strings.EqualFold(bare, lowerRest)) {
+			scored[i].Score += 600
+		} else if bare != "" && strings.HasPrefix(strings.ToLower(bare), lowerRest) {
+			scored[i].Score += 250
+		}
+	}
+	sort.SliceStable(scored, func(i, j int) bool {
+		return scored[i].Score > scored[j].Score
+	})
+	return scored
+}
+
+func inlineOptimizePrefix(cfg config.ClavisConfig) string {
+	p := strings.TrimSpace(cfg.Prompts.InlineOptimizePrefix)
+	if p == "" {
+		return "//"
+	}
+	return p
+}
+
+func matchInlineOptimizePrefix(query string, cfg config.ClavisConfig) (string, bool) {
+	prefix := inlineOptimizePrefix(cfg)
+	if prefix == "" {
+		return "", false
+	}
+	trimmedLeft := strings.TrimLeft(query, " \t\u3000")
+	if strings.HasPrefix(trimmedLeft, prefix) {
+		return strings.TrimSpace(strings.TrimPrefix(trimmedLeft, prefix)), true
+	}
+	normLeft := NormalizeFullWidth(trimmedLeft)
+	if strings.HasPrefix(normLeft, prefix) {
+		return strings.TrimSpace(strings.TrimPrefix(normLeft, prefix)), true
+	}
+	return "", false
+}
+
+var builtInOptimizerPresetOrder = []string{
+	"coding",
+	"concise",
+	"deep_research",
+	"english_pro",
+	"polite",
+}
+
+func optimizerPresetLabel(id string) string {
+	switch id {
+	case "coding":
+		return i18n.T("optimizer.preset.coding")
+	case "concise":
+		return i18n.T("optimizer.preset.concise")
+	case "deep_research":
+		return i18n.T("optimizer.preset.deep_research")
+	case "english_pro":
+		return i18n.T("optimizer.preset.english_pro")
+	case "polite":
+		return i18n.T("optimizer.preset.polite")
+	default:
+		return i18n.T("optimizer.preset.coding")
+	}
+}
+
+func makeOptimizePromptItems(draft string, ctx CapsuleContext, cfg config.ClavisConfig) []OmniboxItem {
+	defPreset := strings.ToLower(strings.TrimSpace(cfg.Prompts.DefaultOptimizerPreset))
+	validDef := false
+	for _, id := range builtInOptimizerPresetOrder {
+		if id == defPreset {
+			validDef = true
+			break
+		}
+	}
+	if !validDef {
+		defPreset = "coding"
+	}
+	ordered := make([]string, 0, len(builtInOptimizerPresetOrder))
+	ordered = append(ordered, defPreset)
+	for _, id := range builtInOptimizerPresetOrder {
+		if id != defPreset {
+			ordered = append(ordered, id)
+		}
+	}
+
+	hasSelection := strings.TrimSpace(ctx.SelectedText) != ""
+	items := make([]OmniboxItem, 0, len(ordered))
+	for i, presetID := range ordered {
+		label := optimizerPresetLabel(presetID)
+		var title, subtitle string
+		switch {
+		case draft != "":
+			title = i18n.Tf("engine.prompt.optimize_title", label, draft)
+			subtitle = i18n.T("engine.prompt.optimize_subtitle")
+		case hasSelection:
+			title = i18n.Tf("engine.prompt.optimize_selection_title", label)
+			subtitle = i18n.T("engine.prompt.optimize_subtitle")
+		default:
+			title = i18n.Tf("engine.prompt.optimize_empty_title", label)
+			subtitle = i18n.T("engine.prompt.optimize_empty_subtitle")
+		}
+		items = append(items, OmniboxItem{
+			ID:              "optimize:" + presetID,
+			Title:           title,
+			Subtitle:        subtitle,
+			KeyHint:         label,
+			Icon:            "wand.and.stars",
+			Keywords:        []string{"optimize", "prompt", presetID, label},
+			Kind:            ItemAIMode,
+			AIMode:          "optimize",
+			AIPrompt:        draft,
+			OptimizerPreset: presetID,
+			Score:           2000 - i*10,
+		})
 	}
 	return items
 }

@@ -26,6 +26,7 @@ import (
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/pkg/core/i18n"
+	"github.com/yeisme/clavis/pkg/core/prompt"
 )
 
 // SettingsTab identifies one of the 5 native Settings tabs.
@@ -74,8 +75,10 @@ type Options struct {
 	OnRepaint       func()
 	OnPresentPhase  func(phase engine.CapsulePhase)
 	OnHide          func()
-	OnOpenSettings  func(tab SettingsTab)
-	OnShowIMEPill   func(label string, anchor *host.CursorAnchor)
+	OnOpenSettings        func(tab SettingsTab)
+	OnOpenPromptComposer  func()
+	OnClosePromptComposer func()
+	OnShowIMEPill         func(label string, anchor *host.CursorAnchor)
 	// OnLanguageChange fires when a config save or reload switches the UI
 	// language, so the shell relabels the tray and window titles.
 	OnLanguageChange func()
@@ -139,9 +142,11 @@ type AppController struct {
 	OnRepaint        func()
 	OnPresentPhase   func(phase engine.CapsulePhase)
 	OnHide           func()
-	OnOpenSettings   func(tab SettingsTab)
-	OnShowIMEPill    func(label string, anchor *host.CursorAnchor)
-	OnLanguageChange func()
+	OnOpenSettings        func(tab SettingsTab)
+	OnOpenPromptComposer  func()
+	OnClosePromptComposer func()
+	OnShowIMEPill         func(label string, anchor *host.CursorAnchor)
+	OnLanguageChange      func()
 
 	// Decoded application icon bitmap cache
 	iconMu       sync.Mutex
@@ -188,6 +193,12 @@ type AppController struct {
 
 	// Ephemeral UI state (used on the UI build thread)
 	uiState uiViewState
+
+	// Active prompt slot composer session & UI handles
+	promptSession         *prompt.SlotComposerSession
+	promptContext         engine.CapsuleContext
+	promptValidationError string
+	promptUI              promptComposerUIState
 }
 
 // NewAppController constructs and initializes an AppController.
@@ -235,8 +246,10 @@ func NewAppController(opts Options) *AppController {
 		OnRepaint:        opts.OnRepaint,
 		OnPresentPhase:   opts.OnPresentPhase,
 		OnHide:           opts.OnHide,
-		OnOpenSettings:   opts.OnOpenSettings,
-		OnShowIMEPill:    opts.OnShowIMEPill,
+		OnOpenSettings:        opts.OnOpenSettings,
+		OnOpenPromptComposer:  opts.OnOpenPromptComposer,
+		OnClosePromptComposer: opts.OnClosePromptComposer,
+		OnShowIMEPill:         opts.OnShowIMEPill,
 		OnLanguageChange: opts.OnLanguageChange,
 		appIconCache:     make(map[string]*ui.Bitmap),
 		clipDone:         make(chan struct{}),
@@ -604,6 +617,15 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 
 	case engine.EffectBindAppIMERule:
 		c.bindAppIMERule(eff, state)
+
+	case engine.EffectOpenPromptComposer:
+		if eff.PromptTemplate != nil {
+			appCtx := state.Context
+			if eff.Context != nil {
+				appCtx = *eff.Context
+			}
+			c.OpenPromptComposer(*eff.PromptTemplate, appCtx)
+		}
 	}
 }
 
@@ -1117,16 +1139,55 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 	history := convertChatHistory(eff.History)
 	profCopy := profile
 
+	req := ai.CompletionRequest{
+		Mode:       eff.Mode,
+		Prompt:     eff.Prompt,
+		SourceText: eff.SourceText,
+		Context:    eff.Context,
+		History:    history,
+		Profile:    &profCopy,
+	}
+	if eff.Mode == "optimize" {
+		presetID := strings.TrimSpace(eff.OptimizerPreset)
+		if presetID == "" {
+			presetID = cfg.Prompts.DefaultOptimizerPreset
+		}
+		if len(history) == 0 {
+			var ctxLines []string
+			if eff.Context != nil {
+				if eff.Context.AppName != "" {
+					ctxLines = append(ctxLines, "App: "+eff.Context.AppName)
+				}
+				if eff.Context.WindowTitle != "" {
+					ctxLines = append(ctxLines, "Window: "+eff.Context.WindowTitle)
+				}
+				if eff.Context.ActiveURL != "" {
+					ctxLines = append(ctxLines, "URL: "+eff.Context.ActiveURL)
+				}
+				if eff.Context.SelectedText != "" {
+					ctxLines = append(ctxLines, "Selection:\n"+eff.Context.SelectedText)
+				}
+			}
+			optReq := prompt.BuildOptimizationRequest(
+				eff.Prompt,
+				presetID,
+				strings.Join(ctxLines, "\n"),
+				cfg.Glossary.Terms,
+				nil,
+			)
+			req.Prompt = optReq.Prompt
+			req.SourceText = ""
+			req.GlossaryTerms = optReq.GlossaryTerms
+			req.SystemPromptOverride = optReq.SystemPromptOverride
+		} else {
+			req.GlossaryTerms = cfg.Glossary.Terms
+			req.SystemPromptOverride = prompt.GetPreset(presetID).SystemPrompt
+		}
+	}
+
 	go func() {
 		defer cancel()
-		err := streamClient.StreamCompletion(ctx, ai.CompletionRequest{
-			Mode:       eff.Mode,
-			Prompt:     eff.Prompt,
-			SourceText: eff.SourceText,
-			Context:    eff.Context,
-			History:    history,
-			Profile:    &profCopy,
-		}, func(delta string) {
+		err := streamClient.StreamCompletion(ctx, req, func(delta string) {
 			if delta == "" {
 				return
 			}
@@ -1153,9 +1214,24 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
+			errMsg := err.Error()
+			if errors.Is(err, secrets.ErrSecretNotFound) {
+				envVar := strings.TrimSpace(profCopy.APIKeyEnvVar)
+				if envVar == "" {
+					envVar = secrets.DefaultEnvVarForProvider(profCopy.Provider)
+				}
+				if envVar == "" {
+					envVar = "API_KEY"
+				}
+				provName := strings.TrimSpace(profCopy.Provider)
+				if provName == "" {
+					provName = "AI"
+				}
+				errMsg = i18n.Tf("prompts.ai_missing_key", provName, envVar)
+			}
 			c.Dispatch(engine.Event{
 				Type:  engine.EventAIFailed,
-				Error: err.Error(),
+				Error: errMsg,
 			})
 			return
 		}
