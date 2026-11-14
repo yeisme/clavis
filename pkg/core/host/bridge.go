@@ -26,6 +26,41 @@ type CursorAnchor struct {
 	Valid  bool    `json:"valid"`
 }
 
+// InlineKeyEvent is the small, allocation-friendly key event passed to an inline IME.
+type InlineKeyEvent struct {
+	KeyName     string   `json:"keyName"`
+	Rune        string   `json:"rune,omitempty"`
+	KeyCode     uint16   `json:"keyCode"`
+	Modifiers   []string `json:"modifiers,omitempty"`
+	IsDown      bool     `json:"isDown"`
+	IsRepeat    bool     `json:"isRepeat"`
+	TimestampMs int64    `json:"timestampMs"`
+}
+
+// EditableFieldSnapshot contains the focused accessibility text value and selection.
+type EditableFieldSnapshot struct {
+	Value          string `json:"value"`
+	SelectedText   string `json:"selectedText,omitempty"`
+	SelectionStart int    `json:"selectionStart"`
+	SelectionEnd   int    `json:"selectionEnd"`
+}
+
+// ListeningPort describes one TCP listener discovered on the host.
+type ListeningPort struct {
+	Port        int    `json:"port"`
+	Proto       string `json:"proto"`
+	PID         int    `json:"pid"`
+	ProcessName string `json:"processName,omitempty"`
+	Command     string `json:"command,omitempty"`
+}
+
+// IMKStatus describes installation of the optional macOS InputMethodKit helper.
+type IMKStatus struct {
+	Installed bool   `json:"installed"`
+	Path      string `json:"path,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
 // InputSourceInfo describes an OS keyboard layout / input method source.
 type InputSourceInfo struct {
 	ID       string `json:"id"`
@@ -82,6 +117,10 @@ const (
 	TriggerSnippetKey      TriggerKind = "snippet_key"
 	TriggerSnippetBack     TriggerKind = "snippet_backspace"
 	TriggerSnippetReset    TriggerKind = "snippet_reset"
+	// TriggerSelectionQuickBar opens the floating selection action bar.
+	TriggerSelectionQuickBar TriggerKind = "selection_quick_bar"
+	// TriggerInPlaceOptimize rewrites the focused field's draft into an upgraded prompt.
+	TriggerInPlaceOptimize TriggerKind = "in_place_optimize"
 )
 
 // TriggerEvent describes a global hotkey or keystroke event captured by the host.
