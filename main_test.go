@@ -499,3 +499,121 @@ func TestDesktopAppDaemonFrecencyReloadAndShutdown(t *testing.T) {
 	app.handleRecordItemUse(wantKey)
 	app.syncFrecency(context.Background())
 }
+
+func TestDesktopAppPromptHistoryRecordedOnCommitAndAIOptimize(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cfgStore := config.NewConfigStore(t.TempDir())
+	cfg, err := cfgStore.LoadOrInitialize()
+	if err != nil {
+		t.Fatalf("LoadOrInitialize: %v", err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "prompt_hist.db")
+	sqliteStore, err := storage.NewSQLiteClipboardStoreFromConfig(ctx, dbPath, cfg.Main.Clipboard)
+	if err != nil {
+		t.Fatalf("NewSQLiteClipboardStoreFromConfig: %v", err)
+	}
+	learningStore, err := storage.NewLearningStore(sqliteStore.DB())
+	if err != nil {
+		t.Fatalf("NewLearningStore: %v", err)
+	}
+
+	app := newDesktopApp()
+	var injMu sync.Mutex
+	var injected []string
+	br := &mockMainBridge{
+		HostService: bridge.NewHostService(),
+		onInject: func(text string) {
+			injMu.Lock()
+			injected = append(injected, text)
+			injMu.Unlock()
+		},
+	}
+	ctrl := uiapp.NewAppController(uiapp.Options{
+		ConfigStore:           cfgStore,
+		ClipboardStore:        sqliteStore,
+		SecretStore:           secrets.NewMemoryAPIKeyStore(),
+		Bridge:                br,
+		ClipboardWriter:       func(string) {},
+		OnRecordPromptVersion: app.handleRecordPromptVersion,
+	})
+
+	app.mu.Lock()
+	app.ctx = ctx
+	app.cancel = cancel
+	app.cfgStore = cfgStore
+	app.sqliteStore = sqliteStore
+	app.learningStore = learningStore
+	app.clipStore = sqliteStore
+	app.controller = ctrl
+	app.mu.Unlock()
+	defer app.shutdown()
+
+	// 1. Prompt template rendered + injected via PromptComposer -> writes to prompt_history.
+	tpl := config.PromptTemplate{
+		ID:              "tpl-review",
+		Trigger:         "/rev",
+		Title:           "Review",
+		Template:        "Review {{target}}",
+		OptimizerPreset: "coding",
+		Slots:           []config.PromptSlot{{Name: "target", Label: "Target", Kind: "text", Required: true}},
+	}
+	ctrl.OpenPromptComposer(tpl, engine.CapsuleContext{AppName: "GoLand"})
+	ctrl.SetPromptSlotValue("target", "main.go")
+	if !ctrl.CommitPromptComposer() {
+		t.Fatal("CommitPromptComposer returned false")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	var hist []storage.PromptHistoryEntry
+	for time.Now().Before(deadline) {
+		hist, err = learningStore.RecentPromptHistory(ctx, "tpl-review", 5)
+		if err == nil && len(hist) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil || len(hist) != 1 {
+		t.Fatalf("expected 1 prompt history entry for tpl-review, got len=%d err=%v", len(hist), err)
+	}
+	if hist[0].Trigger != "/rev" || hist[0].RawDraft != "Review {{target}}" ||
+		hist[0].FinalOutput != "Review main.go" || hist[0].Preset != "coding" {
+		t.Fatalf("unexpected prompt template history row: %+v", hist[0])
+	}
+
+	// 2. AI-upgraded draft committed via EventAcceptAIOutput -> writes to prompt_history.
+	ctrl.OpenOmnibox(config.TabActions, "//fix flaky retry test")
+	ctrl.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
+	ctrl.Dispatch(engine.Event{Type: engine.EventAIChunk, Chunk: "Write a deterministic unit test for retry backoff."})
+	ctrl.Dispatch(engine.Event{Type: engine.EventAICompleted})
+	ctrl.Dispatch(engine.Event{Type: engine.EventAcceptAIOutput})
+
+	deadline = time.Now().Add(2 * time.Second)
+	var optHist []storage.PromptHistoryEntry
+	for time.Now().Before(deadline) {
+		optHist, err = learningStore.RecentPromptHistory(ctx, "optimize", 5)
+		if err == nil && len(optHist) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil || len(optHist) != 1 {
+		t.Fatalf("expected 1 prompt history entry for optimize, got len=%d err=%v", len(optHist), err)
+	}
+	if optHist[0].Trigger != "//" || optHist[0].RawDraft != "fix flaky retry test" ||
+		optHist[0].FinalOutput != "Write a deterministic unit test for retry backoff." ||
+		optHist[0].Preset != "coding" {
+		t.Fatalf("unexpected optimize history row: %+v", optHist[0])
+	}
+}
+
+type mockMainBridge struct {
+	bridge.HostService
+	onInject func(string)
+}
+
+func (m *mockMainBridge) InjectText(_ context.Context, text string, _ int, _ int) error {
+	if m.onInject != nil {
+		m.onInject(text)
+	}
+	return nil
+}

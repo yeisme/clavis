@@ -5,11 +5,29 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
+
+const maxPendingIMECommits = 256
+
+// InputEngineCommit describes one committed candidate from the own input engine.
+type InputEngineCommit struct {
+	PinyinKey string
+	Word      string
+	PrevWord  string
+	Pinned    bool
+}
+
+// InputEngineLearningHost is optionally implemented by bridges that host the own input
+// engine, allowing runtime injection of the RAM-only user frequency provider and an
+// off-hook commit callback without importing internal/storage.
+type InputEngineLearningHost interface {
+	UpdateInputEngineLearning(userFreq inputengine.UserFrequencyProvider, onCommit func(InputEngineCommit))
+}
 
 // Virtual-key codes used by the input engine mapping (duplicated untagged for testability).
 const (
@@ -28,14 +46,18 @@ const (
 
 // inputEngineOptionsFromConfig converts [input_engine] config into inputengine.Options.
 // Returns ok=false when the own input engine is disabled or configured for a non-hook mode,
-// preserving the zero-overhead disabled default.
-func inputEngineOptionsFromConfig(cfg config.InputEngineConfig, cacheDir string) (inputengine.Options, bool) {
+// preserving the zero-overhead disabled default. When user_learning is false, UserFrequency
+// is forced to nil so learning stays completely inert.
+func inputEngineOptionsFromConfig(cfg config.InputEngineConfig, cacheDir string, userFreq inputengine.UserFrequencyProvider) (inputengine.Options, bool) {
 	if !cfg.Enabled || (cfg.Mode != "" && cfg.Mode != "inline_hook" && cfg.Mode != "dual") {
 		return inputengine.Options{}, false
 	}
 	resolvedCache := strings.TrimSpace(cacheDir)
 	if resolvedCache == "" && len(cfg.CustomDictPaths) > 0 {
 		resolvedCache = defaultInputEngineCacheDir()
+	}
+	if !cfg.UserLearning {
+		userFreq = nil
 	}
 	return inputengine.Options{
 		CandidateCount:   cfg.CandidateCount,
@@ -44,15 +66,160 @@ func inputEngineOptionsFromConfig(cfg config.InputEngineConfig, cacheDir string)
 		FuzzyPinyin:      slices.Clone(cfg.FuzzyPinyin),
 		CustomDictPaths:  slices.Clone(cfg.CustomDictPaths),
 		DictCacheDir:     resolvedCache,
+		UserFrequency:    userFreq,
 	}, true
 }
 
-func newInputEngineFromConfig(cfg config.InputEngineConfig, cacheDir string) *inputengine.Engine {
-	opts, ok := inputEngineOptionsFromConfig(cfg, cacheDir)
+func newInputEngineFromConfig(cfg config.InputEngineConfig, cacheDir string, userFreq inputengine.UserFrequencyProvider) *inputengine.Engine {
+	opts, ok := inputEngineOptionsFromConfig(cfg, cacheDir, userFreq)
 	if !ok {
 		return nil
 	}
 	return inputengine.New(opts)
+}
+
+// inputEngineCommitTracker extracts committed candidates on the hook thread without doing any
+// SQL or I/O, buffering commits for the off-hook view/worker goroutine to persist.
+type inputEngineCommitTracker struct {
+	mu       sync.Mutex
+	prevWord string
+	pending  []InputEngineCommit
+}
+
+func (t *inputEngineCommitTracker) resetPrev() {
+	t.mu.Lock()
+	t.prevWord = ""
+	t.mu.Unlock()
+}
+
+func (t *inputEngineCommitTracker) pushCommit(pinyinKey, word string) {
+	t.mu.Lock()
+	if len(t.pending) < maxPendingIMECommits {
+		t.pending = append(t.pending, InputEngineCommit{
+			PinyinKey: pinyinKey,
+			Word:      word,
+			PrevWord:  t.prevWord,
+		})
+	}
+	t.prevWord = word
+	t.mu.Unlock()
+}
+
+func (t *inputEngineCommitTracker) hasPending() bool {
+	t.mu.Lock()
+	n := len(t.pending)
+	t.mu.Unlock()
+	return n > 0
+}
+
+func (t *inputEngineCommitTracker) drain(dst []InputEngineCommit) []InputEngineCommit {
+	t.mu.Lock()
+	if len(t.pending) > 0 {
+		dst = append(dst, t.pending...)
+		t.pending = t.pending[:0]
+	}
+	t.mu.Unlock()
+	return dst
+}
+
+func (t *inputEngineCommitTracker) handleKey(eng *inputengine.Engine, k inputengine.Key, learn bool) inputengine.Result {
+	switch k.Kind {
+	case inputengine.KeyShiftDown:
+		return eng.HandleKey(k)
+	case inputengine.KeyShiftUp:
+		res := eng.HandleKey(k)
+		if res.Changed || res.Commit != "" {
+			t.resetPrev()
+		}
+		return res
+	case inputengine.KeyEscape, inputengine.KeyEnter:
+		res := eng.HandleKey(k)
+		t.resetPrev()
+		return res
+	case inputengine.KeyLetter, inputengine.KeyBackspace, inputengine.KeyApostrophe,
+		inputengine.KeyPagePrev, inputengine.KeyPageNext:
+		if k.Chord {
+			res := eng.HandleKey(k)
+			if res.Changed {
+				t.resetPrev()
+			}
+			return res
+		}
+		return eng.HandleKey(k)
+	}
+
+	if k.Chord || k.Kind == inputengine.KeyNavigation {
+		res := eng.HandleKey(k)
+		if res.Changed {
+			t.resetPrev()
+		}
+		return res
+	}
+
+	if !learn || eng.Raw() == "" {
+		res := eng.HandleKey(k)
+		if res.Commit != "" {
+			t.resetPrev()
+		}
+		return res
+	}
+
+	preView := eng.View()
+	res := eng.HandleKey(k)
+	if res.Commit == "" || !preView.Composing {
+		return res
+	}
+
+	word, ok := committedCandidateWord(preView, k, res.Commit, eng.Raw() == "")
+	if !ok || word == "" {
+		t.resetPrev()
+		return res
+	}
+
+	var pinyinKey string
+	if eng.Raw() == "" {
+		pinyinKey = strings.ReplaceAll(preView.Preedit, "'", "")
+	} else {
+		postPreedit := eng.View().Preedit
+		if postPreedit != "" && strings.HasSuffix(preView.Preedit, "'"+postPreedit) {
+			consumed := strings.TrimSuffix(preView.Preedit, "'"+postPreedit)
+			pinyinKey = strings.ReplaceAll(consumed, "'", "")
+		}
+	}
+
+	if pinyinKey != "" {
+		t.pushCommit(pinyinKey, word)
+	} else {
+		t.resetPrev()
+	}
+	return res
+}
+
+func committedCandidateWord(preView inputengine.View, k inputengine.Key, commit string, fullCommit bool) (string, bool) {
+	switch k.Kind {
+	case inputengine.KeySpace:
+		idx := preView.Selected
+		if idx >= 0 && idx < len(preView.Candidates) && commit == preView.Candidates[idx].Text {
+			return preView.Candidates[idx].Text, true
+		}
+	case inputengine.KeyDigit:
+		idx := int(k.Rune-'0') - 1
+		if idx >= 0 && idx < len(preView.Candidates) && commit == preView.Candidates[idx].Text {
+			return preView.Candidates[idx].Text, true
+		}
+	default:
+		if fullCommit && len(preView.Candidates) > 0 {
+			cand := preView.Candidates[0].Text
+			expected := cand
+			if k.Rune != 0 {
+				expected += string(k.Rune)
+			}
+			if commit == expected {
+				return cand, true
+			}
+		}
+	}
+	return "", false
 }
 
 func defaultInputEngineCacheDir() string {

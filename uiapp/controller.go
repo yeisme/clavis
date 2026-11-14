@@ -97,6 +97,9 @@ type Options struct {
 	OnLanguageChange func()
 	// OnRecordItemUse fires when a clipboard item is pasted or copied from the Omnibox.
 	OnRecordItemUse func(itemID string)
+	// OnRecordPromptVersion fires when a prompt template is rendered and injected or an
+	// AI-upgraded draft is committed.
+	OnRecordPromptVersion func(promptID, trigger, rawDraft, finalOutput, preset string)
 }
 
 type clipTask struct {
@@ -165,6 +168,7 @@ type AppController struct {
 	OnShowIMEPill         func(label string, anchor *host.CursorAnchor)
 	OnLanguageChange      func()
 	OnRecordItemUse       func(itemID string)
+	OnRecordPromptVersion func(promptID, trigger, rawDraft, finalOutput, preset string)
 
 	// Decoded application icon bitmap cache
 	iconMu       sync.Mutex
@@ -296,6 +300,7 @@ func NewAppController(opts Options) *AppController {
 		OnShowIMEPill:         opts.OnShowIMEPill,
 		OnLanguageChange:      opts.OnLanguageChange,
 		OnRecordItemUse:       opts.OnRecordItemUse,
+		OnRecordPromptVersion: opts.OnRecordPromptVersion,
 		appIconCache:          make(map[string]*ui.Bitmap),
 		clipDone:              make(chan struct{}),
 		clipBaseCtx:           clipBaseCtx,
@@ -584,6 +589,17 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 		}
 	}
 
+	var optimizeAccepted bool
+	if prev.Phase == engine.PhaseAIStreaming && prev.AIMode == "optimize" &&
+		(ev.Type == engine.EventAcceptAIOutput || ev.Type == engine.EventCopyAIOutput) {
+		for _, eff := range effects {
+			if eff.Type == engine.EffectApplyAIOutput || eff.Type == engine.EffectCopyText {
+				optimizeAccepted = true
+				break
+			}
+		}
+	}
+
 	for _, eff := range effects {
 		if eff.Type == engine.EffectCancelAI || eff.Type == engine.EffectClose {
 			c.executeEffect(eff, next)
@@ -596,6 +612,13 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 			}
 			c.executeEffect(eff, next)
 		}
+	}
+	if optimizeAccepted {
+		trigger := c.ConfigStore.Current().Prompts.InlineOptimizePrefix
+		if strings.TrimSpace(trigger) == "" {
+			trigger = "//"
+		}
+		c.recordPromptVersion("optimize", trigger, prev.AIPrompt, prev.AIOutput, prev.AIOptimizerPreset)
 	}
 
 	if onRepaint != nil && (len(effects) > 0 || stateChanged(prev, next)) {
@@ -761,6 +784,18 @@ func (c *AppController) recordItemUse(itemID string) {
 	c.mu.Unlock()
 	if fn != nil {
 		fn(itemID)
+	}
+}
+
+func (c *AppController) recordPromptVersion(promptID, trigger, rawDraft, finalOutput, preset string) {
+	if promptID == "" && finalOutput == "" {
+		return
+	}
+	c.mu.Lock()
+	fn := c.OnRecordPromptVersion
+	c.mu.Unlock()
+	if fn != nil {
+		fn(promptID, trigger, rawDraft, finalOutput, preset)
 	}
 }
 

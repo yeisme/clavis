@@ -8,8 +8,31 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/egoist/mygo/plugins/sqlite"
+	"github.com/yeisme/clavis/pkg/core/ime"
+)
+
+const (
+	// MaxLexMirrorEntries bounds the in-memory IME unigram mirror.
+	MaxLexMirrorEntries = 4096
+	// MaxBigramMirrorEntries bounds the in-memory IME bigram mirror.
+	MaxBigramMirrorEntries = 4096
+	// MaxUsesMirrorEntries bounds the in-memory usage frecency mirror.
+	MaxUsesMirrorEntries = 2048
+
+	// MaxMirrorKeyBytes caps per-entry pinyinKey, word, and prevWord byte length in RAM mirrors.
+	MaxMirrorKeyBytes = 128
+	// MaxMirrorItemIDBytes caps per-entry usage_frecency item_id byte length in RAM mirrors.
+	MaxMirrorItemIDBytes = 256
+
+	// DefaultMaxFrecencyRows caps retained rows in the usage_frecency SQLite table on prune.
+	DefaultMaxFrecencyRows = 2048
+	// DefaultFrecencyRetentionWindow drops usage_frecency rows older than 90 days on prune.
+	DefaultFrecencyRetentionWindow = 90 * 24 * time.Hour
+
+	maxCustomPrefixCandidates = 32
 )
 
 // LearnedWord is a locally learned IME candidate.
@@ -38,6 +61,10 @@ type lexValue struct {
 	pinned    bool
 	lastUsed  int64
 }
+type useValue struct {
+	lastUsed int64
+	count    int64
+}
 
 // LearningStore owns the learning, frecency, and prompt-history tables on a shared SQLite DB.
 type LearningStore struct {
@@ -45,7 +72,7 @@ type LearningStore struct {
 	mu      sync.RWMutex
 	lex     map[lexKey]lexValue
 	bigrams map[[2]string]lexValue
-	uses    map[string][]int64
+	uses    map[string]useValue
 }
 
 // NewLearningStore creates learning tables and loads their bounded hot mirror.
@@ -53,7 +80,7 @@ func NewLearningStore(db *sqlite.DB) (*LearningStore, error) {
 	if db == nil {
 		return nil, fmt.Errorf("nil sqlite database")
 	}
-	s := &LearningStore{db: db, lex: make(map[lexKey]lexValue), bigrams: make(map[[2]string]lexValue), uses: make(map[string][]int64)}
+	s := &LearningStore{db: db, lex: make(map[lexKey]lexValue), bigrams: make(map[[2]string]lexValue), uses: make(map[string]useValue)}
 	if err := s.initSchema(context.Background()); err != nil {
 		return nil, err
 	}
@@ -81,7 +108,7 @@ func (s *LearningStore) initSchema(ctx context.Context) error {
 }
 
 func (s *LearningStore) load(ctx context.Context) error {
-	rows, err := s.db.Query(ctx, `SELECT pinyin_key, word, frequency, last_used_ns, pinned FROM ime_user_lexicon`)
+	rows, err := s.db.Query(ctx, `SELECT pinyin_key, word, frequency, last_used_ns, pinned FROM ime_user_lexicon ORDER BY pinned DESC, frequency DESC, last_used_ns DESC LIMIT ?`, MaxLexMirrorEntries)
 	if err != nil {
 		return err
 	}
@@ -89,27 +116,36 @@ func (s *LearningStore) load(ctx context.Context) error {
 	defer s.mu.Unlock()
 	for _, r := range rows.Values {
 		if len(r) >= 5 {
-			s.lex[lexKey{str(r, 0), str(r, 1), ""}] = lexValue{int64val(r, 2), int64val(r, 4) != 0, int64val(r, 3)}
+			py := truncateUTF8(str(r, 0), MaxMirrorKeyBytes)
+			w := truncateUTF8(str(r, 1), MaxMirrorKeyBytes)
+			if py != "" && w != "" {
+				s.lex[lexKey{py, w, ""}] = lexValue{int64val(r, 2), int64val(r, 4) != 0, int64val(r, 3)}
+			}
 		}
 	}
-	rows, err = s.db.Query(ctx, `SELECT prev_word, word, transition_count, last_used_ns FROM ime_bigrams`)
+	rows, err = s.db.Query(ctx, `SELECT prev_word, word, transition_count, last_used_ns FROM ime_bigrams ORDER BY transition_count DESC, last_used_ns DESC LIMIT ?`, MaxBigramMirrorEntries)
 	if err != nil {
 		return err
 	}
 	for _, r := range rows.Values {
 		if len(r) >= 4 {
-			s.bigrams[[2]string{str(r, 0), str(r, 1)}] = lexValue{frequency: int64val(r, 2), lastUsed: int64val(r, 3)}
+			pw := truncateUTF8(str(r, 0), MaxMirrorKeyBytes)
+			w := truncateUTF8(str(r, 1), MaxMirrorKeyBytes)
+			if pw != "" && w != "" {
+				s.bigrams[[2]string{pw, w}] = lexValue{frequency: int64val(r, 2), lastUsed: int64val(r, 3)}
+			}
 		}
 	}
-	rows, err = s.db.Query(ctx, `SELECT item_id, use_count, last_used_ns FROM usage_frecency`)
+	rows, err = s.db.Query(ctx, `SELECT item_id, use_count, last_used_ns FROM usage_frecency ORDER BY last_used_ns DESC, use_count DESC LIMIT ?`, MaxUsesMirrorEntries)
 	if err != nil {
 		return err
 	}
 	for _, r := range rows.Values {
 		if len(r) >= 3 {
-			n := int(int64val(r, 1))
-			if n > 0 {
-				s.uses[str(r, 0)] = []int64{int64val(r, 2), int64(n)}
+			n := int64val(r, 1)
+			id := truncateUTF8(str(r, 0), MaxMirrorItemIDBytes)
+			if n > 0 && id != "" {
+				s.uses[id] = useValue{lastUsed: int64val(r, 2), count: n}
 			}
 		}
 	}
@@ -126,6 +162,12 @@ func (s *LearningStore) RecordIMECommit(ctx context.Context, pinyinKey, word, pr
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	pinyinKey = truncateUTF8(strings.TrimSpace(pinyinKey), MaxMirrorKeyBytes)
+	word = truncateUTF8(word, MaxMirrorKeyBytes)
+	prevWord = truncateUTF8(prevWord, MaxMirrorKeyBytes)
+	if pinyinKey == "" || word == "" {
+		return nil
+	}
 	now := time.Now().UTC().UnixNano()
 	if _, err := s.db.Execute(ctx, `INSERT INTO ime_user_lexicon(pinyin_key,word,frequency,last_used_ns,pinned) VALUES(?,?,?,?,?) ON CONFLICT(pinyin_key,word) DO UPDATE SET frequency=frequency+1,last_used_ns=excluded.last_used_ns,pinned=MAX(pinned,excluded.pinned)`, pinyinKey, word, 1, now, boolInt(pinned)); err != nil {
 		return err
@@ -137,17 +179,25 @@ func (s *LearningStore) RecordIMECommit(ctx context.Context, pinyinKey, word, pr
 	}
 	// Update the write-through mirror only after persistence succeeds, so a
 	// cancelled or failed write cannot make the hot path observe phantom data.
+	lk := lexKey{pinyinKey, word, ""}
 	s.mu.Lock()
-	v := s.lex[lexKey{pinyinKey, word, ""}]
+	v, exists := s.lex[lk]
+	if !exists && len(s.lex) >= MaxLexMirrorEntries {
+		evictLexEntries(s.lex, MaxLexMirrorEntries)
+	}
 	v.frequency++
 	v.lastUsed = now
 	v.pinned = v.pinned || pinned
-	s.lex[lexKey{pinyinKey, word, ""}] = v
+	s.lex[lk] = v
 	if prevWord != "" {
-		b := s.bigrams[[2]string{prevWord, word}]
+		bk := [2]string{prevWord, word}
+		b, bexists := s.bigrams[bk]
+		if !bexists && len(s.bigrams) >= MaxBigramMirrorEntries {
+			evictBigramEntries(s.bigrams, MaxBigramMirrorEntries)
+		}
 		b.frequency++
 		b.lastUsed = now
-		s.bigrams[[2]string{prevWord, word}] = b
+		s.bigrams[bk] = b
 	}
 	s.mu.Unlock()
 	return nil
@@ -155,12 +205,15 @@ func (s *LearningStore) RecordIMECommit(ctx context.Context, pinyinKey, word, pr
 
 // LookupBoost is the allocation-free RAM mirror lookup used by the typing hot path.
 func (s *LearningStore) LookupBoost(pinyinKey, word, prevWord string) int32 {
-	if s == nil {
+	if s == nil || pinyinKey == "" || word == "" {
 		return 0
 	}
 	s.mu.RLock()
 	v := s.lex[lexKey{pinyinKey, word, ""}]
-	big := s.bigrams[[2]string{prevWord, word}]
+	var big lexValue
+	if prevWord != "" {
+		big = s.bigrams[[2]string{prevWord, word}]
+	}
 	s.mu.RUnlock()
 	boost := v.frequency
 	if prevWord != "" {
@@ -242,6 +295,50 @@ func (s *LearningStore) Stats(ctx context.Context) (LexiconStats, error) {
 	return out, nil
 }
 
+func (s *LearningStore) customUserCandidatesForPrefix(prefix string) []ime.UserCandidate {
+	if s == nil || prefix == "" {
+		return nil
+	}
+	s.mu.RLock()
+	var byWord map[string]int32
+	for k, v := range s.lex {
+		if k.prev == "" && strings.HasPrefix(k.pinyin, prefix) {
+			if byWord == nil {
+				byWord = make(map[string]int32, 8)
+			}
+			freq := v.frequency
+			if v.pinned {
+				freq += 100
+			}
+			if freq > math.MaxInt32 {
+				freq = math.MaxInt32
+			}
+			f32 := int32(freq)
+			if cur, ok := byWord[k.word]; !ok || f32 > cur {
+				byWord[k.word] = f32
+			}
+		}
+	}
+	s.mu.RUnlock()
+	if len(byWord) == 0 {
+		return nil
+	}
+	out := make([]ime.UserCandidate, 0, len(byWord))
+	for word, freq := range byWord {
+		out = append(out, ime.UserCandidate{Word: word, Frequency: freq})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Frequency == out[j].Frequency {
+			return out[i].Word < out[j].Word
+		}
+		return out[i].Frequency > out[j].Frequency
+	})
+	if len(out) > maxCustomPrefixCandidates {
+		out = out[:maxCustomPrefixCandidates]
+	}
+	return out
+}
+
 func (s *LearningStore) RecordItemUse(ctx context.Context, itemID string, now time.Time) error {
 	if s == nil || s.db == nil {
 		return nil
@@ -252,18 +349,21 @@ func (s *LearningStore) RecordItemUse(ctx context.Context, itemID string, now ti
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	itemID = truncateUTF8(itemID, MaxMirrorItemIDBytes)
+	if itemID == "" {
+		return nil
+	}
 	ns := now.UnixNano()
 	if _, err := s.db.Execute(ctx, `INSERT INTO usage_frecency(item_id,use_count,last_used_ns) VALUES(?,?,?) ON CONFLICT(item_id) DO UPDATE SET use_count=use_count+1,last_used_ns=excluded.last_used_ns`, itemID, 1, ns); err != nil {
 		return err
 	}
 	s.mu.Lock()
-	v := s.uses[itemID]
-	if len(v) == 0 {
-		v = []int64{ns, 1}
-	} else {
-		v[0] = ns
-		v[1]++
+	v, exists := s.uses[itemID]
+	if !exists && len(s.uses) >= MaxUsesMirrorEntries {
+		evictUseEntries(s.uses, MaxUsesMirrorEntries)
 	}
+	v.lastUsed = ns
+	v.count++
 	s.uses[itemID] = v
 	s.mu.Unlock()
 	return nil
@@ -278,16 +378,70 @@ func (s *LearningStore) FrecencySnapshot(now time.Time) map[string]int {
 	defer s.mu.RUnlock()
 	out := make(map[string]int, len(s.uses))
 	for id, v := range s.uses {
-		if len(v) < 2 {
+		if v.count <= 0 {
 			continue
 		}
-		age := now.UnixNano() - v[0]
-		score := float64(v[1]) * math.Pow(0.5, float64(age)/float64(72*time.Hour))
+		age := now.UnixNano() - v.lastUsed
+		score := float64(v.count) * math.Pow(0.5, float64(age)/float64(72*time.Hour))
 		if score > 0 {
 			out[id] = int(math.Round(score))
 		}
 	}
 	return out
+}
+
+// PruneFrecency drops usage_frecency rows older than maxAge (when > 0) and retains at most
+// maxEntries highest-recency/frequency rows, keeping the RAM uses mirror in sync.
+func (s *LearningStore) PruneFrecency(ctx context.Context, maxEntries int, maxAge time.Duration) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if maxEntries < 0 {
+		return fmt.Errorf("maxEntries must be non-negative")
+	}
+	var cutoffNs int64
+	if maxAge > 0 {
+		cutoffNs = time.Now().UTC().Add(-maxAge).UnixNano()
+		if _, err := s.db.Execute(ctx, `DELETE FROM usage_frecency WHERE last_used_ns < ?`, cutoffNs); err != nil {
+			return err
+		}
+	}
+	if _, err := s.db.Execute(ctx, `DELETE FROM usage_frecency WHERE item_id NOT IN (SELECT item_id FROM usage_frecency ORDER BY last_used_ns DESC, use_count DESC, item_id ASC LIMIT ?)`, maxEntries); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	if maxAge > 0 {
+		for k, v := range s.uses {
+			if v.lastUsed < cutoffNs {
+				delete(s.uses, k)
+			}
+		}
+	}
+	if len(s.uses) > maxEntries {
+		trimUsesTo(s.uses, maxEntries)
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+// MirrorCounts reports the current entry counts in the bounded RAM mirrors (for diagnostics/tests).
+func (s *LearningStore) MirrorCounts() (lexCount, bigramCount, usesCount int) {
+	if s == nil {
+		return 0, 0, 0
+	}
+	s.mu.RLock()
+	lexCount = len(s.lex)
+	bigramCount = len(s.bigrams)
+	usesCount = len(s.uses)
+	s.mu.RUnlock()
+	return lexCount, bigramCount, usesCount
 }
 func (s *LearningStore) RecordPromptVersion(ctx context.Context, promptID, trigger, rawDraft, finalOutput, preset string) error {
 	if s == nil || s.db == nil {
@@ -373,4 +527,119 @@ func boolInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+func truncateUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+func evictTarget(capLimit int) int {
+	batch := capLimit / 10
+	if batch < 1 {
+		batch = 1
+	}
+	target := capLimit - batch
+	if target < 0 {
+		return 0
+	}
+	return target
+}
+
+func evictLexEntries(m map[lexKey]lexValue, capLimit int) {
+	target := evictTarget(capLimit)
+	if len(m) <= target {
+		return
+	}
+	type item struct {
+		k lexKey
+		v lexValue
+	}
+	items := make([]item, 0, len(m))
+	for k, v := range m {
+		items = append(items, item{k, v})
+	}
+	// Ascending priority: non-pinned first, lower frequency first, older lastUsed first.
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].v.pinned != items[j].v.pinned {
+			return !items[i].v.pinned
+		}
+		if items[i].v.frequency != items[j].v.frequency {
+			return items[i].v.frequency < items[j].v.frequency
+		}
+		return items[i].v.lastUsed < items[j].v.lastUsed
+	})
+	drop := len(items) - target
+	for i := 0; i < drop; i++ {
+		delete(m, items[i].k)
+	}
+}
+
+func evictBigramEntries(m map[[2]string]lexValue, capLimit int) {
+	target := evictTarget(capLimit)
+	if len(m) <= target {
+		return
+	}
+	type item struct {
+		k [2]string
+		v lexValue
+	}
+	items := make([]item, 0, len(m))
+	for k, v := range m {
+		items = append(items, item{k, v})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].v.frequency != items[j].v.frequency {
+			return items[i].v.frequency < items[j].v.frequency
+		}
+		return items[i].v.lastUsed < items[j].v.lastUsed
+	})
+	drop := len(items) - target
+	for i := 0; i < drop; i++ {
+		delete(m, items[i].k)
+	}
+}
+
+func evictUseEntries(m map[string]useValue, capLimit int) {
+	trimUsesTo(m, evictTarget(capLimit))
+}
+
+func trimUsesTo(m map[string]useValue, target int) {
+	if target < 0 {
+		target = 0
+	}
+	if len(m) <= target {
+		return
+	}
+	if target == 0 {
+		clear(m)
+		return
+	}
+	type item struct {
+		k string
+		v useValue
+	}
+	items := make([]item, 0, len(m))
+	for k, v := range m {
+		items = append(items, item{k, v})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].v.count != items[j].v.count {
+			return items[i].v.count < items[j].v.count
+		}
+		return items[i].v.lastUsed < items[j].v.lastUsed
+	})
+	drop := len(items) - target
+	for i := 0; i < drop; i++ {
+		delete(m, items[i].k)
+	}
 }
