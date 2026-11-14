@@ -151,7 +151,7 @@ type desktopApp struct {
 	loginMenuItem          *mygo.MenuItem
 	trayLabelItems         map[string]*mygo.MenuItem
 	bridgeRunning          bool
-	fallbackAccelerator    string
+	fallbackAccelerators   map[string]host.TriggerKind
 	sessionAnchor          *host.CursorAnchor
 	imePillLabel           string
 	imePillTimer           *time.Timer
@@ -329,7 +329,7 @@ func (a *desktopApp) start() {
 	a.mu.Unlock()
 
 	a.setupTray()
-	a.startBridgeAndFallbackShortcut(cfg.Main.Trigger.CapsuleShortcut)
+	a.startBridgeAndFallbackShortcut(cfg.Main.Trigger)
 
 	cw := watcher.NewConfigWatcher(cfgStore, watcher.WithOnReload(func(watcher.ReloadResult) {
 		a.applyConfigReload()
@@ -463,7 +463,7 @@ func (a *desktopApp) setupTray() {
 	a.mu.Unlock()
 }
 
-func (a *desktopApp) startBridgeAndFallbackShortcut(capsuleShortcut string) {
+func (a *desktopApp) startBridgeAndFallbackShortcut(trigger config.TriggerConfig) {
 	a.mu.Lock()
 	ctrl := a.controller
 	br := a.hostBridge
@@ -488,43 +488,85 @@ func (a *desktopApp) startBridgeAndFallbackShortcut(capsuleShortcut string) {
 		caps = br.Capabilities()
 	}
 	if running && caps.GlobalHotkeys {
-		a.unregisterFallbackShortcut()
+		a.unregisterFallbackShortcuts()
 		return
 	}
 
-	a.registerFallbackShortcut(capsuleShortcut)
+	a.registerFallbackShortcuts(planFallbackShortcuts(trigger))
 }
 
-func (a *desktopApp) registerFallbackShortcut(shortcut string) {
-	acc := toMyGoAccelerator(shortcut)
-	if acc == "" {
-		return
-	}
-	a.mu.Lock()
-	prev := a.fallbackAccelerator
-	a.mu.Unlock()
-	if prev == acc && mygo.GlobalShortcut.IsRegistered(acc) {
-		return
-	}
-	if prev != "" {
-		mygo.GlobalShortcut.Unregister(prev)
-	}
-	if err := mygo.GlobalShortcut.Register(acc, func() {
-		a.toggleOmnibox()
-	}); err == nil {
-		a.mu.Lock()
-		a.fallbackAccelerator = acc
-		a.mu.Unlock()
-	}
+// fallbackShortcut binds one MyGo accelerator to a trigger kind.
+type fallbackShortcut struct {
+	Accelerator string
+	Kind        host.TriggerKind
 }
 
-func (a *desktopApp) unregisterFallbackShortcut() {
+// planFallbackShortcuts converts trigger config into the de-duplicated set of MyGo accelerators
+// used when the host bridge cannot provide global hotkeys. Capsule wins over Clipboard when both
+// resolve to the same accelerator; unparsable or empty shortcuts are skipped.
+func planFallbackShortcuts(trigger config.TriggerConfig) []fallbackShortcut {
+	candidates := []fallbackShortcut{
+		{Accelerator: toMyGoAccelerator(trigger.CapsuleShortcut), Kind: host.TriggerCapsuleToggle},
+		{Accelerator: toMyGoAccelerator(trigger.ClipboardShortcut), Kind: host.TriggerClipboardToggle},
+	}
+	seen := make(map[string]struct{}, len(candidates))
+	out := make([]fallbackShortcut, 0, len(candidates))
+	for _, c := range candidates {
+		if c.Accelerator == "" {
+			continue
+		}
+		if _, dup := seen[c.Accelerator]; dup {
+			continue
+		}
+		seen[c.Accelerator] = struct{}{}
+		out = append(out, c)
+	}
+	return out
+}
+
+func (a *desktopApp) registerFallbackShortcuts(want []fallbackShortcut) {
+	wanted := make(map[string]host.TriggerKind, len(want))
+	for _, w := range want {
+		wanted[w.Accelerator] = w.Kind
+	}
+
 	a.mu.Lock()
-	prev := a.fallbackAccelerator
-	a.fallbackAccelerator = ""
+	prev := a.fallbackAccelerators
 	a.mu.Unlock()
-	if prev != "" {
-		mygo.GlobalShortcut.Unregister(prev)
+
+	next := make(map[string]host.TriggerKind, len(want))
+	// Drop accelerators that are no longer wanted or whose action changed.
+	for acc, kind := range prev {
+		if wk, ok := wanted[acc]; ok && wk == kind && mygo.GlobalShortcut.IsRegistered(acc) {
+			next[acc] = kind
+			continue
+		}
+		mygo.GlobalShortcut.Unregister(acc)
+	}
+	for _, w := range want {
+		if _, ok := next[w.Accelerator]; ok {
+			continue
+		}
+		kind := w.Kind
+		if err := mygo.GlobalShortcut.Register(w.Accelerator, func() {
+			a.fireTrigger(kind)
+		}); err == nil {
+			next[w.Accelerator] = kind
+		}
+	}
+
+	a.mu.Lock()
+	a.fallbackAccelerators = next
+	a.mu.Unlock()
+}
+
+func (a *desktopApp) unregisterFallbackShortcuts() {
+	a.mu.Lock()
+	prev := a.fallbackAccelerators
+	a.fallbackAccelerators = nil
+	a.mu.Unlock()
+	for acc := range prev {
+		mygo.GlobalShortcut.Unregister(acc)
 	}
 }
 
@@ -551,7 +593,8 @@ func (a *desktopApp) openOmnibox(tab config.CapsuleTab) {
 	go ctrl.OpenOmnibox(tab, "")
 }
 
-func (a *desktopApp) toggleOmnibox() {
+// fireTrigger routes a fallback-shortcut press through the same path as bridge hotkeys.
+func (a *desktopApp) fireTrigger(kind host.TriggerKind) {
 	a.mu.Lock()
 	ctrl := a.controller
 	a.mu.Unlock()
@@ -559,7 +602,7 @@ func (a *desktopApp) toggleOmnibox() {
 		return
 	}
 	go ctrl.HandleTriggerEvent(host.TriggerEvent{
-		Kind:        host.TriggerCapsuleToggle,
+		Kind:        kind,
 		TimestampMs: time.Now().UnixMilli(),
 	})
 }
@@ -618,7 +661,7 @@ func (a *desktopApp) applyConfigReload() {
 		if sqliteStore != nil {
 			sqliteStore.SetPrivacyFilter(clipboard.NewPrivacyFilterFromConfig(cfg.Main.Clipboard))
 		}
-		a.startBridgeAndFallbackShortcut(cfg.Main.Trigger.CapsuleShortcut)
+		a.startBridgeAndFallbackShortcut(cfg.Main.Trigger)
 	}
 	// A language change on disk takes effect on the next reload.
 	a.syncLanguageFromConfig(cfg)
@@ -1081,7 +1124,7 @@ func (a *desktopApp) isInPresentTransition() bool {
 
 func (a *desktopApp) shutdown() {
 	a.shutdownOnce.Do(func() {
-		a.unregisterFallbackShortcut()
+		a.unregisterFallbackShortcuts()
 		a.imePillGen.Add(1)
 		a.stopIMEPillTimer()
 

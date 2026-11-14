@@ -14,6 +14,7 @@ type TriggerConfig struct {
 	DoubleTapKey            string `json:"doubleTapKey"`
 	DoubleTapIntervalMs     int    `json:"doubleTapIntervalMs"`
 	CapsuleShortcut         string `json:"capsuleShortcut"`
+	ClipboardShortcut       string `json:"clipboardShortcut"`
 	SnippetExpansionEnabled bool   `json:"snippetExpansionEnabled"`
 }
 
@@ -23,6 +24,7 @@ func DefaultTriggerConfig() TriggerConfig {
 		DoubleTapKey:            "right_command",
 		DoubleTapIntervalMs:     300,
 		CapsuleShortcut:         "option+space",
+		ClipboardShortcut:       "alt+shift+c",
 		SnippetExpansionEnabled: true,
 	}
 }
@@ -52,6 +54,11 @@ func decodeTriggerConfig(tbl *toml.Table, path string) (TriggerConfig, error) {
 	} else if ok {
 		cfg.CapsuleShortcut = s
 	}
+	if s, ok, err := optionalString(tbl, "clipboard_shortcut", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.ClipboardShortcut = s
+	}
 	if b, ok, err := optionalBool(tbl, "snippet_expansion_enabled", path); err != nil {
 		return cfg, err
 	} else if ok {
@@ -66,6 +73,7 @@ func (c TriggerConfig) toTOML() *toml.Table {
 	t.Set("double_tap_key", toml.StringVal(c.DoubleTapKey))
 	t.Set("double_tap_interval_ms", toml.IntVal(int64(c.DoubleTapIntervalMs)))
 	t.Set("capsule_shortcut", toml.StringVal(c.CapsuleShortcut))
+	t.Set("clipboard_shortcut", toml.StringVal(c.ClipboardShortcut))
 	t.Set("snippet_expansion_enabled", toml.BoolVal(c.SnippetExpansionEnabled))
 	return t
 }

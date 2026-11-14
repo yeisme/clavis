@@ -69,6 +69,8 @@ double_tap_key = "right_command"
 double_tap_interval_ms = 300
 # Shortcut to toggle the Capsule launcher
 capsule_shortcut = "option+space"
+# Shortcut to open Clipboard History directly (Maccy style); press again to close
+clipboard_shortcut = "alt+shift+c"
 snippet_expansion_enabled = true
 
 [keymap]

@@ -21,9 +21,9 @@ import (
 type settingsEditorState struct {
 	mu sync.Mutex
 
-	// recordingShortcut is set while the capsule shortcut recorder waits for
-	// the next modifier+key chord.
-	recordingShortcut bool
+	// recordingShortcut names the trigger field ("capsule_shortcut" or
+	// "clipboard_shortcut") whose recorder waits for the next modifier+key chord.
+	recordingShortcut string
 
 	// leader tree editor.
 	leaderSelected []string

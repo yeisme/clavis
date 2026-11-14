@@ -113,12 +113,14 @@ func NewBridge(opts ...Option) HostService {
 
 // triggerRouter coordinates DoubleTapDetector, HotkeyMatcher, and snippet key events.
 type triggerRouter struct {
-	mu                sync.RWMutex
-	cfg               config.TriggerConfig
-	leaderDetector    *DoubleTapDetector
-	doubleTapDetector *DoubleTapDetector
-	capsuleHotkey     Hotkey
-	hasCapsuleHotkey  bool
+	mu                 sync.RWMutex
+	cfg                config.TriggerConfig
+	leaderDetector     *DoubleTapDetector
+	doubleTapDetector  *DoubleTapDetector
+	capsuleHotkey      Hotkey
+	hasCapsuleHotkey   bool
+	clipboardHotkey    Hotkey
+	hasClipboardHotkey bool
 }
 
 func newTriggerRouter(cfg config.TriggerConfig) *triggerRouter {
@@ -147,6 +149,13 @@ func (r *triggerRouter) UpdateConfig(cfg config.TriggerConfig) {
 	} else {
 		r.capsuleHotkey = Hotkey{}
 		r.hasCapsuleHotkey = false
+	}
+	if hk, err := ParseHotkey(cfg.ClipboardShortcut); err == nil {
+		r.clipboardHotkey = hk
+		r.hasClipboardHotkey = true
+	} else {
+		r.clipboardHotkey = Hotkey{}
+		r.hasClipboardHotkey = false
 	}
 }
 
@@ -202,6 +211,8 @@ func (r *triggerRouter) HandleKeyDownWithIME(
 	doubleDet := r.doubleTapDetector
 	hk := r.capsuleHotkey
 	hasHK := r.hasCapsuleHotkey
+	clipHK := r.clipboardHotkey
+	hasClipHK := r.hasClipboardHotkey
 	snippetEnabled := r.cfg.SnippetExpansionEnabled
 	r.mu.RUnlock()
 
@@ -212,6 +223,15 @@ func (r *triggerRouter) HandleKeyDownWithIME(
 		return []host.TriggerEvent{{
 			Kind:        host.TriggerCapsuleToggle,
 			Key:         hk.Key,
+			Modifiers:   append([]string(nil), modifiers...),
+			TimestampMs: nowMs,
+		}}, true
+	}
+
+	if hasClipHK && clipHK.Matches(key, modifiers) {
+		return []host.TriggerEvent{{
+			Kind:        host.TriggerClipboardToggle,
+			Key:         clipHK.Key,
 			Modifiers:   append([]string(nil), modifiers...),
 			TimestampMs: nowMs,
 		}}, true

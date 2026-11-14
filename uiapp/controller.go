@@ -1451,6 +1451,26 @@ func (c *AppController) HandleTriggerEvent(ev host.TriggerEvent) {
 			Context: &capCtx,
 		})
 
+	case host.TriggerClipboardToggle:
+		// Maccy-style: the dedicated hotkey jumps straight to Clipboard History; pressing it again
+		// while that tab is showing closes the Capsule.
+		state := c.State()
+		if state.Phase == engine.PhaseOmnibox && state.OmniboxTab == config.TabClipboard {
+			c.Dispatch(engine.Event{Type: engine.EventDismiss})
+			return
+		}
+		ctx := context.Background()
+		c.syncClipboardEntries(ctx)
+		if len(c.State().InstalledApps) == 0 {
+			c.SyncInstalledApps(ctx)
+		}
+		capCtx := c.resolveTriggerContext(ev.Context)
+		c.Dispatch(engine.Event{
+			Type:    engine.EventOpenOmnibox,
+			Tab:     config.TabClipboard,
+			Context: &capCtx,
+		})
+
 	case host.TriggerSnippetKey:
 		cfg := c.ConfigStore.Current()
 		if !cfg.Main.Trigger.SnippetExpansionEnabled || ev.Rune == "" {

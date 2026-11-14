@@ -68,9 +68,11 @@ const (
 	TriggerLeaderKey     TriggerKind = "leader_key"
 	TriggerDoubleTap     TriggerKind = "double_tap"
 	TriggerCapsuleToggle TriggerKind = "capsule_toggle"
-	TriggerSnippetKey    TriggerKind = "snippet_key"
-	TriggerSnippetBack   TriggerKind = "snippet_backspace"
-	TriggerSnippetReset  TriggerKind = "snippet_reset"
+	// TriggerClipboardToggle opens (or closes) Capsule directly on the Clipboard History tab.
+	TriggerClipboardToggle TriggerKind = "clipboard_toggle"
+	TriggerSnippetKey      TriggerKind = "snippet_key"
+	TriggerSnippetBack     TriggerKind = "snippet_backspace"
+	TriggerSnippetReset    TriggerKind = "snippet_reset"
 )
 
 // TriggerEvent describes a global hotkey or keystroke event captured by the host.

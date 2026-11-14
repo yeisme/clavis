@@ -90,6 +90,14 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 		})
 	}
 
+	// clipboard_shortcut is optional: empty disables the dedicated Clipboard History hotkey.
+	if clip := strings.TrimSpace(main.Trigger.ClipboardShortcut); clip != "" && !isValidCapsuleShortcut(clip) {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "trigger.clipboard_shortcut", Severity: SeverityError,
+			Message: i18n.Tf("diag.trigger.clipboard_shortcut.invalid", main.Trigger.ClipboardShortcut),
+		})
+	}
+
 	if main.Trigger.DoubleTapIntervalMs < 100 || main.Trigger.DoubleTapIntervalMs > 800 {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "trigger.double_tap_interval_ms", Severity: SeverityError,

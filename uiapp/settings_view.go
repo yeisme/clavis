@@ -244,62 +244,12 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.DoubleTapIntervalMs = int(v) })
 		}
 
-		recording := seGet(se, func(s *settingsEditorState) bool { return s.recordingShortcut })
-		ui.Text(c, i18n.Tf("settings.trigger.shortcut_caption", trigger.CapsuleShortcut)).
-			FontSize(11).
-			TextColor(theme.TextMuted).
-			SingleLine()
-		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.End).Children(func() {
-			ui.Column(c).Gap(2).Grow(1).Children(func() {
-				shortcut := trigger.CapsuleShortcut
-				in := ui.TextInput(c, &shortcut).
-					Label("capsule_shortcut").
-					Placeholder("option+space").
-					FillWidth()
-				if in.Changed() {
-					normalized := normalizeShortcutText(shortcut)
-					if normalized != "" && normalized != trigger.CapsuleShortcut {
-						_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.CapsuleShortcut = normalized })
-					}
-				}
-			})
-			if recording {
-				box := ui.Box(c).
-					Key("shortcut-recorder").
-					Padding(4, 10).
-					Radius(6).
-					Background(withAlpha(theme.Accent, 0.14)).
-					Border(1, theme.Accent).
-					Focusable().
-					AutoFocus().
-					HandleInput(func(ev ui.InputEvent) bool {
-						if ev.Kind != ui.InputKeyDown {
-							return false
-						}
-						if ev.Key == ui.KeyEscape && ev.Mods == 0 {
-							seSet(se, func(s *settingsEditorState) { s.recordingShortcut = false })
-							return true
-						}
-						combo, ok := shortcutFromKey(ev.Key, ev.Mods)
-						if !ok {
-							return true
-						}
-						seSet(se, func(s *settingsEditorState) { s.recordingShortcut = false })
-						_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.CapsuleShortcut = combo })
-						return true
-					})
-				box.Children(func() {
-					ui.Text(c, i18n.T("settings.trigger.recording")).
-						FontSize(11).
-						TextColor(theme.Accent).
-						SingleLine()
-				})
-			} else {
-				if ui.PrimaryButton(c, i18n.T("settings.trigger.record")).Clicked() {
-					seSet(se, func(s *settingsEditorState) { s.recordingShortcut = true })
-				}
-			}
-		})
+		a.renderShortcutEditor(c, theme, se, "capsule_shortcut", "option+space",
+			i18n.Tf("settings.trigger.shortcut_caption", trigger.CapsuleShortcut), trigger.CapsuleShortcut,
+			func(m *config.MainConfig, v string) { m.Trigger.CapsuleShortcut = v })
+		a.renderShortcutEditor(c, theme, se, "clipboard_shortcut", "alt+shift+c",
+			i18n.Tf("settings.trigger.clipboard_shortcut_caption", trigger.ClipboardShortcut), trigger.ClipboardShortcut,
+			func(m *config.MainConfig, v string) { m.Trigger.ClipboardShortcut = v })
 
 		if v, changed := settingsSwitch(
 			c, theme, "snippet_expansion_enabled", i18n.T("settings.trigger.snippet_expansion"), trigger.SnippetExpansionEnabled,
@@ -748,4 +698,73 @@ func configFileDescription(kind config.ConfigFileKind) string {
 	default:
 		return ""
 	}
+}
+
+// renderShortcutEditor draws a shortcut text input plus a chord recorder for one trigger field.
+func (a *AppController) renderShortcutEditor(
+	c *ui.Context,
+	theme *ui.Theme,
+	se *settingsEditorState,
+	field string,
+	placeholder string,
+	caption string,
+	current string,
+	apply func(m *config.MainConfig, v string),
+) {
+	recording := seGet(se, func(s *settingsEditorState) bool { return s.recordingShortcut == field })
+	ui.Text(c, caption).
+		FontSize(11).
+		TextColor(theme.TextMuted).
+		SingleLine()
+	ui.Row(c).Key("shortcut-row:" + field).FillWidth().Gap(8).AlignItems(ui.End).Children(func() {
+		ui.Column(c).Gap(2).Grow(1).Children(func() {
+			shortcut := current
+			in := ui.TextInput(c.Key("shortcut-input:"+field), &shortcut).
+				Label(field).
+				Placeholder(placeholder).
+				FillWidth()
+			if in.Changed() {
+				normalized := normalizeShortcutText(shortcut)
+				if normalized != "" && normalized != current {
+					_ = a.UpdateMainConfig(func(m *config.MainConfig) { apply(m, normalized) })
+				}
+			}
+		})
+		if recording {
+			box := ui.Box(c).
+				Key("shortcut-recorder:"+field).
+				Padding(4, 10).
+				Radius(6).
+				Background(withAlpha(theme.Accent, 0.14)).
+				Border(1, theme.Accent).
+				Focusable().
+				AutoFocus().
+				HandleInput(func(ev ui.InputEvent) bool {
+					if ev.Kind != ui.InputKeyDown {
+						return false
+					}
+					if ev.Key == ui.KeyEscape && ev.Mods == 0 {
+						seSet(se, func(s *settingsEditorState) { s.recordingShortcut = "" })
+						return true
+					}
+					combo, ok := shortcutFromKey(ev.Key, ev.Mods)
+					if !ok {
+						return true
+					}
+					seSet(se, func(s *settingsEditorState) { s.recordingShortcut = "" })
+					_ = a.UpdateMainConfig(func(m *config.MainConfig) { apply(m, combo) })
+					return true
+				})
+			box.Children(func() {
+				ui.Text(c, i18n.T("settings.trigger.recording")).
+					FontSize(11).
+					TextColor(theme.Accent).
+					SingleLine()
+			})
+		} else {
+			if ui.PrimaryButton(c.Key("shortcut-record:"+field), i18n.T("settings.trigger.record")).Clicked() {
+				seSet(se, func(s *settingsEditorState) { s.recordingShortcut = field })
+			}
+		}
+	})
 }

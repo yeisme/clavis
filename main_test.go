@@ -12,6 +12,7 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/yeisme/clavis/internal/bridge"
+	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/uiapp"
 )
@@ -270,5 +271,27 @@ func TestFormatPermissionsMenuLabel(t *testing.T) {
 	}
 	if got := formatPermissionsMenuLabel(host.PermissionStatus{}, nil, host.Capabilities{}); got != "Permissions: Standard Mode" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestPlanFallbackShortcutsCapsuleAndClipboard(t *testing.T) {
+	plan := planFallbackShortcuts(config.TriggerConfig{CapsuleShortcut: "option+space", ClipboardShortcut: "alt+shift+c"})
+	if len(plan) != 2 || plan[0].Kind != host.TriggerCapsuleToggle || plan[1].Kind != host.TriggerClipboardToggle {
+		t.Fatalf("expected capsule + clipboard fallback shortcuts, got %+v", plan)
+	}
+	if plan[0].Accelerator == plan[1].Accelerator || plan[1].Accelerator == "" {
+		t.Fatalf("expected distinct accelerators, got %+v", plan)
+	}
+
+	// Same chord: de-duplicated, capsule wins.
+	dup := planFallbackShortcuts(config.TriggerConfig{CapsuleShortcut: "alt+shift+c", ClipboardShortcut: "shift+option+c"})
+	if len(dup) != 1 || dup[0].Kind != host.TriggerCapsuleToggle {
+		t.Fatalf("expected de-duplicated capsule shortcut, got %+v", dup)
+	}
+
+	// Empty clipboard shortcut is skipped.
+	only := planFallbackShortcuts(config.TriggerConfig{CapsuleShortcut: "option+space"})
+	if len(only) != 1 || only[0].Kind != host.TriggerCapsuleToggle {
+		t.Fatalf("expected only capsule shortcut, got %+v", only)
 	}
 }
