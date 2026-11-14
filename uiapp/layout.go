@@ -165,3 +165,81 @@ func NormalizeCornerRadius(appearance config.AppearanceConfig) float32 {
 	}
 	return float32(r)
 }
+
+// PreferredCandidateBarSize returns bounded dimensions for the candidate
+// strip. Counts are clamped so malformed engine state cannot create an
+// off-screen surface.
+func PreferredCandidateBarSize(candidateCount int, orientation string, hasQuickRoute bool) (width, height int) {
+	if candidateCount < 0 {
+		candidateCount = 0
+	}
+	if candidateCount > 9 {
+		candidateCount = 9
+	}
+	quick := 0
+	if hasQuickRoute {
+		quick = 1
+	}
+	if strings.EqualFold(orientation, "vertical") {
+		height = 48 + candidateCount*38 + quick*38
+		if height < 56 {
+			height = 56
+		}
+		if height > 460 {
+			height = 460
+		}
+		return 92, height
+	}
+	width = 24 + (candidateCount+quick)*54
+	if width < 92 {
+		width = 92
+	}
+	if width > 620 {
+		width = 620
+	}
+	return width, 54
+}
+
+// PreferredPromptComposerSize sizes the prompt editor and its optional AI
+// optimization preview while keeping it usable on compact displays.
+func PreferredPromptComposerSize(slotCount int, showOptimizePreview bool) (width, height int) {
+	if slotCount < 1 {
+		slotCount = 1
+	}
+	if slotCount > 8 {
+		slotCount = 8
+	}
+	width = 420 + slotCount*34
+	if showOptimizePreview {
+		width += 180
+	}
+	if width > 960 {
+		width = 960
+	}
+	height = 106 + slotCount*10
+	if showOptimizePreview {
+		height += 72
+	}
+	if height > 360 {
+		height = 360
+	}
+	return width, height
+}
+
+// PreferredSelectionBarSize returns a compact, screen-clamped action bar.
+func PreferredSelectionBarSize(actionCount int) (width, height int) {
+	if actionCount < 0 {
+		actionCount = 0
+	}
+	if actionCount > 8 {
+		actionCount = 8
+	}
+	width = 32 + actionCount*72
+	if width < 120 {
+		width = 120
+	}
+	if width > 680 {
+		width = 680
+	}
+	return width, 48
+}
