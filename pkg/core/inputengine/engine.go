@@ -3,10 +3,13 @@
 package inputengine
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"unicode"
+
+	"github.com/yeisme/clavis/pkg/core/ime"
 )
 
 // KeyKind classifies a key for the composition state machine (§4).
@@ -26,6 +29,13 @@ const (
 	KeyNavigation                // arrows, Tab, Home/End, Delete, F-keys...: reset + pass
 	KeyShiftDown
 	KeyShiftUp
+)
+
+// Candidate page-size bounds matching config.InputEngineConfig validation.
+const (
+	MinCandidateCount     = 3
+	MaxCandidateCount     = 9
+	DefaultCandidateCount = 7
 )
 
 // Key is one key-down (or Shift up/down) event.
@@ -62,32 +72,135 @@ type View struct {
 	HasNext    bool
 }
 
+// UserCandidate is a learned user word surfaced by a UserFrequencyProvider.
+type UserCandidate = ime.UserCandidate
+
+// UserFrequencyProvider supplies RAM-resident unigram/bigram boosts and learned words.
+// Implementations must never block or perform I/O on LookupBoost or CustomWordsForPrefix.
+type UserFrequencyProvider interface {
+	LookupBoost(pinyinKey, word, prevWord string) int32
+	CustomWordsForPrefix(syllablePrefix string) []UserCandidate
+}
+
 // Options configure the engine.
 type Options struct {
-	CandidateCount   int // page size, clamped to 1..9
-	ShiftToggleASCII bool
+	CandidateCount   int                   // page size; <=0 defaults to 7, clamped to 3..9
+	ShiftToggleASCII bool                  // tap Shift alone to toggle ASCII pass-through
+	Scheme           string                // ""|"quanpin"|"xiaohe"|"ziranma"|"microsoft"|"sogou"|"pinyin_plus"
+	FuzzyPinyin      []string              // optional fuzzy rules, e.g. ["z=zh", "an=ang"]
+	CustomDictPaths  []string              // optional Rime .dict.yaml or .clvdict paths
+	DictCacheDir     string                // optional cache dir for compiled .clvdict
+	Dictionary       Dictionary            // optional explicit dictionary override
+	UserFrequency    UserFrequencyProvider // optional RAM-only unigram/bigram booster (nil-safe)
+}
+
+// seenEntry tracks a deduplicated candidate text tagged with the active rebuild generation.
+type seenEntry struct {
+	text string
+	gen  uint32
 }
 
 // Engine holds composition state. All methods are safe for concurrent use (hook thread +
 // UI/AI goroutines) and never block on I/O.
 type Engine struct {
-	mu         sync.Mutex
-	opts       Options
-	raw        string // letters and ' as typed
-	segs       []string
-	cands      []Candidate
-	ai         []string
-	page, sel  int
-	ascii      bool
-	shiftAlone bool
+	mu           sync.Mutex
+	opts         Options
+	dict         Dictionary
+	dicts        []Dictionary
+	shuangpin    bool
+	raw          string // letters and ' as typed
+	segs         []string
+	rawSegs      []string
+	cands        []Candidate
+	ai           []string
+	prevCommit   string
+	page, sel    int
+	ascii        bool
+	shiftAlone   bool
+	seenSlots    [128]seenEntry
+	seenGen      uint32
+	emitConsumed int
+	emitCap      int
+	emitCount    int
+	emitLocalFn  func(string) bool
+	segAlts      [][]string
+	comboBuf     []string
 }
 
-const maxRawLen = 64
+const (
+	maxRawLen     = 64
+	maxCandidates = 60
+	maxAltCombos  = 24
+)
+
+func clampCandidateCount(n int) int {
+	if n == 0 {
+		return DefaultCandidateCount
+	}
+	return min(max(n, MinCandidateCount), MaxCandidateCount)
+}
+
+func normalizeScheme(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "", "quanpin":
+		return "quanpin"
+	case "xiaohe", "ziranma", "microsoft", "sogou", "pinyin_plus":
+		return s
+	default:
+		return "quanpin"
+	}
+}
 
 func New(opts Options) *Engine {
-	opts.CandidateCount = min(max(opts.CandidateCount, 1), 9)
+	opts.CandidateCount = clampCandidateCount(opts.CandidateCount)
+	opts.Scheme = normalizeScheme(opts.Scheme)
+	opts.FuzzyPinyin = cleanFuzzyRules(opts.FuzzyPinyin)
 	getLexicon() // build tables up front, not on the first keystroke inside the hook
-	return &Engine{opts: opts}
+	dict := opts.Dictionary
+	if dict == nil {
+		dict = LoadDictionary(opts.CustomDictPaths, opts.DictCacheDir)
+	}
+	if opts.Scheme != "quanpin" {
+		_ = ime.ShuangpinSyllables(opts.Scheme, "ni") // warm Shuangpin lookup tables up front
+	}
+	var dicts []Dictionary
+	if cd, ok := dict.(chainedDictionary); ok {
+		dicts = []Dictionary(cd)
+	} else {
+		dicts = []Dictionary{dict}
+	}
+	e := &Engine{
+		opts:      opts,
+		dict:      dict,
+		dicts:     dicts,
+		shuangpin: opts.Scheme != "quanpin",
+		segs:      make([]string, 0, 16),
+		rawSegs:   make([]string, 0, 16),
+		cands:     make([]Candidate, 0, maxCandidates),
+	}
+	e.emitLocalFn = e.emitLocalCandidate
+	return e
+}
+
+func cleanFuzzyRules(rules []string) []string {
+	if len(rules) == 0 {
+		return nil
+	}
+	var out []string
+	for _, r := range rules {
+		if r = strings.TrimSpace(r); r != "" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// CandidateCount returns the active clamped page size (3..9).
+func (e *Engine) CandidateCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.opts.CandidateCount
 }
 
 // Raw returns the current pinyin input ("" when idle).
@@ -103,6 +216,7 @@ func (e *Engine) Reset() bool {
 	defer e.mu.Unlock()
 	was := e.raw != ""
 	e.clear()
+	e.prevCommit = ""
 	return was
 }
 
@@ -133,7 +247,11 @@ func (e *Engine) SetAICandidates(raw string, words []string) bool {
 }
 
 func (e *Engine) clear() {
-	e.raw, e.segs, e.cands, e.ai = "", nil, nil, nil
+	e.raw = ""
+	e.segs = e.segs[:0]
+	e.rawSegs = e.rawSegs[:0]
+	e.cands = e.cands[:0]
+	e.ai = nil
 	e.page, e.sel = 0, 0
 }
 
@@ -156,6 +274,7 @@ func (e *Engine) HandleKey(k Key) Result {
 		// Toggling mid-composition commits the typed letters as-is (common IME behaviour).
 		commit := e.rawLetters()
 		e.clear()
+		e.prevCommit = ""
 		return Result{Commit: commit, Changed: true}
 	}
 	e.shiftAlone = false
@@ -164,13 +283,14 @@ func (e *Engine) HandleKey(k Key) Result {
 	if k.Chord || k.Kind == KeyNavigation {
 		if composing {
 			e.clear()
+			e.prevCommit = ""
 			return Result{Changed: true}
 		}
 		return Result{}
 	}
 	if !composing {
 		if k.Kind == KeyLetter && !e.ascii {
-			e.raw = string(k.Rune)
+			e.raw = asciiLetterString(k.Rune)
 			e.rebuild(true)
 			return Result{Consume: true, Changed: true}
 		}
@@ -180,7 +300,7 @@ func (e *Engine) HandleKey(k Key) Result {
 	switch k.Kind {
 	case KeyLetter:
 		if len(e.raw) < maxRawLen {
-			e.raw += string(k.Rune)
+			e.raw += asciiLetterString(k.Rune)
 			e.ai = nil
 			e.rebuild(true)
 		}
@@ -202,10 +322,12 @@ func (e *Engine) HandleKey(k Key) Result {
 		return Result{Consume: true, Changed: true}
 	case KeyEscape:
 		e.clear()
+		e.prevCommit = ""
 		return Result{Consume: true, Changed: true}
 	case KeyEnter:
 		commit := e.rawLetters()
 		e.clear()
+		e.prevCommit = ""
 		return Result{Consume: true, Commit: commit, Changed: true}
 	case KeySpace:
 		return e.selectIndex(e.sel)
@@ -230,10 +352,13 @@ func (e *Engine) HandleKey(k Key) Result {
 	default:
 		// Other printable (punctuation, upper-case): commit the top candidate then the char.
 		top := e.rawLetters()
+		committedWord := ""
 		if len(e.cands) > 0 && e.cands[0].consumed >= len(e.segs) {
 			top = e.cands[0].Text
+			committedWord = top
 		}
 		e.clear()
+		e.prevCommit = committedWord
 		if k.Rune != 0 {
 			top += string(k.Rune)
 		}
@@ -249,22 +374,33 @@ func (e *Engine) selectIndex(idx int) Result {
 		if len(e.cands) == 0 {
 			commit := e.rawLetters()
 			e.clear()
+			e.prevCommit = ""
 			return Result{Consume: true, Commit: commit, Changed: true}
 		}
 		return Result{Consume: true}
 	}
 	c := e.cands[abs]
+	e.prevCommit = c.Text
 	if c.consumed >= len(e.segs) {
 		e.clear()
 		return Result{Consume: true, Commit: c.Text, Changed: true}
 	}
-	e.raw = strings.Join(e.segs[c.consumed:], "'")
+	rem := e.segs[c.consumed:]
+	if e.shuangpin && c.consumed < len(e.rawSegs) {
+		rem = e.rawSegs[c.consumed:]
+	}
+	e.raw = strings.Join(rem, "'")
 	e.ai = nil
 	e.rebuild(true)
 	return Result{Consume: true, Commit: c.Text, Changed: true}
 }
 
-func (e *Engine) rawLetters() string { return strings.ReplaceAll(e.raw, "'", "") }
+func (e *Engine) rawLetters() string {
+	if !strings.ContainsRune(e.raw, '\'') {
+		return e.raw
+	}
+	return strings.ReplaceAll(e.raw, "'", "")
+}
 
 // View returns the render snapshot for the current page.
 func (e *Engine) View() View {
@@ -282,8 +418,14 @@ func (e *Engine) View() View {
 }
 
 func (e *Engine) rebuild(resetPage bool) {
-	e.segs = Segment(e.raw)
-	e.cands = candidatesFor(e.segs, e.ai)
+	if e.shuangpin {
+		e.segs, e.rawSegs = segmentShuangpinInto(e.segs[:0], e.rawSegs[:0], e.opts.Scheme, e.raw, e.opts.FuzzyPinyin)
+	} else {
+		e.segs = segmentInto(e.segs[:0], getLexicon(), e.raw)
+		e.rawSegs = append(e.rawSegs[:0], e.segs...)
+	}
+	e.cands = e.cands[:0]
+	e.buildCandidates()
 	if resetPage {
 		e.page, e.sel = 0, 0
 	}
@@ -295,24 +437,49 @@ func (e *Engine) rebuild(resetPage bool) {
 // Segment splits raw pinyin into syllables: minimum-cost DP where a full syllable costs 1, a
 // trailing syllable prefix 2 and a lone initial 3; "'" forces a boundary.
 func Segment(raw string) []string {
-	l := getLexicon()
-	var out []string
-	parts := strings.Split(raw, "'")
-	for pi, part := range parts {
+	if raw == "" {
+		return nil
+	}
+	return segmentInto(make([]string, 0, min(8, len(raw))), getLexicon(), raw)
+}
+
+func segmentInto(dst []string, l *lexicon, raw string) []string {
+	start := 0
+	n := len(raw)
+	for i := 0; i <= n; i++ {
+		if i < n && raw[i] != '\'' {
+			continue
+		}
+		part := raw[start:i]
+		start = i + 1
 		if part == "" {
 			continue
 		}
-		last := pi == len(parts)-1
-		out = append(out, segmentChunk(l, part, last)...)
+		last := i == n
+		dst = segmentChunkInto(dst, l, part, last)
 	}
-	return out
+	return dst
 }
 
-func segmentChunk(l *lexicon, s string, allowTrailingPrefix bool) []string {
+func segmentChunkInto(dst []string, l *lexicon, s string, allowTrailingPrefix bool) []string {
 	n := len(s)
+	if n == 0 {
+		return dst
+	}
 	const inf = 1 << 30
-	cost := make([]int, n+1)
-	prev := make([]int, n+1)
+	var costStack [maxRawLen + 1]int
+	var prevStack [maxRawLen + 1]int
+	var cutsStack [maxRawLen + 1]int
+	var cost, prev, cuts []int
+	if n <= maxRawLen {
+		cost = costStack[:n+1]
+		prev = prevStack[:n+1]
+		cuts = cutsStack[:0]
+	} else {
+		cost = make([]int, n+1)
+		prev = make([]int, n+1)
+		cuts = make([]int, 0, n)
+	}
 	for i := 1; i <= n; i++ {
 		cost[i] = inf
 	}
@@ -320,13 +487,20 @@ func segmentChunk(l *lexicon, s string, allowTrailingPrefix bool) []string {
 		if cost[i] == inf {
 			continue
 		}
-		for j := i + 1; j <= min(n, i+l.maxSylLen); j++ {
-			w := s[i:j]
+		cur := uint16(0)
+		limit := min(n, i+l.maxSylLen)
+		for j := i + 1; j <= limit; j++ {
+			ch := s[j-1]
+			if ch >= 'a' && ch <= 'z' && (j == i+1 || cur != 0) {
+				cur = l.trie[cur].next[ch-'a']
+			} else {
+				cur = 0
+			}
 			c := inf
 			switch {
-			case l.syllables[w]:
+			case cur != 0 && l.trie[cur].isSyl:
 				c = 1
-			case j == n && allowTrailingPrefix && l.prefixes[w]:
+			case j == n && allowTrailingPrefix && cur != 0:
 				c = 2
 			case j == i+1:
 				c = 3
@@ -334,16 +508,52 @@ func segmentChunk(l *lexicon, s string, allowTrailingPrefix bool) []string {
 			if c < inf && cost[i]+c < cost[j] {
 				cost[j], prev[j] = cost[i]+c, i
 			}
+			if cur == 0 {
+				break
+			}
 		}
 	}
-	var segs []string
 	for j := n; j > 0; j = prev[j] {
-		segs = append(segs, s[prev[j]:j])
+		cuts = append(cuts, j)
 	}
-	for i, k := 0, len(segs)-1; i < k; i, k = i+1, k-1 {
-		segs[i], segs[k] = segs[k], segs[i]
+	for k := len(cuts) - 1; k >= 0; k-- {
+		end := cuts[k]
+		dst = append(dst, s[prev[end]:end])
 	}
-	return segs
+	return dst
+}
+
+func segmentShuangpinInto(segsDst, rawDst []string, scheme, raw string, _ []string) ([]string, []string) {
+	// Delegate decoding to ime.ShuangpinSyllables / ime.SplitShuangpin while tracking raw pairs
+	// 1-to-1 for partial commit preservation.
+	start := 0
+	n := len(raw)
+	for i := 0; i <= n; i++ {
+		if i < n && raw[i] != '\'' {
+			continue
+		}
+		chunk := raw[start:i]
+		start = i + 1
+		for len(chunk) >= 2 {
+			pair := chunk[:2]
+			chunk = chunk[2:]
+			rawDst = append(rawDst, pair)
+			if syls := ime.ShuangpinSyllables(scheme, pair); len(syls) > 0 {
+				segsDst = append(segsDst, syls[0])
+			} else {
+				segsDst = append(segsDst, pair)
+			}
+		}
+		if len(chunk) == 1 {
+			rawDst = append(rawDst, chunk)
+			if syls := ime.ShuangpinSyllables(scheme, chunk); len(syls) > 0 {
+				segsDst = append(segsDst, syls[0])
+			} else {
+				segsDst = append(segsDst, chunk)
+			}
+		}
+	}
+	return segsDst, rawDst
 }
 
 // matchKey reports whether segs[:len(key)] matches a word key: each typed segment is a prefix
@@ -360,72 +570,333 @@ func matchKey(key []string, segs []string) bool {
 	return true
 }
 
-const maxCandidates = 60
+var asciiLetters = [26]string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"}
 
-func candidatesFor(segs []string, ai []string) []Candidate {
-	if len(segs) == 0 {
-		return nil
+func asciiLetterString(r rune) string {
+	if r >= 'a' && r <= 'z' {
+		return asciiLetters[r-'a']
 	}
-	l := getLexicon()
-	seen := map[string]bool{}
-	var out []Candidate
-	add := func(text string, consumed int, isAI bool) {
-		if text == "" || seen[text] || len(out) >= maxCandidates {
+	return string(r)
+}
+
+func (e *Engine) resetSeen() {
+	e.seenGen++
+	if e.seenGen == 0 {
+		clear(e.seenSlots[:])
+		e.seenGen = 1
+	}
+}
+
+func (e *Engine) markSeen(w string) bool {
+	var h uint32 = 2166136261
+	for i := 0; i < len(w); i++ {
+		h ^= uint32(w[i])
+		h *= 16777619
+	}
+	idx := h & 127
+	gen := e.seenGen
+	for {
+		cur := &e.seenSlots[idx]
+		if cur.gen != gen {
+			cur.text = w
+			cur.gen = gen
+			return true
+		}
+		if cur.text == w {
+			return false
+		}
+		idx = (idx + 1) & 127
+	}
+}
+
+func (e *Engine) addCandidate(text string, consumed int, isAI bool) bool {
+	if text == "" {
+		return true
+	}
+	if len(e.cands) >= maxCandidates {
+		return false
+	}
+	if !e.markSeen(text) {
+		return true
+	}
+	e.cands = append(e.cands, Candidate{Text: text, consumed: consumed, AI: isAI})
+	return len(e.cands) < maxCandidates
+}
+
+func (e *Engine) emitLocalCandidate(w string) bool {
+	if e.emitCap > 0 && e.emitCount >= e.emitCap {
+		return false
+	}
+	if !e.addCandidate(w, e.emitConsumed, false) {
+		return false
+	}
+	if e.emitCap > 0 {
+		e.emitCount++
+		return e.emitCount < e.emitCap
+	}
+	return true
+}
+
+func (e *Engine) lookupPhrases(segs []string) {
+	for _, d := range e.dicts {
+		if len(e.cands) >= maxCandidates {
 			return
 		}
-		seen[text] = true
-		out = append(out, Candidate{Text: text, consumed: consumed, AI: isAI})
+		d.LookupPhrases(segs, e.emitLocalFn)
 	}
+}
+
+func (e *Engine) lookupSingle(seg string) {
+	for _, d := range e.dicts {
+		if len(e.cands) >= maxCandidates || (e.emitCap > 0 && e.emitCount >= e.emitCap) {
+			return
+		}
+		d.LookupSingle(seg, e.emitLocalFn)
+	}
+}
+
+func (e *Engine) buildCandidates() {
+	segs := e.segs
+	if len(segs) == 0 {
+		return
+	}
+	if len(e.dicts) == 0 {
+		if e.dict != nil {
+			e.dicts = []Dictionary{e.dict}
+		} else {
+			e.dicts = []Dictionary{defaultDictionary()}
+		}
+	}
+	if e.emitLocalFn == nil {
+		e.emitLocalFn = e.emitLocalCandidate
+	}
+	uf := e.opts.UserFrequency
+	e.resetSeen()
+	e.emitCap = 0
+
+	hasAlts := e.shuangpin || len(e.opts.FuzzyPinyin) > 0
+	var segAlts [][]string
+	if hasAlts {
+		segAlts = e.expandSegmentAlts(segs)
+	}
+
 	// 1. Words covering all syllables, then 2. words covering a prefix (longest first).
-	keys := make([]string, 0, len(l.words))
-	for k := range l.words {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys) // deterministic order
 	for n := len(segs); n >= 2; n-- {
-		for _, k := range keys {
-			key := strings.Fields(k)
-			if len(key) == n && matchKey(key, segs) {
-				for _, w := range l.words[k] {
-					add(w, n, false)
+		tierStart := len(e.cands)
+		var customScores map[string]int32
+		var pyKey string
+		if uf != nil {
+			pyKey = joinCompact(segs[:n])
+			if n == len(segs) {
+				if custom := uf.CustomWordsForPrefix(pyKey); len(custom) > 0 {
+					customScores = make(map[string]int32, len(custom))
+					for _, u := range custom {
+						if u.Word != "" {
+							customScores[u.Word] = u.Frequency
+							e.addCandidate(u.Word, n, false)
+						}
+					}
 				}
 			}
 		}
-		if n == len(segs) {
-			for _, w := range ai {
-				add(w, len(segs), true)
+		prefix := segs[:n]
+		e.emitConsumed = n
+		e.lookupPhrases(prefix)
+		if hasAlts && len(e.cands) < maxCandidates {
+			e.emitAltPhrases(segAlts[:n], prefix)
+		}
+		if uf != nil && len(e.cands)-tierStart > 1 {
+			rankTierByUserBoost(e.cands[tierStart:], uf, pyKey, e.prevCommit, customScores)
+		}
+		if n == len(segs) && len(e.ai) > 0 {
+			for _, w := range e.ai {
+				e.addCandidate(w, len(segs), true)
 			}
 		}
 	}
-	if len(segs) == 1 {
-		for _, w := range ai {
-			add(w, 1, true)
+
+	if len(segs) == 1 && len(e.ai) > 0 {
+		for _, w := range e.ai {
+			e.addCandidate(w, 1, true)
 		}
 	}
-	// 3. Single characters for the first syllable (or every syllable starting with the prefix).
-	for _, r := range charsFor(l, segs[0]) {
-		add(string(r), 1, false)
+
+	// 3. Single-syllable words and characters for the first segment.
+	if len(e.cands) < maxCandidates {
+		tierStart := len(e.cands)
+		var customScores map[string]int32
+		if uf != nil && len(segs) == 1 {
+			if custom := uf.CustomWordsForPrefix(segs[0]); len(custom) > 0 {
+				customScores = make(map[string]int32, len(custom))
+				for _, u := range custom {
+					if u.Word != "" {
+						customScores[u.Word] = u.Frequency
+						e.addCandidate(u.Word, 1, false)
+					}
+				}
+			}
+		}
+		e.emitConsumed = 1
+		if !hasAlts || len(segAlts[0]) <= 1 {
+			e.emitCap = 0
+			e.lookupSingle(segs[0])
+		} else {
+			// Emit top 3 of the primary syllable first, then top 2 of each Shuangpin/fuzzy
+			// variant so every alternative reading stays reachable on page 1, then the rest.
+			e.emitCap = 3
+			e.emitCount = 0
+			e.lookupSingle(segAlts[0][0])
+			for _, alt := range segAlts[0][1:] {
+				if len(e.cands) >= maxCandidates {
+					break
+				}
+				e.emitCap = 2
+				e.emitCount = 0
+				e.lookupSingle(alt)
+			}
+			e.emitCap = 0
+			for _, alt := range segAlts[0] {
+				if len(e.cands) >= maxCandidates {
+					break
+				}
+				e.lookupSingle(alt)
+			}
+		}
+		if uf != nil && len(e.cands)-tierStart > 1 {
+			rankTierByUserBoost(e.cands[tierStart:], uf, segs[0], e.prevCommit, customScores)
+		}
 	}
-	return out
 }
 
-func charsFor(l *lexicon, seg string) []rune {
-	if l.syllables[seg] {
-		return l.bySyllable[seg]
+func (e *Engine) expandSegmentAlts(segs []string) [][]string {
+	if cap(e.segAlts) < len(segs) {
+		e.segAlts = make([][]string, len(segs))
+	} else {
+		e.segAlts = e.segAlts[:len(segs)]
 	}
-	var syls []string
-	for s := range l.bySyllable {
-		if strings.HasPrefix(s, seg) {
-			syls = append(syls, s)
+	for i, seg := range segs {
+		alts := e.segAlts[i][:0]
+		alts = append(alts, seg)
+		appendAlt := func(v string) {
+			if v != "" && !slices.Contains(alts, v) {
+				alts = append(alts, v)
+			}
+		}
+		if e.shuangpin && i < len(e.rawSegs) {
+			for _, sy := range ime.ShuangpinSyllables(e.opts.Scheme, e.rawSegs[i]) {
+				appendAlt(sy)
+			}
+		}
+		if len(e.opts.FuzzyPinyin) > 0 {
+			baseLen := len(alts)
+			for bi := 0; bi < baseLen; bi++ {
+				for _, fz := range ime.ExpandFuzzy(alts[bi], e.opts.FuzzyPinyin) {
+					appendAlt(fz)
+				}
+			}
+		}
+		e.segAlts[i] = alts
+	}
+	return e.segAlts
+}
+
+func (e *Engine) emitAltPhrases(segAlts [][]string, primary []string) {
+	n := len(segAlts)
+	multi := false
+	for _, a := range segAlts {
+		if len(a) > 1 {
+			multi = true
+			break
 		}
 	}
-	sort.Strings(syls)
-	var all []rune
-	for _, s := range syls {
-		all = append(all, l.bySyllable[s][:min(8, len(l.bySyllable[s]))]...)
+	if !multi {
+		return
 	}
-	sort.SliceStable(all, func(i, j int) bool { return l.rankOf(all[i]) < l.rankOf(all[j]) })
-	return all
+	if cap(e.comboBuf) < n {
+		e.comboBuf = make([]string, n)
+	} else {
+		e.comboBuf = e.comboBuf[:n]
+	}
+	combo := e.comboBuf
+	emittedCombos := 0
+	var walk func(idx int, diff bool)
+	walk = func(idx int, diff bool) {
+		if len(e.cands) >= maxCandidates || emittedCombos >= maxAltCombos {
+			return
+		}
+		if idx == n {
+			if !diff {
+				return
+			}
+			emittedCombos++
+			e.lookupPhrases(combo)
+			return
+		}
+		for _, candSyl := range segAlts[idx] {
+			combo[idx] = candSyl
+			walk(idx+1, diff || candSyl != primary[idx])
+			if len(e.cands) >= maxCandidates || emittedCombos >= maxAltCombos {
+				return
+			}
+		}
+	}
+	walk(0, false)
+}
+
+func joinCompact(segs []string) string {
+	if len(segs) == 1 {
+		return segs[0]
+	}
+	var b strings.Builder
+	total := 0
+	for _, s := range segs {
+		total += len(s)
+	}
+	b.Grow(total)
+	for _, s := range segs {
+		b.WriteString(s)
+	}
+	return b.String()
+}
+
+func rankTierByUserBoost(tier []Candidate, uf UserFrequencyProvider, pyKey, prevWord string, customFreq map[string]int32) {
+	type scored struct {
+		cand  Candidate
+		score int32
+	}
+	anyNonZero := false
+	items := make([]scored, len(tier))
+	for i, c := range tier {
+		s := uf.LookupBoost(pyKey, c.Text, prevWord)
+		if customFreq != nil {
+			s += customFreq[c.Text]
+		}
+		if s != 0 {
+			anyNonZero = true
+		}
+		items[i] = scored{cand: c, score: s}
+	}
+	if !anyNonZero {
+		return
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].score > items[j].score
+	})
+	for i := range items {
+		tier[i] = items[i].cand
+	}
+}
+
+func candidatesFor(segs []string, ai []string) []Candidate {
+	e := &Engine{
+		dict:  defaultDictionary(),
+		segs:  segs,
+		ai:    ai,
+		cands: make([]Candidate, 0, maxCandidates),
+	}
+	e.emitLocalFn = e.emitLocalCandidate
+	e.buildCandidates()
+	return e.cands
 }
 
 // IsLetterKey reports whether r is an ASCII a-z letter (helper for platform mappers).
