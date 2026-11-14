@@ -92,6 +92,10 @@ type Options struct {
 	OnOpenPromptComposer  func()
 	OnClosePromptComposer func()
 	OnShowIMEPill         func(label string, anchor *host.CursorAnchor)
+	// OnShowSelectionBar presents actions for the current focused-field selection.
+	// The callback is optional so headless and non-native shells remain supported.
+	OnShowSelectionBar func(SelectionBarPayload)
+	OnHideSelectionBar func()
 	// OnLanguageChange fires when a config save or reload switches the UI
 	// language, so the shell relabels the tray and window titles.
 	OnLanguageChange func()
@@ -166,6 +170,8 @@ type AppController struct {
 	OnOpenPromptComposer  func()
 	OnClosePromptComposer func()
 	OnShowIMEPill         func(label string, anchor *host.CursorAnchor)
+	OnShowSelectionBar    func(SelectionBarPayload)
+	OnHideSelectionBar    func()
 	OnLanguageChange      func()
 	OnRecordItemUse       func(itemID string)
 	OnRecordPromptVersion func(promptID, trigger, rawDraft, finalOutput, preset string)
@@ -184,8 +190,9 @@ type AppController struct {
 	activeKeymapLayer string
 
 	// AI cancellation & generation guard
-	aiCancel context.CancelFunc
-	aiGen    uint64
+	aiCancel  context.CancelFunc
+	aiGen     uint64
+	transform *inplaceSession
 
 	// HUD auto-dismiss timer & generation guard
 	hudTimer *time.Timer
@@ -298,6 +305,8 @@ func NewAppController(opts Options) *AppController {
 		OnOpenPromptComposer:  opts.OnOpenPromptComposer,
 		OnClosePromptComposer: opts.OnClosePromptComposer,
 		OnShowIMEPill:         opts.OnShowIMEPill,
+		OnShowSelectionBar:    opts.OnShowSelectionBar,
+		OnHideSelectionBar:    opts.OnHideSelectionBar,
 		OnLanguageChange:      opts.OnLanguageChange,
 		OnRecordItemUse:       opts.OnRecordItemUse,
 		OnRecordPromptVersion: opts.OnRecordPromptVersion,
@@ -341,12 +350,16 @@ func (c *AppController) Close() {
 		c.aiCancel = nil
 	}
 	c.aiGen++
+	selectionHide := c.OnHideSelectionBar
 	if c.hudTimer != nil {
 		c.hudTimer.Stop()
 		c.hudTimer = nil
 	}
 	c.hudGen++
 	c.mu.Unlock()
+	if selectionHide != nil {
+		selectionHide()
+	}
 
 	cancelSeq := c.clipSearchSeq.Add(1)
 	c.cancelClipboardSearch(cancelSeq)
@@ -600,6 +613,23 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 		}
 	}
 
+	// A focused-field transform replaces the field only after a fresh value check.
+	transformAccepted := false
+	if ev.Type == engine.EventAcceptAIOutput && prev.Phase == engine.PhaseAIStreaming {
+		c.mu.Lock()
+		ts := c.transform
+		c.mu.Unlock()
+		if ts != nil && prev.AIOutput != "" {
+			transformAccepted = true
+			c.applyInPlaceResult(ts, prev.AIOutput)
+			for i := range effects {
+				if effects[i].Type == engine.EffectApplyAIOutput {
+					effects[i].Type = engine.EffectClose
+				}
+			}
+		}
+	}
+
 	for _, eff := range effects {
 		if eff.Type == engine.EffectCancelAI || eff.Type == engine.EffectClose {
 			c.executeEffect(eff, next)
@@ -613,7 +643,7 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 			c.executeEffect(eff, next)
 		}
 	}
-	if optimizeAccepted {
+	if optimizeAccepted && !transformAccepted {
 		trigger := c.ConfigStore.Current().Prompts.InlineOptimizePrefix
 		if strings.TrimSpace(trigger) == "" {
 			trigger = "//"
@@ -696,9 +726,13 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 		c.maybeRestoreLockedIME()
 		c.mu.Lock()
 		onHide := c.OnHide
+		onHideSelection := c.OnHideSelectionBar
 		c.mu.Unlock()
 		if onHide != nil {
 			onHide()
+		}
+		if onHideSelection != nil {
+			onHideSelection()
 		}
 
 	case engine.EffectStartAI:
@@ -1282,6 +1316,10 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 	if c.aiCancel != nil {
 		c.aiCancel()
 	}
+	// A new AI surface supersedes any pending focused-field write-back.
+	if eff.Mode != "custom" {
+		c.transform = nil
+	}
 	c.aiGen++
 	gen := c.aiGen
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -1317,7 +1355,21 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 		History:    history,
 		Profile:    &profCopy,
 	}
-	if eff.Mode == "optimize" {
+	c.mu.Lock()
+	transformMode := ""
+	if c.transform != nil {
+		transformMode = c.transform.mode
+	}
+	c.mu.Unlock()
+	if eff.Mode == "custom" && transformMode == "optimize" {
+		presetID := strings.TrimSpace(cfg.Prompts.DefaultOptimizerPreset)
+		if presetID == "" {
+			presetID = prompt.PresetCoding
+		}
+		optReq := prompt.BuildOptimizationRequest(eff.Prompt, presetID, "", cfg.Glossary.Terms, nil)
+		req.Mode = "optimize"
+		req.Prompt, req.SourceText, req.GlossaryTerms, req.SystemPromptOverride = optReq.Prompt, "", optReq.GlossaryTerms, optReq.SystemPromptOverride
+	} else if eff.Mode == "optimize" {
 		presetID := strings.TrimSpace(eff.OptimizerPreset)
 		if presetID == "" {
 			presetID = cfg.Prompts.DefaultOptimizerPreset
@@ -1353,6 +1405,19 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 			req.GlossaryTerms = cfg.Glossary.Terms
 			req.SystemPromptOverride = prompt.GetPreset(presetID).SystemPrompt
 		}
+	} else if (eff.Mode == "custom" && transformMode != "") || eff.Mode == "polish" || eff.Mode == "translate" || eff.Mode == "explain" {
+		mode := eff.Mode
+		if mode == "custom" {
+			mode = transformMode
+		}
+		req.Mode = mode
+		req.SourceText = eff.SourceText
+		eff.Mode = mode
+		req.SystemPromptOverride = map[string]string{
+			"polish":    "Rewrite the text for clarity, grammar, and flow while preserving its meaning. Return only the rewritten text.",
+			"translate": "Translate the text between Chinese and English naturally. Return only the translation.",
+			"explain":   "Explain the text clearly and concisely. Return only the explanation.",
+		}[mode]
 	}
 
 	go func() {
@@ -1415,6 +1480,7 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 func (c *AppController) cancelAIStream() {
 	c.mu.Lock()
 	c.aiGen++
+	c.transform = nil
 	cancel := c.aiCancel
 	c.aiCancel = nil
 	c.mu.Unlock()
@@ -1935,6 +2001,12 @@ func (c *AppController) HandleTriggerEvent(ev host.TriggerEvent) {
 			Type:    engine.EventOpenLeader,
 			Context: &capCtx,
 		})
+
+	case host.TriggerInPlaceOptimize:
+		go c.startInPlaceTransform(false, "")
+
+	case host.TriggerSelectionQuickBar:
+		go c.showSelectionQuickBar()
 
 	case host.TriggerCapsuleToggle:
 		phase := c.State().Phase
