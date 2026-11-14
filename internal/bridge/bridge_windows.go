@@ -678,27 +678,44 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 		return r
 	}
 
-	if isDown && b.inputEngineHandleKey(vk, info.ScanCode, true, time.Now()) {
-		return 1
-	}
-
 	if isDown {
-		if b.shiftDown {
-			b.shiftHadKey = true
-		}
-		keyName := winVKToKeyName(vk)
-		if b.inlineEnabled.Load() && b.callInline(host.InlineKeyEvent{KeyName: keyName, Rune: winVKToUnicode(vk, info.ScanCode), KeyCode: vk, Modifiers: winActiveModifiers(), IsDown: true, TimestampMs: nowMs}) {
-			return 1
-		}
-		mods := winActiveModifiers()
-		unicodeStr := winVKToUnicode(vk, info.ScanCode)
-		// Under IMM32 a shared HKL keeps native (Chinese) conversion mode active; keystrokes then
-		// belong to the IME candidate buffer rather than to committed text.
-		now := time.Now()
-		imeComposing := b.hookIMEComposing(now)
-		events, consume := b.router.HandleKeyDownWithIME(keyName, unicodeStr, mods, vk == vkBack, b.hookSecureInput(now), imeComposing, nowMs)
-		b.emitTriggerEvents(events)
-		if consume {
+		cache := &keyDownUnicodeCache{lookup: rawWinVKToUnicode}
+		prevCache := activeKeyDownUnicode.Swap(cache)
+		defer activeKeyDownUnicode.Store(prevCache)
+
+		var keyName string
+		var mods []string
+		if dispatchWinKeyDown(vk, info.ScanCode, cache, winKeyDownHooks{
+			inputEngine: func() bool {
+				return b.inputEngineHandleKey(vk, info.ScanCode, true, time.Now())
+			},
+			onFallback: func() {
+				if b.shiftDown {
+					b.shiftHadKey = true
+				}
+				keyName = winVKToKeyName(vk)
+				mods = winActiveModifiers()
+			},
+			inline: func(unicodeStr string) bool {
+				return b.inlineEnabled.Load() && b.callInline(host.InlineKeyEvent{
+					KeyName:     keyName,
+					Rune:        unicodeStr,
+					KeyCode:     vk,
+					Modifiers:   mods,
+					IsDown:      true,
+					TimestampMs: nowMs,
+				})
+			},
+			router: func(unicodeStr string) bool {
+				// Under IMM32 a shared HKL keeps native (Chinese) conversion mode active; keystrokes then
+				// belong to the IME candidate buffer rather than to committed text.
+				now := time.Now()
+				imeComposing := b.hookIMEComposing(now)
+				events, consume := b.router.HandleKeyDownWithIME(keyName, unicodeStr, mods, vk == vkBack, b.hookSecureInput(now), imeComposing, nowMs)
+				b.emitTriggerEvents(events)
+				return consume
+			},
+		}) {
 			return 1
 		}
 	}
@@ -1817,7 +1834,16 @@ func winActiveModifiers() []string {
 	return mods
 }
 
+var activeKeyDownUnicode atomic.Pointer[keyDownUnicodeCache]
+
 func winVKToUnicode(vk uint16, scanCode uint32) string {
+	if c := activeKeyDownUnicode.Load(); c != nil {
+		return c.Resolve(vk, scanCode)
+	}
+	return rawWinVKToUnicode(vk, scanCode)
+}
+
+func rawWinVKToUnicode(vk uint16, scanCode uint32) string {
 	var keyState [256]byte
 	if winVKDown(vkLShift) || winVKDown(vkRShift) || winVKDown(vkShift) {
 		keyState[vkShift] = 0x80

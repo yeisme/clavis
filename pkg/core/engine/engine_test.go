@@ -1,6 +1,8 @@
 package engine_test
 
 import (
+	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -639,6 +641,69 @@ func TestSnippetEngine_FullWidthPunctuationTriggers(t *testing.T) {
 	for _, r := range "hi；sig" {
 		if _, ok := eng.Feed(r, engine.FeedOptions{}); ok {
 			t.Fatal("expected word boundary to block 'hi；sig'")
+		}
+	}
+}
+
+func TestColorOKLCHReferenceAndRoundTrip(t *testing.T) {
+	cases := []struct {
+		hex       string
+		wantL     float64
+		wantC     float64
+		wantH     float64
+		tolL      float64
+		tolC      float64
+		tolH      float64
+		wantRGB   [3]int
+		maxRGBErr int
+	}{
+		{hex: "#FF0000", wantL: 0.628, wantC: 0.2577, wantH: 29.23, tolL: 0.002, tolC: 0.002, tolH: 0.2, wantRGB: [3]int{255, 0, 0}, maxRGBErr: 1},
+		{hex: "#FFFFFF", wantL: 1.000, wantC: 0.0000, wantH: 0.0, tolL: 0.002, tolC: 0.001, tolH: 0.1, wantRGB: [3]int{255, 255, 255}, maxRGBErr: 0},
+		{hex: "#808080", wantL: 0.600, wantC: 0.0000, wantH: 0.0, tolL: 0.002, tolC: 0.001, tolH: 0.1, wantRGB: [3]int{128, 128, 128}, maxRGBErr: 1},
+		{hex: "#0000FF", wantL: 0.452, wantC: 0.3132, wantH: 264.05, tolL: 0.002, tolC: 0.002, tolH: 0.2, wantRGB: [3]int{0, 0, 255}, maxRGBErr: 1},
+		{hex: "#3B82F6", wantL: 0.623, wantC: 0.1880, wantH: 259.81, tolL: 0.002, tolC: 0.002, tolH: 0.3, wantRGB: [3]int{59, 130, 246}, maxRGBErr: 2},
+	}
+
+	now := time.Now()
+	for _, tc := range cases {
+		items := engine.EvaluateUtilities(tc.hex, now)
+		var oklchVal string
+		for _, it := range items {
+			if strings.HasPrefix(it.ID, "utility:color:oklch:") {
+				oklchVal = it.UtilityValue
+				break
+			}
+		}
+		if oklchVal == "" {
+			t.Fatalf("%s: missing utility:color:oklch item in %+v", tc.hex, items)
+		}
+		var l, c, h float64
+		if n, err := fmt.Sscanf(oklchVal, "oklch(%f %f %f)", &l, &c, &h); err != nil || n != 3 {
+			t.Fatalf("%s: bad oklch format %q: err=%v", tc.hex, oklchVal, err)
+		}
+		if math.Abs(l-tc.wantL) > tc.tolL || math.Abs(c-tc.wantC) > tc.tolC || math.Abs(h-tc.wantH) > tc.tolH {
+			t.Fatalf("%s: got %q (L=%.4f C=%.4f H=%.2f), want L=%.3f C=%.4f H=%.2f",
+				tc.hex, oklchVal, l, c, h, tc.wantL, tc.wantC, tc.wantH)
+		}
+
+		// Round-trip: oklch(...) -> RGB utility item
+		rtItems := engine.EvaluateUtilities(oklchVal, now)
+		var rgbVal string
+		for _, it := range rtItems {
+			if strings.HasPrefix(it.ID, "utility:color:rgb:") {
+				rgbVal = it.UtilityValue
+				break
+			}
+		}
+		var r, g, b int
+		if n, err := fmt.Sscanf(rgbVal, "rgb(%d, %d, %d)", &r, &g, &b); err != nil || n != 3 {
+			t.Fatalf("%s -> %q: round-trip rgb parse failed (%q, err=%v)", tc.hex, oklchVal, rgbVal, err)
+		}
+		if math.Abs(float64(r-tc.wantRGB[0])) > float64(tc.maxRGBErr) ||
+			math.Abs(float64(g-tc.wantRGB[1])) > float64(tc.maxRGBErr) ||
+			math.Abs(float64(b-tc.wantRGB[2])) > float64(tc.maxRGBErr) {
+			t.Fatalf("%s -> %q -> %s, want rgb(%d, %d, %d) within ±%d",
+				tc.hex, oklchVal, rgbVal, tc.wantRGB[0], tc.wantRGB[1], tc.wantRGB[2], tc.maxRGBErr)
 		}
 	}
 }
