@@ -275,6 +275,7 @@ func (a *desktopApp) start() {
 		OnShowIMEPill:         a.handleShowIMEPill,
 		OnLanguageChange:      a.handleLanguageChange,
 		OnRecordItemUse:       a.handleRecordItemUse,
+		OnRecordPromptVersion: a.handleRecordPromptVersion,
 	})
 
 	initW, initH := uiapp.PreferredCapsuleSize(engine.PhaseLeader, cfg.Main.Appearance)
@@ -400,6 +401,9 @@ func (a *desktopApp) start() {
 				maxHist = promptHistoryRetentionLimit(ctrl.Config().Main.Clipboard)
 			}
 			err := learningStore.PruneHistory(hCtx, maxHist)
+			if fErr := learningStore.PruneFrecency(hCtx, storage.DefaultMaxFrecencyRows, storage.DefaultFrecencyRetentionWindow); err == nil {
+				err = fErr
+			}
 			a.syncFrecency(hCtx)
 			return err
 		})
@@ -438,6 +442,7 @@ func (a *desktopApp) start() {
 		ext.UpdateDaemonShortcut(cfg.Main.Daemon.InPlaceOptimizeShortcut)
 	}
 	sup.Start(ctx)
+	a.wireInputEngineLearning(hostBridge, learningStore)
 	if ui := a.setupInputEngine(ctx, hostBridge, cfg.Main.InputEngine, controller.SuggestInputCandidates); ui != nil {
 		a.mu.Lock()
 		a.inputUI = ui
@@ -814,6 +819,7 @@ func (a *desktopApp) applyConfigReload() {
 				}
 				if learningStore != nil {
 					_ = learningStore.PruneHistory(ctx, promptHistoryRetentionLimit(clipCfg))
+					_ = learningStore.PruneFrecency(ctx, storage.DefaultMaxFrecencyRows, storage.DefaultFrecencyRetentionWindow)
 				}
 				a.syncFrecency(ctx)
 			})
@@ -964,6 +970,7 @@ func (a *desktopApp) runClipboardPoller(ctx context.Context) {
 				maintainClipboardMedia(ctx, store, ms, cfg.Main.Clipboard)
 				if ls != nil {
 					_ = ls.PruneHistory(ctx, promptHistoryRetentionLimit(cfg.Main.Clipboard))
+					_ = ls.PruneFrecency(ctx, storage.DefaultMaxFrecencyRows, storage.DefaultFrecencyRetentionWindow)
 				}
 				if pruned > 0 {
 					a.syncFrecency(ctx)
@@ -1013,6 +1020,48 @@ func (a *desktopApp) handleRecordItemUse(itemID string) {
 			_ = ls.RecordItemUse(ctx, itemID, time.Now())
 		}
 		a.syncFrecency(ctx)
+	})
+}
+
+func (a *desktopApp) handleRecordPromptVersion(promptID, trigger, rawDraft, finalOutput, preset string) {
+	if promptID == "" && finalOutput == "" {
+		return
+	}
+	a.mu.Lock()
+	sup := a.supervisor
+	a.mu.Unlock()
+	if sup != nil {
+		sup.RecordInteraction()
+	}
+	a.goBG(func(ctx context.Context) {
+		a.mu.Lock()
+		ls := a.learningStore
+		a.mu.Unlock()
+		if ls != nil {
+			_ = ls.RecordPromptVersion(ctx, promptID, trigger, rawDraft, finalOutput, preset)
+		}
+	})
+}
+
+func (a *desktopApp) wireInputEngineLearning(br bridge.HostService, ls *storage.LearningStore) {
+	lh, ok := br.(bridge.InputEngineLearningHost)
+	if !ok || ls == nil {
+		return
+	}
+	adapter := storage.NewUserFrequencyAdapter(ls)
+	lh.UpdateInputEngineLearning(adapter, func(c bridge.InputEngineCommit) {
+		a.mu.Lock()
+		store := a.learningStore
+		shuttingDown := a.shuttingDown
+		bgCtx := a.ctx
+		a.mu.Unlock()
+		if shuttingDown || store == nil {
+			return
+		}
+		if bgCtx == nil {
+			bgCtx = context.Background()
+		}
+		_ = store.RecordIMECommit(bgCtx, c.PinyinKey, c.Word, c.PrevWord, c.Pinned)
 	})
 }
 

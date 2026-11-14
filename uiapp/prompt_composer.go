@@ -217,6 +217,7 @@ func (c *AppController) CommitPromptComposer() bool {
 
 	rendered := res.RenderedText
 	backOffset := res.CursorBackOffset
+	tpl := sess.Template
 	c.promptSession = nil
 	c.promptValidationError = ""
 	c.promptUI.slotHandles = nil
@@ -230,6 +231,11 @@ func (c *AppController) CommitPromptComposer() bool {
 		onClose()
 	}
 	c.injectTextAsync(rendered, 0, backOffset)
+	promptID := strings.TrimSpace(tpl.ID)
+	if promptID == "" {
+		promptID = strings.TrimSpace(tpl.Title)
+	}
+	c.recordPromptVersion(promptID, tpl.Trigger, tpl.Template, rendered, tpl.OptimizerPreset)
 	if onRepaint != nil {
 		onRepaint()
 	}

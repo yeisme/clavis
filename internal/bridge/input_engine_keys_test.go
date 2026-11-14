@@ -3,9 +3,12 @@ package bridge
 import (
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/ime"
 	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
 
@@ -63,14 +66,14 @@ func TestInputEngineConfigPlumbing(t *testing.T) {
 	if def.Enabled {
 		t.Fatal("default [input_engine] must stay disabled")
 	}
-	if eng := newInputEngineFromConfig(def, t.TempDir()); eng != nil {
+	if eng := newInputEngineFromConfig(def, t.TempDir(), nil); eng != nil {
 		t.Fatal("disabled config must not instantiate engine")
 	}
 	for _, mode := range []string{"native_imk", "off"} {
 		cfg := def
 		cfg.Enabled = true
 		cfg.Mode = mode
-		if eng := newInputEngineFromConfig(cfg, t.TempDir()); eng != nil {
+		if eng := newInputEngineFromConfig(cfg, t.TempDir(), nil); eng != nil {
 			t.Fatalf("mode %q must not instantiate inline hook engine", mode)
 		}
 	}
@@ -88,7 +91,7 @@ func TestInputEngineConfigPlumbing(t *testing.T) {
 	cfg.FuzzyPinyin = []string{"z=zh"}
 	cfg.CustomDictPaths = []string{dictPath}
 
-	eng := newInputEngineFromConfig(cfg, filepath.Join(dir, "cache"))
+	eng := newInputEngineFromConfig(cfg, filepath.Join(dir, "cache"), nil)
 	if eng == nil {
 		t.Fatal("enabled inline_hook config returned nil engine")
 	}
@@ -110,5 +113,136 @@ func TestInputEngineConfigPlumbing(t *testing.T) {
 	}
 	if v := eng.View(); len(v.Candidates) == 0 || v.Candidates[0].Text != "桥接热词" {
 		t.Fatalf("wired custom dict in xiaohe = %+v (preedit=%q)", v.Candidates, v.Preedit)
+	}
+}
+
+type bridgeTestFreq struct {
+	mu     sync.RWMutex
+	counts map[[2]string]int32
+	bigram map[[2]string]int32
+}
+
+func newBridgeTestFreq() *bridgeTestFreq {
+	return &bridgeTestFreq{
+		counts: make(map[[2]string]int32),
+		bigram: make(map[[2]string]int32),
+	}
+}
+
+func (f *bridgeTestFreq) record(c InputEngineCommit) {
+	f.mu.Lock()
+	f.counts[[2]string{c.PinyinKey, c.Word}]++
+	if c.PrevWord != "" {
+		f.bigram[[2]string{c.PrevWord, c.Word}]++
+	}
+	f.mu.Unlock()
+}
+
+func (f *bridgeTestFreq) LookupBoost(pinyinKey, word, prevWord string) int32 {
+	f.mu.RLock()
+	b := f.counts[[2]string{pinyinKey, word}]
+	if prevWord != "" {
+		b += f.bigram[[2]string{prevWord, word}] * 2
+	}
+	f.mu.RUnlock()
+	return b
+}
+
+func (f *bridgeTestFreq) CustomWordsForPrefix(prefix string) []ime.UserCandidate {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	var out []ime.UserCandidate
+	for k, v := range f.counts {
+		if strings.HasPrefix(k[0], prefix) {
+			out = append(out, ime.UserCandidate{Word: k[1], Frequency: v})
+		}
+	}
+	return out
+}
+
+func TestInputEngineUserLearningConfigAndCommitTracker(t *testing.T) {
+	freq := newBridgeTestFreq()
+	cfg := config.DefaultInputEngineConfig()
+	cfg.Enabled = true
+	cfg.Mode = "inline_hook"
+
+	// user_learning=false forces UserFrequency=nil even when a provider is passed.
+	cfgOff := cfg
+	cfgOff.UserLearning = false
+	optsOff, ok := inputEngineOptionsFromConfig(cfgOff, t.TempDir(), freq)
+	if !ok || optsOff.UserFrequency != nil {
+		t.Fatalf("user_learning=false must force UserFrequency=nil, got ok=%v uf=%v", ok, optsOff.UserFrequency)
+	}
+
+	// user_learning=true wires UserFrequency into inputengine.Options.
+	optsOn, ok := inputEngineOptionsFromConfig(cfg, t.TempDir(), freq)
+	if !ok || optsOn.UserFrequency == nil {
+		t.Fatalf("user_learning=true must wire UserFrequency, got ok=%v uf=%v", ok, optsOn.UserFrequency)
+	}
+
+	eng := newInputEngineFromConfig(cfg, t.TempDir(), freq)
+	tracker := &inputEngineCommitTracker{}
+	typeStr := func(s string) {
+		for _, r := range s {
+			tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeyLetter, Rune: r}, true)
+		}
+	}
+
+	// Baseline "shi" -> index 0 is "是"; find "时" and select it by digit.
+	typeStr("shi")
+	v := eng.View()
+	shiIdx := -1
+	for i, c := range v.Candidates {
+		if c.Text == "时" {
+			shiIdx = i
+			break
+		}
+	}
+	if shiIdx <= 0 {
+		t.Fatalf("expected 时 after index 0 in baseline, got %+v", v.Candidates)
+	}
+	res := tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeyDigit, Rune: rune('1' + shiIdx)}, true)
+	if res.Commit != "时" {
+		t.Fatalf("expected commit 时, got %+v", res)
+	}
+
+	// Simulate partial commit ("nihaozhongguo" -> Space commits "你好", then Space commits "中国").
+	tracker.resetPrev()
+	typeStr("nihaozhongguo")
+	res1 := tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeySpace}, true)
+	res2 := tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeySpace}, true)
+	if res1.Commit != "你好" || res2.Commit != "中国" {
+		t.Fatalf("partial commit mismatch: %+v / %+v", res1, res2)
+	}
+
+	drained := tracker.drain(nil)
+	if len(drained) != 3 {
+		t.Fatalf("expected 3 commits, got %+v", drained)
+	}
+	if drained[0] != (InputEngineCommit{PinyinKey: "shi", Word: "时", PrevWord: ""}) {
+		t.Fatalf("commit[0] = %+v", drained[0])
+	}
+	if drained[1] != (InputEngineCommit{PinyinKey: "nihao", Word: "你好", PrevWord: ""}) {
+		t.Fatalf("commit[1] = %+v", drained[1])
+	}
+	if drained[2] != (InputEngineCommit{PinyinKey: "zhongguo", Word: "中国", PrevWord: "你好"}) {
+		t.Fatalf("commit[2] = %+v", drained[2])
+	}
+
+	// Persist drained commits into freq -> "时" now jumps to #0 on next composition.
+	for _, c := range drained {
+		freq.record(c)
+	}
+	typeStr("shi")
+	if got := eng.View().Candidates; len(got) == 0 || got[0].Text != "时" {
+		t.Fatalf("expected 时 lifted to #0 after commit learning, got %+v", got)
+	}
+	tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeyEscape}, true)
+
+	// learn=false records zero commits.
+	typeStr("nihao")
+	_ = tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeySpace}, false)
+	if rem := tracker.drain(nil); len(rem) != 0 {
+		t.Fatalf("learn=false must record no commits, got %+v", rem)
 	}
 }

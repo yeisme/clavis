@@ -20,23 +20,41 @@ import (
 const keyeventfUnicodeFlag = 0x0004
 
 type inputEngineState struct {
-	eng      atomic.Pointer[inputengine.Engine]
-	viewMu   sync.Mutex
-	viewFn   func(InputEngineView)
-	dirty    chan struct{}
-	anchor   atomic.Pointer[host.CursorAnchor]
-	started  atomic.Bool
-	cacheDir string
+	eng          atomic.Pointer[inputengine.Engine]
+	viewMu       sync.Mutex
+	viewFn       func(InputEngineView)
+	learnMu      sync.RWMutex
+	userFreq     inputengine.UserFrequencyProvider
+	onCommit     func(InputEngineCommit)
+	userLearning atomic.Bool
+	commits      inputEngineCommitTracker
+	dirty        chan struct{}
+	anchor       atomic.Pointer[host.CursorAnchor]
+	started      atomic.Bool
+	cacheDir     string
 }
 
 func (st *inputEngineState) buildEngine(cfg config.InputEngineConfig) *inputengine.Engine {
-	return newInputEngineFromConfig(cfg, st.cacheDir)
+	st.learnMu.RLock()
+	uf := st.userFreq
+	st.learnMu.RUnlock()
+	st.userLearning.Store(cfg.UserLearning)
+	return newInputEngineFromConfig(cfg, st.cacheDir, uf)
+}
+
+// UpdateInputEngineLearning implements InputEngineLearningHost.
+func (b *windowsBridge) UpdateInputEngineLearning(userFreq inputengine.UserFrequencyProvider, onCommit func(InputEngineCommit)) {
+	b.ime.learnMu.Lock()
+	b.ime.userFreq = userFreq
+	b.ime.onCommit = onCommit
+	b.ime.learnMu.Unlock()
 }
 
 // ConfigureInputEngine implements InputEngineHost.
 func (b *windowsBridge) ConfigureInputEngine(cfg config.InputEngineConfig) {
 	st := &b.ime
 	eng := st.buildEngine(cfg)
+	st.commits.resetPrev()
 	if eng == nil {
 		if old := st.eng.Swap(nil); old != nil {
 			old.Reset()
@@ -68,8 +86,11 @@ func (b *windowsBridge) SetInputEngineAICandidates(raw string, words []string) {
 }
 
 func (b *windowsBridge) resetInputEngine() {
-	if eng := b.ime.eng.Load(); eng != nil && eng.Reset() {
-		b.notifyInputEngineView()
+	if eng := b.ime.eng.Load(); eng != nil {
+		b.ime.commits.resetPrev()
+		if eng.Reset() {
+			b.notifyInputEngineView()
+		}
 	}
 }
 
@@ -81,10 +102,22 @@ func (b *windowsBridge) notifyInputEngineView() {
 	}
 }
 
-// runInputEngineViewWorker coalesces view updates and resolves the caret anchor once per
-// composition (GetGUIThreadInfo is a cross-thread call and must stay off the hook thread).
+// runInputEngineViewWorker coalesces view updates, resolves the caret anchor once per
+// composition, and persists queued IME commits off the keyboard hook thread.
 func (b *windowsBridge) runInputEngineViewWorker() {
+	var commitBuf []InputEngineCommit
 	for range b.ime.dirty {
+		commitBuf = b.ime.commits.drain(commitBuf[:0])
+		if len(commitBuf) > 0 {
+			b.ime.learnMu.RLock()
+			onCommit := b.ime.onCommit
+			b.ime.learnMu.RUnlock()
+			if onCommit != nil {
+				for _, c := range commitBuf {
+					onCommit(c)
+				}
+			}
+		}
 		eng := b.ime.eng.Load()
 		var v InputEngineView
 		if eng != nil {
@@ -122,6 +155,7 @@ func (b *windowsBridge) inputEngineHandleKey(vk uint16, scan uint32, isDown bool
 	}
 	defer func() {
 		if r := recover(); r != nil {
+			b.ime.commits.resetPrev()
 			eng.Reset()
 			consume = false
 		}
@@ -132,7 +166,7 @@ func (b *windowsBridge) inputEngineHandleKey(vk uint16, scan uint32, isDown bool
 		if isDown {
 			kind = inputengine.KeyShiftDown
 		}
-		if res := eng.HandleKey(inputengine.Key{Kind: kind}); res.Changed || res.Commit != "" {
+		if res := b.ime.commits.handleKey(eng, inputengine.Key{Kind: kind}, b.ime.userLearning.Load()); res.Changed || res.Commit != "" {
 			sendWinUnicodeText(res.Commit)
 			b.notifyInputEngineView()
 		}
@@ -147,6 +181,7 @@ func (b *windowsBridge) inputEngineHandleKey(vk uint16, scan uint32, isDown bool
 
 	app := AppIdentity{ProcessName: b.cachedFrontmostProcessName()}
 	if !inputEngineEligible(b.hookIMEComposing(now), b.hookSecureInput(now), isSelfClavisApp(app)) {
+		b.ime.commits.resetPrev()
 		if eng.Reset() {
 			b.notifyInputEngineView()
 		}
@@ -163,11 +198,11 @@ func (b *windowsBridge) inputEngineHandleKey(vk uint16, scan uint32, isDown bool
 	if !ok {
 		return false
 	}
-	res := eng.HandleKey(key)
+	res := b.ime.commits.handleKey(eng, key, b.ime.userLearning.Load())
 	if res.Commit != "" {
 		sendWinUnicodeText(res.Commit)
 	}
-	if res.Changed {
+	if res.Changed || b.ime.commits.hasPending() {
 		b.notifyInputEngineView()
 	}
 	if res.Consume {
