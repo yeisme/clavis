@@ -113,3 +113,24 @@ func TestMaintainClipboardMediaQuotaAndGC(t *testing.T) {
 		t.Fatal("orphan blob not GC'd")
 	}
 }
+
+func TestEnrichMediaCandidateFiles(t *testing.T) {
+	cfg := config.DefaultClipboardConfig()
+	ms := clipboard.NewMediaStore(t.TempDir())
+	src := mediaSource{
+		ReadFiles: func() ([]string, error) { return []string{`C:\Videos\clip.mp4`}, nil },
+		Probe:     clipboard.FileProbe{DurationMs: func(string) int64 { return 5000 }},
+	}
+	c := &clipboard.CaptureCandidate{Media: clipboard.Media{Kind: clipboard.KindFile}}
+	keep, err := enrichMediaCandidate(c, cfg, ms, src)
+	if !keep || err != nil || c.Kind != clipboard.KindVideo || c.DurationMs != 5000 || c.Content != "clip.mp4" {
+		t.Fatalf("%v %v %+v %q", keep, err, c.Media, c.Content)
+	}
+	// Files from a password manager are filtered before ReadFiles runs.
+	called := false
+	src.ReadFiles = func() ([]string, error) { called = true; return nil, nil }
+	c = &clipboard.CaptureCandidate{SourceAppName: "1Password.exe", Media: clipboard.Media{Kind: clipboard.KindFile}}
+	if keep, _ := enrichMediaCandidate(c, cfg, ms, src); keep || called {
+		t.Fatal("filtered file list was read")
+	}
+}

@@ -15,8 +15,10 @@ var errClipboardChanged = errors.New("clipboard changed while reading media")
 
 // mediaSource abstracts the platform reads so enrichMediaCandidate is unit-testable.
 type mediaSource struct {
-	ReadPNG  func() ([]byte, error)
-	Sequence func() int64 // nil when the bridge has no change counter
+	ReadPNG   func() ([]byte, error)
+	ReadFiles func() ([]string, error)
+	Probe     clipboard.FileProbe
+	Sequence  func() int64 // nil when the bridge has no change counter
 }
 
 // enrichMediaCandidate fills an image candidate's payload. It returns false when the candidate
@@ -51,8 +53,23 @@ func enrichMediaCandidate(cand *clipboard.CaptureCandidate, cfg config.Clipboard
 		}
 		cand.Media = media
 		return true, nil
+	case clipboard.KindFile, clipboard.KindVideo:
+		if src.ReadFiles == nil {
+			return false, nil
+		}
+		paths, err := src.ReadFiles()
+		if err != nil {
+			return false, err
+		}
+		// Files are referenced, not copied: only a thumbnail may be written.
+		media, names, err := ms.SaveFileList(paths, src.Probe)
+		if err != nil {
+			return false, err
+		}
+		cand.Media = media
+		cand.Content = names // searchable by file name
+		return true, nil
 	default:
-		// File/video capture is wired in P3.
 		return false, nil
 	}
 }

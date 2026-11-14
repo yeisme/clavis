@@ -784,7 +784,13 @@ func (a *desktopApp) runClipboardPoller(ctx context.Context) {
 				continue
 			}
 			if cand.IsMedia() && sqliteStoreFor(store) {
-				src := mediaSource{ReadPNG: func() ([]byte, error) { return mygo.Clipboard.ReadFormat(transfer.PNG) }}
+				src := mediaSource{
+					ReadPNG:   func() ([]byte, error) { return mygo.Clipboard.ReadFormat(transfer.PNG) },
+					ReadFiles: mygo.Clipboard.ReadFiles,
+				}
+				if prober, ok := br.(bridge.FileMediaProber); ok {
+					src.Probe = prober.FileProbe()
+				}
 				if seqr, ok := br.(bridge.ClipboardSequencer); ok {
 					src.Sequence = seqr.ClipboardSequence
 				}
