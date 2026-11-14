@@ -1397,7 +1397,7 @@ func TestClipboard_RapidMutationsFIFOAndGenerationGuard(t *testing.T) {
 }
 
 func TestDispatch_HideBeforeHUDAndTimerSurvives(t *testing.T) {
-		setShortHUD := func(t *testing.T, ctrl *AppController) {
+	setShortHUD := func(t *testing.T, ctrl *AppController) {
 		t.Helper()
 		cfg := ctrl.Config()
 		// 500ms: long enough that the headless -race frames between dispatch
