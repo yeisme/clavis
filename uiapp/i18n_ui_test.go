@@ -30,12 +30,12 @@ func TestChineseLocalizationRendering(t *testing.T) {
 	tt.Frame()
 
 	for _, want := range []string{
-		"动作",       // Actions tab
-		"剪贴板",      // Clipboard tab
-		"代码片段",     // Snippets tab
-		"术语表",      // Glossary tab
+		"动作",         // Actions tab
+		"剪贴板",        // Clipboard tab
+		"代码片段",       // Snippets tab
+		"术语表",        // Glossary tab
 		"Omnibox 搜索", // search field accessibility label
-		"↵ 运行",      // footer hint
+		"↵ 运行",       // footer hint
 	} {
 		if !tt.HasText(want) {
 			t.Fatalf("Chinese omnibox missing %q; texts: %q", want, tt.Texts())

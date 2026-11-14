@@ -157,6 +157,7 @@ type desktopApp struct {
 	imePillTimer           *time.Timer
 	imePillGen             atomic.Uint64
 	presentSeq             atomic.Uint64
+	hideSeq                atomic.Uint64
 	presentTransitionUntil atomic.Int64
 	lastPanelHideNano      atomic.Int64
 	shutdownOnce           sync.Once
@@ -888,6 +889,7 @@ func (a *desktopApp) scheduleIMEPillAutoHide(gen uint64) {
 
 func (a *desktopApp) handlePresentPhase(phase engine.CapsulePhase) {
 	seq := a.presentSeq.Add(1)
+	a.hideSeq.Add(1) // cancel any pending delayed hide from an exit animation
 	a.markPresentTransition(350 * time.Millisecond)
 
 	a.mu.Lock()
@@ -964,22 +966,41 @@ func (a *desktopApp) handleHide() {
 	}
 	a.presentSeq.Add(1)
 	a.setSessionAnchor(nil)
-	go mygo.RunOnMain(func() {
-		a.mu.Lock()
-		panel := a.capsulePanel
-		ctrl := a.controller
-		a.mu.Unlock()
-		if panel == nil {
+
+	// Keep the window on screen briefly so the exit animation (fade /
+	// scale-down of the capsule card) is visible; a re-presentation bumps
+	// hideSeq and cancels the pending hide.
+	seq := a.hideSeq.Add(1)
+	delay := time.Duration(0)
+	if ctrl != nil {
+		delay = ctrl.ExitHideDelay()
+	}
+	hide := func() {
+		if a.hideSeq.Load() != seq {
 			return
 		}
-		if ctrl != nil && ctrl.State().Phase != engine.PhaseHidden {
-			return
-		}
-		if panel.IsVisible() {
-			panel.Hide()
-			a.lastPanelHideNano.Store(time.Now().UnixNano())
-		}
-	})
+		mygo.RunOnMain(func() {
+			a.mu.Lock()
+			panel := a.capsulePanel
+			ctrl := a.controller
+			a.mu.Unlock()
+			if panel == nil {
+				return
+			}
+			if ctrl != nil && ctrl.State().Phase != engine.PhaseHidden {
+				return
+			}
+			if panel.IsVisible() {
+				panel.Hide()
+				a.lastPanelHideNano.Store(time.Now().UnixNano())
+			}
+		})
+	}
+	if delay <= 0 {
+		hide()
+		return
+	}
+	time.AfterFunc(delay, hide)
 }
 
 func (a *desktopApp) beforeInject(ctx context.Context) {

@@ -81,6 +81,8 @@ nav_layer_enabled = true
 theme = "system"
 # Language: "auto" (follow the system UI language), "zh-CN", or "en"
 language = "auto"
+# Animations: "auto" (respect the system reduce-motion setting), "full", "reduced", or "off"
+animations = "auto"
 capsule_width = 680.0
 max_visible_results = 8
 corner_radius = 16.0

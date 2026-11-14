@@ -321,6 +321,21 @@ func (a *AppController) renderOmniboxPreviewCard(
 	state engine.State,
 	item engine.OmniboxItem,
 ) {
+	profile := appMotionProfile(c, a.Config().Main.Appearance)
+
+	// Snippet-expansion flash: landing on a snippet row highlights its
+	// preview for a beat (120ms) as the rendered content expands.
+	flashRun := uint64(0)
+	flashFrames := []ui.Keyframe{}
+	if item.Kind == engine.ItemSnippet && item.Snippet != nil && profile.flash > 0 {
+		if a.uiState.lastPreviewSnippet != item.Snippet.ID {
+			a.uiState.lastPreviewSnippet = item.Snippet.ID
+			a.uiState.snippetFlashRun++
+		}
+		flashRun = a.uiState.snippetFlashRun
+		flashFrames = []ui.Keyframe{{At: 0, Value: 1}, {At: profile.flash, Value: 0, Ease: ui.EaseOut}}
+	}
+
 	card := ui.Column(c).
 		Fill().
 		Padding(9, 10).
@@ -328,6 +343,10 @@ func (a *AppController) renderOmniboxPreviewCard(
 		Radius(10).
 		Background(theme.Surface).
 		Border(1, withAlpha(theme.Border, 0.85))
+	if len(flashFrames) == 2 {
+		glow := card.Keyframes("snippet-flash", flashFrames, ui.KeyframeOptions{Run: flashRun, NonMotion: true})
+		card.Border(1, mixColor(withAlpha(theme.Accent, 0.85), withAlpha(theme.Border, 0.85), 1-glow))
+	}
 
 	card.Children(func() {
 		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {

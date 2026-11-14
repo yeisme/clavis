@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/yeisme/clavis/pkg/core/i18n"
 	"github.com/yeisme/clavis/pkg/core/toml"
@@ -60,6 +61,16 @@ func DefaultConfig() ClavisConfig {
 		Glossary: DefaultGlossaryConfig(),
 		IMERules: DefaultIMERulesConfig(),
 	}
+}
+
+// NormalizeAnimationMode trims and lowercases a configured animations mode
+// ("auto", "full", "reduced", "off"); the empty string is "auto".
+func NormalizeAnimationMode(s string) string {
+	t := strings.ToLower(strings.TrimSpace(s))
+	if t == "" {
+		return string("auto")
+	}
+	return t
 }
 
 func joinPath(base, key string) string {

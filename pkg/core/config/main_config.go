@@ -74,6 +74,7 @@ func (c TriggerConfig) toTOML() *toml.Table {
 type AppearanceConfig struct {
 	Theme             string  `json:"theme"`
 	Language          string  `json:"language"`
+	Animations        string  `json:"animations"`
 	CapsuleWidth      float64 `json:"capsuleWidth"`
 	MaxVisibleResults int     `json:"maxVisibleResults"`
 	CornerRadius      float64 `json:"cornerRadius"`
@@ -86,6 +87,7 @@ func DefaultAppearanceConfig() AppearanceConfig {
 	return AppearanceConfig{
 		Theme:             "system",
 		Language:          "auto",
+		Animations:        "auto",
 		CapsuleWidth:      680.0,
 		MaxVisibleResults: 8,
 		CornerRadius:      16.0,
@@ -109,6 +111,11 @@ func decodeAppearanceConfig(tbl *toml.Table, path string) (AppearanceConfig, err
 		return cfg, err
 	} else if ok {
 		cfg.Language = s
+	}
+	if s, ok, err := optionalString(tbl, "animations", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.Animations = s
 	}
 	if f, ok, err := optionalFloat(tbl, "capsule_width", path); err != nil {
 		return cfg, err
@@ -147,6 +154,7 @@ func (c AppearanceConfig) toTOML() *toml.Table {
 	t := toml.NewTable()
 	t.Set("theme", toml.StringVal(c.Theme))
 	t.Set("language", toml.StringVal(c.Language))
+	t.Set("animations", toml.StringVal(c.Animations))
 	t.Set("capsule_width", toml.FloatVal(c.CapsuleWidth))
 	t.Set("max_visible_results", toml.IntVal(int64(c.MaxVisibleResults)))
 	t.Set("corner_radius", toml.FloatVal(c.CornerRadius))

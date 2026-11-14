@@ -319,6 +319,11 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.Language = v })
 			}
 		})
+		settingsInlineRow(c, theme, "animations", 110, func() {
+			if v, changed := settingsPills(c, theme, "animations", AllAnimationModes(), appearance.Animations); changed {
+				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.Animations = v })
+			}
+		})
 		ui.Grid(c).Columns(2).GapX(10).GapY(4).FillWidth().Children(func() {
 			if v, changed := settingsStepper(c, theme, "capsule_width", appearance.CapsuleWidth, 400, 1200, 20, "px"); changed {
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.CapsuleWidth = v })

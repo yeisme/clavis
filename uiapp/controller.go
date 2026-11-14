@@ -107,6 +107,13 @@ type uiViewState struct {
 	imeRuleTitleDraft      string
 	imeRuleSourceDraft     string
 	imeRuleModeDraft       config.IMEMode
+
+	// Animation bookkeeping (view-side, main-thread only).
+	lastExitHideDelay  time.Duration
+	lastAIError        string
+	aiShakeRun         uint64
+	lastPreviewSnippet string
+	snippetFlashRun    uint64
 }
 
 // AppController coordinates Clavis state, host integration, AI streaming,
@@ -1756,6 +1763,16 @@ func (c *AppController) UpdateMainConfig(mutate func(main *config.MainConfig)) e
 		onRepaint()
 	}
 	return nil
+}
+
+// ExitHideDelay reports how long the shell should keep the capsule window
+// visible after a dismiss so the exit animation lands; 0 hides at once.
+// The value is published by the last CapsuleView frame (fresh config and
+// accessibility preferences).
+func (c *AppController) ExitHideDelay() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.uiState.lastExitHideDelay
 }
 
 // syncAppearanceLanguage applies [appearance].language of cfg, resolving

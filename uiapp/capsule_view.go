@@ -32,6 +32,9 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 	c.SetTheme(theme)
 	prefs := c.Preferences()
 	radius := NormalizeCornerRadius(cfg.Main.Appearance)
+	profile := appMotionProfile(c, cfg.Main.Appearance)
+	DisableAnimationsFor(c, profile)
+	a.uiState.lastExitHideDelay = profile.ExitHideDelay()
 
 	if state.Phase != engine.PhaseAIStreaming {
 		a.uiState.followUpQuery = ""
@@ -55,6 +58,11 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 	}
 
 	card := applyTextLocale(ui.Column(c).Fill().Radius(radius).Clip())
+	if state.Phase == engine.PhaseHUD {
+		card = card.Transition(profile.hudEnterTransition())
+	} else {
+		card = card.Transition(profile.capsuleEnterTransition())
+	}
 	if !prefs.ReduceTransparency {
 		card.Material(glass.Glass{Native: c.Vibrancy()})
 		if prefs.HighContrast {
@@ -85,7 +93,7 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 		case engine.PhaseAIStreaming:
 			a.renderCapsuleHeader(c, theme, cfg, state, diag)
 			ui.Divider(c)
-			a.renderAIStreamingView(c, theme, state)
+			a.renderAIStreamingView(c, theme, cfg, state)
 		}
 	})
 }
@@ -416,6 +424,7 @@ func (a *AppController) renderOmniboxView(
 	cfg config.ClavisConfig,
 	state engine.State,
 ) {
+	profile := appMotionProfile(c, cfg.Main.Appearance)
 	if a.uiState.lastPhase != engine.PhaseOmnibox || a.uiState.lastTab != state.OmniboxTab {
 		a.uiState.searchHandle.RequestFocus(c)
 	}
@@ -538,8 +547,21 @@ func (a *AppController) renderOmniboxView(
 						Padding(7, 10).
 						Radius(8).
 						Gap(10).
-						AlignItems(ui.Center)
-					if isSelected {
+						AlignItems(ui.Center).
+						Transition(ui.ElementTransition{
+							Animation: profile.rowEnterAnimation(i),
+							Enter:     profile.rowEnterMotion(),
+							ExitDelay: -1, // rows leave at once; only entering staggers
+						})
+					selAnim := profile.selectionAnimation()
+					if selAnim.Duration > 0 {
+						if isSelected {
+							row.Background(row.AnimateColor("row-sel", withAlpha(theme.Accent, 0.16), selAnim)).
+								Border(1, withAlpha(theme.Accent, 0.45))
+						} else {
+							row.Background(row.AnimateColor("row-sel", ui.Transparent, selAnim))
+						}
+					} else if isSelected {
 						row.Background(withAlpha(theme.Accent, 0.16)).Border(1, withAlpha(theme.Accent, 0.45))
 					}
 
@@ -786,7 +808,8 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 	return false
 }
 
-func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, state engine.State) {
+func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig, state engine.State) {
+	profile := appMotionProfile(c, cfg.Main.Appearance)
 	c.OnWindowShortcut(0, ui.KeyEscape, func() {
 		if a.followUpComposing() {
 			return
@@ -915,7 +938,12 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, st
 			Children(func() {
 				switch {
 				case state.AIError != "":
-					ui.Box(c).
+					// Two quick jolts (2 × 60ms) whenever a new error lands.
+					if state.AIError != a.uiState.lastAIError {
+						a.uiState.lastAIError = state.AIError
+						a.uiState.aiShakeRun++
+					}
+					errBox := ui.Box(c).
 						FillWidth().
 						Padding(10, 12).
 						Radius(8).
@@ -924,10 +952,19 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, st
 						Children(func() {
 							ui.Text(c, state.AIError).FontSize(13).TextColor(theme.Danger)
 						})
+					if frames := shakeKeyframes(profile); frames != nil {
+						jolt := errBox.Keyframes("ai-error-shake", frames, ui.KeyframeOptions{Run: a.uiState.aiShakeRun})
+						errBox.Translate(jolt*3, 0)
+					}
 				case state.AIOutput == "":
 					ui.Text(c, i18n.T("ai.generating")).FontSize(13).TextColor(theme.TextMuted)
 				default:
 					markdown.View(c, state.AIOutput, &a.uiState.mdOpts)
+					if !state.AIComplete {
+						// Pulsing caret while the answer streams in (900ms loop).
+						caret := ui.Box(c).Width(7).Height(15).Radius(2)
+						caret.Background(theme.Accent.Alpha(cursorOpacity(caret, profile)))
+					}
 				}
 			})
 

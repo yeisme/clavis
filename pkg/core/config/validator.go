@@ -139,6 +139,14 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 		})
 	}
 
+	animations := strings.TrimSpace(main.Appearance.Animations)
+	if animations != "" && animations != "auto" && animations != "full" && animations != "reduced" && animations != "off" {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "appearance.animations", Severity: SeverityWarning,
+			Message: i18n.Tf("diag.appearance.animations.unknown", main.Appearance.Animations),
+		})
+	}
+
 	if math.IsNaN(main.Appearance.CapsuleWidth) || math.IsInf(main.Appearance.CapsuleWidth, 0) || main.Appearance.CapsuleWidth <= 0 {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "appearance.capsule_width", Severity: SeverityError,

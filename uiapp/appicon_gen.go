@@ -239,12 +239,12 @@ func GenerateAppIconICO() []byte {
 type TrayMenuIconKind string
 
 const (
-	TrayMenuIconCapsule  TrayMenuIconKind = "capsule"
+	TrayMenuIconCapsule   TrayMenuIconKind = "capsule"
 	TrayMenuIconClipboard TrayMenuIconKind = "clipboard"
-	TrayMenuIconReload   TrayMenuIconKind = "reload"
-	TrayMenuIconFolder   TrayMenuIconKind = "folder"
-	TrayMenuIconSettings TrayMenuIconKind = "settings"
-	TrayMenuIconQuit     TrayMenuIconKind = "quit"
+	TrayMenuIconReload    TrayMenuIconKind = "reload"
+	TrayMenuIconFolder    TrayMenuIconKind = "folder"
+	TrayMenuIconSettings  TrayMenuIconKind = "settings"
+	TrayMenuIconQuit      TrayMenuIconKind = "quit"
 )
 
 // GenerateTrayMenuIconPNG renders a 16×16 (default) monochrome template
