@@ -163,6 +163,8 @@ type desktopApp struct {
 	imePillPanel           *mygo.Window
 	inputUI                *inputEngineUI
 	settingsWin            *mygo.Window
+	selectionBar           *mygo.Window
+	selectionBarPayload    uiapp.SelectionBarPayload
 	tray                   *mygo.Tray
 	permMenuItem           *mygo.MenuItem
 	loginMenuItem          *mygo.MenuItem
@@ -284,6 +286,8 @@ func (a *desktopApp) start() {
 		OnLanguageChange:      a.handleLanguageChange,
 		OnRecordItemUse:       a.handleRecordItemUse,
 		OnRecordPromptVersion: a.handleRecordPromptVersion,
+		OnShowSelectionBar:    a.handleShowSelectionBar,
+		OnHideSelectionBar:    a.handleHideSelectionBar,
 	})
 
 	initW, initH := uiapp.PreferredCapsuleSize(engine.PhaseLeader, cfg.Main.Appearance)
@@ -369,6 +373,30 @@ func (a *desktopApp) start() {
 		imePillPanel.Hide()
 	})
 
+	sbW, sbH := uiapp.PreferredSelectionBarWidth(nil), 34
+	selectionBar := mygo.NewWindow(mygo.WindowOptions{
+		Title:         "Clavis Selection",
+		Width:         sbW,
+		Height:        sbH,
+		Panel:         true,
+		Hidden:        true,
+		Frameless:     true,
+		Transparent:   true,
+		Vibrancy:      mygo.VibrancyGlass,
+		CornerRadius:  17,
+		DisableResize: true,
+		AlwaysOnTop:   true,
+		SkipTaskbar:   true,
+		Content: ui.View(func(c *ui.Context) {
+			cfg := controller.Config()
+			uiapp.SelectionBarView(c, a.selectionBarSnapshot(), cfg.Main.Appearance)
+		}),
+	})
+	selectionBar.OnClose(func(e *mygo.CloseEvent) {
+		e.PreventDefault()
+		selectionBar.Hide()
+	})
+
 	settingsWin := mygo.NewWindow(mygo.WindowOptions{
 		Title:     i18n.T("tray.settings_window"),
 		Width:     960,
@@ -442,6 +470,7 @@ func (a *desktopApp) start() {
 	a.promptPanel = promptPanel
 	a.imePillPanel = imePillPanel
 	a.settingsWin = settingsWin
+	a.selectionBar = selectionBar
 	a.mu.Unlock()
 
 	a.setupTray()
@@ -1553,6 +1582,59 @@ func (a *desktopApp) shutdown() {
 		}
 		if tray != nil {
 			tray.Destroy()
+		}
+	})
+}
+
+// selectionBarSnapshot returns the payload the floating bar renders.
+func (a *desktopApp) selectionBarSnapshot() uiapp.SelectionBarPayload {
+	a.mu.Lock()
+	p := a.selectionBarPayload
+	a.mu.Unlock()
+	return p
+}
+
+// handleShowSelectionBar presents the floating action bar next to the selection.
+// It never takes focus: the window is shown inactive so the caret and the
+// frontmost app keep their state.
+func (a *desktopApp) handleShowSelectionBar(p uiapp.SelectionBarPayload) {
+	a.mu.Lock()
+	win := a.selectionBar
+	a.selectionBarPayload = p
+	a.mu.Unlock()
+	if win == nil || len(p.Actions) == 0 {
+		return
+	}
+	go mygo.RunOnMain(func() {
+		w, h := uiapp.SelectionBarSize(p)
+		displays := mygo.Screen.Displays()
+		cursorPt := mygo.Screen.CursorScreenPoint()
+		anchor := p.Anchor
+		var anchorPtr *host.CursorAnchor
+		if anchor.Valid {
+			anchorPtr = &anchor
+		}
+		bounds := computeIMEPillBounds(anchorPtr, cursorPt, bridge.Size{
+			Width:  float64(w),
+			Height: float64(h),
+		}, displays)
+		win.SetBounds(bounds)
+		win.Invalidate()
+		win.ShowInactive()
+	})
+}
+
+// handleHideSelectionBar hides the floating action bar.
+func (a *desktopApp) handleHideSelectionBar() {
+	a.mu.Lock()
+	win := a.selectionBar
+	a.mu.Unlock()
+	if win == nil {
+		return
+	}
+	go mygo.RunOnMain(func() {
+		if win.IsVisible() {
+			win.Hide()
 		}
 	})
 }
