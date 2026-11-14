@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -20,9 +21,10 @@ import (
 
 // SQLiteClipboardStore implements pkg/core/clipboard.Store backed by MyGo's SQLite plugin + FTS5.
 type SQLiteClipboardStore struct {
-	db     *sqlite.DB
-	mu     sync.RWMutex
-	filter clipboard.PrivacyFilter
+	db         *sqlite.DB
+	mu         sync.RWMutex
+	filter     clipboard.PrivacyFilter
+	generation atomic.Uint64
 }
 
 var _ clipboard.Store = (*SQLiteClipboardStore)(nil)
@@ -184,6 +186,7 @@ func (s *SQLiteClipboardStore) Record(ctx context.Context, candidate clipboard.C
 		existing.UpdatedAt = now
 		existing.SourceBundleID = newBundleID
 		existing.SourceAppName = newAppName
+		s.generation.Add(1)
 		return &existing, true, nil
 	}
 
@@ -206,6 +209,7 @@ func (s *SQLiteClipboardStore) Record(ctx context.Context, candidate clipboard.C
 		UpdatedAt:      now,
 		IsPinned:       false,
 	}
+	s.generation.Add(1)
 	return &item, true, nil
 }
 
@@ -272,7 +276,7 @@ func (s *SQLiteClipboardStore) searchFTS5(ctx context.Context, ftsQuery string, 
 			 FROM clipboard_fts fts
 			 JOIN clipboard_items ci ON ci.rowid = fts.rowid
 			 WHERE clipboard_fts MATCH ?
-			 ORDER BY ci.is_pinned DESC, ci.updated_at_ns DESC, ci.id ASC
+			 ORDER BY ci.is_pinned DESC, bm25(clipboard_fts) ASC, ci.updated_at_ns DESC, ci.id ASC
 			 LIMIT ?`,
 			ftsQuery, limit,
 		)
@@ -282,7 +286,7 @@ func (s *SQLiteClipboardStore) searchFTS5(ctx context.Context, ftsQuery string, 
 			 FROM clipboard_fts fts
 			 JOIN clipboard_items ci ON ci.rowid = fts.rowid
 			 WHERE clipboard_fts MATCH ?
-			 ORDER BY ci.is_pinned DESC, ci.updated_at_ns DESC, ci.id ASC`,
+			 ORDER BY ci.is_pinned DESC, bm25(clipboard_fts) ASC, ci.updated_at_ns DESC, ci.id ASC`,
 			ftsQuery,
 		)
 	}
@@ -339,6 +343,7 @@ func (s *SQLiteClipboardStore) Pin(ctx context.Context, id string, pinned bool) 
 	if res.Changes == 0 {
 		return fmt.Errorf("clipboard item %q not found", id)
 	}
+	s.generation.Add(1)
 	return nil
 }
 
@@ -350,9 +355,11 @@ func (s *SQLiteClipboardStore) Delete(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, err := s.db.Execute(ctx, `DELETE FROM clipboard_items WHERE id = ?`, id); err != nil {
+	_, err := s.db.Execute(ctx, `DELETE FROM clipboard_items WHERE id = ?`, id)
+	if err != nil {
 		return fmt.Errorf("delete clipboard item: %w", err)
 	}
+	s.generation.Add(1)
 	return nil
 }
 
@@ -364,9 +371,11 @@ func (s *SQLiteClipboardStore) Clear(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, err := s.db.Execute(ctx, `DELETE FROM clipboard_items`); err != nil {
+	_, err := s.db.Execute(ctx, `DELETE FROM clipboard_items`)
+	if err != nil {
 		return fmt.Errorf("clear clipboard items: %w", err)
 	}
+	s.generation.Add(1)
 	return nil
 }
 
@@ -418,8 +427,15 @@ func (s *SQLiteClipboardStore) PruneExpired(ctx context.Context, retentionDays i
 		}
 	}
 
+	s.generation.Add(1)
 	return removed, nil
 }
+
+// Generation returns a monotonically increasing mutation generation.
+func (s *SQLiteClipboardStore) Generation() uint64 { return s.generation.Load() }
+
+// DB exposes the shared database handle for related stores.
+func (s *SQLiteClipboardStore) DB() *sqlite.DB { return s.db }
 
 func contentSHA256(content string) string {
 	sum := sha256.Sum256([]byte(content))

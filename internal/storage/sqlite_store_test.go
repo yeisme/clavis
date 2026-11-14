@@ -173,6 +173,22 @@ func TestSQLiteClipboardStore_SearchFTS5AndCJKAndFallback(t *testing.T) {
 	}
 }
 
+func TestSQLiteClipboardStore_SpecialCharacterSearch(t *testing.T) {
+	store := openTestStore(t, ":memory:", clipboard.NewPrivacyFilter())
+	ctx := context.Background()
+	for _, content := range []string{"foo-bar", "C++", `say "foo-bar"`} {
+		if _, ok, err := store.Record(ctx, clipboard.CaptureCandidate{Content: content}); err != nil || !ok {
+			t.Fatalf("record %q: %v", content, err)
+		}
+	}
+	for _, query := range []string{"foo-bar", "C++", `"foo-bar"`} {
+		got, err := store.Search(ctx, query, 10)
+		if err != nil || len(got) == 0 {
+			t.Fatalf("search %q: got=%v err=%v", query, got, err)
+		}
+	}
+}
+
 func TestSQLiteClipboardStore_PruneExpiredAndMaxItemsAndPersistence(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "clavis.db")
