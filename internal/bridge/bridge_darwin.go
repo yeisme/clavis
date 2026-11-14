@@ -521,6 +521,7 @@ type darwinBridge struct {
 	inlineMu      sync.RWMutex
 	inlineHandler func(host.InlineKeyEvent) bool
 	inlineEnabled atomic.Bool
+	ime           inputEngineState
 	shiftDown     bool
 	shiftHadKey   bool
 }
@@ -537,6 +538,11 @@ func newPlatformBridge(opts Options) HostService {
 		onLayer:      opts.OnKeymapLayerChanged,
 	}
 	b.pbRestorer = NewPasteboardSnapshotRestorer(&darwinPasteboardBackend{bridge: b})
+	b.ime.dirty = make(chan struct{}, 1)
+	b.ime.anchorFn = func(ctx context.Context) (host.CursorAnchor, bool) {
+		a, err := b.FastCaretAnchor(ctx)
+		return a, err == nil
+	}
 	return b
 }
 
