@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/yeisme/clavis/pkg/core/i18n"
 	"github.com/yeisme/clavis/pkg/core/toml"
 )
 
@@ -53,7 +54,7 @@ func decodeIMERule(tbl *toml.Table, path string) (IMERule, error) {
 	if !hasBundle && !hasProc {
 		return IMERule{}, &DecodingError{
 			KeyPath: joinPath(path, "bundle_id"),
-			Message: "Missing required 'bundle_id' or 'process_name'",
+			Message: i18n.T("decode.ime_rule.target_missing"),
 		}
 	}
 
@@ -87,7 +88,7 @@ func decodeIMERule(tbl *toml.Table, path string) (IMERule, error) {
 		}
 		return IMERule{}, &DecodingError{
 			KeyPath: joinPath(path, "preferred_mode"),
-			Message: fmt.Sprintf("Unknown preferred_mode '%s'; expected one of: %s", rawMode, strings.Join(allowed, ", ")),
+			Message: i18n.Tf("decode.ime_rule.mode.unknown", rawMode, strings.Join(allowed, ", ")),
 		}
 	}
 

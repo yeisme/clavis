@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/yeisme/clavis/pkg/core/i18n"
 	"github.com/yeisme/clavis/pkg/core/toml"
 )
 
@@ -355,6 +356,10 @@ func (s *ConfigStore) Reload() bool {
 		IMERules: imeRulesCfg,
 	}
 
+	// Speak the language of the config being validated so its diagnostics
+	// localize; the previous language stays until a config decodes cleanly.
+	i18n.SyncConfigLanguage(candidate.Main.Appearance.Language)
+
 	issues := Validate(candidate)
 	var errorIssues []ValidationIssue
 	var warningIssues []ValidationIssue
@@ -400,7 +405,7 @@ func loadConfigFile[T any](dir string, kind ConfigFileKind, decode func(string) 
 	if err != nil {
 		*errs = append(*errs, LoadError{
 			File:    string(kind),
-			Message: fmt.Sprintf("Failed to read file: %v", err),
+			Message: i18n.Tf("decode.store.read_failed", err),
 		})
 		return zero, false
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/yeisme/clavis/pkg/core/i18n"
 	"github.com/yeisme/clavis/pkg/core/toml"
 )
 
@@ -72,6 +73,7 @@ func (c TriggerConfig) toTOML() *toml.Table {
 // AppearanceConfig configures Capsule UI visuals and timings.
 type AppearanceConfig struct {
 	Theme             string  `json:"theme"`
+	Language          string  `json:"language"`
 	CapsuleWidth      float64 `json:"capsuleWidth"`
 	MaxVisibleResults int     `json:"maxVisibleResults"`
 	CornerRadius      float64 `json:"cornerRadius"`
@@ -83,6 +85,7 @@ type AppearanceConfig struct {
 func DefaultAppearanceConfig() AppearanceConfig {
 	return AppearanceConfig{
 		Theme:             "system",
+		Language:          "auto",
 		CapsuleWidth:      680.0,
 		MaxVisibleResults: 8,
 		CornerRadius:      16.0,
@@ -101,6 +104,11 @@ func decodeAppearanceConfig(tbl *toml.Table, path string) (AppearanceConfig, err
 		return cfg, err
 	} else if ok {
 		cfg.Theme = s
+	}
+	if s, ok, err := optionalString(tbl, "language", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.Language = s
 	}
 	if f, ok, err := optionalFloat(tbl, "capsule_width", path); err != nil {
 		return cfg, err
@@ -138,6 +146,7 @@ func decodeAppearanceConfig(tbl *toml.Table, path string) (AppearanceConfig, err
 func (c AppearanceConfig) toTOML() *toml.Table {
 	t := toml.NewTable()
 	t.Set("theme", toml.StringVal(c.Theme))
+	t.Set("language", toml.StringVal(c.Language))
 	t.Set("capsule_width", toml.FloatVal(c.CapsuleWidth))
 	t.Set("max_visible_results", toml.IntVal(int64(c.MaxVisibleResults)))
 	t.Set("corner_radius", toml.FloatVal(c.CornerRadius))
@@ -380,7 +389,7 @@ func checkForbiddenAPIKeys(tbl *toml.Table, path string) error {
 		if _, exists := tbl.Get(forbiddenKey); exists {
 			return &DecodingError{
 				KeyPath: joinPath(path, forbiddenKey),
-				Message: "Raw API keys must never be stored in config.toml; use 'keychain_account' instead",
+				Message: i18n.T("decode.ai.raw_key_forbidden"),
 			}
 		}
 	}

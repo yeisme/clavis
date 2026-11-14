@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/yeisme/clavis/pkg/core/i18n"
 	"github.com/yeisme/clavis/pkg/core/toml"
 )
 
@@ -176,7 +177,7 @@ func decodeLeaderNode(tbl *toml.Table, path string) (LeaderNode, error) {
 	} else {
 		return LeaderNode{}, &DecodingError{
 			KeyPath: joinPath(path, "action"),
-			Message: "Missing required 'action' type",
+			Message: i18n.T("decode.leader.action_missing"),
 		}
 	}
 
@@ -222,7 +223,7 @@ func decodeLeaderNode(tbl *toml.Table, path string) (LeaderNode, error) {
 			}
 			return LeaderNode{}, &DecodingError{
 				KeyPath: joinPath(path, "command"),
-				Message: fmt.Sprintf("Unknown window command '%s'; expected one of: %s", rawCmd, strings.Join(allowed, ", ")),
+				Message: i18n.Tf("decode.leader.window.unknown", rawCmd, strings.Join(allowed, ", ")),
 			}
 		}
 		action = WindowAction(cmd)
@@ -258,7 +259,7 @@ func decodeLeaderNode(tbl *toml.Table, path string) (LeaderNode, error) {
 			}
 			return LeaderNode{}, &DecodingError{
 				KeyPath: joinPath(path, "tab"),
-				Message: fmt.Sprintf("Unknown capsule tab '%s'; expected one of: %s", rawTab, strings.Join(allowed, ", ")),
+				Message: i18n.Tf("decode.leader.tab.unknown", rawTab, strings.Join(allowed, ", ")),
 			}
 		}
 		action = SwitchTabAction(tab)
@@ -285,7 +286,7 @@ func decodeLeaderNode(tbl *toml.Table, path string) (LeaderNode, error) {
 	default:
 		return LeaderNode{}, &DecodingError{
 			KeyPath: joinPath(path, "action"),
-			Message: fmt.Sprintf("Unknown leader action '%s'", actionType),
+			Message: i18n.Tf("decode.leader.action.unknown", actionType),
 		}
 	}
 

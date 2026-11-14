@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
 func TestDefaultGeneratorIdempotencyAndValidity(t *testing.T) {
@@ -616,5 +617,101 @@ preferred_mode = "ascii"
 	}
 	if !store.Reload() {
 		t.Fatalf("Reload after all 5 Save* calls failed: %+v", store.LastErrors())
+	}
+}
+
+// TestAppearanceLanguageLegacyDefault pins the old-config contract: a
+// config.toml written before [appearance].language existed decodes to the
+// "auto" default, an explicit value round-trips through Encode, and the
+// default template and DefaultConfig stay in sync.
+func TestAppearanceLanguageLegacyDefault(t *testing.T) {
+	decoded, err := config.DecodeMainConfig("[appearance]\ntheme = \"dark\"\n")
+	if err != nil {
+		t.Fatalf("decode legacy appearance failed: %v", err)
+	}
+	if decoded.Appearance.Language != "auto" {
+		t.Fatalf("legacy config language = %q, want auto", decoded.Appearance.Language)
+	}
+
+	decoded.Appearance.Language = "zh-CN"
+	encoded := decoded.Encode()
+	if !strings.Contains(encoded, "language = \"zh-CN\"") {
+		t.Fatalf("encoded config lost the language key:\n%s", encoded)
+	}
+	rt, err := config.DecodeMainConfig(encoded)
+	if err != nil {
+		t.Fatalf("decode round-trip failed: %v", err)
+	}
+	if rt.Appearance.Language != "zh-CN" {
+		t.Fatalf("round-trip language = %q, want zh-CN", rt.Appearance.Language)
+	}
+
+	if def := config.DefaultAppearanceConfig(); def.Language != "auto" {
+		t.Fatalf("DefaultAppearanceConfig().Language = %q, want auto", def.Language)
+	}
+	issues := config.ValidateMain(config.DefaultMainConfig())
+	if len(issues) != 0 {
+		t.Fatalf("default config must validate clean, got %+v", issues)
+	}
+	bad := config.DefaultMainConfig()
+	bad.Appearance.Language = "klingon"
+	if !hasIssue(config.ValidateMain(bad), "appearance.language", config.SeverityWarning) {
+		t.Fatalf("expected warning for unknown language, got %+v", config.ValidateMain(bad))
+	}
+}
+
+// TestValidatorDiagnosticsLocalizeToChinese verifies the validator speaks
+// the configured language, and that the store applies it on reload.
+func TestValidatorDiagnosticsLocalizeToChinese(t *testing.T) {
+	defer i18n.SetLanguage(i18n.English)
+	i18n.SetLanguage(i18n.Chinese)
+
+	main := config.DefaultMainConfig()
+	main.Appearance.Theme = "solarized"
+	issues := config.ValidateMain(main)
+	found := false
+	for _, issue := range issues {
+		if issue.KeyPath == "appearance.theme" && issue.Severity == config.SeverityWarning {
+			found = true
+			if !strings.Contains(issue.Message, "未知的 appearance.theme") {
+				t.Fatalf("expected Chinese diagnostic, got %q", issue.Message)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected appearance.theme warning, got %+v", issues)
+	}
+
+	// English restored by the deferred SetLanguage; a store reload of a
+	// zh-CN config switches diagnostics without touching the caller.
+	i18n.SetLanguage(i18n.English)
+	dir := t.TempDir()
+	store := config.NewConfigStore(dir)
+	loaded, err := store.LoadOrInitialize()
+	if err != nil {
+		t.Fatalf("LoadOrInitialize: %v", err)
+	}
+	if loaded.Main.Appearance.Language != "auto" {
+		t.Fatalf("fresh template language = %q, want auto", loaded.Main.Appearance.Language)
+	}
+	main.Appearance.Language = "zh-CN"
+	main.Appearance.Theme = "solarized"
+	if err := store.SaveMain(main); err != nil {
+		t.Fatalf("SaveMain: %v", err)
+	}
+	if !store.Reload() {
+		t.Fatalf("Reload failed: %+v", store.LastErrors())
+	}
+	warned := false
+	for _, w := range store.LastWarnings() {
+		if w.KeyPath == "appearance.theme" {
+			warned = true
+			if !strings.Contains(w.Message, "未知的 appearance.theme") {
+				t.Fatalf("expected Chinese warning from store, got %q", w.Message)
+			}
+		}
+	}
+	if !warned {
+		t.Fatalf("expected theme warning from store, got %+v", store.LastWarnings())
 	}
 }

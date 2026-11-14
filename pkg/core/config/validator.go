@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
 // ValidationSeverity indicates error vs warning.
@@ -51,12 +53,12 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 	if leaderKey == "" {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "trigger.leader_key", Severity: SeverityError,
-			Message: "Trigger leader_key cannot be empty",
+			Message: i18n.T("diag.trigger.leader_key.empty"),
 		})
 	} else if !isSupportedTriggerModifierKey(leaderKey) {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "trigger.leader_key", Severity: SeverityError,
-			Message: fmt.Sprintf("Unsupported trigger leader_key '%s'", main.Trigger.LeaderKey),
+			Message: i18n.Tf("diag.trigger.leader_key.unsupported", main.Trigger.LeaderKey),
 		})
 	}
 
@@ -64,12 +66,12 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 	if doubleTapKey == "" {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "trigger.double_tap_key", Severity: SeverityError,
-			Message: "Trigger double_tap_key cannot be empty",
+			Message: i18n.T("diag.trigger.double_tap_key.empty"),
 		})
 	} else if !isSupportedTriggerModifierKey(doubleTapKey) {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "trigger.double_tap_key", Severity: SeverityError,
-			Message: fmt.Sprintf("Unsupported trigger double_tap_key '%s'", main.Trigger.DoubleTapKey),
+			Message: i18n.Tf("diag.trigger.double_tap_key.unsupported", main.Trigger.DoubleTapKey),
 		})
 	}
 
@@ -77,19 +79,19 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 	if shortcut == "" {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "trigger.capsule_shortcut", Severity: SeverityError,
-			Message: "Trigger capsule_shortcut cannot be empty",
+			Message: i18n.T("diag.trigger.capsule_shortcut.empty"),
 		})
 	} else if !isValidCapsuleShortcut(shortcut) {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "trigger.capsule_shortcut", Severity: SeverityError,
-			Message: fmt.Sprintf("Invalid trigger capsule_shortcut '%s'", main.Trigger.CapsuleShortcut),
+			Message: i18n.Tf("diag.trigger.capsule_shortcut.invalid", main.Trigger.CapsuleShortcut),
 		})
 	}
 
 	if main.Trigger.DoubleTapIntervalMs < 100 || main.Trigger.DoubleTapIntervalMs > 800 {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "trigger.double_tap_interval_ms", Severity: SeverityError,
-			Message: fmt.Sprintf("double_tap_interval_ms must be within 100..800 (got %d)", main.Trigger.DoubleTapIntervalMs),
+			Message: i18n.Tf("diag.trigger.double_tap_interval.range", main.Trigger.DoubleTapIntervalMs),
 		})
 	}
 
@@ -97,7 +99,7 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 	if main.Keymap.TapHoldThresholdMs != 0 && (main.Keymap.TapHoldThresholdMs < 80 || main.Keymap.TapHoldThresholdMs > 500) {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "keymap.tap_hold_threshold_ms", Severity: SeverityError,
-			Message: fmt.Sprintf("tap_hold_threshold_ms must be within 80..500 (got %d)", main.Keymap.TapHoldThresholdMs),
+			Message: i18n.Tf("diag.keymap.tap_hold_threshold.range", main.Keymap.TapHoldThresholdMs),
 		})
 	}
 	for i, r := range main.Keymap.Remaps {
@@ -105,13 +107,13 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 		if strings.TrimSpace(r.From) == "" {
 			issues = append(issues, ValidationIssue{
 				File: file, KeyPath: rPath + ".from", Severity: SeverityError,
-				Message: "Keymap remap 'from' key cannot be empty",
+				Message: i18n.T("diag.keymap.remap.from.empty"),
 			})
 		}
 		if strings.TrimSpace(r.Tap) == "" && strings.TrimSpace(r.Hold) == "" {
 			issues = append(issues, ValidationIssue{
 				File: file, KeyPath: rPath + ".tap", Severity: SeverityError,
-				Message: "Keymap remap rule must specify at least 'tap' or 'hold'",
+				Message: i18n.T("diag.keymap.remap.need_tap_or_hold"),
 			})
 		}
 	}
@@ -120,74 +122,82 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 	if theme == "" {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "appearance.theme", Severity: SeverityError,
-			Message: "appearance.theme cannot be empty",
+			Message: i18n.T("diag.appearance.theme.empty"),
 		})
 	} else if theme != "system" && theme != "light" && theme != "dark" {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "appearance.theme", Severity: SeverityWarning,
-			Message: fmt.Sprintf("Unknown appearance theme '%s'; expected 'system', 'light', or 'dark'", main.Appearance.Theme),
+			Message: i18n.Tf("diag.appearance.theme.unknown", main.Appearance.Theme),
+		})
+	}
+
+	language := strings.TrimSpace(main.Appearance.Language)
+	if language != "" && language != "auto" && language != "zh-CN" && language != "en" {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "appearance.language", Severity: SeverityWarning,
+			Message: i18n.Tf("diag.appearance.language.unknown", main.Appearance.Language),
 		})
 	}
 
 	if math.IsNaN(main.Appearance.CapsuleWidth) || math.IsInf(main.Appearance.CapsuleWidth, 0) || main.Appearance.CapsuleWidth <= 0 {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "appearance.capsule_width", Severity: SeverityError,
-			Message: "capsule_width must be positive",
+			Message: i18n.T("diag.appearance.capsule_width.positive"),
 		})
 	}
 	if main.Appearance.MaxVisibleResults <= 0 {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "appearance.max_visible_results", Severity: SeverityError,
-			Message: "max_visible_results must be positive",
+			Message: i18n.T("diag.appearance.max_visible.positive"),
 		})
 	}
 	if math.IsNaN(main.Appearance.CornerRadius) || math.IsInf(main.Appearance.CornerRadius, 0) || main.Appearance.CornerRadius < 0 {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "appearance.corner_radius", Severity: SeverityError,
-			Message: "appearance.corner_radius must be non-negative",
+			Message: i18n.T("diag.appearance.corner_radius.nonneg"),
 		})
 	}
 
 	if strings.TrimSpace(main.AI.Provider) == "" {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "ai.provider", Severity: SeverityError,
-			Message: "AI provider cannot be empty",
+			Message: i18n.T("diag.ai.provider.empty"),
 		})
 	}
 	if main.AI.Protocol != "" && !isValidAIProtocol(main.AI.Protocol) {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "ai.protocol", Severity: SeverityError,
-			Message: fmt.Sprintf("Unsupported AI protocol '%s'", main.AI.Protocol),
+			Message: i18n.Tf("diag.ai.protocol.unsupported", main.AI.Protocol),
 		})
 	}
 	if !isValidHTTPURL(main.AI.BaseURL) {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "ai.base_url", Severity: SeverityError,
-			Message: fmt.Sprintf("AI base_url '%s' must be a valid http or https URL with a host", main.AI.BaseURL),
+			Message: i18n.Tf("diag.ai.base_url.invalid", main.AI.BaseURL),
 		})
 	}
 	if strings.TrimSpace(main.AI.Model) == "" {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "ai.model", Severity: SeverityError,
-			Message: "AI model cannot be empty",
+			Message: i18n.T("diag.ai.model.empty"),
 		})
 	}
 	if strings.TrimSpace(main.AI.KeychainAccount) == "" {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "ai.keychain_account", Severity: SeverityError,
-			Message: "AI keychain_account cannot be empty",
+			Message: i18n.T("diag.ai.keychain_account.empty"),
 		})
 	}
 	if math.IsNaN(main.AI.Temperature) || math.IsInf(main.AI.Temperature, 0) || main.AI.Temperature < 0.0 || main.AI.Temperature > 2.0 {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "ai.temperature", Severity: SeverityWarning,
-			Message: fmt.Sprintf("AI temperature %v is outside recommended 0.0..2.0 range", main.AI.Temperature),
+			Message: i18n.Tf("diag.ai.temperature.range", main.AI.Temperature),
 		})
 	}
 	if math.IsNaN(main.AI.TimeoutSeconds) || math.IsInf(main.AI.TimeoutSeconds, 0) || main.AI.TimeoutSeconds <= 0 {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "ai.timeout_seconds", Severity: SeverityError,
-			Message: "AI timeout_seconds must be positive",
+			Message: i18n.T("diag.ai.timeout.positive"),
 		})
 	}
 
@@ -199,12 +209,12 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 			if pid == "" {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: pPath + ".id", Severity: SeverityError,
-					Message: "AI profile id cannot be empty",
+					Message: i18n.T("diag.ai.profile.id.empty"),
 				})
 			} else if _, dup := seenProfiles[pid]; dup {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: pPath + ".id", Severity: SeverityError,
-					Message: fmt.Sprintf("Duplicate AI profile id '%s'", prof.ID),
+					Message: i18n.Tf("diag.ai.profile.id.duplicate", prof.ID),
 				})
 			} else {
 				seenProfiles[pid] = struct{}{}
@@ -212,43 +222,43 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 			if strings.TrimSpace(prof.Provider) == "" {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: pPath + ".provider", Severity: SeverityError,
-					Message: "AI profile provider cannot be empty",
+					Message: i18n.T("diag.ai.profile.provider.empty"),
 				})
 			}
 			if prof.Protocol != "" && !isValidAIProtocol(prof.Protocol) {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: pPath + ".protocol", Severity: SeverityError,
-					Message: fmt.Sprintf("Unsupported AI profile protocol '%s'", prof.Protocol),
+					Message: i18n.Tf("diag.ai.profile.protocol.unsupported", prof.Protocol),
 				})
 			}
 			if !isValidHTTPURL(prof.BaseURL) {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: pPath + ".base_url", Severity: SeverityError,
-					Message: fmt.Sprintf("AI profile base_url '%s' must be a valid http or https URL with a host", prof.BaseURL),
+					Message: i18n.Tf("diag.ai.profile.base_url.invalid", prof.BaseURL),
 				})
 			}
 			if strings.TrimSpace(prof.Model) == "" {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: pPath + ".model", Severity: SeverityError,
-					Message: "AI profile model cannot be empty",
+					Message: i18n.T("diag.ai.profile.model.empty"),
 				})
 			}
 			if strings.TrimSpace(prof.KeychainAccount) == "" && !strings.EqualFold(strings.TrimSpace(prof.Provider), "ollama") {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: pPath + ".keychain_account", Severity: SeverityError,
-					Message: "AI profile keychain_account cannot be empty",
+					Message: i18n.T("diag.ai.profile.keychain_account.empty"),
 				})
 			}
 			if math.IsNaN(prof.Temperature) || math.IsInf(prof.Temperature, 0) || prof.Temperature < 0.0 || prof.Temperature > 2.0 {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: pPath + ".temperature", Severity: SeverityWarning,
-					Message: fmt.Sprintf("AI profile temperature %v is outside recommended 0.0..2.0 range", prof.Temperature),
+					Message: i18n.Tf("diag.ai.profile.temperature.range", prof.Temperature),
 				})
 			}
 			if math.IsNaN(prof.TimeoutSeconds) || math.IsInf(prof.TimeoutSeconds, 0) || prof.TimeoutSeconds <= 0 {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: pPath + ".timeout_seconds", Severity: SeverityError,
-					Message: "AI profile timeout_seconds must be positive",
+					Message: i18n.T("diag.ai.profile.timeout.positive"),
 				})
 			}
 		}
@@ -256,7 +266,7 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 			if _, ok := main.AI.ProfileByID(main.AI.ActiveProfileID); !ok {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: "ai.active_profile_id", Severity: SeverityError,
-					Message: fmt.Sprintf("Active AI profile '%s' not found in ai.profiles", main.AI.ActiveProfileID),
+					Message: i18n.Tf("diag.ai.profile.active_missing", main.AI.ActiveProfileID),
 				})
 			}
 		}
@@ -265,20 +275,20 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 	if main.Clipboard.MaxHistoryItems <= 0 {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "clipboard.max_history_items", Severity: SeverityError,
-			Message: "clipboard.max_history_items must be positive",
+			Message: i18n.T("diag.clipboard.max_history.positive"),
 		})
 	}
 	if main.Clipboard.RetentionDays < 0 {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "clipboard.retention_days", Severity: SeverityError,
-			Message: "clipboard.retention_days cannot be negative",
+			Message: i18n.T("diag.clipboard.retention_days.nonneg"),
 		})
 	}
 
 	if main.IME.Enabled && strings.TrimSpace(main.IME.DefaultInputSourceID) == "" {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "ime.default_input_source_id", Severity: SeverityError,
-			Message: "ime.default_input_source_id cannot be empty when IME is enabled",
+			Message: i18n.T("diag.ime.default_input_source.required"),
 		})
 	}
 
@@ -303,12 +313,12 @@ func validateLeaderLevel(nodes []LeaderNode, basePath string, knownSnippetIDs ma
 		if trimmedKey == "" {
 			*issues = append(*issues, ValidationIssue{
 				File: file, KeyPath: nodePath + ".key", Severity: SeverityError,
-				Message: "Leader node key cannot be empty",
+				Message: i18n.T("diag.leader.node.key.empty"),
 			})
 		} else if firstIdx, dup := seenKeys[node.Key]; dup {
 			*issues = append(*issues, ValidationIssue{
 				File: file, KeyPath: nodePath + ".key", Severity: SeverityError,
-				Message: fmt.Sprintf("Duplicate leader key '%s' at the same level (first seen at index %d)", node.Key, firstIdx),
+				Message: i18n.Tf("diag.leader.key.duplicate", node.Key, firstIdx),
 			})
 		} else {
 			seenKeys[node.Key] = i
@@ -317,7 +327,7 @@ func validateLeaderLevel(nodes []LeaderNode, basePath string, knownSnippetIDs ma
 		if strings.TrimSpace(node.Label) == "" {
 			*issues = append(*issues, ValidationIssue{
 				File: file, KeyPath: nodePath + ".label", Severity: SeverityError,
-				Message: "Leader node label cannot be empty",
+				Message: i18n.T("diag.leader.node.label.empty"),
 			})
 		}
 
@@ -326,7 +336,7 @@ func validateLeaderLevel(nodes []LeaderNode, basePath string, knownSnippetIDs ma
 			if len(node.Action.Children) == 0 {
 				*issues = append(*issues, ValidationIssue{
 					File: file, KeyPath: nodePath + ".children", Severity: SeverityWarning,
-					Message: fmt.Sprintf("Leader group '%s' has no child nodes", node.Label),
+					Message: i18n.Tf("diag.leader.group.empty", node.Label),
 				})
 			} else {
 				validateLeaderLevel(node.Action.Children, nodePath+".children", knownSnippetIDs, issues)
@@ -335,40 +345,40 @@ func validateLeaderLevel(nodes []LeaderNode, basePath string, knownSnippetIDs ma
 			if strings.TrimSpace(node.Action.Mode) == "" {
 				*issues = append(*issues, ValidationIssue{
 					File: file, KeyPath: nodePath + ".mode", Severity: SeverityError,
-					Message: "AI rewrite mode cannot be empty",
+					Message: i18n.T("diag.leader.ai_rewrite.mode.empty"),
 				})
 			}
 			if strings.TrimSpace(node.Action.Prompt) == "" {
 				*issues = append(*issues, ValidationIssue{
 					File: file, KeyPath: nodePath + ".prompt", Severity: SeverityError,
-					Message: "AI rewrite prompt cannot be empty",
+					Message: i18n.T("diag.leader.ai_rewrite.prompt.empty"),
 				})
 			}
 		case ActionCLI:
 			if strings.TrimSpace(node.Action.Command) == "" {
 				*issues = append(*issues, ValidationIssue{
 					File: file, KeyPath: nodePath + ".command", Severity: SeverityError,
-					Message: "CLI action command cannot be empty",
+					Message: i18n.T("diag.leader.cli.command.empty"),
 				})
 			}
 		case ActionOpenApp:
 			if strings.TrimSpace(node.Action.Target) == "" {
 				*issues = append(*issues, ValidationIssue{
 					File: file, KeyPath: nodePath + ".target", Severity: SeverityError,
-					Message: "Open app target cannot be empty",
+					Message: i18n.T("diag.leader.open_app.target.empty"),
 				})
 			}
 		case ActionSnippet:
 			if strings.TrimSpace(node.Action.SnippetID) == "" {
 				*issues = append(*issues, ValidationIssue{
 					File: file, KeyPath: nodePath + ".snippet_id", Severity: SeverityError,
-					Message: "Snippet action id cannot be empty",
+					Message: i18n.T("diag.leader.snippet.id.empty"),
 				})
 			} else if knownSnippetIDs != nil {
 				if _, ok := knownSnippetIDs[node.Action.SnippetID]; !ok {
 					*issues = append(*issues, ValidationIssue{
 						File: file, KeyPath: nodePath + ".snippet_id", Severity: SeverityWarning,
-						Message: fmt.Sprintf("Referenced snippet id '%s' does not exist in snippets.toml", node.Action.SnippetID),
+						Message: i18n.Tf("diag.leader.snippet.missing", node.Action.SnippetID),
 					})
 				}
 			}
@@ -376,14 +386,14 @@ func validateLeaderLevel(nodes []LeaderNode, basePath string, knownSnippetIDs ma
 			if !isValidWindowCommand(node.Action.WindowCommand) {
 				*issues = append(*issues, ValidationIssue{
 					File: file, KeyPath: nodePath + ".command", Severity: SeverityError,
-					Message: fmt.Sprintf("Unknown window command '%s'", node.Action.WindowCommand),
+					Message: i18n.Tf("diag.leader.window.unknown", node.Action.WindowCommand),
 				})
 			}
 		case ActionSwitchTab:
 			if !isValidCapsuleTab(node.Action.Tab) {
 				*issues = append(*issues, ValidationIssue{
 					File: file, KeyPath: nodePath + ".tab", Severity: SeverityError,
-					Message: fmt.Sprintf("Unknown capsule tab '%s'", node.Action.Tab),
+					Message: i18n.Tf("diag.leader.tab.unknown", node.Action.Tab),
 				})
 			}
 		case ActionToggleIME, ActionNormalizeGlossary:
@@ -391,7 +401,7 @@ func validateLeaderLevel(nodes []LeaderNode, basePath string, knownSnippetIDs ma
 		default:
 			*issues = append(*issues, ValidationIssue{
 				File: file, KeyPath: nodePath + ".action", Severity: SeverityError,
-				Message: fmt.Sprintf("Unknown leader action '%s'", node.Action.Type),
+				Message: i18n.Tf("diag.leader.action.unknown", node.Action.Type),
 			})
 		}
 	}
@@ -409,12 +419,12 @@ func ValidateSnippets(snippets SnippetsConfig) []ValidationIssue {
 		if strings.TrimSpace(item.ID) == "" {
 			issues = append(issues, ValidationIssue{
 				File: file, KeyPath: path + ".id", Severity: SeverityError,
-				Message: "Snippet id cannot be empty",
+				Message: i18n.T("diag.snippet.id.empty"),
 			})
 		} else if _, dup := seenIDs[item.ID]; dup {
 			issues = append(issues, ValidationIssue{
 				File: file, KeyPath: path + ".id", Severity: SeverityError,
-				Message: fmt.Sprintf("Duplicate snippet id '%s'", item.ID),
+				Message: i18n.Tf("diag.snippet.id.duplicate", item.ID),
 			})
 		} else {
 			seenIDs[item.ID] = struct{}{}
@@ -423,12 +433,12 @@ func ValidateSnippets(snippets SnippetsConfig) []ValidationIssue {
 		if strings.TrimSpace(item.Trigger) == "" {
 			issues = append(issues, ValidationIssue{
 				File: file, KeyPath: path + ".trigger", Severity: SeverityError,
-				Message: "Snippet trigger cannot be empty",
+				Message: i18n.T("diag.snippet.trigger.empty"),
 			})
 		} else if _, dup := seenTriggers[item.Trigger]; dup {
 			issues = append(issues, ValidationIssue{
 				File: file, KeyPath: path + ".trigger", Severity: SeverityError,
-				Message: fmt.Sprintf("Duplicate snippet trigger '%s'", item.Trigger),
+				Message: i18n.Tf("diag.snippet.trigger.duplicate", item.Trigger),
 			})
 		} else {
 			seenTriggers[item.Trigger] = struct{}{}
@@ -449,14 +459,14 @@ func ValidateGlossary(glossary GlossaryConfig) []ValidationIssue {
 		if trimmedTerm == "" {
 			issues = append(issues, ValidationIssue{
 				File: file, KeyPath: path + ".term", Severity: SeverityError,
-				Message: "Glossary term cannot be empty",
+				Message: i18n.T("diag.glossary.term.empty"),
 			})
 		} else {
 			lower := strings.ToLower(trimmedTerm)
 			if _, dup := seenTerms[lower]; dup {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: path + ".term", Severity: SeverityWarning,
-					Message: fmt.Sprintf("Duplicate glossary term '%s'", entry.Term),
+					Message: i18n.Tf("diag.glossary.term.duplicate", entry.Term),
 				})
 			} else {
 				seenTerms[lower] = struct{}{}
@@ -483,7 +493,7 @@ func ValidateIMERules(imeRules IMERulesConfig) []ValidationIssue {
 		if bundleID == "" && procName == "" {
 			issues = append(issues, ValidationIssue{
 				File: file, KeyPath: path + ".bundle_id", Severity: SeverityError,
-				Message: "IME rule must specify bundle_id or process_name",
+				Message: i18n.T("diag.ime_rule.target.required"),
 			})
 		}
 		if bundleID != "" {
@@ -491,7 +501,7 @@ func ValidateIMERules(imeRules IMERulesConfig) []ValidationIssue {
 			if _, dup := seenBundleIDs[key]; dup {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: path + ".bundle_id", Severity: SeverityError,
-					Message: fmt.Sprintf("Duplicate IME rule for bundle_id '%s'", rule.BundleID),
+					Message: i18n.Tf("diag.ime_rule.bundle.duplicate", rule.BundleID),
 				})
 			} else {
 				seenBundleIDs[key] = struct{}{}
@@ -502,7 +512,7 @@ func ValidateIMERules(imeRules IMERulesConfig) []ValidationIssue {
 			if _, dup := seenProcessNames[lowerProc]; dup {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: path + ".process_name", Severity: SeverityError,
-					Message: fmt.Sprintf("Duplicate IME rule for process_name '%s'", rule.ProcessName),
+					Message: i18n.Tf("diag.ime_rule.process.duplicate", rule.ProcessName),
 				})
 			} else {
 				seenProcessNames[lowerProc] = struct{}{}
@@ -512,7 +522,7 @@ func ValidateIMERules(imeRules IMERulesConfig) []ValidationIssue {
 			if _, err := regexp.Compile(titlePat); err != nil {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: path + ".title_pattern", Severity: SeverityError,
-					Message: fmt.Sprintf("Invalid title_pattern regular expression '%s': %v", rule.TitlePattern, err),
+					Message: i18n.Tf("diag.ime_rule.title_pattern.invalid", rule.TitlePattern, err),
 				})
 			}
 		}
@@ -523,13 +533,13 @@ func ValidateIMERules(imeRules IMERulesConfig) []ValidationIssue {
 			}
 			issues = append(issues, ValidationIssue{
 				File: file, KeyPath: path + ".preferred_mode", Severity: SeverityError,
-				Message: fmt.Sprintf("Unknown preferred_mode '%s'; expected one of: %s", rule.PreferredMode, strings.Join(allowed, ", ")),
+				Message: i18n.Tf("diag.ime_rule.mode.unknown", rule.PreferredMode, strings.Join(allowed, ", ")),
 			})
 		}
 		if strings.TrimSpace(rule.InputSourceID) == "" && (rule.PreferredMode == "" || !isValidIMEMode(rule.PreferredMode)) {
 			issues = append(issues, ValidationIssue{
 				File: file, KeyPath: path + ".input_source_id", Severity: SeverityError,
-				Message: "IME rule must specify input_source_id when preferred_mode is empty",
+				Message: i18n.T("diag.ime_rule.source.required"),
 			})
 		}
 	}

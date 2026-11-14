@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 
+	"github.com/yeisme/clavis/pkg/core/i18n"
 	"github.com/yeisme/clavis/pkg/core/toml"
 )
 
@@ -71,10 +72,10 @@ func joinPath(base, key string) string {
 func requiredString(tbl *toml.Table, key, path string) (string, error) {
 	v, ok := tbl.Get(key)
 	if !ok {
-		return "", &DecodingError{KeyPath: joinPath(path, key), Message: "Missing required string"}
+		return "", &DecodingError{KeyPath: joinPath(path, key), Message: i18n.T("decode.missing_string")}
 	}
 	if v.Kind != toml.KindString {
-		return "", &DecodingError{KeyPath: joinPath(path, key), Message: "Expected string"}
+		return "", &DecodingError{KeyPath: joinPath(path, key), Message: i18n.T("decode.expected_string")}
 	}
 	return v.Str, nil
 }
@@ -85,7 +86,7 @@ func optionalString(tbl *toml.Table, key, path string) (string, bool, error) {
 		return "", false, nil
 	}
 	if v.Kind != toml.KindString {
-		return "", false, &DecodingError{KeyPath: joinPath(path, key), Message: "Expected string"}
+		return "", false, &DecodingError{KeyPath: joinPath(path, key), Message: i18n.T("decode.expected_string")}
 	}
 	return v.Str, true, nil
 }
@@ -96,7 +97,7 @@ func optionalInt(tbl *toml.Table, key, path string) (int, bool, error) {
 		return 0, false, nil
 	}
 	if v.Kind != toml.KindInt {
-		return 0, false, &DecodingError{KeyPath: joinPath(path, key), Message: "Expected integer"}
+		return 0, false, &DecodingError{KeyPath: joinPath(path, key), Message: i18n.T("decode.expected_integer")}
 	}
 	return int(v.Int), true, nil
 }
@@ -108,7 +109,7 @@ func optionalFloat(tbl *toml.Table, key, path string) (float64, bool, error) {
 	}
 	n, isNum := v.AsNumber()
 	if !isNum {
-		return 0, false, &DecodingError{KeyPath: joinPath(path, key), Message: "Expected number"}
+		return 0, false, &DecodingError{KeyPath: joinPath(path, key), Message: i18n.T("decode.expected_number")}
 	}
 	return n, true, nil
 }
@@ -119,7 +120,7 @@ func optionalBool(tbl *toml.Table, key, path string) (bool, bool, error) {
 		return false, false, nil
 	}
 	if v.Kind != toml.KindBool {
-		return false, false, &DecodingError{KeyPath: joinPath(path, key), Message: "Expected boolean"}
+		return false, false, &DecodingError{KeyPath: joinPath(path, key), Message: i18n.T("decode.expected_boolean")}
 	}
 	return v.Bool, true, nil
 }
@@ -130,14 +131,14 @@ func optionalStringArray(tbl *toml.Table, key, path string) ([]string, bool, err
 		return nil, false, nil
 	}
 	if v.Kind != toml.KindArray {
-		return nil, false, &DecodingError{KeyPath: joinPath(path, key), Message: "Expected array of strings"}
+		return nil, false, &DecodingError{KeyPath: joinPath(path, key), Message: i18n.T("decode.expected_string_array")}
 	}
 	out := make([]string, 0, len(v.Array))
 	for i, elem := range v.Array {
 		if elem.Kind != toml.KindString {
 			return nil, false, &DecodingError{
 				KeyPath: fmt.Sprintf("%s[%d]", joinPath(path, key), i),
-				Message: "Expected string element",
+				Message: i18n.T("decode.expected_string_element"),
 			}
 		}
 		out = append(out, elem.Str)
@@ -151,7 +152,7 @@ func optionalTable(tbl *toml.Table, key, path string) (*toml.Table, bool, error)
 		return nil, false, nil
 	}
 	if v.Kind != toml.KindTable || v.Table == nil {
-		return nil, false, &DecodingError{KeyPath: joinPath(path, key), Message: "Expected table"}
+		return nil, false, &DecodingError{KeyPath: joinPath(path, key), Message: i18n.T("decode.expected_table")}
 	}
 	return v.Table, true, nil
 }
@@ -162,14 +163,14 @@ func optionalTableArray(tbl *toml.Table, key, path string) ([]*toml.Table, bool,
 		return nil, false, nil
 	}
 	if v.Kind != toml.KindArray {
-		return nil, false, &DecodingError{KeyPath: joinPath(path, key), Message: "Expected array of tables"}
+		return nil, false, &DecodingError{KeyPath: joinPath(path, key), Message: i18n.T("decode.expected_table_array")}
 	}
 	out := make([]*toml.Table, 0, len(v.Array))
 	for i, elem := range v.Array {
 		if elem.Kind != toml.KindTable || elem.Table == nil {
 			return nil, false, &DecodingError{
 				KeyPath: fmt.Sprintf("%s[%d]", joinPath(path, key), i),
-				Message: "Expected table element",
+				Message: i18n.T("decode.expected_table_element"),
 			}
 		}
 		out = append(out, elem.Table)
