@@ -13,8 +13,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/yeisme/clavis/pkg/core/clipboard"
@@ -82,8 +84,9 @@ const (
 	vkOem6      = 0xDD // ]}
 	vkOem7      = 0xDE // '"
 
-	inputKeyboard  = 1
-	keyeventfKeyUp = 0x0002
+	inputKeyboard    = 1
+	keyeventfKeyUp   = 0x0002
+	keyeventfUnicode = 0x0004
 
 	cfUnicodeText = 13
 	gmemMoveable  = 0x0002
@@ -258,16 +261,21 @@ type windowsBridge struct {
 	lastProcMu      sync.RWMutex
 	lastProcessName string
 
-	router       *triggerRouter
-	keymapEngine *KeymapLayerEngine
-	imeEngine    *IMESwitchDecisionEngine
-	imeCfg       config.IMEConfig
-	windowCalc   *WindowLayoutCalculator
-	pbTracker    *selfPasteboardTracker
-	pbRestorer   *PasteboardSnapshotRestorer
-	onIME        func(host.InputSourceInfo)
-	onLayer      func(string)
-	lastLayer    string
+	router        *triggerRouter
+	keymapEngine  *KeymapLayerEngine
+	imeEngine     *IMESwitchDecisionEngine
+	imeCfg        config.IMEConfig
+	windowCalc    *WindowLayoutCalculator
+	pbTracker     *selfPasteboardTracker
+	pbRestorer    *PasteboardSnapshotRestorer
+	onIME         func(host.InputSourceInfo)
+	onLayer       func(string)
+	lastLayer     string
+	inlineMu      sync.RWMutex
+	inlineHandler func(host.InlineKeyEvent) bool
+	inlineEnabled atomic.Bool
+	shiftDown     bool
+	shiftHadKey   bool
 }
 
 func newPlatformBridge(opts Options) HostService {
@@ -563,6 +571,23 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 	}
 
 	if modName, ok := winVKToModifier(vk); ok && (isDown || isUp) {
+		if modName == "shift" {
+			if isDown {
+				b.shiftDown = true
+				b.shiftHadKey = false
+			}
+			if !isDown && b.shiftDown && !b.shiftHadKey && b.inlineEnabled.Load() {
+				_ = b.callInline(host.InlineKeyEvent{KeyName: "shift_tap", KeyCode: vk, IsDown: true, TimestampMs: nowMs})
+				b.shiftDown = false
+				return 1
+			}
+			if !isDown {
+				b.shiftDown = false
+			}
+		}
+		if b.inlineEnabled.Load() && b.callInline(host.InlineKeyEvent{KeyName: modName, KeyCode: vk, Modifiers: winActiveModifiers(), IsDown: isDown, IsRepeat: isDown && info.Flags&llkhfInjected != 0, TimestampMs: nowMs}) {
+			return 1
+		}
 		otherDown := winOtherModifiersDown(vk)
 		events := b.router.HandleModifier(modName, isDown, otherDown, nowMs)
 		b.emitTriggerEvents(events)
@@ -571,7 +596,13 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 	}
 
 	if isDown {
+		if b.shiftDown {
+			b.shiftHadKey = true
+		}
 		keyName := winVKToKeyName(vk)
+		if b.inlineEnabled.Load() && b.callInline(host.InlineKeyEvent{KeyName: keyName, Rune: winVKToUnicode(vk, info.ScanCode), KeyCode: vk, Modifiers: winActiveModifiers(), IsDown: true, TimestampMs: nowMs}) {
+			return 1
+		}
 		mods := winActiveModifiers()
 		unicodeStr := winVKToUnicode(vk, info.ScanCode)
 		// Under IMM32 a shared HKL keeps native (Chinese) conversion mode active; keystrokes then
@@ -967,6 +998,22 @@ func winDisplays() []DisplayInfo {
 func (b *windowsBridge) InjectText(ctx context.Context, text string, deleteCount int, cursorBackOffset int) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if utf8.RuneCountInString(text) <= 256 && !strings.ContainsAny(text, "\r\n\t") {
+		inputs := make([]winInput, 0, deleteCount*2+cursorBackOffset*2+len([]rune(text))*2)
+		for i := 0; i < deleteCount; i++ {
+			inputs = append(inputs, winInput{Typ: inputKeyboard, Ki: keybdInput{WVk: vkBack, DwExtraInfo: uintptr(SyntheticEventTag)}}, winInput{Typ: inputKeyboard, Ki: keybdInput{WVk: vkBack, DwFlags: keyeventfKeyUp, DwExtraInfo: uintptr(SyntheticEventTag)}})
+		}
+		for _, u := range utf16.Encode([]rune(text)) {
+			inputs = append(inputs, winInput{Typ: inputKeyboard, Ki: keybdInput{WScan: u, DwFlags: keyeventfUnicode, DwExtraInfo: uintptr(SyntheticEventTag)}}, winInput{Typ: inputKeyboard, Ki: keybdInput{WScan: u, DwFlags: keyeventfUnicode | keyeventfKeyUp, DwExtraInfo: uintptr(SyntheticEventTag)}})
+		}
+		for i := 0; i < cursorBackOffset; i++ {
+			inputs = append(inputs, winInput{Typ: inputKeyboard, Ki: keybdInput{WVk: vkLeft, DwExtraInfo: uintptr(SyntheticEventTag)}}, winInput{Typ: inputKeyboard, Ki: keybdInput{WVk: vkLeft, DwFlags: keyeventfKeyUp, DwExtraInfo: uintptr(SyntheticEventTag)}})
+		}
+		if len(inputs) > 0 {
+			procSendInput.Call(uintptr(len(inputs)), uintptr(unsafe.Pointer(&inputs[0])), unsafe.Sizeof(inputs[0]))
+		}
+		return nil
 	}
 
 	snap, snapErr := b.pbRestorer.Capture()

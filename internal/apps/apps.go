@@ -1,6 +1,7 @@
 package apps
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"math"
@@ -46,11 +47,23 @@ func normalizeIconSizePx(sizePx int) int {
 
 // MyGoAppProvider wraps mygo.Shell.InstalledApps() and mygo.Shell.FileIcon(path, sizePx)
 // with thread-safe in-memory caching for the application list and PNG icons.
+const (
+	maxIconEntries = 256
+	maxIconBytes   = 16 << 20
+)
+
+type iconCacheEntry struct {
+	key  string
+	data []byte
+}
+
 type MyGoAppProvider struct {
 	mu         sync.RWMutex
 	appsLoaded bool
 	appsCache  []engine.InstalledAppEntry
-	iconCache  map[string][]byte
+	iconCache  map[string]*list.Element
+	iconLRU    *list.List
+	iconBytes  int
 
 	// Optional overrides for unit testing; when nil, uses mygo.App.IsReady() and mygo.Shell.
 	IsReadyFn       func() bool
@@ -62,9 +75,7 @@ var _ AppProvider = (*MyGoAppProvider)(nil)
 
 // NewMyGoAppProvider constructs a MyGoAppProvider with an empty in-memory cache.
 func NewMyGoAppProvider() *MyGoAppProvider {
-	return &MyGoAppProvider{
-		iconCache: make(map[string][]byte),
-	}
+	return &MyGoAppProvider{iconCache: make(map[string]*list.Element), iconLRU: list.New()}
 }
 
 // InvalidateCache clears both the cached application list and icon PNG cache.
@@ -73,6 +84,12 @@ func (p *MyGoAppProvider) InvalidateCache() {
 	p.appsLoaded = false
 	p.appsCache = nil
 	clear(p.iconCache)
+	if p.iconLRU == nil {
+		p.iconLRU = list.New()
+	} else {
+		p.iconLRU.Init()
+	}
+	p.iconBytes = 0
 	p.mu.Unlock()
 }
 
@@ -172,14 +189,15 @@ func (p *MyGoAppProvider) IconPNG(path string, sizePx int) ([]byte, error) {
 	effSize := normalizeIconSizePx(sizePx)
 	cacheKey := fmt.Sprintf("%s#%d", trimmed, effSize)
 
-	p.mu.RLock()
-	if data, ok := p.iconCache[cacheKey]; ok {
-		copied := make([]byte, len(data))
-		copy(copied, data)
-		p.mu.RUnlock()
+	p.mu.Lock()
+	if el, ok := p.iconCache[cacheKey]; ok {
+		p.iconLRU.MoveToFront(el)
+		data := el.Value.(iconCacheEntry).data
+		copied := append([]byte(nil), data...)
+		p.mu.Unlock()
 		return copied, nil
 	}
-	p.mu.RUnlock()
+	p.mu.Unlock()
 
 	if !p.isReadyForIcons() {
 		return nil, nil
@@ -195,13 +213,34 @@ func (p *MyGoAppProvider) IconPNG(path string, sizePx int) ([]byte, error) {
 	}
 
 	if len(pngBytes) > 0 {
+		stored := append([]byte(nil), pngBytes...)
 		p.mu.Lock()
 		if p.iconCache == nil {
-			p.iconCache = make(map[string][]byte)
+			p.iconCache = make(map[string]*list.Element)
 		}
-		stored := make([]byte, len(pngBytes))
-		copy(stored, pngBytes)
-		p.iconCache[cacheKey] = stored
+		if p.iconLRU == nil {
+			p.iconLRU = list.New()
+		}
+		if old, ok := p.iconCache[cacheKey]; ok {
+			p.iconBytes -= len(old.Value.(iconCacheEntry).data)
+			old.Value = iconCacheEntry{key: cacheKey, data: stored}
+			p.iconBytes += len(stored)
+			p.iconLRU.MoveToFront(old)
+		} else {
+			el := p.iconLRU.PushFront(iconCacheEntry{key: cacheKey, data: stored})
+			p.iconCache[cacheKey] = el
+			p.iconBytes += len(stored)
+		}
+		for p.iconLRU.Len() > maxIconEntries || p.iconBytes > maxIconBytes {
+			el := p.iconLRU.Back()
+			if el == nil {
+				break
+			}
+			entry := el.Value.(iconCacheEntry)
+			delete(p.iconCache, entry.key)
+			p.iconBytes -= len(entry.data)
+			p.iconLRU.Remove(el)
+		}
 		p.mu.Unlock()
 	}
 

@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -234,6 +235,7 @@ var (
 	cgEventGetLocation           func(event uintptr) cgPoint
 	cgEventCreateKeyboardEvent   func(source uintptr, virtualKey uint16, keyDown bool) uintptr
 	cgEventKeyboardGetUnicodeStr func(event uintptr, maxLen uint, actualLen *uint, unicodeStr *uint16)
+	cgEventKeyboardSetUnicodeStr func(event uintptr, length uint, unicodeStr *uint16)
 	cgEventPost                  func(tap uint32, event uintptr)
 	cgMainDisplayID              func() uint32
 	cgDisplayBounds              func(display uint32) cgRect
@@ -377,6 +379,7 @@ func initDarwin() error {
 		reg(&cgEventGetLocation, libCG, "CGEventGetLocation")
 		reg(&cgEventCreateKeyboardEvent, libCG, "CGEventCreateKeyboardEvent")
 		reg(&cgEventKeyboardGetUnicodeStr, libCG, "CGEventKeyboardGetUnicodeString")
+		reg(&cgEventKeyboardSetUnicodeStr, libCG, "CGEventKeyboardSetUnicodeString")
 		reg(&cgEventPost, libCG, "CGEventPost")
 		reg(&cgMainDisplayID, libCG, "CGMainDisplayID")
 		reg(&cgDisplayBounds, libCG, "CGDisplayBounds")
@@ -505,16 +508,21 @@ type darwinBridge struct {
 	lastBundleIDMu sync.RWMutex
 	lastBundleID   string
 
-	router       *triggerRouter
-	keymapEngine *KeymapLayerEngine
-	imeEngine    *IMESwitchDecisionEngine
-	imeCfg       config.IMEConfig
-	windowCalc   *WindowLayoutCalculator
-	pbTracker    *selfPasteboardTracker
-	pbRestorer   *PasteboardSnapshotRestorer
-	onIME        func(host.InputSourceInfo)
-	onLayer      func(string)
-	lastLayer    string
+	router        *triggerRouter
+	keymapEngine  *KeymapLayerEngine
+	imeEngine     *IMESwitchDecisionEngine
+	imeCfg        config.IMEConfig
+	windowCalc    *WindowLayoutCalculator
+	pbTracker     *selfPasteboardTracker
+	pbRestorer    *PasteboardSnapshotRestorer
+	onIME         func(host.InputSourceInfo)
+	onLayer       func(string)
+	lastLayer     string
+	inlineMu      sync.RWMutex
+	inlineHandler func(host.InlineKeyEvent) bool
+	inlineEnabled atomic.Bool
+	shiftDown     bool
+	shiftHadKey   bool
 }
 
 func newPlatformBridge(opts Options) HostService {
@@ -858,6 +866,20 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 
 	case kCGEventFlagsChanged:
 		modName, isDown, otherDown := darwinModifierEvent(keyCode, flags)
+		if modName == "shift" {
+			if isDown {
+				b.shiftDown = true
+				b.shiftHadKey = false
+			}
+			if !isDown && b.shiftDown && !b.shiftHadKey && b.inlineEnabled.Load() && !isSecureEventInputEnabled() && !b.isIMKInputSource() {
+				_ = b.callInline(host.InlineKeyEvent{KeyName: "shift_tap", KeyCode: keyCode, IsDown: true, TimestampMs: nowMs})
+				b.shiftDown = false
+				return 0
+			}
+			if !isDown {
+				b.shiftDown = false
+			}
+		}
 		if modName == "" {
 			b.router.leaderDetector.Reset()
 			b.router.doubleTapDetector.Reset()
@@ -881,6 +903,9 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 		return event
 
 	case kCGEventKeyDown:
+		if b.shiftDown {
+			b.shiftHadKey = true
+		}
 		keyName := darwinKeyCodeToName(keyCode)
 		mods := darwinFlagsToModifiers(flags)
 		if b.keymapEngine != nil && b.keymapEngine.IsEnabled() && keyName != "" {
@@ -904,9 +929,16 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 
 		// IME preedit detection is AX-bound and comparatively slow: only probe it for plain
 		// (non-shortcut) keystrokes, which are the only ones that feed the snippet buffer.
+		// AX marked-text queries are cross-process IPC. Avoid them on the typing hot path;
+		// only query when a snippet-enabled trigger could actually complete.
 		imeComposing := false
-		if !hasNonShiftModifier(mods) {
+		if !hasNonShiftModifier(mods) && b.router.mayNeedMarkedText(unicodeStr) {
 			imeComposing = darwinHasMarkedText()
+		}
+		if b.inlineEnabled.Load() && !isSecureEventInputEnabled() && !b.isIMKInputSource() {
+			if b.callInline(host.InlineKeyEvent{KeyName: keyName, Rune: unicodeStr, KeyCode: keyCode, Modifiers: mods, IsDown: true, TimestampMs: nowMs}) {
+				return 0
+			}
 		}
 
 		events, consume := b.router.HandleKeyDownWithIME(keyName, unicodeStr, mods, isBackspace, secure, imeComposing, nowMs)
@@ -1565,12 +1597,23 @@ func (b *darwinBridge) InjectText(ctx context.Context, text string, deleteCount 
 	if !axIsProcessTrusted() {
 		return errors.New("darwin: Accessibility permission required for text injection")
 	}
-
-	// Fast path: direct AXSelectedText write when no delete or cursor movement is required.
-	if deleteCount == 0 && cursorBackOffset == 0 && text != "" {
-		if trySetAXSelectedText(text) {
-			return nil
+	if utf8.RuneCountInString(text) <= 256 && !strings.ContainsAny(text, "\r\n\t") {
+		for i := 0; i < deleteCount; i++ {
+			postTaggedKey(kVK_Delete, 0)
 		}
+		units := utf16.Encode([]rune(text))
+		for len(units) > 0 {
+			n := len(units)
+			if n > 20 {
+				n = 20
+			}
+			postTaggedUnicode(units[:n])
+			units = units[n:]
+		}
+		for i := 0; i < cursorBackOffset; i++ {
+			postTaggedKey(kVK_LeftArrow, 0)
+		}
+		return nil
 	}
 
 	snap, snapErr := b.pbRestorer.Capture()
@@ -1630,6 +1673,26 @@ func trySetAXSelectedText(text string) bool {
 	defer cfRelease(val)
 
 	return axUIElementSetAttributeValue(focused, axAttr("AXSelectedText"), val) == 0
+}
+
+func postTaggedUnicode(units []uint16) {
+	if len(units) == 0 || cgEventKeyboardSetUnicodeStr == nil {
+		return
+	}
+	down := cgEventCreateKeyboardEvent(0, 0, true)
+	if down != 0 {
+		cgEventSetIntegerValueField(down, kCGEventSourceUserData, SyntheticEventTag)
+		cgEventKeyboardSetUnicodeStr(down, uint(len(units)), &units[0])
+		cgEventPost(kCGHIDEventTap, down)
+		cfRelease(down)
+	}
+	up := cgEventCreateKeyboardEvent(0, 0, false)
+	if up != 0 {
+		cgEventSetIntegerValueField(up, kCGEventSourceUserData, SyntheticEventTag)
+		cgEventKeyboardSetUnicodeStr(up, uint(len(units)), &units[0])
+		cgEventPost(kCGHIDEventTap, up)
+		cfRelease(up)
+	}
 }
 
 func postTaggedKey(keyCode uint16, flags uint64) {

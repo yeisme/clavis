@@ -34,6 +34,22 @@ type HostService interface {
 	TapRecoveryCount() int64
 }
 
+// ExtendedHostService contains optional low-latency and process-management capabilities.
+// It is intentionally separate so existing embedders of HostService remain source-compatible.
+type ExtendedHostService interface {
+	HostService
+	CommitText(ctx context.Context, text string, deleteCount int, cursorBackOffset int) error
+	SetInlineIMEHandler(fn func(host.InlineKeyEvent) bool)
+	SetInlineIMEEnabled(enabled bool)
+	FastCaretAnchor(ctx context.Context) (host.CursorAnchor, error)
+	CaptureEditableField(ctx context.Context) (host.EditableFieldSnapshot, error)
+	ReplaceEditableField(ctx context.Context, replacement string, onlySelection bool) error
+	UpdateDaemonShortcut(inPlaceShortcut string)
+	UpdateSelectionBarConfig(cfg config.SelectionBarConfig)
+	ListListeningPorts(ctx context.Context) ([]host.ListeningPort, error)
+	KillProcess(ctx context.Context, pid int, force bool) error
+}
+
 // Bridge aliases HostService for callers referencing bridge.Bridge.
 type Bridge = HostService
 
@@ -182,6 +198,16 @@ func (r *triggerRouter) HandleModifier(mod string, isDown bool, otherModifiersDo
 
 // HandleKeyDown evaluates a keyDown event against CapsuleShortcut and inline snippet triggers.
 // Returns (eventsToEmit, consumeKeyEvent).
+func (r *triggerRouter) mayNeedMarkedText(unicodeStr string) bool {
+	if unicodeStr == "" {
+		return false
+	}
+	r.mu.RLock()
+	enabled := r.cfg.SnippetExpansionEnabled
+	r.mu.RUnlock()
+	return enabled
+}
+
 func (r *triggerRouter) HandleKeyDown(key string, unicodeStr string, modifiers []string, isBackspace bool, secureInputActive bool, nowMs int64) ([]host.TriggerEvent, bool) {
 	return r.HandleKeyDownWithIME(key, unicodeStr, modifiers, isBackspace, secureInputActive, false, nowMs)
 }
