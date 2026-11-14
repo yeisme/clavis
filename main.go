@@ -35,10 +35,10 @@ import (
 )
 
 const (
-	appName          = "Clavis"
-	keychainService  = "com.yeisme.clavis"
-	clipPollInterval = 400 * time.Millisecond
-	clipPruneEvery   = 5 * time.Minute
+	appName                   = "Clavis"
+	keychainService           = "com.yeisme.clavis"
+	clipPollInterval          = 400 * time.Millisecond
+	clipPruneEvery            = 5 * time.Minute
 	imePillDuration           = 850 * time.Millisecond
 	imePillOffsetX            = 8.0
 	imePillOffsetY            = 6.0

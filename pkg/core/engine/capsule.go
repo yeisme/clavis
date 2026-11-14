@@ -149,32 +149,32 @@ const (
 
 // State is the immutable snapshot of the Capsule state machine.
 type State struct {
-	Phase             CapsulePhase            `json:"phase"`
-	LeaderPath        []string                `json:"leaderPath,omitempty"`
-	LeaderBreadcrumbs []string                `json:"leaderBreadcrumbs,omitempty"`
-	LeaderNodes       []config.LeaderNode     `json:"leaderNodes,omitempty"`
-	OmniboxTab        config.CapsuleTab       `json:"omniboxTab,omitempty"`
-	OmniboxQuery      string                  `json:"omniboxQuery,omitempty"`
-	OmniboxItems      []OmniboxItem           `json:"omniboxItems,omitempty"`
-	SelectedIndex     int                     `json:"selectedIndex"`
-	AIMode            string                  `json:"aiMode,omitempty"`
-	AIPrompt          string                  `json:"aiPrompt,omitempty"`
-	AISourceText      string                  `json:"aiSourceText,omitempty"`
-	AIOutput          string                  `json:"aiOutput,omitempty"`
-	AIComplete        bool                    `json:"aiComplete,omitempty"`
-	AIError           string                  `json:"aiError,omitempty"`
-	AIHistory         []ChatTurn              `json:"aiHistory,omitempty"`
-	AIOptimizerPreset string                  `json:"aiOptimizerPreset,omitempty"`
-	ActiveAIProfileID string                  `json:"activeAiProfileId,omitempty"`
-	HUDMessage        string                  `json:"hudMessage,omitempty"`
+	Phase                   CapsulePhase            `json:"phase"`
+	LeaderPath              []string                `json:"leaderPath,omitempty"`
+	LeaderBreadcrumbs       []string                `json:"leaderBreadcrumbs,omitempty"`
+	LeaderNodes             []config.LeaderNode     `json:"leaderNodes,omitempty"`
+	OmniboxTab              config.CapsuleTab       `json:"omniboxTab,omitempty"`
+	OmniboxQuery            string                  `json:"omniboxQuery,omitempty"`
+	OmniboxItems            []OmniboxItem           `json:"omniboxItems,omitempty"`
+	SelectedIndex           int                     `json:"selectedIndex"`
+	AIMode                  string                  `json:"aiMode,omitempty"`
+	AIPrompt                string                  `json:"aiPrompt,omitempty"`
+	AISourceText            string                  `json:"aiSourceText,omitempty"`
+	AIOutput                string                  `json:"aiOutput,omitempty"`
+	AIComplete              bool                    `json:"aiComplete,omitempty"`
+	AIError                 string                  `json:"aiError,omitempty"`
+	AIHistory               []ChatTurn              `json:"aiHistory,omitempty"`
+	AIOptimizerPreset       string                  `json:"aiOptimizerPreset,omitempty"`
+	ActiveAIProfileID       string                  `json:"activeAiProfileId,omitempty"`
+	HUDMessage              string                  `json:"hudMessage,omitempty"`
 	Context                 CapsuleContext          `json:"context"`
 	ClipboardEntries        []OmniboxClipboardEntry `json:"clipboardEntries,omitempty"`
 	ClipboardSearchExternal bool                    `json:"clipboardSearchExternal,omitempty"`
 	ClipboardSearchQuery    string                  `json:"clipboardSearchQuery,omitempty"`
 	ClipboardSearchEntries  []OmniboxClipboardEntry `json:"clipboardSearchEntries,omitempty"`
 	InstalledApps           []InstalledAppEntry     `json:"installedApps,omitempty"`
-	FrecencyScores    map[string]int          `json:"frecencyScores,omitempty"`
-	ListeningPorts    []PortEntry             `json:"listeningPorts,omitempty"`
+	FrecencyScores          map[string]int          `json:"frecencyScores,omitempty"`
+	ListeningPorts          []PortEntry             `json:"listeningPorts,omitempty"`
 }
 
 // NewInitialState returns a hidden initial State.
@@ -1035,10 +1035,6 @@ func AvailableItemActions(item OmniboxItem) []OmniboxActionSpec {
 			{ID: "copy_title", Label: i18n.T("engine.action.copy_item_title"), Shortcut: modKey() + "↵"},
 		}
 	}
-}
-
-func executeOmniboxItem(item OmniboxItem, next State, cfg config.ClavisConfig) (State, []Effect) {
-	return executeOmniboxItemWithAction(item, "primary", next, cfg)
 }
 
 func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State, cfg config.ClavisConfig) (State, []Effect) {

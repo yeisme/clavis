@@ -69,7 +69,7 @@ type ClipboardSearcher interface {
 }
 
 const (
-	defaultClipboardMirrorLimit   = 50
+	defaultClipboardMirrorLimit    = 50
 	defaultClipboardSearchDebounce = 50 * time.Millisecond
 )
 
@@ -145,12 +145,12 @@ type AppController struct {
 	ClipboardStore    clipboard.Store
 	ClipboardSearcher ClipboardSearcher
 	SecretStore       secrets.APIKeyStore
-	Bridge         bridge.HostService
-	AppProvider    apps.AppProvider
-	AIClient       *ai.OpenAICompatibleClient
-	CLIExecutor    actions.CLIExecutor
-	Glossary       engine.GlossaryEngine
-	Snippets       *engine.SnippetEngine
+	Bridge            bridge.HostService
+	AppProvider       apps.AppProvider
+	AIClient          *ai.OpenAICompatibleClient
+	CLIExecutor       actions.CLIExecutor
+	Glossary          engine.GlossaryEngine
+	Snippets          *engine.SnippetEngine
 
 	httpDoer              ai.HTTPDoer
 	ClipboardWriter       func(text string)

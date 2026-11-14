@@ -437,7 +437,7 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 						}
 						isActive := slotIdx == activeSlotIdx
 
-						ui.Column(c).Key("prompt-slot:"+sl.Name).FillWidth().Gap(4).Children(func() {
+						ui.Column(c).Key("prompt-slot:" + sl.Name).FillWidth().Gap(4).Children(func() {
 							ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 								lbl := ui.Text(c, label).FontSize(12).FontWeight(600).SingleLine()
 								if isActive {
@@ -510,7 +510,7 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 										optVal := opt
 										chosen := optVal == curVal
 										pill := ui.ButtonBase(c).
-											Key("opt:" + sl.Name + ":" + optVal).
+											Key("opt:"+sl.Name+":"+optVal).
 											Padding(4, 10).
 											Radius(6).
 											FocusRing(false)
