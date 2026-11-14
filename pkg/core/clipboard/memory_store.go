@@ -14,11 +14,12 @@ import (
 
 // MemoryStore is a pure-stdlib in-memory reference implementation of Store.
 type MemoryStore struct {
-	mu     sync.RWMutex
-	filter PrivacyFilter
-	items  map[string]ClipboardItem
-	byHash map[string]string
-	seq    atomic.Uint64
+	mu         sync.RWMutex
+	filter     PrivacyFilter
+	items      map[string]ClipboardItem
+	byHash     map[string]string
+	seq        atomic.Uint64
+	generation atomic.Uint64
 }
 
 // NewMemoryStore constructs an empty MemoryStore with the given PrivacyFilter.
@@ -62,6 +63,7 @@ func (s *MemoryStore) Record(ctx context.Context, candidate CaptureCandidate) (*
 			item.SourceAppName = candidate.SourceAppName
 		}
 		s.items[existingID] = item
+		s.generation.Add(1)
 		copied := item
 		return &copied, true, nil
 	}
@@ -80,6 +82,7 @@ func (s *MemoryStore) Record(ctx context.Context, candidate CaptureCandidate) (*
 	}
 	s.items[id] = item
 	s.byHash[hash] = id
+	s.generation.Add(1)
 	copied := item
 	return &copied, true, nil
 }
@@ -140,8 +143,11 @@ func (s *MemoryStore) Pin(ctx context.Context, id string, pinned bool) error {
 	if !ok {
 		return fmt.Errorf("clipboard item %q not found", id)
 	}
-	item.IsPinned = pinned
-	s.items[id] = item
+	if item.IsPinned != pinned {
+		item.IsPinned = pinned
+		s.items[id] = item
+	}
+	s.generation.Add(1)
 	return nil
 }
 
@@ -157,6 +163,7 @@ func (s *MemoryStore) Delete(ctx context.Context, id string) error {
 	}
 	delete(s.byHash, item.ContentHash)
 	delete(s.items, id)
+	s.generation.Add(1)
 	return nil
 }
 
@@ -166,8 +173,11 @@ func (s *MemoryStore) Clear(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.items = make(map[string]ClipboardItem)
-	s.byHash = make(map[string]string)
+	if len(s.items) > 0 {
+		s.items = make(map[string]ClipboardItem)
+		s.byHash = make(map[string]string)
+		s.generation.Add(1)
+	}
 	return nil
 }
 
@@ -207,8 +217,14 @@ func (s *MemoryStore) PruneExpired(ctx context.Context, retentionDays int, maxIt
 		}
 	}
 
+	if removed > 0 {
+		s.generation.Add(1)
+	}
 	return removed, nil
 }
+
+// Generation returns a monotonically increasing mutation generation.
+func (s *MemoryStore) Generation() uint64 { return s.generation.Load() }
 
 func sortClipboardItems(items []ClipboardItem) {
 	sort.Slice(items, func(i, j int) bool {
