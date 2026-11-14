@@ -595,4 +595,6 @@ var enTable = map[string]string{
 	"label.Terminal":        "Terminal",
 	"label.Improve clarity, grammar, and flow while preserving the original meaning and tone.": "Improve clarity, grammar, and flow while preserving the original meaning and tone.",
 	"label.Translate Chinese to natural English or English to natural Chinese.":                "Translate Chinese to natural English or English to natural Chinese.",
+	"snippet.expanded_undo_hint":              "Expanded %s · ⌫ to undo",
+	"settings.trigger.snippet_backspace_undo": "Backspace Undoes Expansion",
 }

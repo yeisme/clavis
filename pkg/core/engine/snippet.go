@@ -16,6 +16,9 @@ type SnippetMatch struct {
 	RenderedText     string             `json:"renderedText"`
 	CursorBackOffset int                `json:"cursorBackOffset"`
 	DeleteCount      int                `json:"deleteCount"`
+	// TypedTrigger is what the user actually typed for the trigger (e.g.
+	// the full-width "；sig" for ";sig"): the text an undo puts back.
+	TypedTrigger string `json:"typedTrigger,omitempty"`
 }
 
 // SnippetRenderResult holds rendered snippet output and cursor metrics.
@@ -336,6 +339,10 @@ func (e *SnippetEngine) Feed(r rune, opts FeedOptions) (*SnippetMatch, bool) {
 			Location:      opts.Location,
 		})
 
+		typed := make([]rune, tlen)
+		for i := 0; i < tlen; i++ {
+			typed[i], _ = e.buffer.runeAtOffsetFromEnd(tlen - 1 - i)
+		}
 		e.buffer.clear()
 
 		return &SnippetMatch{
@@ -343,6 +350,7 @@ func (e *SnippetEngine) Feed(r rune, opts FeedOptions) (*SnippetMatch, bool) {
 			RenderedText:     rendered.RenderedText,
 			CursorBackOffset: rendered.CursorBackOffset,
 			DeleteCount:      rendered.DeleteCount,
+			TypedTrigger:     string(typed),
 		}, true
 	}
 

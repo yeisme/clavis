@@ -596,4 +596,6 @@ var zhTable = map[string]string{
 	"label.Terminal":        "终端",
 	"label.Improve clarity, grammar, and flow while preserving the original meaning and tone.": "改进清晰度、语法与流畅度，保留原意与语气。",
 	"label.Translate Chinese to natural English or English to natural Chinese.":                "中文译为地道英文，或英文译为地道中文。",
+	"snippet.expanded_undo_hint":              "已展开 %s · ⌫ 撤销",
+	"settings.trigger.snippet_backspace_undo": "展开后按 ⌫ 撤销",
 }

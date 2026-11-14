@@ -178,7 +178,10 @@ type AppController struct {
 	// Leader temporary ASCII IME lock state
 	preLeaderIMESourceID string
 	imeLockedForCapsule  bool
-	skipIMERestore       bool
+	// snippetUndo is the last inline expansion, revertible by an immediate
+	// Backspace (see snippet_undo.go).
+	snippetUndo    snippetUndoState
+	skipIMERestore bool
 
 	// Keymap hold layer reported by the host bridge (e.g. "nav", "hyper", "")
 	activeKeymapLayer string
@@ -1975,6 +1978,9 @@ func (c *AppController) HandleTriggerEvent(ev host.TriggerEvent) {
 		})
 
 	case host.TriggerSnippetKey:
+		// Any typed key ends the window in which Backspace undoes the last
+		// expansion.
+		c.disarmSnippetUndo()
 		cfg := c.ConfigStore.Current()
 		if !cfg.Main.Trigger.SnippetExpansionEnabled || ev.Rune == "" {
 			return
@@ -2006,18 +2012,24 @@ func (c *AppController) HandleTriggerEvent(ev host.TriggerEvent) {
 					backOffset = rendered.CursorBackOffset
 				}
 				c.injectTextAsync(renderedText, delCount, backOffset)
+				c.armSnippetUndo(match.TypedTrigger, renderedText, backOffset)
 				break
 			}
 		}
 
 	case host.TriggerSnippetBack:
+		if c.tryUndoSnippet() {
+			return
+		}
 		c.mu.Lock()
 		c.Snippets.Backspace()
 		c.mu.Unlock()
 
 	case host.TriggerSnippetReset:
 		// Cursor moved, app changed, IME composed, or a click landed: the typed trigger prefix
-		// can no longer be relied on, so drop it instead of risking a wrong expansion.
+		// can no longer be relied on, so drop it instead of risking a wrong expansion. The
+		// caret may no longer sit after the expansion either, so Backspace can't undo it.
+		c.disarmSnippetUndo()
 		c.mu.Lock()
 		if c.Snippets != nil {
 			c.Snippets.Reset()

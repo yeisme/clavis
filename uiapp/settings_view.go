@@ -256,6 +256,11 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 		); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.SnippetExpansionEnabled = v })
 		}
+		if v, changed := settingsSwitch(
+			c, theme, "snippet_backspace_undo", i18n.T("settings.trigger.snippet_backspace_undo"), trigger.SnippetBackspaceUndo,
+		); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.SnippetBackspaceUndo = v })
+		}
 	})
 
 	settingsSectionCard(c, theme, i18n.T("settings.card.appearance"), func() {

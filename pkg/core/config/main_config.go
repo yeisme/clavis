@@ -17,6 +17,9 @@ type TriggerConfig struct {
 	CapsuleShortcut         string `json:"capsuleShortcut"`
 	ClipboardShortcut       string `json:"clipboardShortcut"`
 	SnippetExpansionEnabled bool   `json:"snippetExpansionEnabled"`
+	// SnippetBackspaceUndo reverts an expansion when Backspace is the very
+	// next key, restoring the typed trigger (as espanso's undo_backspace).
+	SnippetBackspaceUndo bool `json:"snippetBackspaceUndo"`
 }
 
 func DefaultTriggerConfig() TriggerConfig {
@@ -27,6 +30,7 @@ func DefaultTriggerConfig() TriggerConfig {
 		CapsuleShortcut:         "option+space",
 		ClipboardShortcut:       "alt+shift+c",
 		SnippetExpansionEnabled: true,
+		SnippetBackspaceUndo:    true,
 	}
 }
 
@@ -65,6 +69,11 @@ func decodeTriggerConfig(tbl *toml.Table, path string) (TriggerConfig, error) {
 	} else if ok {
 		cfg.SnippetExpansionEnabled = b
 	}
+	if b, ok, err := optionalBool(tbl, "snippet_backspace_undo", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.SnippetBackspaceUndo = b
+	}
 	return cfg, nil
 }
 
@@ -76,6 +85,7 @@ func (c TriggerConfig) toTOML() *toml.Table {
 	t.Set("capsule_shortcut", toml.StringVal(c.CapsuleShortcut))
 	t.Set("clipboard_shortcut", toml.StringVal(c.ClipboardShortcut))
 	t.Set("snippet_expansion_enabled", toml.BoolVal(c.SnippetExpansionEnabled))
+	t.Set("snippet_backspace_undo", toml.BoolVal(c.SnippetBackspaceUndo))
 	return t
 }
 
