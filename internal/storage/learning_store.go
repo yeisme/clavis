@@ -117,6 +117,12 @@ func (s *LearningStore) load(ctx context.Context) error {
 }
 
 func (s *LearningStore) RecordIMECommit(ctx context.Context, pinyinKey, word, prevWord string, pinned bool) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -149,6 +155,9 @@ func (s *LearningStore) RecordIMECommit(ctx context.Context, pinyinKey, word, pr
 
 // LookupBoost is the allocation-free RAM mirror lookup used by the typing hot path.
 func (s *LearningStore) LookupBoost(pinyinKey, word, prevWord string) int32 {
+	if s == nil {
+		return 0
+	}
 	s.mu.RLock()
 	v := s.lex[lexKey{pinyinKey, word, ""}]
 	big := s.bigrams[[2]string{prevWord, word}]
@@ -166,12 +175,20 @@ func (s *LearningStore) LookupBoost(pinyinKey, word, prevWord string) int32 {
 	return int32(boost)
 }
 func (s *LearningStore) LookupIMEBoost(ctx context.Context, pinyinKey, word, prevWord string) (int32, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
+	if s == nil {
+		return 0, nil
 	}
 	return s.LookupBoost(pinyinKey, word, prevWord), nil
 }
 func (s *LearningStore) CustomWordsForPrefix(prefix string) []LearnedWord {
+	if s == nil {
+		return nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := []LearnedWord{}
@@ -184,6 +201,12 @@ func (s *LearningStore) CustomWordsForPrefix(prefix string) []LearnedWord {
 	return out
 }
 func (s *LearningStore) DeleteLearnedWord(ctx context.Context, pinyinKey, word string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -196,8 +219,13 @@ func (s *LearningStore) DeleteLearnedWord(ctx context.Context, pinyinKey, word s
 	return nil
 }
 func (s *LearningStore) Stats(ctx context.Context) (LexiconStats, error) {
-	if err := ctx.Err(); err != nil {
-		return LexiconStats{}, err
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return LexiconStats{}, err
+		}
+	}
+	if s == nil {
+		return LexiconStats{}, nil
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -215,6 +243,12 @@ func (s *LearningStore) Stats(ctx context.Context) (LexiconStats, error) {
 }
 
 func (s *LearningStore) RecordItemUse(ctx context.Context, itemID string, now time.Time) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -237,6 +271,9 @@ func (s *LearningStore) RecordItemUse(ctx context.Context, itemID string, now ti
 
 // FrecencySnapshot returns half-life-decayed use scores from the hot mirror.
 func (s *LearningStore) FrecencySnapshot(now time.Time) map[string]int {
+	if s == nil {
+		return nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make(map[string]int, len(s.uses))
@@ -253,6 +290,12 @@ func (s *LearningStore) FrecencySnapshot(now time.Time) map[string]int {
 	return out
 }
 func (s *LearningStore) RecordPromptVersion(ctx context.Context, promptID, trigger, rawDraft, finalOutput, preset string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -260,6 +303,12 @@ func (s *LearningStore) RecordPromptVersion(ctx context.Context, promptID, trigg
 	return err
 }
 func (s *LearningStore) RecentPromptHistory(ctx context.Context, promptID string, limit int) ([]PromptHistoryEntry, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -282,6 +331,12 @@ func (s *LearningStore) RecentPromptHistory(ctx context.Context, promptID string
 	return out, nil
 }
 func (s *LearningStore) PruneHistory(ctx context.Context, maxEntries int) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}

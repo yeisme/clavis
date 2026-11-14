@@ -82,6 +82,8 @@ type Options struct {
 	// OnLanguageChange fires when a config save or reload switches the UI
 	// language, so the shell relabels the tray and window titles.
 	OnLanguageChange func()
+	// OnRecordItemUse fires when a clipboard item is pasted or copied from the Omnibox.
+	OnRecordItemUse func(itemID string)
 }
 
 type clipTask struct {
@@ -147,6 +149,7 @@ type AppController struct {
 	OnClosePromptComposer func()
 	OnShowIMEPill         func(label string, anchor *host.CursorAnchor)
 	OnLanguageChange      func()
+	OnRecordItemUse       func(itemID string)
 
 	// Decoded application icon bitmap cache
 	iconMu       sync.Mutex
@@ -250,7 +253,8 @@ func NewAppController(opts Options) *AppController {
 		OnOpenPromptComposer:  opts.OnOpenPromptComposer,
 		OnClosePromptComposer: opts.OnClosePromptComposer,
 		OnShowIMEPill:         opts.OnShowIMEPill,
-		OnLanguageChange: opts.OnLanguageChange,
+		OnLanguageChange:      opts.OnLanguageChange,
+		OnRecordItemUse:       opts.OnRecordItemUse,
 		appIconCache:     make(map[string]*ui.Bitmap),
 		clipDone:         make(chan struct{}),
 		aiTestStatus:     AITestIdle,
@@ -483,6 +487,19 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 		c.maybeRestoreLockedIME()
 	}
 
+	var actedClipboardID string
+	if prev.Phase == engine.PhaseOmnibox {
+		idx := prev.SelectedIndex
+		if ev.Type == engine.EventSelectAndConfirmIndex {
+			idx = ev.Index
+		}
+		if idx >= 0 && idx < len(prev.OmniboxItems) {
+			if item := prev.OmniboxItems[idx]; item.Kind == engine.ItemClipboardEntry {
+				actedClipboardID = item.ClipboardID
+			}
+		}
+	}
+
 	for _, eff := range effects {
 		if eff.Type == engine.EffectCancelAI || eff.Type == engine.EffectClose {
 			c.executeEffect(eff, next)
@@ -490,6 +507,9 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 	}
 	for _, eff := range effects {
 		if eff.Type != engine.EffectCancelAI && eff.Type != engine.EffectClose {
+			if eff.Type == engine.EffectCopyText && eff.ClipboardID == "" && actedClipboardID != "" {
+				eff.ClipboardID = actedClipboardID
+			}
 			c.executeEffect(eff, next)
 		}
 	}
@@ -576,6 +596,9 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 		} else {
 			c.injectTextAsync(eff.ClipboardContent, 0, 0)
 		}
+		if eff.ClipboardID != "" {
+			c.recordItemUse("clipboard:" + eff.ClipboardID)
+		}
 
 	case engine.EffectCopyText:
 		if eff.ClipboardMedia != nil && eff.ClipboardMedia.IsMedia() {
@@ -585,6 +608,9 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 			}
 		} else {
 			c.writeClipboardText(eff.Text)
+		}
+		if eff.ClipboardID != "" {
+			c.recordItemUse("clipboard:" + eff.ClipboardID)
 		}
 		c.Dispatch(engine.Event{
 			Type:    engine.EventShowHUD,
@@ -626,6 +652,18 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 			}
 			c.OpenPromptComposer(*eff.PromptTemplate, appCtx)
 		}
+	}
+}
+
+func (c *AppController) recordItemUse(itemID string) {
+	if itemID == "" {
+		return
+	}
+	c.mu.Lock()
+	fn := c.OnRecordItemUse
+	c.mu.Unlock()
+	if fn != nil {
+		fn(itemID)
 	}
 }
 

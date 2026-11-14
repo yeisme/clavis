@@ -18,6 +18,7 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/internal/apps"
 	"github.com/yeisme/clavis/internal/bridge"
+	"github.com/yeisme/clavis/internal/daemon"
 	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/internal/storage"
 	"github.com/yeisme/clavis/internal/watcher"
@@ -38,9 +39,10 @@ const (
 	keychainService  = "com.yeisme.clavis"
 	clipPollInterval = 400 * time.Millisecond
 	clipPruneEvery   = 5 * time.Minute
-	imePillDuration  = 850 * time.Millisecond
-	imePillOffsetX   = 8.0
-	imePillOffsetY   = 6.0
+	imePillDuration           = 850 * time.Millisecond
+	imePillOffsetX            = 8.0
+	imePillOffsetY            = 6.0
+	defaultPromptHistoryLimit = 500
 )
 
 func main() {
@@ -140,10 +142,13 @@ type desktopApp struct {
 	cancel                 context.CancelFunc
 	cfgStore               *config.ConfigStore
 	sqliteStore            *storage.SQLiteClipboardStore
+	learningStore          *storage.LearningStore
 	clipStore              clipboard.Store
 	mediaStore             *clipboard.MediaStore
 	hostBridge             bridge.HostService
 	controller             *uiapp.AppController
+	supervisor             *daemon.ResidentSupervisor
+	frecencySyncer         *daemon.FrecencySyncer
 	configWatcher          *watcher.ConfigWatcher
 	capsulePanel           *mygo.Window
 	promptPanel            *mygo.Window
@@ -155,11 +160,14 @@ type desktopApp struct {
 	loginMenuItem          *mygo.MenuItem
 	trayLabelItems         map[string]*mygo.MenuItem
 	bridgeRunning          bool
+	shuttingDown           bool
+	bgWG                   sync.WaitGroup
 	fallbackAccelerators   map[string]host.TriggerKind
 	sessionAnchor          *host.CursorAnchor
 	imePillLabel           string
 	imePillTimer           *time.Timer
 	imePillGen             atomic.Uint64
+	frecencyGen            atomic.Uint64
 	presentSeq             atomic.Uint64
 	hideSeq                atomic.Uint64
 	presentTransitionUntil atomic.Int64
@@ -190,6 +198,7 @@ func (a *desktopApp) start() {
 	}
 
 	var sqliteStore *storage.SQLiteClipboardStore
+	var learningStore *storage.LearningStore
 	var clipStore clipboard.Store
 	var mediaStore *clipboard.MediaStore
 	if userDataDir, err := mygo.App.Path(mygo.PathUserData); err == nil && userDataDir != "" {
@@ -200,6 +209,9 @@ func (a *desktopApp) start() {
 			sqliteStore = s
 			clipStore = s
 			_, _ = s.PruneExpired(ctx, cfg.Main.Clipboard.RetentionDays, cfg.Main.Clipboard.MaxHistoryItems)
+			if ls, lsErr := storage.NewLearningStore(s.DB()); lsErr == nil {
+				learningStore = ls
+			}
 		}
 	}
 	if clipStore == nil {
@@ -262,6 +274,7 @@ func (a *desktopApp) start() {
 		OnClosePromptComposer: a.handleClosePromptComposer,
 		OnShowIMEPill:         a.handleShowIMEPill,
 		OnLanguageChange:      a.handleLanguageChange,
+		OnRecordItemUse:       a.handleRecordItemUse,
 	})
 
 	initW, initH := uiapp.PreferredCapsuleSize(engine.PhaseLeader, cfg.Main.Appearance)
@@ -362,15 +375,57 @@ func (a *desktopApp) start() {
 		settingsWin.Hide()
 	})
 
+	frecencySyncer := daemon.NewFrecencySyncer(
+		func(now time.Time) map[string]int {
+			a.mu.Lock()
+			ls := a.learningStore
+			a.mu.Unlock()
+			return ls.FrecencySnapshot(now)
+		},
+		a.dispatchFrecencyScores,
+	)
+
+	sup := daemon.NewResidentSupervisor(cfg.Main.Daemon)
+	if sqliteStore != nil {
+		sup.RegisterCompactionHook(daemon.NewSQLiteCompactionHook(sqliteStore.DB()))
+	}
+	sup.RegisterCompactionHook(daemon.NewCacheTrimHook(appProvider.InvalidateCache))
+	if learningStore != nil {
+		sup.RegisterCompactionHook(func(hCtx context.Context) error {
+			a.mu.Lock()
+			ctrl := a.controller
+			a.mu.Unlock()
+			maxHist := defaultPromptHistoryLimit
+			if ctrl != nil {
+				maxHist = promptHistoryRetentionLimit(ctrl.Config().Main.Clipboard)
+			}
+			err := learningStore.PruneHistory(hCtx, maxHist)
+			a.syncFrecency(hCtx)
+			return err
+		})
+	}
+	sup.RegisterWatchdogProbe(daemon.NewBridgeWatchdogProbe(daemon.BridgeLivenessInput{
+		IsRunning: func() bool {
+			a.mu.Lock()
+			running := a.bridgeRunning
+			a.mu.Unlock()
+			return running
+		},
+		TapRecoveryCount: hostBridge.TapRecoveryCount,
+	}))
+
 	a.mu.Lock()
 	a.ctx = ctx
 	a.cancel = cancel
 	a.cfgStore = cfgStore
 	a.sqliteStore = sqliteStore
+	a.learningStore = learningStore
 	a.clipStore = clipStore
 	a.mediaStore = mediaStore
 	a.hostBridge = hostBridge
 	a.controller = controller
+	a.supervisor = sup
+	a.frecencySyncer = frecencySyncer
 	a.capsulePanel = capsulePanel
 	a.promptPanel = promptPanel
 	a.imePillPanel = imePillPanel
@@ -379,6 +434,10 @@ func (a *desktopApp) start() {
 
 	a.setupTray()
 	a.startBridgeAndFallbackShortcut(cfg.Main.Trigger)
+	if ext, ok := hostBridge.(bridge.ExtendedHostService); ok {
+		ext.UpdateDaemonShortcut(cfg.Main.Daemon.InPlaceOptimizeShortcut)
+	}
+	sup.Start(ctx)
 	if ui := a.setupInputEngine(ctx, hostBridge, cfg.Main.InputEngine, controller.SuggestInputCandidates); ui != nil {
 		a.mu.Lock()
 		a.inputUI = ui
@@ -396,7 +455,8 @@ func (a *desktopApp) start() {
 
 	// Installed-app discovery runs inside ctrl.Start in the background so the main-thread
 	// startup path never blocks on slow /Applications scans.
-	go a.runClipboardPoller(ctx)
+	a.goBG(func(bgCtx context.Context) { a.syncFrecency(bgCtx) })
+	a.goBG(func(bgCtx context.Context) { a.runClipboardPoller(bgCtx) })
 	go a.refreshPermissionsAsync()
 }
 
@@ -579,6 +639,9 @@ func planFallbackShortcuts(trigger config.TriggerConfig) []fallbackShortcut {
 }
 
 func (a *desktopApp) registerFallbackShortcuts(want []fallbackShortcut) {
+	if !mygo.App.IsReady() {
+		return
+	}
 	wanted := make(map[string]host.TriggerKind, len(want))
 	for _, w := range want {
 		wanted[w.Accelerator] = w.Kind
@@ -619,6 +682,9 @@ func (a *desktopApp) unregisterFallbackShortcuts() {
 	prev := a.fallbackAccelerators
 	a.fallbackAccelerators = nil
 	a.mu.Unlock()
+	if !mygo.App.IsReady() {
+		return
+	}
 	for acc := range prev {
 		mygo.GlobalShortcut.Unregister(acc)
 	}
@@ -627,7 +693,11 @@ func (a *desktopApp) unregisterFallbackShortcuts() {
 func (a *desktopApp) openLeader() {
 	a.mu.Lock()
 	ctrl := a.controller
+	sup := a.supervisor
 	a.mu.Unlock()
+	if sup != nil {
+		sup.RecordInteraction()
+	}
 	if ctrl == nil {
 		return
 	}
@@ -640,7 +710,11 @@ func (a *desktopApp) openLeader() {
 func (a *desktopApp) openOmnibox(tab config.CapsuleTab) {
 	a.mu.Lock()
 	ctrl := a.controller
+	sup := a.supervisor
 	a.mu.Unlock()
+	if sup != nil {
+		sup.RecordInteraction()
+	}
 	if ctrl == nil {
 		return
 	}
@@ -651,7 +725,11 @@ func (a *desktopApp) openOmnibox(tab config.CapsuleTab) {
 func (a *desktopApp) fireTrigger(kind host.TriggerKind) {
 	a.mu.Lock()
 	ctrl := a.controller
+	sup := a.supervisor
 	a.mu.Unlock()
+	if sup != nil {
+		sup.RecordInteraction()
+	}
 	if ctrl == nil {
 		return
 	}
@@ -699,6 +777,9 @@ func (a *desktopApp) applyConfigReload() {
 	ctrl := a.controller
 	br := a.hostBridge
 	sqliteStore := a.sqliteStore
+	learningStore := a.learningStore
+	sup := a.supervisor
+	ms := a.mediaStore
 	a.mu.Unlock()
 	if ctrl == nil {
 		return
@@ -715,8 +796,27 @@ func (a *desktopApp) applyConfigReload() {
 		if h, ok := br.(bridge.InputEngineHost); ok {
 			h.ConfigureInputEngine(cfg.Main.InputEngine)
 		}
+		if ext, ok := br.(bridge.ExtendedHostService); ok {
+			ext.UpdateDaemonShortcut(cfg.Main.Daemon.InPlaceOptimizeShortcut)
+		}
 		if sqliteStore != nil {
 			sqliteStore.SetPrivacyFilter(clipboard.NewPrivacyFilterFromConfig(cfg.Main.Clipboard))
+		}
+		if sup != nil {
+			sup.UpdateConfig(cfg.Main.Daemon)
+		}
+		if sqliteStore != nil || learningStore != nil {
+			clipCfg := cfg.Main.Clipboard
+			a.goBG(func(ctx context.Context) {
+				if sqliteStore != nil && clipCfg.Enabled {
+					_, _ = sqliteStore.PruneExpired(ctx, clipCfg.RetentionDays, clipCfg.MaxHistoryItems)
+					maintainClipboardMedia(ctx, sqliteStore, ms, clipCfg)
+				}
+				if learningStore != nil {
+					_ = learningStore.PruneHistory(ctx, promptHistoryRetentionLimit(clipCfg))
+				}
+				a.syncFrecency(ctx)
+			})
 		}
 		a.startBridgeAndFallbackShortcut(cfg.Main.Trigger)
 	}
@@ -845,23 +945,115 @@ func (a *desktopApp) runClipboardPoller(ctx context.Context) {
 			} else if cand.IsMedia() {
 				continue
 			}
-			_, _, _ = store.Record(ctx, *cand)
+			if _, changed, recErr := store.Record(ctx, *cand); recErr == nil && changed {
+				a.syncFrecency(ctx)
+			}
 		case <-pruneTicker.C:
 			a.mu.Lock()
 			ctrl := a.controller
 			store := a.clipStore
 			ms := a.mediaStore
+			ls := a.learningStore
 			a.mu.Unlock()
 			if ctrl == nil || store == nil {
 				continue
 			}
 			cfg := ctrl.Config()
 			if cfg.Main.Clipboard.Enabled {
-				_, _ = store.PruneExpired(ctx, cfg.Main.Clipboard.RetentionDays, cfg.Main.Clipboard.MaxHistoryItems)
+				pruned, _ := store.PruneExpired(ctx, cfg.Main.Clipboard.RetentionDays, cfg.Main.Clipboard.MaxHistoryItems)
 				maintainClipboardMedia(ctx, store, ms, cfg.Main.Clipboard)
+				if ls != nil {
+					_ = ls.PruneHistory(ctx, promptHistoryRetentionLimit(cfg.Main.Clipboard))
+				}
+				if pruned > 0 {
+					a.syncFrecency(ctx)
+				}
 			}
 		}
 	}
+}
+
+func promptHistoryRetentionLimit(cfg config.ClipboardConfig) int {
+	if cfg.MaxHistoryItems > defaultPromptHistoryLimit {
+		return cfg.MaxHistoryItems
+	}
+	return defaultPromptHistoryLimit
+}
+
+func (a *desktopApp) goBG(fn func(context.Context)) {
+	a.mu.Lock()
+	if a.shuttingDown || a.ctx == nil || a.ctx.Err() != nil {
+		a.mu.Unlock()
+		return
+	}
+	ctx := a.ctx
+	a.bgWG.Add(1)
+	a.mu.Unlock()
+	go func() {
+		defer a.bgWG.Done()
+		fn(ctx)
+	}()
+}
+
+func (a *desktopApp) handleRecordItemUse(itemID string) {
+	if itemID == "" {
+		return
+	}
+	a.mu.Lock()
+	sup := a.supervisor
+	a.mu.Unlock()
+	if sup != nil {
+		sup.RecordInteraction()
+	}
+	a.goBG(func(ctx context.Context) {
+		a.mu.Lock()
+		ls := a.learningStore
+		a.mu.Unlock()
+		if ls != nil {
+			_ = ls.RecordItemUse(ctx, itemID, time.Now())
+		}
+		a.syncFrecency(ctx)
+	})
+}
+
+func (a *desktopApp) syncFrecency(ctx context.Context) {
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
+	a.mu.Lock()
+	syncer := a.frecencySyncer
+	shuttingDown := a.shuttingDown
+	a.mu.Unlock()
+	if shuttingDown || syncer == nil {
+		return
+	}
+	syncer.Sync(time.Now())
+}
+
+func (a *desktopApp) dispatchFrecencyScores(scores map[string]int) {
+	gen := a.frecencyGen.Add(1)
+	run := func() {
+		if a.frecencyGen.Load() != gen {
+			return
+		}
+		a.mu.Lock()
+		shuttingDown := a.shuttingDown
+		ctx := a.ctx
+		ctrl := a.controller
+		a.mu.Unlock()
+		if shuttingDown || ctrl == nil || (ctx != nil && ctx.Err() != nil) {
+			return
+		}
+		ctrl.Dispatch(engine.Event{
+			Type:           engine.EventSetFrecencyScores,
+			FrecencyScores: scores,
+		})
+	}
+	if mygo.App.IsReady() {
+		go mygo.RunOnMain(run)
+		return
+	}
+	run()
 }
 
 func (a *desktopApp) handleRepaint() {
@@ -1267,8 +1459,10 @@ func (a *desktopApp) shutdown() {
 		a.stopIMEPillTimer()
 
 		a.mu.Lock()
+		a.shuttingDown = true
 		cancel := a.cancel
 		cw := a.configWatcher
+		sup := a.supervisor
 		ctrl := a.controller
 		sqliteStore := a.sqliteStore
 		tray := a.tray
@@ -1281,10 +1475,14 @@ func (a *desktopApp) shutdown() {
 		if cw != nil {
 			cw.Stop()
 		}
+		if sup != nil {
+			sup.Stop()
+		}
 		if ctrl != nil {
 			_ = ctrl.Stop()
 			ctrl.Close()
 		}
+		a.bgWG.Wait()
 		if sqliteStore != nil {
 			_ = sqliteStore.Close()
 		}
