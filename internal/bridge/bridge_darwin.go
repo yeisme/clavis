@@ -41,6 +41,7 @@ const (
 	kCGEventTapOptionDefault uint32 = 0
 
 	kCGEventLeftMouseDown          uint32 = 1
+	kCGEventLeftMouseUp            uint32 = 2
 	kCGEventRightMouseDown         uint32 = 3
 	kCGEventKeyDown                uint32 = 10
 	kCGEventKeyUp                  uint32 = 11
@@ -505,6 +506,7 @@ type darwinBridge struct {
 	onTrigger    func(host.TriggerEvent)
 
 	tapRecoveries  atomic.Int64
+	triggers       *triggerRuntime
 	lastBundleIDMu sync.RWMutex
 	lastBundleID   string
 
@@ -536,6 +538,7 @@ func newPlatformBridge(opts Options) HostService {
 		pbTracker:    newSelfPasteboardTracker(),
 		onIME:        opts.OnInputSourceChanged,
 		onLayer:      opts.OnKeymapLayerChanged,
+		triggers:     newTriggerRuntime(),
 	}
 	b.pbRestorer = NewPasteboardSnapshotRestorer(&darwinPasteboardBackend{bridge: b})
 	b.ime.dirty = make(chan struct{}, 1)
@@ -794,7 +797,7 @@ func (b *darwinBridge) runEventTap(ctx context.Context, ready chan<- error) {
 	b.mu.Unlock()
 
 	mask := uint64(1<<kCGEventKeyDown) | uint64(1<<kCGEventKeyUp) | uint64(1<<kCGEventFlagsChanged) |
-		uint64(1<<kCGEventLeftMouseDown) | uint64(1<<kCGEventRightMouseDown)
+		uint64(1<<kCGEventLeftMouseDown) | uint64(1<<kCGEventLeftMouseUp) | uint64(1<<kCGEventRightMouseDown)
 	port := cgEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault, mask, cb, 0)
 	if port == 0 {
 		ready <- errors.New("darwin: CGEventTapCreate failed (check Input Monitoring / Accessibility permission)")
@@ -864,15 +867,31 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 		// A click moves the insertion point / focus: drop any pending double-tap and snippet buffer.
 		b.router.leaderDetector.Reset()
 		b.router.doubleTapDetector.Reset()
-		b.emitTriggerEvents([]host.TriggerEvent{{
-			Kind:        host.TriggerSnippetReset,
-			TimestampMs: nowMs,
-		}})
+		if eventType == kCGEventLeftMouseDown && b.triggers != nil {
+			b.triggers.autoSelectMouseDown()
+		}
+		b.emitTriggerEvents([]host.TriggerEvent{{Kind: host.TriggerSnippetReset, TimestampMs: nowMs}})
+		return event
+	case kCGEventLeftMouseUp:
+		if b.triggers != nil && b.triggers.autoSelectMouseUp() {
+			if enabled, mode := b.triggers.selectionMode(); enabled && mode == "auto_select" {
+				// AX is cross-process IPC; never perform it on the CGEventTap callback.
+				go func(ts int64) {
+					if snap, err := b.CaptureEditableField(context.Background()); err == nil && strings.TrimSpace(snap.SelectedText) != "" {
+						b.emitTriggerEvents([]host.TriggerEvent{selectionEvent(ts)})
+					}
+				}(nowMs)
+			}
+		}
 		return event
 
 	case kCGEventFlagsChanged:
 		modName, isDown, otherDown := darwinModifierEvent(keyCode, flags)
 		if modName == "shift" {
+			if b.triggers != nil && b.triggers.doubleShift(modName, isDown, otherDown, nowMs, false) {
+				b.emitTriggerEvents([]host.TriggerEvent{selectionEvent(nowMs)})
+				return 0
+			}
 			if isDown {
 				b.shiftDown = true
 				b.shiftHadKey = false
@@ -914,6 +933,10 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 		}
 		keyName := darwinKeyCodeToName(keyCode)
 		mods := darwinFlagsToModifiers(flags)
+		if b.triggers != nil && b.triggers.shortcutMatches(keyName, mods) && !isSecureEventInputEnabled() {
+			b.emitTriggerEvents([]host.TriggerEvent{optimizeEvent(nowMs)})
+			return 0
+		}
 		if b.keymapEngine != nil && b.keymapEngine.IsEnabled() && keyName != "" {
 			outcome := b.keymapEngine.HandleKeyEvent(keyName, true, mods, b.cachedFrontmostBundleID(), nowMs)
 			b.notifyLayerIfChanged(outcome.LayerActive)

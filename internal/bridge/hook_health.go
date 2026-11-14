@@ -68,6 +68,11 @@ func isMouseButtonDown(wParam uintptr) bool {
 	return wParam == wmLButtonDown || wParam == wmRButtonDown
 }
 
+func isMouseButtonUp(wParam uintptr) bool {
+	const wmLButtonUp, wmRButtonUp = 0x0202, 0x0205
+	return wParam == wmLButtonUp || wParam == wmRButtonUp
+}
+
 // secureFieldSignals are the cheap Win32 signals gathered for the focused control.
 type secureFieldSignals struct {
 	ClassName    string

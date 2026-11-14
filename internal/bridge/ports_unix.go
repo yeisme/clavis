@@ -107,5 +107,13 @@ func (b *darwinBridge) ReplaceEditableField(ctx context.Context, replacement str
 	}
 	return b.InjectText(ctx, replacement, 0, 0)
 }
-func (b *darwinBridge) UpdateDaemonShortcut(string)                        {}
-func (b *darwinBridge) UpdateSelectionBarConfig(config.SelectionBarConfig) {}
+func (b *darwinBridge) UpdateDaemonShortcut(accel string) {
+	if b.triggers != nil {
+		b.triggers.setShortcut(accel)
+	}
+}
+func (b *darwinBridge) UpdateSelectionBarConfig(cfg config.SelectionBarConfig) {
+	if b.triggers != nil {
+		b.triggers.setSelection(cfg)
+	}
+}
