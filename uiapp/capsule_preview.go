@@ -374,6 +374,10 @@ func (a *AppController) renderOmniboxPreviewBody(
 ) {
 	switch item.Kind {
 	case engine.ItemClipboardEntry:
+		if m := item.ClipboardMedia; m != nil && m.IsMedia() {
+			a.renderClipboardMediaPreview(c, theme, item, *m)
+			return
+		}
 		content := item.ClipboardContent
 		if content == "" {
 			content = item.Title
@@ -612,5 +616,25 @@ func previewIcon(item engine.OmniboxItem) string {
 		return "keyboard"
 	default:
 		return "bolt"
+	}
+}
+
+// renderClipboardMediaPreview shows the thumbnail and metadata for image/file/video entries.
+func (a *AppController) renderClipboardMediaPreview(c *ui.Context, theme *ui.Theme, item engine.OmniboxItem, m engine.ClipboardMedia) {
+	source := strings.TrimSpace(item.Subtitle)
+	ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
+		previewBadge(c, theme, item.Icon, source, false)
+		if item.KeyHint == engine.KeyHintPinned {
+			previewBadge(c, theme, "pin.fill", i18n.T("common.pinned"), true)
+		}
+	})
+	if bmp := a.ThumbBitmap(m.ThumbPath); bmp != nil {
+		ui.Image(c, bmp).FillWidth().Height(160).Fit(ui.Contain).Radius(6)
+	}
+	for _, row := range clipboardMediaMetaRows(m) {
+		ui.Text(c, row).FontSize(10).TextColor(theme.TextMuted).SingleLine()
+	}
+	if len(m.FilePaths) > 0 {
+		renderPreviewLines(c, theme, strings.Join(m.FilePaths, "\n"), 20)
 	}
 }

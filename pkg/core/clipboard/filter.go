@@ -1,6 +1,7 @@
 package clipboard
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/yeisme/clavis/pkg/core/config"
@@ -54,9 +55,33 @@ func NewPrivacyFilterFromConfig(cfg config.ClipboardConfig) PrivacyFilter {
 	}
 }
 
+// DefaultSecretSourceProcesses are Windows password-manager / credential processes whose
+// clipboard writes (text or images such as QR / recovery codes) are never recorded.
+var DefaultSecretSourceProcesses = []string{
+	"1password", "keepass", "keepassxc", "bitwarden", "enpass", "dashlane",
+	"lastpass", "roboform", "credentialuibroker", "keychainaccess",
+}
+
 // ShouldRecord reports true if the candidate passes all privacy checks.
 func (f PrivacyFilter) ShouldRecord(candidate CaptureCandidate) bool {
-	return !f.ShouldIgnore(candidate.PasteboardTypes, candidate.SourceBundleID, candidate.Content)
+	content := candidate.Content
+	if candidate.IsMedia() && strings.TrimSpace(content) == "" {
+		// Media entries have no text; the empty-content rule must not drop them.
+		content = string(candidate.Kind)
+	}
+	if isSecretSourceProcess(candidate.SourceBundleID) || isSecretSourceProcess(candidate.SourceAppName) {
+		return false
+	}
+	return !f.ShouldIgnore(candidate.PasteboardTypes, candidate.SourceBundleID, content)
+}
+
+// isSecretSourceProcess matches Windows process names case-insensitively, ".exe" optional.
+func isSecretSourceProcess(name string) bool {
+	n := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(name)), ".exe")
+	if n == "" || strings.Contains(n, ".") {
+		return false // macOS bundle IDs go through ExcludedBundleIDs
+	}
+	return slices.Contains(DefaultSecretSourceProcesses, n)
 }
 
 // ShouldIgnore reports true if the clipboard event must be skipped for privacy/policy reasons.
@@ -76,6 +101,11 @@ func (f PrivacyFilter) ShouldIgnore(pasteboardTypes []string, sourceBundleID, co
 	if sourceBundleID != "" && len(f.ExcludedBundleIDs) > 0 {
 		if _, excluded := f.ExcludedBundleIDs[sourceBundleID]; excluded {
 			return true
+		}
+		for id := range f.ExcludedBundleIDs {
+			if strings.EqualFold(id, sourceBundleID) {
+				return true
+			}
 		}
 	}
 

@@ -192,6 +192,8 @@ max_history_items = 200
 retention_days = 30
 ignore_concealed_types = true
 excluded_bundle_ids = ["com.1password.1password", "com.apple.keychainaccess"]
+media_capture = true
+media_quota_mb = 512
 
 [ime]
 enabled = true

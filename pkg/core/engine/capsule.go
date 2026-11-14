@@ -30,7 +30,25 @@ type OmniboxClipboardEntry struct {
 	Content       string `json:"content"`
 	SourceAppName string `json:"sourceAppName,omitempty"`
 	IsPinned      bool   `json:"isPinned"`
+	// Media is set for image/file/video entries (empty Kind = text).
+	Media ClipboardMedia `json:"media,omitzero"`
 }
+
+// ClipboardMedia mirrors clipboard.Media for the engine/UI layer (engine must not import storage).
+type ClipboardMedia struct {
+	Kind       string   `json:"kind,omitempty"` // "image" | "file" | "video"
+	Path       string   `json:"path,omitempty"`
+	Mime       string   `json:"mime,omitempty"`
+	ThumbPath  string   `json:"thumbPath,omitempty"`
+	Width      int      `json:"width,omitempty"`
+	Height     int      `json:"height,omitempty"`
+	ByteSize   int64    `json:"byteSize,omitempty"`
+	DurationMs int64    `json:"durationMs,omitempty"`
+	FilePaths  []string `json:"filePaths,omitempty"`
+}
+
+// IsMedia reports whether the entry is not plain text.
+func (m ClipboardMedia) IsMedia() bool { return m.Kind != "" && m.Kind != "text" }
 
 // InstalledAppEntry represents a discovered OS application for the launcher.
 type InstalledAppEntry struct {
@@ -85,6 +103,7 @@ type OmniboxItem struct {
 	SwitchTab        config.CapsuleTab    `json:"switchTab,omitempty"`
 	ClipboardID      string               `json:"clipboardId,omitempty"`
 	ClipboardContent string               `json:"clipboardContent,omitempty"`
+	ClipboardMedia   *ClipboardMedia      `json:"clipboardMedia,omitempty"`
 	GlossaryTerm     *config.GlossaryTerm `json:"glossaryTerm,omitempty"`
 	AIMode           string               `json:"aiMode,omitempty"`
 	AIPrompt         string               `json:"aiPrompt,omitempty"`
@@ -217,6 +236,7 @@ type Effect struct {
 	Text             string               `json:"text,omitempty"`
 	ClipboardID      string               `json:"clipboardId,omitempty"`
 	ClipboardContent string               `json:"clipboardContent,omitempty"`
+	ClipboardMedia   *ClipboardMedia      `json:"clipboardMedia,omitempty"`
 	IsPinned         bool                 `json:"isPinned,omitempty"`
 	IMEMode          config.IMEMode       `json:"imeMode,omitempty"`
 }
@@ -923,7 +943,7 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 			clearPhaseFields(&next)
 			next.Phase = PhaseHidden
 			return next, []Effect{
-				{Type: EffectCopyText, Text: txt},
+				{Type: EffectCopyText, Text: txt, ClipboardMedia: item.ClipboardMedia},
 				{Type: EffectClose},
 			}
 		}
@@ -1059,7 +1079,7 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 		clearPhaseFields(&next)
 		next.Phase = PhaseHidden
 		return next, []Effect{
-			{Type: EffectPasteClipboardItem, ClipboardID: item.ClipboardID, ClipboardContent: item.ClipboardContent},
+			{Type: EffectPasteClipboardItem, ClipboardID: item.ClipboardID, ClipboardContent: item.ClipboardContent, ClipboardMedia: item.ClipboardMedia},
 			{Type: EffectClose},
 		}
 
@@ -1197,6 +1217,9 @@ func makeClipboardOmniboxItems(entries []OmniboxClipboardEntry) []OmniboxItem {
 	candidates := make([]OmniboxItem, 0, len(entries))
 	for _, entry := range entries {
 		firstLine := firstNonEmptyLine(entry.Content)
+		if entry.Media.IsMedia() {
+			firstLine = ClipboardMediaTitle(entry.Media, entry.Content)
+		}
 		sub := entry.SourceAppName
 		if sub == "" {
 			sub = i18n.T("omnibox.tab.clipboard")
@@ -1224,9 +1247,53 @@ func makeClipboardOmniboxItems(entries []OmniboxClipboardEntry) []OmniboxItem {
 			Kind:             ItemClipboardEntry,
 			ClipboardID:      entry.ID,
 			ClipboardContent: entry.Content,
+			ClipboardMedia:   clipboardMediaPtr(entry.Media),
 		})
+		if entry.Media.IsMedia() {
+			candidates[len(candidates)-1].Icon = clipboardMediaIcon(entry.Media)
+			if entry.IsPinned {
+				candidates[len(candidates)-1].Icon = "pin.fill"
+			}
+		}
 	}
 	return candidates
+}
+
+func clipboardMediaPtr(m ClipboardMedia) *ClipboardMedia {
+	if !m.IsMedia() {
+		return nil
+	}
+	c := m
+	return &c
+}
+
+func clipboardMediaIcon(m ClipboardMedia) string {
+	switch m.Kind {
+	case "image":
+		return "photo"
+	case "video":
+		return "film"
+	}
+	return "doc"
+}
+
+// ClipboardMediaTitle is the list title for a media entry: "Image 1920×1080" or the file name(s).
+func ClipboardMediaTitle(m ClipboardMedia, content string) string {
+	switch m.Kind {
+	case "image":
+		if m.Width > 0 && m.Height > 0 {
+			return i18n.Tf("clipboard.media.image_dims", m.Width, m.Height)
+		}
+		return i18n.T("clipboard.media.image")
+	default:
+		if t := firstNonEmptyLine(content); t != "" {
+			if n := len(m.FilePaths); n > 1 {
+				return i18n.Tf("clipboard.media.files_more", t, n-1)
+			}
+			return t
+		}
+		return i18n.T("clipboard.media.file")
+	}
 }
 
 func makeSettingsOmniboxItems() []OmniboxItem {

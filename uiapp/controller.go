@@ -146,6 +146,7 @@ type AppController struct {
 	// Decoded application icon bitmap cache
 	iconMu       sync.Mutex
 	appIconCache map[string]*ui.Bitmap
+	thumbCache   map[string]*ui.Bitmap
 
 	// Leader temporary ASCII IME lock state
 	preLeaderIMESourceID string
@@ -557,10 +558,21 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 		c.injectTextAsync(eff.Text, 0, 0)
 
 	case engine.EffectPasteClipboardItem:
-		c.injectTextAsync(eff.ClipboardContent, 0, 0)
+		if eff.ClipboardMedia != nil && eff.ClipboardMedia.IsMedia() {
+			c.pasteClipboardMediaAsync(*eff.ClipboardMedia)
+		} else {
+			c.injectTextAsync(eff.ClipboardContent, 0, 0)
+		}
 
 	case engine.EffectCopyText:
-		c.writeClipboardText(eff.Text)
+		if eff.ClipboardMedia != nil && eff.ClipboardMedia.IsMedia() {
+			if err := writeClipboardMedia(*eff.ClipboardMedia); err != nil {
+				c.ShowToastOrHUD(err.Error())
+				return
+			}
+		} else {
+			c.writeClipboardText(eff.Text)
+		}
 		c.Dispatch(engine.Event{
 			Type:    engine.EventShowHUD,
 			Message: i18n.T("hud.copied"),
@@ -1219,6 +1231,7 @@ func (c *AppController) syncClipboardEntries(ctx context.Context) {
 			Content:       it.Content,
 			SourceAppName: it.SourceAppName,
 			IsPinned:      it.IsPinned,
+			Media:         engineClipboardMedia(it.Media),
 		}
 	}
 	c.Dispatch(engine.Event{

@@ -240,8 +240,41 @@ func initWinClipboardFormats() {
 		p2, _ := windows.UTF16PtrFromString("CanIncludeInClipboardHistory")
 		r2, _, _ := procRegisterClipboardFormatW.Call(uintptr(unsafe.Pointer(p2)))
 		fmtIncludeHistory = uint32(r2)
+
+		p3, _ := windows.UTF16PtrFromString("PNG")
+		r3, _, _ := procRegisterClipboardFormatW.Call(uintptr(unsafe.Pointer(p3)))
+		fmtPNG = uint32(r3)
 	})
 }
+
+const (
+	cfDIBFormat   = 8
+	cfHDropFormat = 15
+	cfDIBV5Format = 17
+)
+
+var fmtPNG uint32
+
+func winClipFormatAvailable(f uint32) bool {
+	if f == 0 {
+		return false
+	}
+	r, _, _ := procIsClipboardFormatAvail.Call(uintptr(f))
+	return r != 0
+}
+
+// winMediaClipboardKind classifies a text-less clipboard without opening it.
+func winMediaClipboardKind() clipboard.Kind {
+	return classifyClipboardFormats(winClipFormats{
+		HDrop: winClipFormatAvailable(cfHDropFormat),
+		PNG:   winClipFormatAvailable(fmtPNG),
+		DIB:   winClipFormatAvailable(cfDIBFormat) || winClipFormatAvailable(cfDIBV5Format),
+	})
+}
+
+// ClipboardSequence implements ClipboardSequencer so the poller can detect a clipboard change
+// while it was reading media bytes.
+func (b *windowsBridge) ClipboardSequence() int64 { return winClipboardSequenceNumber() }
 
 type windowsBridge struct {
 	mu              sync.Mutex
@@ -1477,17 +1510,36 @@ func (b *windowsBridge) PollClipboardCandidate(ctx context.Context) (*clipboard.
 	}
 
 	text, types, err := readWinClipboardUnicodeText()
-	if err != nil || text == "" {
+	if err != nil {
 		return nil, seq, err
+	}
+	var kind clipboard.Kind
+	if text == "" {
+		// Media: only the kind is decided here; bytes are read by the poller after the privacy
+		// filter accepted the candidate (docs/design/media-preview.md §5).
+		if kind = winMediaClipboardKind(); kind == "" {
+			return nil, seq, nil
+		}
 	}
 	app, _ := winForegroundApp()
 	return &clipboard.CaptureCandidate{
+		Media:           clipboard.Media{Kind: kind},
 		Content:         text,
 		SourceAppName:   strings.TrimSuffix(app.ProcessName, filepath.Ext(app.ProcessName)),
 		SourceBundleID:  app.ProcessName,
 		PasteboardTypes: types,
 		Timestamp:       time.Now().UTC(),
 	}, seq, nil
+}
+
+// PasteClipboard implements MediaPaster: the caller already wrote the clipboard.
+func (b *windowsBridge) PasteClipboard(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.IgnoreSelfPasteboardChange(winClipboardSequenceNumber())
+	sendWinCombo(vkControl, 'V')
+	return nil
 }
 
 func winClipboardSequenceNumber() int64 {

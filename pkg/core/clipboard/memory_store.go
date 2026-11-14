@@ -47,7 +47,7 @@ func (s *MemoryStore) Record(ctx context.Context, candidate CaptureCandidate) (*
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	hash := contentSHA256(candidate.Content)
+	hash := candidate.DedupeHash()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -76,6 +76,7 @@ func (s *MemoryStore) Record(ctx context.Context, candidate CaptureCandidate) (*
 		CreatedAt:      now,
 		UpdatedAt:      now,
 		IsPinned:       false,
+		Media:          candidate.Media,
 	}
 	s.items[id] = item
 	s.byHash[hash] = id

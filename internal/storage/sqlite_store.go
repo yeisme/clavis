@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -126,6 +127,60 @@ func (s *SQLiteClipboardStore) initSchema(ctx context.Context, enableWAL bool) e
 			return fmt.Errorf("init clipboard schema: %w", err)
 		}
 	}
+	return s.migrateMediaColumns(ctx)
+}
+
+// itemColumns is the column list every item query selects, in rowToItem order.
+const itemColumns = `id, content, content_hash, source_bundle_id, source_app_name, created_at_ns, updated_at_ns, is_pinned,
+	kind, media_path, media_mime, width, height, blob_sha, thumb_path, byte_size, duration_ms`
+
+// ciItemColumns is itemColumns qualified with the "ci." alias for FTS joins.
+var ciItemColumns = qualifyColumns("ci.", itemColumns)
+
+func qualifyColumns(prefix, cols string) string {
+	parts := strings.Split(cols, ",")
+	for i, p := range parts {
+		parts[i] = prefix + strings.TrimSpace(p)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// mediaColumns are added in place to pre-media databases (docs/design/media-preview.md §3).
+// FTS keeps indexing content/source_app_name only, so binary payloads never enter it.
+var mediaColumns = [][2]string{
+	{"kind", "TEXT NOT NULL DEFAULT 'text'"},
+	{"media_path", "TEXT NOT NULL DEFAULT ''"},
+	{"media_mime", "TEXT NOT NULL DEFAULT ''"},
+	{"width", "INTEGER NOT NULL DEFAULT 0"},
+	{"height", "INTEGER NOT NULL DEFAULT 0"},
+	{"blob_sha", "TEXT NOT NULL DEFAULT ''"},
+	{"thumb_path", "TEXT NOT NULL DEFAULT ''"},
+	{"byte_size", "INTEGER NOT NULL DEFAULT 0"},
+	{"duration_ms", "INTEGER NOT NULL DEFAULT 0"},
+}
+
+func (s *SQLiteClipboardStore) migrateMediaColumns(ctx context.Context) error {
+	rows, err := s.db.Query(ctx, `PRAGMA table_info(clipboard_items)`)
+	if err != nil {
+		return fmt.Errorf("inspect clipboard schema: %w", err)
+	}
+	nameIdx := slices.Index(rows.Columns, "name")
+	have := map[string]bool{}
+	for _, r := range rows.Values {
+		if nameIdx >= 0 && nameIdx < len(r) {
+			if n, ok := r[nameIdx].(string); ok {
+				have[n] = true
+			}
+		}
+	}
+	for _, col := range mediaColumns {
+		if have[col[0]] {
+			continue
+		}
+		if _, err := s.db.Execute(ctx, `ALTER TABLE clipboard_items ADD COLUMN `+col[0]+` `+col[1]); err != nil {
+			return fmt.Errorf("add clipboard column %s: %w", col[0], err)
+		}
+	}
 	return nil
 }
 
@@ -147,13 +202,13 @@ func (s *SQLiteClipboardStore) Record(ctx context.Context, candidate clipboard.C
 		now = time.Now().UTC()
 	}
 	nowNs := now.UnixNano()
-	hash := contentSHA256(candidate.Content)
+	hash := candidate.DedupeHash()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	rows, err := s.db.Query(ctx,
-		`SELECT id, content, content_hash, source_bundle_id, source_app_name, created_at_ns, updated_at_ns, is_pinned
+		`SELECT `+itemColumns+`
 		 FROM clipboard_items WHERE content_hash = ? LIMIT 1`,
 		hash,
 	)
@@ -189,9 +244,12 @@ func (s *SQLiteClipboardStore) Record(ctx context.Context, candidate clipboard.C
 
 	id := newItemID(nowNs)
 	if _, err := s.db.Execute(ctx,
-		`INSERT INTO clipboard_items (id, content, content_hash, source_bundle_id, source_app_name, created_at_ns, updated_at_ns, is_pinned)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
+		`INSERT INTO clipboard_items (id, content, content_hash, source_bundle_id, source_app_name, created_at_ns, updated_at_ns, is_pinned,
+			kind, media_path, media_mime, width, height, blob_sha, thumb_path, byte_size, duration_ms)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, candidate.Content, hash, candidate.SourceBundleID, candidate.SourceAppName, nowNs, nowNs,
+		kindOrText(candidate.Kind), candidate.MediaPath, candidate.MediaMime, candidate.Width, candidate.Height,
+		candidate.BlobSHA, candidate.ThumbPath, candidate.ByteSize, candidate.DurationMs,
 	); err != nil {
 		return nil, false, fmt.Errorf("insert clipboard item: %w", err)
 	}
@@ -205,6 +263,7 @@ func (s *SQLiteClipboardStore) Record(ctx context.Context, candidate clipboard.C
 		CreatedAt:      now,
 		UpdatedAt:      now,
 		IsPinned:       false,
+		Media:          candidate.Media,
 	}
 	return &item, true, nil
 }
@@ -221,7 +280,7 @@ func (s *SQLiteClipboardStore) Recent(ctx context.Context, limit int) ([]clipboa
 	var err error
 	if limit > 0 {
 		rows, err = s.db.Query(ctx,
-			`SELECT id, content, content_hash, source_bundle_id, source_app_name, created_at_ns, updated_at_ns, is_pinned
+			`SELECT `+itemColumns+`
 			 FROM clipboard_items
 			 ORDER BY is_pinned DESC, updated_at_ns DESC, id ASC
 			 LIMIT ?`,
@@ -229,7 +288,7 @@ func (s *SQLiteClipboardStore) Recent(ctx context.Context, limit int) ([]clipboa
 		)
 	} else {
 		rows, err = s.db.Query(ctx,
-			`SELECT id, content, content_hash, source_bundle_id, source_app_name, created_at_ns, updated_at_ns, is_pinned
+			`SELECT `+itemColumns+`
 			 FROM clipboard_items
 			 ORDER BY is_pinned DESC, updated_at_ns DESC, id ASC`,
 		)
@@ -268,7 +327,7 @@ func (s *SQLiteClipboardStore) searchFTS5(ctx context.Context, ftsQuery string, 
 	var err error
 	if limit > 0 {
 		rows, err = s.db.Query(ctx,
-			`SELECT ci.id, ci.content, ci.content_hash, ci.source_bundle_id, ci.source_app_name, ci.created_at_ns, ci.updated_at_ns, ci.is_pinned
+			`SELECT `+ciItemColumns+`
 			 FROM clipboard_fts fts
 			 JOIN clipboard_items ci ON ci.rowid = fts.rowid
 			 WHERE clipboard_fts MATCH ?
@@ -278,7 +337,7 @@ func (s *SQLiteClipboardStore) searchFTS5(ctx context.Context, ftsQuery string, 
 		)
 	} else {
 		rows, err = s.db.Query(ctx,
-			`SELECT ci.id, ci.content, ci.content_hash, ci.source_bundle_id, ci.source_app_name, ci.created_at_ns, ci.updated_at_ns, ci.is_pinned
+			`SELECT `+ciItemColumns+`
 			 FROM clipboard_fts fts
 			 JOIN clipboard_items ci ON ci.rowid = fts.rowid
 			 WHERE clipboard_fts MATCH ?
@@ -298,7 +357,7 @@ func (s *SQLiteClipboardStore) searchLike(ctx context.Context, rawQuery string, 
 	var err error
 	if limit > 0 {
 		rows, err = s.db.Query(ctx,
-			`SELECT id, content, content_hash, source_bundle_id, source_app_name, created_at_ns, updated_at_ns, is_pinned
+			`SELECT `+itemColumns+`
 			 FROM clipboard_items
 			 WHERE content LIKE ? ESCAPE '\' OR source_app_name LIKE ? ESCAPE '\'
 			 ORDER BY is_pinned DESC, updated_at_ns DESC, id ASC
@@ -307,7 +366,7 @@ func (s *SQLiteClipboardStore) searchLike(ctx context.Context, rawQuery string, 
 		)
 	} else {
 		rows, err = s.db.Query(ctx,
-			`SELECT id, content, content_hash, source_bundle_id, source_app_name, created_at_ns, updated_at_ns, is_pinned
+			`SELECT `+itemColumns+`
 			 FROM clipboard_items
 			 WHERE content LIKE ? ESCAPE '\' OR source_app_name LIKE ? ESCAPE '\'
 			 ORDER BY is_pinned DESC, updated_at_ns DESC, id ASC`,
@@ -458,7 +517,33 @@ func rowToItem(row []any) clipboard.ClipboardItem {
 		CreatedAt:      time.Unix(0, num(5)).UTC(),
 		UpdatedAt:      time.Unix(0, num(6)).UTC(),
 		IsPinned:       num(7) != 0,
+		Media: clipboard.Media{
+			Kind:       textKindToZero(clipboard.Kind(str(8))),
+			MediaPath:  str(9),
+			MediaMime:  str(10),
+			Width:      int(num(11)),
+			Height:     int(num(12)),
+			BlobSHA:    str(13),
+			ThumbPath:  str(14),
+			ByteSize:   num(15),
+			DurationMs: num(16),
+		},
 	}
+}
+
+func kindOrText(k clipboard.Kind) string {
+	if k == "" {
+		return string(clipboard.KindText)
+	}
+	return string(k)
+}
+
+// textKindToZero keeps text rows' Media zero-valued so they compare equal to pre-media items.
+func textKindToZero(k clipboard.Kind) clipboard.Kind {
+	if k == clipboard.KindText {
+		return ""
+	}
+	return k
 }
 
 func rowsToItems(rows sqlite.Rows) []clipboard.ClipboardItem {

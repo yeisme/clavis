@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"context"
 	"strings"
 
 	"github.com/yeisme/clavis/pkg/core/config"
@@ -46,4 +47,17 @@ func DescribeIMERuleTarget(r config.IMERule) string {
 		return "title~" + t
 	}
 	return strings.TrimSpace(r.URLPattern)
+}
+
+// MediaPaster is implemented by bridges that can paste whatever is on the system clipboard
+// into the focused app (Windows: Ctrl+V). Optional; type-asserted by the controller.
+type MediaPaster interface {
+	// PasteClipboard ignores the current clipboard sequence as a self-write (so the history
+	// poller does not re-record the item) and sends the platform paste shortcut.
+	PasteClipboard(ctx context.Context) error
+}
+
+// ClipboardSequencer exposes the platform clipboard change counter (optional).
+type ClipboardSequencer interface {
+	ClipboardSequence() int64
 }

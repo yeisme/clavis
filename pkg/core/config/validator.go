@@ -302,6 +302,12 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 			Message: i18n.T("diag.clipboard.retention_days.nonneg"),
 		})
 	}
+	if main.Clipboard.MediaQuotaMB < 0 {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "clipboard.media_quota_mb", Severity: SeverityError,
+			Message: i18n.T("diag.clipboard.media_quota.nonneg"),
+		})
+	}
 
 	if main.Appearance.VisualPreset != "" && main.Appearance.VisualPreset != "spatial_3d" && main.Appearance.VisualPreset != "liquid_glass" && main.Appearance.VisualPreset != "classic" {
 		issues = append(issues, ValidationIssue{File: file, KeyPath: "appearance.visual_preset", Severity: SeverityError, Message: "unsupported visual preset"})

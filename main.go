@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/internal/apps"
 	"github.com/yeisme/clavis/internal/bridge"
@@ -140,6 +141,7 @@ type desktopApp struct {
 	cfgStore               *config.ConfigStore
 	sqliteStore            *storage.SQLiteClipboardStore
 	clipStore              clipboard.Store
+	mediaStore             *clipboard.MediaStore
 	hostBridge             bridge.HostService
 	controller             *uiapp.AppController
 	configWatcher          *watcher.ConfigWatcher
@@ -187,7 +189,10 @@ func (a *desktopApp) start() {
 
 	var sqliteStore *storage.SQLiteClipboardStore
 	var clipStore clipboard.Store
+	var mediaStore *clipboard.MediaStore
 	if userDataDir, err := mygo.App.Path(mygo.PathUserData); err == nil && userDataDir != "" {
+		// Blobs live next to the DB; an in-memory store gets no media (nothing to reference them).
+		mediaStore = clipboard.NewMediaStore(filepath.Join(userDataDir, "clipboard-media"))
 		dbPath := filepath.Join(userDataDir, "clipboard.db")
 		if s, openErr := storage.NewSQLiteClipboardStoreFromConfig(ctx, dbPath, cfg.Main.Clipboard); openErr == nil {
 			sqliteStore = s
@@ -330,6 +335,7 @@ func (a *desktopApp) start() {
 	a.cfgStore = cfgStore
 	a.sqliteStore = sqliteStore
 	a.clipStore = clipStore
+	a.mediaStore = mediaStore
 	a.hostBridge = hostBridge
 	a.controller = controller
 	a.capsulePanel = capsulePanel
@@ -764,6 +770,7 @@ func (a *desktopApp) runClipboardPoller(ctx context.Context) {
 			ctrl := a.controller
 			br := a.hostBridge
 			store := a.clipStore
+			ms := a.mediaStore
 			a.mu.Unlock()
 			if ctrl == nil || br == nil || store == nil {
 				continue
@@ -776,11 +783,23 @@ func (a *desktopApp) runClipboardPoller(ctx context.Context) {
 			if err != nil || cand == nil {
 				continue
 			}
+			if cand.IsMedia() && sqliteStoreFor(store) {
+				src := mediaSource{ReadPNG: func() ([]byte, error) { return mygo.Clipboard.ReadFormat(transfer.PNG) }}
+				if seqr, ok := br.(bridge.ClipboardSequencer); ok {
+					src.Sequence = seqr.ClipboardSequence
+				}
+				if keep, _ := enrichMediaCandidate(cand, cfg.Main.Clipboard, ms, src); !keep {
+					continue
+				}
+			} else if cand.IsMedia() {
+				continue
+			}
 			_, _, _ = store.Record(ctx, *cand)
 		case <-pruneTicker.C:
 			a.mu.Lock()
 			ctrl := a.controller
 			store := a.clipStore
+			ms := a.mediaStore
 			a.mu.Unlock()
 			if ctrl == nil || store == nil {
 				continue
@@ -788,6 +807,7 @@ func (a *desktopApp) runClipboardPoller(ctx context.Context) {
 			cfg := ctrl.Config()
 			if cfg.Main.Clipboard.Enabled {
 				_, _ = store.PruneExpired(ctx, cfg.Main.Clipboard.RetentionDays, cfg.Main.Clipboard.MaxHistoryItems)
+				maintainClipboardMedia(ctx, store, ms, cfg.Main.Clipboard)
 			}
 		}
 	}

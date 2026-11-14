@@ -697,6 +697,15 @@ func (a *AppController) renderOmniboxFooterFrameToggle(
 
 func (a *AppController) renderOmniboxRowLeadingIcon(c *ui.Context, item engine.OmniboxItem, iconColor ui.Color) {
 	switch item.Kind {
+	case engine.ItemClipboardEntry:
+		if m := item.ClipboardMedia; m != nil && m.ThumbPath != "" {
+			if bmp := a.ThumbBitmap(m.ThumbPath); bmp != nil {
+				ui.Image(c, bmp).Size(22, 22).Fit(ui.Cover).Radius(4)
+				return
+			}
+		}
+		renderSemanticIcon(c, item.Icon, 16, iconColor)
+
 	case engine.ItemInstalledApp:
 		if bmp := a.AppIconBitmap(item.AppPath); bmp != nil {
 			ui.Image(c, bmp).Size(22, 22).Radius(5)

@@ -886,6 +886,10 @@ type ClipboardConfig struct {
 	RetentionDays        int      `json:"retentionDays"`
 	IgnoreConcealedTypes bool     `json:"ignoreConcealedTypes"`
 	ExcludedBundleIDs    []string `json:"excludedBundleIds"`
+	// MediaCapture records images (and, on Windows, copied files/videos) in history.
+	MediaCapture bool `json:"mediaCapture"`
+	// MediaQuotaMB caps on-disk image blobs; oldest unpinned media rows are evicted first.
+	MediaQuotaMB int `json:"mediaQuotaMb"`
 }
 
 func DefaultClipboardConfig() ClipboardConfig {
@@ -898,6 +902,8 @@ func DefaultClipboardConfig() ClipboardConfig {
 			"com.1password.1password",
 			"com.apple.keychainaccess",
 		},
+		MediaCapture: true,
+		MediaQuotaMB: 512,
 	}
 }
 
@@ -931,6 +937,16 @@ func decodeClipboardConfig(tbl *toml.Table, path string) (ClipboardConfig, error
 	} else if ok {
 		cfg.ExcludedBundleIDs = arr
 	}
+	if b, ok, err := optionalBool(tbl, "media_capture", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.MediaCapture = b
+	}
+	if n, ok, err := optionalInt(tbl, "media_quota_mb", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.MediaQuotaMB = n
+	}
 	return cfg, nil
 }
 
@@ -941,6 +957,8 @@ func (c ClipboardConfig) toTOML() *toml.Table {
 	t.Set("retention_days", toml.IntVal(int64(c.RetentionDays)))
 	t.Set("ignore_concealed_types", toml.BoolVal(c.IgnoreConcealedTypes))
 	t.Set("excluded_bundle_ids", stringsToTOMLArray(c.ExcludedBundleIDs))
+	t.Set("media_capture", toml.BoolVal(c.MediaCapture))
+	t.Set("media_quota_mb", toml.IntVal(int64(c.MediaQuotaMB)))
 	return t
 }
 
