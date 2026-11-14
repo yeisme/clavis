@@ -219,14 +219,25 @@ func TestInputEngineUserLearningConfigAndCommitTracker(t *testing.T) {
 	if len(drained) != 3 {
 		t.Fatalf("expected 3 commits, got %+v", drained)
 	}
-	if drained[0] != (InputEngineCommit{PinyinKey: "shi", Word: "时", PrevWord: ""}) {
-		t.Fatalf("commit[0] = %+v", drained[0])
+	// LatencyNs is measured on the hook thread, so compare the learning fields only.
+	type learnFields struct{ PinyinKey, Word, PrevWord string }
+	fields := func(c InputEngineCommit) learnFields {
+		return learnFields{c.PinyinKey, c.Word, c.PrevWord}
 	}
-	if drained[1] != (InputEngineCommit{PinyinKey: "nihao", Word: "你好", PrevWord: ""}) {
-		t.Fatalf("commit[1] = %+v", drained[1])
+	if got, want := fields(drained[0]), (learnFields{"shi", "时", ""}); got != want {
+		t.Fatalf("commit[0] = %+v, want %+v (raw %+v)", got, want, drained[0])
 	}
-	if drained[2] != (InputEngineCommit{PinyinKey: "zhongguo", Word: "中国", PrevWord: "你好"}) {
-		t.Fatalf("commit[2] = %+v", drained[2])
+	if got, want := fields(drained[1]), (learnFields{"nihao", "你好", ""}); got != want {
+		t.Fatalf("commit[1] = %+v, want %+v", got, want)
+	}
+	if got, want := fields(drained[2]), (learnFields{"zhongguo", "中国", "你好"}); got != want {
+		t.Fatalf("commit[2] = %+v, want %+v", got, want)
+	}
+	// Telemetry must be a plausible positive latency for every commit.
+	for i, c := range drained {
+		if c.LatencyNs <= 0 {
+			t.Fatalf("commit[%d] has non-positive LatencyNs: %d", i, c.LatencyNs)
+		}
 	}
 
 	// Persist drained commits into freq -> "时" now jumps to #0 on next composition.

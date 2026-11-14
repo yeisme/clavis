@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/yeisme/clavis/pkg/core/config"
@@ -39,6 +40,9 @@ type InputEngineCommit struct {
 	Word      string
 	PrevWord  string
 	Pinned    bool
+	// LatencyNs is the hook-side latency from key arrival to commit decision,
+	// measured inside the hook thread (no I/O, no allocation).
+	LatencyNs int64
 }
 
 // InputEngineLearningHost is optionally implemented by bridges that host the own input
@@ -111,13 +115,14 @@ func (t *inputEngineCommitTracker) resetPrev() {
 	t.mu.Unlock()
 }
 
-func (t *inputEngineCommitTracker) pushCommit(pinyinKey, word string) {
+func (t *inputEngineCommitTracker) pushCommit(pinyinKey, word string, latencyNs int64) {
 	t.mu.Lock()
 	if len(t.pending) < maxPendingIMECommits {
 		t.pending = append(t.pending, InputEngineCommit{
 			PinyinKey: pinyinKey,
 			Word:      word,
 			PrevWord:  t.prevWord,
+			LatencyNs: latencyNs,
 		})
 	}
 	t.prevWord = word
@@ -142,6 +147,10 @@ func (t *inputEngineCommitTracker) drain(dst []InputEngineCommit) []InputEngineC
 }
 
 func (t *inputEngineCommitTracker) handleKey(eng *inputengine.Engine, k inputengine.Key, learn bool) inputengine.Result {
+	// start measures key-arrival → commit-decision latency for the resident
+	// telemetry (P50/P99). time.Now is ~20ns and allocates nothing, so this is
+	// safe on the hook thread.
+	start := time.Now()
 	switch k.Kind {
 	case inputengine.KeyShiftDown:
 		return eng.HandleKey(k)
@@ -207,7 +216,7 @@ func (t *inputEngineCommitTracker) handleKey(eng *inputengine.Engine, k inputeng
 	}
 
 	if pinyinKey != "" {
-		t.pushCommit(pinyinKey, word)
+		t.pushCommit(pinyinKey, word, time.Since(start).Nanoseconds())
 	} else {
 		t.resetPrev()
 	}

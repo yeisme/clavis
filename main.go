@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/transfer"
@@ -1052,10 +1053,18 @@ func (a *desktopApp) wireInputEngineLearning(br bridge.HostService, ls *storage.
 	lh.UpdateInputEngineLearning(adapter, func(c bridge.InputEngineCommit) {
 		a.mu.Lock()
 		store := a.learningStore
+		sup := a.supervisor
 		shuttingDown := a.shuttingDown
 		bgCtx := a.ctx
 		a.mu.Unlock()
-		if shuttingDown || store == nil {
+		if shuttingDown {
+			return
+		}
+		// Resident telemetry: this runs on the view worker, never the hook.
+		if sup != nil {
+			sup.RecordKeystroke(c.LatencyNs, utf8.RuneCountInString(c.Word))
+		}
+		if store == nil {
 			return
 		}
 		if bgCtx == nil {
