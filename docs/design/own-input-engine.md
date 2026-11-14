@@ -131,3 +131,4 @@ MVP 切分：合法音节表最长匹配 + 回溯；末段允许为合法音节�
 | 候选窗抢焦点 | `ShowInactive`（`main.go:909` 已验证）。 |
 | 定位不准 | 窗口/鼠标锚点回退，同 pill。 |
 | macOS 回归 | 逻辑在纯 Go 包，接线只在 `*_windows.go`；`bridge_darwin.go` 不动。macOS 上 `enabled=true` 暂不生效（后续走 IMK）。 |
+| 词频学习写库阻塞钩子（Windows 原生 SQLite 往返约 12.6ms/次，自动提交另含 fsync） | 钩子线程、提交路径、UI 线程只调用 `storage.LearningWriter` 的 `Queue*`：同步更新 RAM 镜像（`LookupBoost` 立即生效），持久化由后台按 750ms / 256 条合并为一个事务（计数按增量 UPSERT）；**禁止**在这些路径直接调用 `LearningStore.RecordIMECommit` / `RecordItemUse`。失败重试 3 次后丢弃并计入 `Stats().Dropped`。 |
