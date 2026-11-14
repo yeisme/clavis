@@ -72,28 +72,40 @@ func (c TriggerConfig) toTOML() *toml.Table {
 
 // AppearanceConfig configures Capsule UI visuals and timings.
 type AppearanceConfig struct {
-	Theme             string  `json:"theme"`
-	Language          string  `json:"language"`
-	Animations        string  `json:"animations"`
-	CapsuleWidth      float64 `json:"capsuleWidth"`
-	MaxVisibleResults int     `json:"maxVisibleResults"`
-	CornerRadius      float64 `json:"cornerRadius"`
-	ShowKeyHints      bool    `json:"showKeyHints"`
-	ShowPreviewPane   bool    `json:"showPreviewPane"`
-	HUDDurationMs     int     `json:"hudDurationMs"`
+	Theme                   string  `json:"theme"`
+	Language                string  `json:"language"`
+	Animations              string  `json:"animations"`
+	CapsuleWidth            float64 `json:"capsuleWidth"`
+	MaxVisibleResults       int     `json:"maxVisibleResults"`
+	CornerRadius            float64 `json:"cornerRadius"`
+	ShowKeyHints            bool    `json:"showKeyHints"`
+	ShowPreviewPane         bool    `json:"showPreviewPane"`
+	HUDDurationMs           int     `json:"hudDurationMs"`
+	VisualPreset            string  `json:"visualPreset"`
+	Enable3DEffects         bool    `json:"enable3DEffects"`
+	EnableShaders           bool    `json:"enableShaders"`
+	GlassClarity            float64 `json:"glassClarity"`
+	ShowBentoShelf          bool    `json:"showBentoShelf"`
+	CandidateBarOrientation string  `json:"candidateBarOrientation"`
 }
 
 func DefaultAppearanceConfig() AppearanceConfig {
 	return AppearanceConfig{
-		Theme:             "system",
-		Language:          "auto",
-		Animations:        "auto",
-		CapsuleWidth:      680.0,
-		MaxVisibleResults: 8,
-		CornerRadius:      16.0,
-		ShowKeyHints:      true,
-		ShowPreviewPane:   true,
-		HUDDurationMs:     1400,
+		Theme:                   "system",
+		Language:                "auto",
+		Animations:              "auto",
+		CapsuleWidth:            680.0,
+		MaxVisibleResults:       8,
+		CornerRadius:            16.0,
+		ShowKeyHints:            true,
+		ShowPreviewPane:         true,
+		HUDDurationMs:           1400,
+		VisualPreset:            "spatial_3d",
+		Enable3DEffects:         true,
+		EnableShaders:           true,
+		GlassClarity:            0.18,
+		ShowBentoShelf:          true,
+		CandidateBarOrientation: "horizontal",
 	}
 }
 
@@ -147,6 +159,36 @@ func decodeAppearanceConfig(tbl *toml.Table, path string) (AppearanceConfig, err
 	} else if ok {
 		cfg.HUDDurationMs = n
 	}
+	if s, ok, err := optionalString(tbl, "visual_preset", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.VisualPreset = s
+	}
+	if b, ok, err := optionalBool(tbl, "enable_3d_effects", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.Enable3DEffects = b
+	}
+	if b, ok, err := optionalBool(tbl, "enable_shaders", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.EnableShaders = b
+	}
+	if f, ok, err := optionalFloat(tbl, "glass_clarity", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.GlassClarity = f
+	}
+	if b, ok, err := optionalBool(tbl, "show_bento_shelf", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.ShowBentoShelf = b
+	}
+	if s, ok, err := optionalString(tbl, "candidate_bar_orientation", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.CandidateBarOrientation = s
+	}
 	return cfg, nil
 }
 
@@ -161,6 +203,12 @@ func (c AppearanceConfig) toTOML() *toml.Table {
 	t.Set("show_key_hints", toml.BoolVal(c.ShowKeyHints))
 	t.Set("show_preview_pane", toml.BoolVal(c.ShowPreviewPane))
 	t.Set("hud_duration_ms", toml.IntVal(int64(c.HUDDurationMs)))
+	t.Set("visual_preset", toml.StringVal(c.VisualPreset))
+	t.Set("enable_3d_effects", toml.BoolVal(c.Enable3DEffects))
+	t.Set("enable_shaders", toml.BoolVal(c.EnableShaders))
+	t.Set("glass_clarity", toml.FloatVal(c.GlassClarity))
+	t.Set("show_bento_shelf", toml.BoolVal(c.ShowBentoShelf))
+	t.Set("candidate_bar_orientation", toml.StringVal(c.CandidateBarOrientation))
 	return t
 }
 
@@ -957,24 +1005,213 @@ func (c IMEConfig) toTOML() *toml.Table {
 	return t
 }
 
+// InputEngineConfig configures Clavis' built-in input engine.
+type InputEngineConfig struct {
+	Enabled             bool     `json:"enabled"`
+	Mode                string   `json:"mode"`
+	Scheme              string   `json:"scheme"`
+	CandidateCount      int      `json:"candidateCount"`
+	MixedEnglish        bool     `json:"mixedEnglish"`
+	AutoPairPunctuation bool     `json:"autoPairPunctuation"`
+	ShiftToggleASCII    bool     `json:"shiftToggleASCII"`
+	FuzzyPinyin         []string `json:"fuzzyPinyin"`
+	CustomDictPaths     []string `json:"customDictPaths"`
+	UserLearning        bool     `json:"userLearning"`
+	IMKSocketPath       string   `json:"imkSocketPath"`
+}
+
+func DefaultInputEngineConfig() InputEngineConfig {
+	return InputEngineConfig{Mode: "inline_hook", Scheme: "quanpin", CandidateCount: 7, MixedEnglish: true, AutoPairPunctuation: true, ShiftToggleASCII: true, FuzzyPinyin: []string{}, CustomDictPaths: []string{}, UserLearning: true}
+}
+func decodeInputEngineConfig(tbl *toml.Table, path string) (InputEngineConfig, error) {
+	c := DefaultInputEngineConfig()
+	if tbl == nil {
+		return c, nil
+	}
+	if b, ok, e := optionalBool(tbl, "enabled", path); e != nil {
+		return c, e
+	} else if ok {
+		c.Enabled = b
+	}
+	if s, ok, e := optionalString(tbl, "mode", path); e != nil {
+		return c, e
+	} else if ok {
+		c.Mode = s
+	}
+	if s, ok, e := optionalString(tbl, "scheme", path); e != nil {
+		return c, e
+	} else if ok {
+		c.Scheme = s
+	}
+	if n, ok, e := optionalInt(tbl, "candidate_count", path); e != nil {
+		return c, e
+	} else if ok {
+		c.CandidateCount = n
+	}
+	if b, ok, e := optionalBool(tbl, "mixed_english", path); e != nil {
+		return c, e
+	} else if ok {
+		c.MixedEnglish = b
+	}
+	if b, ok, e := optionalBool(tbl, "auto_pair_punctuation", path); e != nil {
+		return c, e
+	} else if ok {
+		c.AutoPairPunctuation = b
+	}
+	if b, ok, e := optionalBool(tbl, "shift_toggle_ascii", path); e != nil {
+		return c, e
+	} else if ok {
+		c.ShiftToggleASCII = b
+	}
+	if a, ok, e := optionalStringArray(tbl, "fuzzy_pinyin", path); e != nil {
+		return c, e
+	} else if ok {
+		c.FuzzyPinyin = a
+	}
+	if a, ok, e := optionalStringArray(tbl, "custom_dict_paths", path); e != nil {
+		return c, e
+	} else if ok {
+		c.CustomDictPaths = a
+	}
+	if b, ok, e := optionalBool(tbl, "user_learning", path); e != nil {
+		return c, e
+	} else if ok {
+		c.UserLearning = b
+	}
+	if s, ok, e := optionalString(tbl, "imk_socket_path", path); e != nil {
+		return c, e
+	} else if ok {
+		c.IMKSocketPath = s
+	}
+	return c, nil
+}
+func (c InputEngineConfig) toTOML() *toml.Table {
+	t := toml.NewTable()
+	t.Set("enabled", toml.BoolVal(c.Enabled))
+	t.Set("mode", toml.StringVal(c.Mode))
+	t.Set("scheme", toml.StringVal(c.Scheme))
+	t.Set("candidate_count", toml.IntVal(int64(c.CandidateCount)))
+	t.Set("mixed_english", toml.BoolVal(c.MixedEnglish))
+	t.Set("auto_pair_punctuation", toml.BoolVal(c.AutoPairPunctuation))
+	t.Set("shift_toggle_ascii", toml.BoolVal(c.ShiftToggleASCII))
+	t.Set("fuzzy_pinyin", stringsToTOMLArray(c.FuzzyPinyin))
+	t.Set("custom_dict_paths", stringsToTOMLArray(c.CustomDictPaths))
+	t.Set("user_learning", toml.BoolVal(c.UserLearning))
+	t.Set("imk_socket_path", toml.StringVal(c.IMKSocketPath))
+	return t
+}
+
+// SelectionBarConfig configures text-selection actions.
+type SelectionBarConfig struct {
+	Enabled     bool     `json:"enabled"`
+	TriggerMode string   `json:"triggerMode"`
+	Actions     []string `json:"actions"`
+}
+
+func DefaultSelectionBarConfig() SelectionBarConfig {
+	return SelectionBarConfig{Enabled: true, TriggerMode: "double_shift", Actions: []string{"optimize_prompt", "explain", "translate", "polish", "copy"}}
+}
+func decodeSelectionBarConfig(tbl *toml.Table, path string) (SelectionBarConfig, error) {
+	c := DefaultSelectionBarConfig()
+	if tbl == nil {
+		return c, nil
+	}
+	if b, o, e := optionalBool(tbl, "enabled", path); e != nil {
+		return c, e
+	} else if o {
+		c.Enabled = b
+	}
+	if s, o, e := optionalString(tbl, "trigger_mode", path); e != nil {
+		return c, e
+	} else if o {
+		c.TriggerMode = s
+	}
+	if a, o, e := optionalStringArray(tbl, "actions", path); e != nil {
+		return c, e
+	} else if o {
+		c.Actions = a
+	}
+	return c, nil
+}
+func (c SelectionBarConfig) toTOML() *toml.Table {
+	t := toml.NewTable()
+	t.Set("enabled", toml.BoolVal(c.Enabled))
+	t.Set("trigger_mode", toml.StringVal(c.TriggerMode))
+	t.Set("actions", stringsToTOMLArray(c.Actions))
+	return t
+}
+
+// DaemonConfig controls resident process lifecycle behavior.
+type DaemonConfig struct {
+	IdleCompactSeconds      int    `json:"idleCompactSeconds"`
+	MaxMemoryMB             int    `json:"maxMemoryMB"`
+	WatchdogIntervalMs      int    `json:"watchdogIntervalMs"`
+	InPlaceOptimizeShortcut string `json:"inPlaceOptimizeShortcut"`
+}
+
+func DefaultDaemonConfig() DaemonConfig {
+	return DaemonConfig{IdleCompactSeconds: 60, MaxMemoryMB: 64, WatchdogIntervalMs: 5000, InPlaceOptimizeShortcut: "option+tab"}
+}
+func decodeDaemonConfig(tbl *toml.Table, path string) (DaemonConfig, error) {
+	c := DefaultDaemonConfig()
+	if tbl == nil {
+		return c, nil
+	}
+	if n, o, e := optionalInt(tbl, "idle_compact_seconds", path); e != nil {
+		return c, e
+	} else if o {
+		c.IdleCompactSeconds = n
+	}
+	if n, o, e := optionalInt(tbl, "max_memory_mb", path); e != nil {
+		return c, e
+	} else if o {
+		c.MaxMemoryMB = n
+	}
+	if n, o, e := optionalInt(tbl, "watchdog_interval_ms", path); e != nil {
+		return c, e
+	} else if o {
+		c.WatchdogIntervalMs = n
+	}
+	if s, o, e := optionalString(tbl, "in_place_optimize_shortcut", path); e != nil {
+		return c, e
+	} else if o {
+		c.InPlaceOptimizeShortcut = s
+	}
+	return c, nil
+}
+func (c DaemonConfig) toTOML() *toml.Table {
+	t := toml.NewTable()
+	t.Set("idle_compact_seconds", toml.IntVal(int64(c.IdleCompactSeconds)))
+	t.Set("max_memory_mb", toml.IntVal(int64(c.MaxMemoryMB)))
+	t.Set("watchdog_interval_ms", toml.IntVal(int64(c.WatchdogIntervalMs)))
+	t.Set("in_place_optimize_shortcut", toml.StringVal(c.InPlaceOptimizeShortcut))
+	return t
+}
+
 // MainConfig represents config.toml.
 type MainConfig struct {
-	Trigger    TriggerConfig    `json:"trigger"`
-	Keymap     KeymapConfig     `json:"keymap"`
-	Appearance AppearanceConfig `json:"appearance"`
-	AI         AIConfig         `json:"ai"`
-	Clipboard  ClipboardConfig  `json:"clipboard"`
-	IME        IMEConfig        `json:"ime"`
+	Trigger      TriggerConfig      `json:"trigger"`
+	Keymap       KeymapConfig       `json:"keymap"`
+	Appearance   AppearanceConfig   `json:"appearance"`
+	AI           AIConfig           `json:"ai"`
+	Clipboard    ClipboardConfig    `json:"clipboard"`
+	IME          IMEConfig          `json:"ime"`
+	InputEngine  InputEngineConfig  `json:"inputEngine"`
+	SelectionBar SelectionBarConfig `json:"selectionBar"`
+	Daemon       DaemonConfig       `json:"daemon"`
 }
 
 func DefaultMainConfig() MainConfig {
 	return MainConfig{
-		Trigger:    DefaultTriggerConfig(),
-		Keymap:     DefaultKeymapConfig(),
-		Appearance: DefaultAppearanceConfig(),
-		AI:         DefaultAIConfig(),
-		Clipboard:  DefaultClipboardConfig(),
-		IME:        DefaultIMEConfig(),
+		Trigger:      DefaultTriggerConfig(),
+		Keymap:       DefaultKeymapConfig(),
+		Appearance:   DefaultAppearanceConfig(),
+		AI:           DefaultAIConfig(),
+		Clipboard:    DefaultClipboardConfig(),
+		IME:          DefaultIMEConfig(),
+		InputEngine:  DefaultInputEngineConfig(),
+		SelectionBar: DefaultSelectionBarConfig(),
+		Daemon:       DefaultDaemonConfig(),
 	}
 }
 
@@ -1013,6 +1250,18 @@ func MainConfigFromTOML(tbl *toml.Table) (MainConfig, error) {
 	if err != nil {
 		return MainConfig{}, err
 	}
+	inputTbl, _, err := optionalTable(tbl, "input_engine", "")
+	if err != nil {
+		return MainConfig{}, err
+	}
+	selectionTbl, _, err := optionalTable(tbl, "selection_bar", "")
+	if err != nil {
+		return MainConfig{}, err
+	}
+	daemonTbl, _, err := optionalTable(tbl, "daemon", "")
+	if err != nil {
+		return MainConfig{}, err
+	}
 
 	trigger, err := decodeTriggerConfig(triggerTbl, "trigger")
 	if err != nil {
@@ -1038,15 +1287,19 @@ func MainConfigFromTOML(tbl *toml.Table) (MainConfig, error) {
 	if err != nil {
 		return MainConfig{}, err
 	}
-
-	return MainConfig{
-		Trigger:    trigger,
-		Keymap:     keymap,
-		Appearance: appearance,
-		AI:         aiCfg,
-		Clipboard:  clipboard,
-		IME:        ime,
-	}, nil
+	inputEngine, err := decodeInputEngineConfig(inputTbl, "input_engine")
+	if err != nil {
+		return MainConfig{}, err
+	}
+	selectionBar, err := decodeSelectionBarConfig(selectionTbl, "selection_bar")
+	if err != nil {
+		return MainConfig{}, err
+	}
+	daemon, err := decodeDaemonConfig(daemonTbl, "daemon")
+	if err != nil {
+		return MainConfig{}, err
+	}
+	return MainConfig{Trigger: trigger, Keymap: keymap, Appearance: appearance, AI: aiCfg, Clipboard: clipboard, IME: ime, InputEngine: inputEngine, SelectionBar: selectionBar, Daemon: daemon}, nil
 }
 
 // Encode serializes MainConfig to deterministic TOML.
@@ -1058,5 +1311,8 @@ func (c MainConfig) Encode() string {
 	root.Set("ai", toml.TableVal(c.AI.toTOML()))
 	root.Set("clipboard", toml.TableVal(c.Clipboard.toTOML()))
 	root.Set("ime", toml.TableVal(c.IME.toTOML()))
+	root.Set("input_engine", toml.TableVal(c.InputEngine.toTOML()))
+	root.Set("selection_bar", toml.TableVal(c.SelectionBar.toTOML()))
+	root.Set("daemon", toml.TableVal(c.Daemon.toTOML()))
 	return toml.Encode(root)
 }

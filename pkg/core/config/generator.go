@@ -49,6 +49,10 @@ func DefaultContent(kind ConfigFileKind) string {
 		return defaultGlossaryTOML
 	case FileIMERules:
 		return defaultIMERulesTOML
+	case FilePrompts:
+		return DefaultPromptsConfig().Encode()
+	case FileComponents:
+		return DefaultComponentsConfig().Encode()
 	default:
 		return ""
 	}
@@ -89,6 +93,12 @@ corner_radius = 16.0
 show_key_hints = true
 show_preview_pane = true
 hud_duration_ms = 1400
+visual_preset = "spatial_3d"
+enable_3d_effects = true
+enable_shaders = true
+glass_clarity = 0.18
+show_bento_shelf = true
+candidate_bar_orientation = "horizontal"
 
 [ai]
 # API keys are never stored in config.toml; store them in OS Keychain / Credential Manager under keychain_account
@@ -169,6 +179,30 @@ show_indicator_hud = true
 switch_delay_ms = 50
 lock_ascii_on_leader = true
 show_floating_pill = true
+
+[input_engine]
+enabled = false
+mode = "inline_hook"
+scheme = "quanpin"
+candidate_count = 7
+mixed_english = true
+auto_pair_punctuation = true
+shift_toggle_ascii = true
+fuzzy_pinyin = []
+custom_dict_paths = []
+user_learning = true
+imk_socket_path = ""
+
+[selection_bar]
+enabled = true
+trigger_mode = "double_shift"
+actions = ["optimize_prompt", "explain", "translate", "polish", "copy"]
+
+[daemon]
+idle_compact_seconds = 60
+max_memory_mb = 64
+watchdog_interval_ms = 5000
+in_place_optimize_shortcut = "option+tab"
 `
 
 const defaultLeaderTOML = `# Clavis leader key tree

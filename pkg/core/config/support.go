@@ -8,15 +8,17 @@ import (
 	"github.com/yeisme/clavis/pkg/core/toml"
 )
 
-// ConfigFileKind identifies one of the 5 declarative Clavis TOML files.
+// ConfigFileKind identifies one of the declarative Clavis TOML files.
 type ConfigFileKind string
 
 const (
-	FileMain     ConfigFileKind = "config.toml"
-	FileLeader   ConfigFileKind = "leader.toml"
-	FileSnippets ConfigFileKind = "snippets.toml"
-	FileGlossary ConfigFileKind = "glossary.toml"
-	FileIMERules ConfigFileKind = "ime-rules.toml"
+	FileMain       ConfigFileKind = "config.toml"
+	FileLeader     ConfigFileKind = "leader.toml"
+	FileSnippets   ConfigFileKind = "snippets.toml"
+	FileGlossary   ConfigFileKind = "glossary.toml"
+	FileIMERules   ConfigFileKind = "ime-rules.toml"
+	FilePrompts    ConfigFileKind = "prompts.toml"
+	FileComponents ConfigFileKind = "components.toml"
 )
 
 // AllConfigFileKinds returns all config file kinds in deterministic order.
@@ -27,6 +29,8 @@ func AllConfigFileKinds() []ConfigFileKind {
 		FileSnippets,
 		FileGlossary,
 		FileIMERules,
+		FilePrompts,
+		FileComponents,
 	}
 }
 
@@ -43,23 +47,27 @@ func (e *DecodingError) Error() string {
 	return fmt.Sprintf("%s: %s", e.KeyPath, e.Message)
 }
 
-// ClavisConfig holds all 5 declarative Clavis configurations.
+// ClavisConfig holds all declarative Clavis configurations.
 type ClavisConfig struct {
-	Main     MainConfig     `json:"main"`
-	Leader   LeaderConfig   `json:"leader"`
-	Snippets SnippetsConfig `json:"snippets"`
-	Glossary GlossaryConfig `json:"glossary"`
-	IMERules IMERulesConfig `json:"imeRules"`
+	Main       MainConfig       `json:"main"`
+	Leader     LeaderConfig     `json:"leader"`
+	Snippets   SnippetsConfig   `json:"snippets"`
+	Glossary   GlossaryConfig   `json:"glossary"`
+	IMERules   IMERulesConfig   `json:"imeRules"`
+	Prompts    PromptsConfig    `json:"prompts"`
+	Components ComponentsConfig `json:"components"`
 }
 
 // DefaultConfig returns the complete default ClavisConfig.
 func DefaultConfig() ClavisConfig {
 	return ClavisConfig{
-		Main:     DefaultMainConfig(),
-		Leader:   DefaultLeaderConfig(),
-		Snippets: DefaultSnippetsConfig(),
-		Glossary: DefaultGlossaryConfig(),
-		IMERules: DefaultIMERulesConfig(),
+		Main:       DefaultMainConfig(),
+		Leader:     DefaultLeaderConfig(),
+		Snippets:   DefaultSnippetsConfig(),
+		Glossary:   DefaultGlossaryConfig(),
+		IMERules:   DefaultIMERulesConfig(),
+		Prompts:    DefaultPromptsConfig(),
+		Components: DefaultComponentsConfig(),
 	}
 }
 

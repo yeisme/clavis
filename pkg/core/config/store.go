@@ -243,6 +243,47 @@ func (s *ConfigStore) SaveGlossary(glossaryCfg GlossaryConfig) error {
 }
 
 // SaveIMERules validates imeRulesCfg, atomically writes ime-rules.toml to disk, and updates Current().IMERules.
+func (s *ConfigStore) SavePrompts(cfg PromptsConfig) error {
+	if err := firstErrorIssue(ValidatePrompts(cfg)); err != nil {
+		return err
+	}
+	if err := atomicWriteConfigFile(s.dir, FilePrompts, cfg.Encode()); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.ensureSavedDigestsLocked()
+	s.current.Prompts = cfg
+	s.lastErrors = nil
+	s.savedDigests[string(FilePrompts)] = sha256.Sum256([]byte(cfg.Encode()))
+	s.mu.Unlock()
+	return nil
+}
+func (s *ConfigStore) SavePromptMarkdown(id, content string) error {
+	trimmedID := strings.TrimSpace(id)
+	if trimmedID == "" || trimmedID != filepath.Base(trimmedID) || strings.Contains(trimmedID, string(filepath.Separator)) {
+		return errors.New("prompt id must be a non-empty file name")
+	}
+	if err := os.MkdirAll(filepath.Join(s.dir, "prompts"), 0o755); err != nil {
+		return err
+	}
+	return atomicWriteFile(filepath.Join(s.dir, "prompts", trimmedID+".md"), content)
+}
+func (s *ConfigStore) SaveComponents(cfg ComponentsConfig) error {
+	if err := firstErrorIssue(ValidateComponents(cfg)); err != nil {
+		return err
+	}
+	if err := atomicWriteConfigFile(s.dir, FileComponents, cfg.Encode()); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.ensureSavedDigestsLocked()
+	s.current.Components = cfg
+	s.lastErrors = nil
+	s.savedDigests[string(FileComponents)] = sha256.Sum256([]byte(cfg.Encode()))
+	s.mu.Unlock()
+	return nil
+}
+
 func (s *ConfigStore) SaveIMERules(imeRulesCfg IMERulesConfig) error {
 	if err := firstErrorIssue(ValidateIMERules(imeRulesCfg)); err != nil {
 		return err
@@ -277,6 +318,8 @@ func (s *ConfigStore) SaveAll(cfg ClavisConfig) error {
 		{FileSnippets, cfg.Snippets.Encode()},
 		{FileGlossary, cfg.Glossary.Encode()},
 		{FileIMERules, cfg.IMERules.Encode()},
+		{FilePrompts, cfg.Prompts.Encode()},
+		{FileComponents, cfg.Components.Encode()},
 	}
 	sums := make(map[string][32]byte, len(files))
 	for _, f := range files {
@@ -296,6 +339,26 @@ func (s *ConfigStore) SaveAll(cfg ClavisConfig) error {
 	return nil
 }
 
+func atomicWriteFile(path, content string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".clavis-tmp-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if _, err = tmp.WriteString(content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
+}
 func atomicWriteConfigFile(dir string, kind ConfigFileKind, content string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -340,8 +403,24 @@ func (s *ConfigStore) Reload() bool {
 	snippetsCfg, ok3 := loadConfigFile(s.dir, FileSnippets, DecodeSnippetsConfig, &errs)
 	glossaryCfg, ok4 := loadConfigFile(s.dir, FileGlossary, DecodeGlossaryConfig, &errs)
 	imeRulesCfg, ok5 := loadConfigFile(s.dir, FileIMERules, DecodeIMERulesConfig, &errs)
+	promptsCfg, ok6 := loadConfigFile(s.dir, FilePrompts, DecodePromptsConfig, &errs)
+	componentsCfg, ok7 := loadConfigFile(s.dir, FileComponents, DecodeComponentsConfig, &errs)
+	if ok6 {
+		var mergeErr error
+		promptsCfg, mergeErr = mergePromptMarkdown(promptsCfg, s.dir)
+		if mergeErr != nil {
+			errs = append(errs, LoadError{File: "prompts/*.md", Message: mergeErr.Error()})
+		}
+	}
+	if ok7 {
+		var mergeErr error
+		componentsCfg, mergeErr = mergeComponentScripts(componentsCfg, s.dir)
+		if mergeErr != nil {
+			errs = append(errs, LoadError{File: "components/*.toml", Message: mergeErr.Error()})
+		}
+	}
 
-	if len(errs) > 0 || !ok || !ok2 || !ok3 || !ok4 || !ok5 {
+	if len(errs) > 0 || !ok || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 || !ok7 {
 		s.mu.Lock()
 		s.lastErrors = errs
 		s.mu.Unlock()
@@ -349,11 +428,13 @@ func (s *ConfigStore) Reload() bool {
 	}
 
 	candidate := ClavisConfig{
-		Main:     mainCfg,
-		Leader:   leaderCfg,
-		Snippets: snippetsCfg,
-		Glossary: glossaryCfg,
-		IMERules: imeRulesCfg,
+		Main:       mainCfg,
+		Leader:     leaderCfg,
+		Snippets:   snippetsCfg,
+		Glossary:   glossaryCfg,
+		IMERules:   imeRulesCfg,
+		Prompts:    promptsCfg,
+		Components: componentsCfg,
 	}
 
 	// Speak the language of the config being validated so its diagnostics
