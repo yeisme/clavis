@@ -101,6 +101,25 @@ func Current() Language {
 // uses it to pick CJK-aware widths, fonts and line heights.
 func IsChinese() bool { return Current() == Chinese }
 
+// DisplayLabel returns the active language's display text for a stock label
+// that ships in the generated defaults (leader.toml node labels and the
+// default AI prompts), so a zh-CN user sees 「左半屏」 for the default
+// "Left Half" node. Config files keep their English values; labels the user
+// wrote themselves have no "label." table entry and come back unchanged.
+func DisplayLabel(label string) string {
+	if Current() != Chinese {
+		return label
+	}
+	trimmed := strings.TrimSpace(label)
+	if trimmed == "" {
+		return label
+	}
+	if s, ok := zhTable["label."+trimmed]; ok && s != "" {
+		return s
+	}
+	return label
+}
+
 // preferred supplies the operating system's preferred UI languages for
 // Auto. The desktop shell injects the toolkit's probe; without one (tests,
 // CLI runs) the LANG family of environment variables is read instead.

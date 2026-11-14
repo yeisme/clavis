@@ -38,7 +38,7 @@ const (
 	keychainService  = "com.yeisme.clavis"
 	clipPollInterval = 400 * time.Millisecond
 	clipPruneEvery   = 5 * time.Minute
-	imePillDuration  = 850 * time.Millisecond
+	imePillFadeOut   = 160 * time.Millisecond
 	imePillOffsetX   = 8.0
 	imePillOffsetY   = 6.0
 )
@@ -981,6 +981,7 @@ func (a *desktopApp) presentIMEPillAsync(ctx context.Context, gen uint64, br bri
 		}, displays)
 
 		pill.SetBounds(bounds)
+		pill.SetOpacity(1) // undo a fade-out the new label interrupted
 		pill.ShowInactive()
 		pill.Invalidate()
 		a.scheduleIMEPillAutoHide(gen)
@@ -996,10 +997,30 @@ func (a *desktopApp) scheduleIMEPillAutoHide(gen uint64) {
 	if a.imePillTimer != nil {
 		a.imePillTimer.Stop()
 	}
-	a.imePillTimer = time.AfterFunc(imePillDuration, func() {
+	// A mode badge is glanceable; sentences and failures stay longer.
+	hold := uiapp.PillDisplayDuration(a.imePillLabel)
+	a.imePillTimer = time.AfterFunc(hold, func() {
 		if a.imePillGen.Load() != gen {
 			return
 		}
+		a.fadeOutIMEPill(gen)
+	})
+}
+
+// fadeOutIMEPill fades the pill window out over imePillFadeOut and hides it,
+// instead of letting it vanish mid-glance. A newer pill (gen changed) stops
+// the fade; presentIMEPillAsync restores full opacity before showing it.
+// With [appearance].animations = "off" the pill hides at once.
+func (a *desktopApp) fadeOutIMEPill(gen uint64) {
+	const steps = 8
+	animate := true
+	a.mu.Lock()
+	if a.cfgStore != nil {
+		animate = config.NormalizeAnimationMode(a.cfgStore.Current().Main.Appearance.Animations) != "off"
+	}
+	a.mu.Unlock()
+
+	hide := func() {
 		mygo.RunOnMain(func() {
 			if a.imePillGen.Load() != gen {
 				return
@@ -1009,9 +1030,38 @@ func (a *desktopApp) scheduleIMEPillAutoHide(gen uint64) {
 			a.mu.Unlock()
 			if p != nil && p.IsVisible() {
 				p.Hide()
+				p.SetOpacity(1)
 			}
 		})
-	})
+	}
+	if !animate {
+		hide()
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(imePillFadeOut / steps)
+		defer ticker.Stop()
+		for i := 1; i < steps; i++ {
+			<-ticker.C
+			if a.imePillGen.Load() != gen {
+				return
+			}
+			opacity := 1 - float64(i)/steps
+			mygo.RunOnMain(func() {
+				if a.imePillGen.Load() != gen {
+					return
+				}
+				a.mu.Lock()
+				p := a.imePillPanel
+				a.mu.Unlock()
+				if p != nil {
+					p.SetOpacity(opacity)
+				}
+			})
+		}
+		<-ticker.C
+		hide()
+	}()
 }
 
 func (a *desktopApp) handlePresentPhase(phase engine.CapsulePhase) {

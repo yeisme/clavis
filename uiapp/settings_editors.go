@@ -190,7 +190,9 @@ func settingsStepper(
 ) (float64, bool) {
 	next, changed := value, false
 	ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-		text := caption
+		// The caption always carries the current value: a bare count
+		// (max_visible_results, max_history_items) used to show no number.
+		text := fmt.Sprintf("%s: %.0f", caption, value)
 		if suffix != "" {
 			text = fmt.Sprintf("%s: %.0f %s", caption, value, suffix)
 		}

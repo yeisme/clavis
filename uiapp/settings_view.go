@@ -278,7 +278,7 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 			if v, changed := settingsStepper(c, theme, "capsule_width", appearance.CapsuleWidth, 400, 1200, 20, "px"); changed {
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.CapsuleWidth = v })
 			}
-			if v, changed := settingsStepper(c, theme, "max_visible_results", float64(appearance.MaxVisibleResults), 3, 20, 1, ""); changed {
+			if v, changed := settingsStepper(c, theme, "max_visible_results", float64(appearance.MaxVisibleResults), minVisibleResults, maxVisibleResults, 1, ""); changed {
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.MaxVisibleResults = int(v) })
 			}
 			if v, changed := settingsStepper(c, theme, "corner_radius", appearance.CornerRadius, 0, 32, 2, "px"); changed {

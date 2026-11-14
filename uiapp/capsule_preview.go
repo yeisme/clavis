@@ -448,11 +448,7 @@ func (a *AppController) renderOmniboxPreviewBody(
 
 	case engine.ItemAIMode:
 		ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
-			mode := item.AIMode
-			if mode == "" {
-				mode = i18n.T("ai.mode.ask")
-			}
-			previewBadge(c, theme, "sparkles", i18n.Tf("preview.ai_mode", mode), true)
+			previewBadge(c, theme, "sparkles", i18n.Tf("preview.ai_mode", aiModeLabel(item.AIMode)), true)
 		})
 		ui.Text(c, i18n.T("preview.prompt")).FontSize(10).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
 		prompt := item.AIPrompt
@@ -504,16 +500,9 @@ func (a *AppController) renderPreviewActionHints(c *ui.Context, theme *ui.Theme,
 		shown = shown[:2]
 	}
 	ui.Divider(c)
-	ui.Column(c).FillWidth().Gap(2).Children(func() {
+	ui.Column(c).FillWidth().Gap(space4).Children(func() {
 		for _, spec := range shown {
-			ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, adaptActionShortcut(spec.Shortcut)).
-					FontSize(10).
-					FontWeight(700).
-					TextColor(theme.Accent).
-					SingleLine()
-				ui.Text(c, spec.Label).FontSize(10).TextColor(theme.TextMuted).SingleLine().Grow(1)
-			})
+			keyHint(c, theme, adaptActionShortcut(spec.Shortcut), spec.Label, keyToneNeutral)
 		}
 	})
 }
@@ -540,29 +529,55 @@ func previewBadge(c *ui.Context, theme *ui.Theme, iconName, label string, accent
 // renderPreviewLines renders text line by line so long, multi-line content can
 // scroll inside the preview pane.
 func renderPreviewLines(c *ui.Context, theme *ui.Theme, text string, limit int) {
-	lines := previewLines(text, limit)
+	lines, hidden := previewLines(text, limit)
 	if len(lines) == 0 {
 		ui.Text(c, "—").FontSize(11).TextColor(theme.TextMuted).SingleLine()
 		return
 	}
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		applyProseLineHeight(ui.Text(c, line)).FontSize(11).TextColor(theme.Text).SingleLine()
+	// Code, commands and paths keep their shape in the monospace face on a
+	// faint well; prose wraps with the wider CJK leading.
+	trimmed := strings.TrimSpace(text)
+	mono := looksLikeCode(text) || looksLikeShellCommand(strings.ToLower(trimmed)) || looksLikePath(trimmed)
+	body := ui.Column(c).FillWidth().Gap(space2)
+	if mono {
+		body.Padding(space6, space8).Radius(radiusChip).Background(tileFill(theme)).Border(1, hairline(theme))
 	}
+	body.Children(func() {
+		for _, line := range lines {
+			if strings.TrimSpace(line) == "" {
+				if mono {
+					ui.Box(c).Height(space6)
+				}
+				continue
+			}
+			// Lines wrap at the pane width: a long URL or SQL statement reads
+			// in full instead of being cut to its first 40 characters.
+			t := ui.Text(c, line).TextColor(theme.Text).Wrap()
+			if mono {
+				t.Font("monospace").FontSize(typeMeta)
+			} else {
+				applyProseLineHeight(t).FontSize(typeLabel)
+			}
+		}
+		if hidden > 0 {
+			ui.Text(c, i18n.Tf("preview.more_lines", hidden)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+		}
+	})
 }
 
-func previewLines(text string, limit int) []string {
+// previewLines splits text into at most limit lines (limit <= 0: all) and
+// reports how many further lines were left out.
+func previewLines(text string, limit int) (lines []string, hidden int) {
 	if strings.TrimSpace(text) == "" {
-		return nil
+		return nil, 0
 	}
 	normalized := strings.ReplaceAll(text, "\r\n", "\n")
-	lines := strings.Split(normalized, "\n")
+	lines = strings.Split(strings.TrimRight(normalized, "\n"), "\n")
 	if limit > 0 && len(lines) > limit {
-		lines = append(lines[:limit:limit], "…")
+		hidden = len(lines) - limit
+		lines = lines[:limit:limit]
 	}
-	return lines
+	return lines, hidden
 }
 
 func previewLineCount(text string) int {
