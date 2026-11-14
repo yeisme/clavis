@@ -47,6 +47,13 @@ const (
 )
 
 func main() {
+	if hasSelfCheckFlag(os.Args[1:]) {
+		if err := runSelfCheck(os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "Clavis self-check failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if hasSmokeCheckFlag(os.Args[1:]) {
 		if err := runSmokeCheck(os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "Clavis smoke-check failed: %v\n", err)
