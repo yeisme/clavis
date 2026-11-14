@@ -539,6 +539,12 @@ func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *u
 			if diag.LastIMEError != "" {
 				settingsKeyValueRow(c, theme, i18n.T("settings.diag.ime_error"), diag.LastIMEError)
 			}
+			if v := diag.Permissions.Details["mouseHook"]; v != "" {
+				settingsKeyValueRow(c, theme, i18n.T("settings.diag.mouse_hook"), v)
+			}
+			if v := diag.Permissions.Details["hookError"]; v != "" {
+				settingsKeyValueRow(c, theme, i18n.T("settings.diag.hook_error"), v)
+			}
 
 			ui.Row(c).FillWidth().Gap(8).Children(func() {
 				svc := c.Services()

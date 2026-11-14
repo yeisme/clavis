@@ -272,6 +272,37 @@ type windowsBridge struct {
 
 	lastIMEFailMsg string
 	lastIMEFailAt  time.Time
+
+	// Last non-Clavis foreground app and its input source, for the settings IME card.
+	extMu     sync.Mutex
+	extApp    AppIdentity
+	extSource host.InputSourceInfo
+	haveExt   bool
+
+	health hookHealthState
+	// inputEngineReset, when set, drops any in-flight own-IME composition (mouse click etc.).
+	inputEngineReset func()
+}
+
+func (b *windowsBridge) recordExternalIME(app AppIdentity, src host.InputSourceInfo) {
+	b.extMu.Lock()
+	b.extApp, b.extSource, b.haveExt = app, src, true
+	b.extMu.Unlock()
+}
+
+// ForegroundIMEStatus implements ForegroundIMEReporter.
+func (b *windowsBridge) ForegroundIMEStatus() (ForegroundIMEStatus, bool) {
+	b.extMu.Lock()
+	app, src, ok := b.extApp, b.extSource, b.haveExt
+	b.extMu.Unlock()
+	if !ok {
+		return ForegroundIMEStatus{}, false
+	}
+	b.mu.Lock()
+	enabled := b.imeCfg.Enabled
+	b.mu.Unlock()
+	rule, matched := b.imeEngine.MatchedRule(app)
+	return ForegroundIMEStatus{App: app, Source: src, Rule: rule, RuleMatched: matched, AutoSwitch: enabled}, true
 }
 
 func newPlatformBridge(opts Options) HostService {
@@ -287,6 +318,8 @@ func newPlatformBridge(opts Options) HostService {
 		onLayer:      opts.OnKeymapLayerChanged,
 	}
 	b.pbRestorer = NewPasteboardSnapshotRestorer(&windowsPasteboardBackend{bridge: b})
+	b.health.resetCh = make(chan struct{}, 1)
+	b.health.reinstallRes = make(chan bool, 1)
 	return b
 }
 
@@ -334,8 +367,9 @@ func (b *windowsBridge) UpdateIMEConfig(imeCfg config.IMEConfig, rules config.IM
 	b.imeEngine.UpdateRules(imeCfg.Enabled, rules)
 }
 
+// TapRecoveryCount reports how many times the hook watchdog reinstalled the LL hooks.
 func (b *windowsBridge) TapRecoveryCount() int64 {
-	return 0
+	return b.health.reinstalls.Load()
 }
 
 func (b *windowsBridge) setCachedProcessName(name string) {
@@ -376,6 +410,7 @@ func (b *windowsBridge) Permissions(ctx context.Context) (host.PermissionStatus,
 		AppleEvents:     true,
 		Granted:         true,
 		Promptable:      false,
+		Details:         b.hookHealthDetails(),
 	}, nil
 }
 
@@ -433,6 +468,8 @@ func (b *windowsBridge) Start(ctx context.Context, onTrigger func(host.TriggerEv
 	}
 
 	go b.runIMEObserver(runCtx)
+	go b.runHookWatchdog(runCtx)
+	go b.runMouseResetWorker(runCtx)
 	return nil
 }
 
@@ -502,6 +539,7 @@ func (b *windowsBridge) runKeyboardHook(ctx context.Context, ready chan<- error)
 	defer stopWatch()
 
 	ready <- nil
+	b.installMouseHook()
 
 	var msg winMSG
 	for {
@@ -509,11 +547,25 @@ func (b *windowsBridge) runKeyboardHook(ctx context.Context, ready chan<- error)
 		if int32(ret) <= 0 {
 			break
 		}
+		if msg.Hwnd == 0 && msg.Message == wmClavisReinstall {
+			ok := b.reinstallHooksOnThread()
+			select {
+			case b.health.reinstallRes <- ok:
+			default:
+			}
+			continue
+		}
 		procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
 		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
 	}
 
-	procUnhookWindowsHookEx.Call(hhk)
+	b.uninstallMouseHook()
+	b.mu.Lock()
+	hhk = b.hookHandle
+	b.mu.Unlock()
+	if hhk != 0 {
+		procUnhookWindowsHookEx.Call(hhk)
+	}
 	b.mu.Lock()
 	b.hookHandle = 0
 	b.hookThreadID = 0
@@ -531,6 +583,7 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 	}
 
 	info := (*kbdLLHookStruct)(nativePtr(lParam))
+	b.health.lastHookTick.Store(info.Time)
 	if info.DwExtraInfo == uintptr(SyntheticEventTag) || (info.Flags&llkhfInjected) != 0 {
 		r, _, _ := procCallNextHookEx.Call(hhk, uintptr(nCode), wParam, lParam)
 		return r
@@ -581,8 +634,9 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 		unicodeStr := winVKToUnicode(vk, info.ScanCode)
 		// Under IMM32 a shared HKL keeps native (Chinese) conversion mode active; keystrokes then
 		// belong to the IME candidate buffer rather than to committed text.
-		imeComposing := winIsNativeConversionMode()
-		events, consume := b.router.HandleKeyDownWithIME(keyName, unicodeStr, mods, vk == vkBack, false, imeComposing, nowMs)
+		now := time.Now()
+		imeComposing := b.hookIMEComposing(now)
+		events, consume := b.router.HandleKeyDownWithIME(keyName, unicodeStr, mods, vk == vkBack, b.hookSecureInput(now), imeComposing, nowMs)
 		b.emitTriggerEvents(events)
 		if consume {
 			return 1
@@ -650,13 +704,14 @@ func (b *windowsBridge) runIMEObserver(ctx context.Context) {
 			onIME := b.onIME
 			b.mu.Unlock()
 
-			app, _ := winForegroundApp()
+			app, fg := winForegroundApp()
 			if app.ProcessName != "" {
 				b.setCachedProcessName(app.ProcessName)
 			}
 			if app.ProcessName == "" {
 				continue
 			}
+			b.health.secure.Store(isSecureField(winFocusedSecureSignals(fg, app.ProcessName)), time.Now())
 
 			// A foreground app change moves the insertion point: never let a snippet buffer
 			// typed in the previous app match inside the newly focused one.
@@ -678,12 +733,15 @@ func (b *windowsBridge) runIMEObserver(ctx context.Context) {
 			if err != nil {
 				continue
 			}
+			b.recordExternalIME(app, cur)
+			b.health.native.Store(cur.Mode == host.InputModeNative, time.Now())
 			changed := tracker.Observe(cur)
 
 			if enabled {
 				decision := b.imeEngine.EvaluateAppActivationWithState(app, cur.ID, cur.Mode == host.InputModeNative)
 				if decision.ShouldSwitch && b.applyRuleDecision(ctx, app, decision, delayMs) {
 					if updated, err := b.CurrentInputSource(ctx); err == nil {
+						b.recordExternalIME(app, updated)
 						tracker.Observe(updated)
 						if onIME != nil {
 							onIME(updated)

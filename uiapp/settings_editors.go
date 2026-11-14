@@ -495,6 +495,11 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 		if cur, err := a.CurrentInputSource(ctx); err == nil {
 			settingsKeyValueRow(c, theme, i18n.T("settings.ime.current_source"), FormatInputSourceStatus(cur))
 		}
+		if st, ok := a.ForegroundIMEStatus(); ok {
+			for _, row := range foregroundIMERows(st) {
+				settingsKeyValueRow(c, theme, row[0], row[1])
+			}
+		}
 		sources := a.AvailableInputSources(ctx)
 		labels, ids := inputSourceOptions(sources, imeCfg.DefaultInputSourceID)
 		settingsInlineRow(c, theme, "default_input_source_id", 130, func() {

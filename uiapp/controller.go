@@ -622,26 +622,11 @@ func (c *AppController) bindAppIMERule(eff engine.Effect, state engine.State) {
 
 	cfg := c.ConfigStore.Current()
 	mode := eff.IMEMode
-	kept := make([]config.IMERule, 0, len(cfg.IMERules.Rules)+1)
-	for _, rule := range cfg.IMERules.Rules {
-		if imeRuleTargetsApp(rule, bundleID, processName) {
-			continue
-		}
-		kept = append(kept, rule)
+	if isClavisProcess(bundleID, processName) {
+		c.ShowToastOrHUD(i18n.T("hud.no_active_app"))
+		return
 	}
-	if mode != "" {
-		newRule := config.IMERule{
-			BundleID:       bundleID,
-			ProcessName:    processName,
-			AppName:        appName,
-			PreferredMode:  mode,
-			RestoreOnLeave: true,
-		}
-		if mode == config.IMEModeASCII {
-			newRule.InputSourceID = strings.TrimSpace(cfg.Main.IME.DefaultInputSourceID)
-		}
-		kept = append(kept, newRule)
-	}
+	kept := buildAppIMERules(cfg.IMERules.Rules, bundleID, processName, appName, mode, cfg.Main.IME.DefaultInputSourceID)
 
 	rulesCfg := config.IMERulesConfig{Rules: kept}
 	if err := c.ConfigStore.SaveIMERules(rulesCfg); err != nil {
@@ -688,9 +673,47 @@ func imeRuleTargetsApp(rule config.IMERule, bundleID, processName string) bool {
 		return strings.TrimSpace(rule.BundleID) == bundleID
 	}
 	if processName != "" {
-		return strings.TrimSpace(rule.BundleID) == "" && strings.TrimSpace(rule.ProcessName) == processName
+		return strings.TrimSpace(rule.BundleID) == "" && normalizeRuleProcess(rule.ProcessName) == normalizeRuleProcess(processName)
 	}
 	return false
+}
+
+// normalizeRuleProcess compares Windows process names case-insensitively with ".exe" optional,
+// matching the bridge's rule matcher so re-binding "code.exe" replaces an existing "Code.exe" rule.
+func normalizeRuleProcess(name string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	return strings.TrimSuffix(n, ".exe")
+}
+
+func isClavisProcess(bundleID, processName string) bool {
+	return strings.EqualFold(strings.TrimSpace(bundleID), "com.yeisme.clavis") || normalizeRuleProcess(processName) == "clavis"
+}
+
+// buildAppIMERules replaces any app-scoped rule for (bundleID|processName) with a new rule for
+// mode, or only removes it when mode is empty. On Windows bundleID is empty, so the stored rule
+// targets process_name (e.g. "Code.exe"), which the bridge matches against the foreground exe.
+func buildAppIMERules(rules []config.IMERule, bundleID, processName, appName string, mode config.IMEMode, asciiSourceID string) []config.IMERule {
+	kept := make([]config.IMERule, 0, len(rules)+1)
+	for _, rule := range rules {
+		if imeRuleTargetsApp(rule, bundleID, processName) {
+			continue
+		}
+		kept = append(kept, rule)
+	}
+	if mode == "" {
+		return kept
+	}
+	newRule := config.IMERule{
+		BundleID:       bundleID,
+		ProcessName:    processName,
+		AppName:        appName,
+		PreferredMode:  mode,
+		RestoreOnLeave: true,
+	}
+	if mode == config.IMEModeASCII {
+		newRule.InputSourceID = strings.TrimSpace(asciiSourceID)
+	}
+	return append(kept, newRule)
 }
 
 func (c *AppController) handlePresentCapsule(phase engine.CapsulePhase) {
@@ -2271,4 +2294,17 @@ func (c *AppController) Diagnostics() DiagnosticsSnapshot {
 		}
 	}
 	return snap
+}
+
+// ForegroundIMEStatus returns the IME state of the last non-Clavis foreground app when the
+// platform bridge tracks it (Windows). ok is false elsewhere or before the first observation.
+func (c *AppController) ForegroundIMEStatus() (bridge.ForegroundIMEStatus, bool) {
+	c.mu.Lock()
+	br := c.Bridge
+	c.mu.Unlock()
+	rep, ok := br.(bridge.ForegroundIMEReporter)
+	if !ok || rep == nil {
+		return bridge.ForegroundIMEStatus{}, false
+	}
+	return rep.ForegroundIMEStatus()
 }
