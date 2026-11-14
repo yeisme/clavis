@@ -935,6 +935,12 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 			a.Dispatch(engine.Event{Type: engine.EventCopyAIOutput})
 		})
 	}
+	review, hasReview := a.aiReview(state)
+	if hasReview {
+		c.OnWindowShortcut(primaryMod(), ui.KeyD, func() {
+			a.toggleAIReview(review)
+		})
+	}
 
 	ui.Column(c).FillWidth().Grow(1).Padding(12, 14).Gap(8).Children(func() {
 		if state.AISourceText != "" {
@@ -1016,6 +1022,10 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 				})
 		}
 
+		if hasReview {
+			a.renderAIReviewToggle(c, theme, review)
+		}
+
 		applyProseLineHeight(ui.Scroll(c).
 			FillWidth().
 			Grow(1).
@@ -1046,6 +1056,8 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 					}
 				case state.AIOutput == "":
 					ui.Text(c, i18n.T("ai.generating")).FontSize(13).TextColor(theme.TextMuted)
+				case hasReview && a.aiReviewShowsChanges(review):
+					renderAIReviewChanges(c, theme, review)
 				default:
 					markdown.View(c, state.AIOutput, &a.uiState.mdOpts)
 					if !state.AIComplete {

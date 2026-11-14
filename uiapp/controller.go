@@ -134,6 +134,10 @@ type uiViewState struct {
 	imeRuleSourceDraft     string
 	imeRuleModeDraft       config.IMEMode
 
+	// aiReview caches the diff of an AI rewrite against its source and the
+	// view the user picked (see ai_review.go).
+	aiReview aiReviewState
+
 	// Animation bookkeeping (view-side, main-thread only).
 	lastExitHideDelay  time.Duration
 	lastAIError        string

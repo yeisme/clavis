@@ -598,4 +598,6 @@ var enTable = map[string]string{
 	"snippet.expanded_undo_hint":              "Expanded %s · ⌫ to undo",
 	"settings.trigger.snippet_backspace_undo": "Backspace Undoes Expansion",
 	"diag.trigger.leader_reveal_delay.range":  "leader_reveal_delay_ms should be within 0..%d (got %d); clamped",
+	"ai.view.result":                          "Result",
+	"ai.view.changes":                         "Changes",
 }

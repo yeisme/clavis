@@ -51,6 +51,8 @@ func TestTokenContrast(t *testing.T) {
 			{"matched runes on resting row", theme.Text, matchMark(theme).Over(bg), minTextContrast},
 			{"tile icon on chosen row", selectedTileGlyph(theme), selectedTileFill(theme).Over(selected), minGlyphContrast},
 			{"pill EN segment", theme.Background, theme.Text.Alpha(0.88).Over(bg), minTextContrast},
+			{"diff insertion", theme.Text, diffInsertMark(theme).Over(theme.Surface), minTextContrast},
+			{"diff deletion", diffDeleteInk(theme, theme.Surface), diffDeleteMark(theme).Over(theme.Surface), minTextContrast},
 		}
 		for _, ck := range checks {
 			if got := contrastRatio(ck.fg, ck.bg); got < ck.min {

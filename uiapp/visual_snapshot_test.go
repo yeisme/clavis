@@ -131,6 +131,25 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool) {
 	w, h = PreferredCapsuleSizeForState(f.ctrl.State(), appearance)
 	shoot("06-ai", f.ctrl.CapsuleView, w, h, 2, nil)
 
+	// AI rewrite review: a close edit opens on the changes view.
+	rf := newInteractionFixture(t, mockHTTPDoer{fn: func(*http.Request) (*http.Response, error) {
+		return sseResponse("这段代码负责读取配置文件，并校验所有字段后原子写回磁盘。"), nil
+	}})
+	rf.ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Context: &engine.CapsuleContext{
+		AppName: "Notes", SelectedText: "这段代码的作用是读取配置文件，然后校验字段并写回磁盘。",
+	}})
+	rt := ui.NewTester(rf.ctrl.CapsuleView, w, h)
+	rt.Frame()
+	rt.Type("?润色")
+	rt.Frame()
+	rt.Key(0, ui.KeyEnter)
+	waitUntil(t, 2*time.Second, func() bool {
+		st := rf.ctrl.State()
+		return st.Phase == engine.PhaseAIStreaming && st.AIComplete
+	}, "AI review completion")
+	w, h = PreferredCapsuleSizeForState(rf.ctrl.State(), appearance)
+	shoot("06b-ai-review", rf.ctrl.CapsuleView, w, h, 2, nil)
+
 	f.ctrl.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.T("hud.copied")})
 	w, h = PreferredCapsuleSizeForState(f.ctrl.State(), appearance)
 	shoot("07-hud", f.ctrl.CapsuleView, w, h, 2, nil)
