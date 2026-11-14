@@ -78,6 +78,12 @@ type Store interface {
 	PruneExpired(ctx context.Context, retentionDays int, maxItems int) (int, error)
 }
 
+// GenerationTracker is optionally implemented by Store backends that expose a
+// monotonically increasing mutation generation counter for incremental sync.
+type GenerationTracker interface {
+	Generation() uint64
+}
+
 // File/video entries store their paths newline-joined in MediaPath (paths cannot contain '\n'
 // on Windows, and the original files are never copied or deleted by Clavis).
 
