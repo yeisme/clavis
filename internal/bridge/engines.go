@@ -109,6 +109,20 @@ func (d *DoubleTapDetector) SetConfig(targetKey string, intervalMs int) {
 	d.resetLocked()
 }
 
+// IntervalMs reports the configured double-tap window in milliseconds. Callers
+// that share a gesture with this detector (a bare Shift tap both toggling the
+// input mode and opening the selection bar) use it to defer their own action
+// until the window can no longer complete.
+func (d *DoubleTapDetector) IntervalMs() int64 {
+	if d == nil {
+		return 0
+	}
+	d.mu.Lock()
+	v := d.intervalMs
+	d.mu.Unlock()
+	return v
+}
+
 // SetMaxHoldMs overrides the maximum duration a single tap may be held down.
 func (d *DoubleTapDetector) SetMaxHoldMs(maxHoldMs int) {
 	d.mu.Lock()

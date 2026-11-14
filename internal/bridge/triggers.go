@@ -85,3 +85,18 @@ func resolveTriggerPrecedence(optimize, selection bool) host.TriggerKind {
 // optimize chord wins before keymaps/IME/router; selection double-shift wins
 // only after a complete tap pair and never during composition; router Leader /
 // Capsule then runs as before. Synthetic events are filtered by each hook.
+
+// selectionDoubleShiftArmed reports whether a bare-Shift double tap is
+// currently routed to the selection bar. Callers that also act on a single
+// Shift tap must defer their action while this is true, so one gesture cannot
+// trigger both behaviours. The window is the detector's interval.
+func (r *triggerRuntime) selectionDoubleShiftArmed() (armed bool, windowMs int64) {
+	if r == nil {
+		return false, 0
+	}
+	enabled, mode := r.selectionMode()
+	if !enabled || mode != "double_shift" {
+		return false, 0
+	}
+	return true, r.shift.IntervalMs()
+}

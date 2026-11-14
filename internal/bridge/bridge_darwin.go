@@ -526,6 +526,11 @@ type darwinBridge struct {
 	ime           inputEngineState
 	shiftDown     bool
 	shiftHadKey   bool
+	// shiftToggle, when non-nil, is the pending bare-Shift ASCII toggle. It is
+	// deferred while the selection bar's double-shift is armed so that one
+	// double tap cannot both flip 中/英 and open the selection bar.
+	shiftMu     sync.Mutex
+	shiftToggle *time.Timer
 }
 
 func newPlatformBridge(opts Options) HostService {
@@ -889,7 +894,11 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 		modName, isDown, otherDown := darwinModifierEvent(keyCode, flags)
 		if modName == "shift" {
 			if b.triggers != nil && b.triggers.doubleShift(modName, isDown, otherDown, nowMs, false) {
+				// A completed double tap belongs to the selection bar: cancel the
+				// deferred ASCII toggle queued by the first tap.
+				b.cancelShiftToggle()
 				b.emitTriggerEvents([]host.TriggerEvent{selectionEvent(nowMs)})
+				b.shiftDown = false
 				return 0
 			}
 			if isDown {
@@ -897,8 +906,15 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 				b.shiftHadKey = false
 			}
 			if !isDown && b.shiftDown && !b.shiftHadKey && b.inlineEnabled.Load() && !isSecureEventInputEnabled() && !b.isIMKInputSource() {
-				_ = b.callInline(host.InlineKeyEvent{KeyName: "shift_tap", KeyCode: keyCode, IsDown: true, TimestampMs: nowMs})
 				b.shiftDown = false
+				// With double-shift selection armed, the first tap must wait out the
+				// double-tap window before it flips 中/英; otherwise one gesture would
+				// both switch the input mode and open the selection bar.
+				if armed, _ := b.triggers.selectionDoubleShiftArmed(); armed {
+					b.deferShiftToggle(host.InlineKeyEvent{KeyName: "shift_tap", KeyCode: keyCode, IsDown: true, TimestampMs: nowMs})
+				} else {
+					_ = b.callInline(host.InlineKeyEvent{KeyName: "shift_tap", KeyCode: keyCode, IsDown: true, TimestampMs: nowMs})
+				}
 				return 0
 			}
 			if !isDown {
@@ -2673,4 +2689,38 @@ func darwinKeyCodeToName(code uint16) string {
 	default:
 		return ""
 	}
+}
+
+// cancelShiftToggle drops a deferred bare-Shift ASCII toggle.
+func (b *darwinBridge) cancelShiftToggle() {
+	b.shiftMu.Lock()
+	if b.shiftToggle != nil {
+		b.shiftToggle.Stop()
+		b.shiftToggle = nil
+	}
+	b.shiftMu.Unlock()
+}
+
+// deferShiftToggle queues a bare-Shift ASCII toggle until the selection bar's
+// double-tap window elapses. Completing the double tap cancels it, so exactly
+// one of the two behaviours runs per gesture.
+func (b *darwinBridge) deferShiftToggle(ev host.InlineKeyEvent) {
+	armed, windowMs := b.triggers.selectionDoubleShiftArmed()
+	if !armed || windowMs <= 0 {
+		_ = b.callInline(ev)
+		return
+	}
+	b.shiftMu.Lock()
+	if b.shiftToggle != nil {
+		b.shiftToggle.Stop()
+	}
+	b.shiftToggle = time.AfterFunc(time.Duration(windowMs)*time.Millisecond, func() {
+		b.shiftMu.Lock()
+		b.shiftToggle = nil
+		b.shiftMu.Unlock()
+		if b.inlineEnabled.Load() && !isSecureEventInputEnabled() && !b.isIMKInputSource() {
+			_ = b.callInline(ev)
+		}
+	})
+	b.shiftMu.Unlock()
 }
