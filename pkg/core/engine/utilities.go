@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
 // EvaluateUtilities evaluates instant developer & productivity utilities for query:
@@ -36,8 +38,8 @@ func EvaluateUtilities(query string, now time.Time) []OmniboxItem {
 			{
 				ID:           "utility:ts:unix",
 				Title:        unixSec,
-				Subtitle:     "Unix Timestamp (seconds) • Type math after '=' (e.g. =(2+3)*4)",
-				KeyHint:      "Copy",
+				Subtitle:     i18n.T("engine.utility.ts_hint"),
+				KeyHint:      i18n.T("common.copy"),
 				Icon:         "clock",
 				Kind:         ItemUtility,
 				UtilityValue: unixSec,
@@ -46,8 +48,8 @@ func EvaluateUtilities(query string, now time.Time) []OmniboxItem {
 			{
 				ID:           "utility:ts:iso",
 				Title:        isoUTC,
-				Subtitle:     "ISO-8601 UTC Timestamp • Local: " + now.Local().Format(time.RFC3339),
-				KeyHint:      "Copy",
+				Subtitle:     i18n.Tf("engine.utility.ts_iso", now.Local().Format(time.RFC3339)),
+				KeyHint:      i18n.T("common.copy"),
 				Icon:         "clock",
 				Kind:         ItemUtility,
 				UtilityValue: isoUTC,
@@ -56,8 +58,8 @@ func EvaluateUtilities(query string, now time.Time) []OmniboxItem {
 			{
 				ID:           "utility:uuid",
 				Title:        id,
-				Subtitle:     "UUID v4 • Press Enter to copy or Secondary to paste",
-				KeyHint:      "Copy",
+				Subtitle:     i18n.T("engine.utility.uuid_hint2"),
+				KeyHint:      i18n.T("common.copy"),
 				Icon:         "number",
 				Kind:         ItemUtility,
 				UtilityValue: id,
@@ -73,8 +75,8 @@ func EvaluateUtilities(query string, now time.Time) []OmniboxItem {
 		out = append(out, OmniboxItem{
 			ID:           "utility:uuid",
 			Title:        id,
-			Subtitle:     "UUID v4 • Press Enter to copy",
-			KeyHint:      "Copy",
+			Subtitle:     i18n.T("engine.utility.uuid_hint"),
+			KeyHint:      i18n.T("common.copy"),
 			Icon:         "number",
 			Kind:         ItemUtility,
 			UtilityValue: id,
@@ -91,8 +93,8 @@ func EvaluateUtilities(query string, now time.Time) []OmniboxItem {
 			OmniboxItem{
 				ID:           "utility:ts:unix",
 				Title:        unixSec,
-				Subtitle:     "Unix Timestamp (seconds) • " + isoUTC,
-				KeyHint:      "Copy",
+				Subtitle:     i18n.Tf("engine.utility.ts_unix", isoUTC),
+				KeyHint:      i18n.T("common.copy"),
 				Icon:         "clock",
 				Kind:         ItemUtility,
 				UtilityValue: unixSec,
@@ -101,8 +103,8 @@ func EvaluateUtilities(query string, now time.Time) []OmniboxItem {
 			OmniboxItem{
 				ID:           "utility:ts:iso",
 				Title:        isoUTC,
-				Subtitle:     "ISO-8601 UTC Timestamp • Local: " + now.Local().Format(time.RFC3339),
-				KeyHint:      "Copy",
+				Subtitle:     i18n.Tf("engine.utility.ts_iso", now.Local().Format(time.RFC3339)),
+				KeyHint:      i18n.T("common.copy"),
 				Icon:         "clock",
 				Kind:         ItemUtility,
 				UtilityValue: isoUTC,
@@ -121,8 +123,8 @@ func EvaluateUtilities(query string, now time.Time) []OmniboxItem {
 			out = append(out, OmniboxItem{
 				ID:           "utility:b64:encode",
 				Title:        encoded,
-				Subtitle:     "Base64 Encode • Press Enter to copy",
-				KeyHint:      "Copy",
+				Subtitle:     i18n.T("engine.utility.b64_enc"),
+				KeyHint:      i18n.T("common.copy"),
 				Icon:         "lock.rotation",
 				Kind:         ItemUtility,
 				UtilityValue: encoded,
@@ -139,8 +141,8 @@ func EvaluateUtilities(query string, now time.Time) []OmniboxItem {
 				out = append(out, OmniboxItem{
 					ID:           "utility:b64:decode",
 					Title:        decoded,
-					Subtitle:     "Base64 Decode • Press Enter to copy",
-					KeyHint:      "Copy",
+					Subtitle:     i18n.T("engine.utility.b64_dec"),
+					KeyHint:      i18n.T("common.copy"),
 					Icon:         "lock.open",
 					Kind:         ItemUtility,
 					UtilityValue: decoded,
@@ -159,8 +161,8 @@ func EvaluateUtilities(query string, now time.Time) []OmniboxItem {
 			out = append(out, OmniboxItem{
 				ID:           "utility:hex:fromdec",
 				Title:        hexVal,
-				Subtitle:     fmt.Sprintf("Decimal %d → Hex • Press Enter to copy", n),
-				KeyHint:      "Copy",
+				Subtitle:     i18n.Tf("engine.utility.dec_to_hex", n),
+				KeyHint:      i18n.T("common.copy"),
 				Icon:         "number",
 				Kind:         ItemUtility,
 				UtilityValue: hexVal,
@@ -179,8 +181,8 @@ func EvaluateUtilities(query string, now time.Time) []OmniboxItem {
 				out = append(out, OmniboxItem{
 					ID:           "utility:hex:todec",
 					Title:        decStr,
-					Subtitle:     fmt.Sprintf("Hex %s → Decimal • Press Enter to copy", trimmed),
-					KeyHint:      "Copy",
+					Subtitle:     i18n.Tf("engine.utility.hex_to_dec", trimmed),
+					KeyHint:      i18n.T("common.copy"),
 					Icon:         "number",
 					Kind:         ItemUtility,
 					UtilityValue: decStr,
@@ -195,10 +197,10 @@ func EvaluateUtilities(query string, now time.Time) []OmniboxItem {
 	if (len(trimmed) == 10 || len(trimmed) == 13) && isAllASCIIDigits(trimmed) {
 		if n, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
 			var t time.Time
-			unit := "seconds"
+			unit := i18n.T("engine.utility.unit_seconds")
 			if len(trimmed) == 13 {
 				t = time.UnixMilli(n)
-				unit = "milliseconds"
+				unit = i18n.T("engine.utility.unit_milliseconds")
 			} else {
 				t = time.Unix(n, 0)
 			}
@@ -207,8 +209,8 @@ func EvaluateUtilities(query string, now time.Time) []OmniboxItem {
 			out = append(out, OmniboxItem{
 				ID:           "utility:ts:convert:" + trimmed,
 				Title:        utcStr,
-				Subtitle:     fmt.Sprintf("Timestamp (%s) • Local: %s • UTC: %s", unit, localStr, utcStr),
-				KeyHint:      "Copy",
+				Subtitle:     i18n.Tf("engine.utility.ts_convert", unit, localStr, utcStr),
+				KeyHint:      i18n.T("common.copy"),
 				Icon:         "calendar.badge.clock",
 				Kind:         ItemUtility,
 				UtilityValue: utcStr,
@@ -223,9 +225,9 @@ func EvaluateUtilities(query string, now time.Time) []OmniboxItem {
 		formatted := formatMathNumber(val)
 		out = append(out, OmniboxItem{
 			ID:           "utility:math:" + formatted,
-			Title:        fmt.Sprintf("Result = %s", formatted),
-			Subtitle:     fmt.Sprintf("Calculator • %s — Press Enter to copy", trimmed),
-			KeyHint:      "Copy",
+			Title:        i18n.Tf("engine.utility.result", formatted),
+			Subtitle:     i18n.Tf("engine.utility.calculator", trimmed),
+			KeyHint:      i18n.T("common.copy"),
 			Icon:         "function",
 			Kind:         ItemUtility,
 			UtilityValue: formatted,

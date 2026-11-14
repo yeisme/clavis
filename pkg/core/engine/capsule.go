@@ -2,12 +2,14 @@ package engine
 
 import (
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
 // CapsuleContext captures active application and text selection context when the Capsule opens.
@@ -783,58 +785,71 @@ func executeLeaderNode(
 }
 
 // AvailableItemActions returns the ordered contextual actions for item (Primary first, Secondary second).
+// KeyHintPinned is the sentinel KeyHint marking a pinned clipboard entry.
+// It is compared, not shown: render sites translate it with i18n.
+const KeyHintPinned = "Pinned"
+
+// modKey names the primary modifier in shortcut hints: ⌘ on macOS,
+// Ctrl+ elsewhere. Both languages use the platform glyph.
+func modKey() string {
+	if runtime.GOOS == "darwin" {
+		return "⌘"
+	}
+	return "Ctrl+"
+}
+
 func AvailableItemActions(item OmniboxItem) []OmniboxActionSpec {
 	switch item.Kind {
 	case ItemClipboardEntry:
-		pinLabel := "Pin Item"
-		if item.KeyHint == "Pinned" {
-			pinLabel = "Unpin Item"
+		pinLabel := i18n.T("engine.action.pin")
+		if item.KeyHint == KeyHintPinned {
+			pinLabel = i18n.T("engine.action.unpin")
 		}
 		return []OmniboxActionSpec{
-			{ID: "paste", Label: "Paste to Active App", Shortcut: "↵"},
-			{ID: "copy", Label: "Copy to Clipboard", Shortcut: "⌘↵"},
-			{ID: "pin", Label: pinLabel, Shortcut: "⌘P"},
-			{ID: "delete", Label: "Delete History Item", Shortcut: "⌘⌫"},
+			{ID: "paste", Label: i18n.T("engine.action.paste"), Shortcut: "↵"},
+			{ID: "copy", Label: i18n.T("engine.action.copy_clipboard"), Shortcut: modKey() + "↵"},
+			{ID: "pin", Label: pinLabel, Shortcut: modKey() + "P"},
+			{ID: "delete", Label: i18n.T("engine.action.delete_history"), Shortcut: modKey() + "⌫"},
 		}
 	case ItemSnippet:
 		return []OmniboxActionSpec{
-			{ID: "expand", Label: "Insert Snippet", Shortcut: "↵"},
-			{ID: "copy", Label: "Copy Rendered Snippet", Shortcut: "⌘↵"},
+			{ID: "expand", Label: i18n.T("engine.action.insert_snippet"), Shortcut: "↵"},
+			{ID: "copy", Label: i18n.T("engine.action.copy_snippet"), Shortcut: modKey() + "↵"},
 		}
 	case ItemUtility:
 		return []OmniboxActionSpec{
-			{ID: "copy", Label: "Copy Result", Shortcut: "↵"},
-			{ID: "paste", Label: "Insert Result at Cursor", Shortcut: "⌘↵"},
+			{ID: "copy", Label: i18n.T("engine.action.copy_result"), Shortcut: "↵"},
+			{ID: "paste", Label: i18n.T("engine.action.insert_result"), Shortcut: modKey() + "↵"},
 		}
 	case ItemGlossaryTerm:
 		return []OmniboxActionSpec{
-			{ID: "copy", Label: "Copy Canonical Term", Shortcut: "↵"},
-			{ID: "paste", Label: "Insert Term at Cursor", Shortcut: "⌘↵"},
+			{ID: "copy", Label: i18n.T("engine.action.copy_term"), Shortcut: "↵"},
+			{ID: "paste", Label: i18n.T("engine.action.insert_term"), Shortcut: modKey() + "↵"},
 		}
 	case ItemEmoji:
 		return []OmniboxActionSpec{
-			{ID: "paste", Label: "Insert Emoji", Shortcut: "↵"},
-			{ID: "copy", Label: "Copy Emoji", Shortcut: "⌘↵"},
+			{ID: "paste", Label: i18n.T("engine.action.insert_emoji"), Shortcut: "↵"},
+			{ID: "copy", Label: i18n.T("engine.action.copy_emoji"), Shortcut: modKey() + "↵"},
 		}
 	case ItemInstalledApp:
 		return []OmniboxActionSpec{
-			{ID: "open", Label: "Open Application", Shortcut: "↵"},
-			{ID: "copy_id", Label: "Copy Bundle ID / Path", Shortcut: "⌘↵"},
+			{ID: "open", Label: i18n.T("engine.action.open_app"), Shortcut: "↵"},
+			{ID: "copy_id", Label: i18n.T("engine.action.copy_bundle"), Shortcut: modKey() + "↵"},
 		}
 	case ItemAIMode:
 		return []OmniboxActionSpec{
-			{ID: "run_ai", Label: "Run AI with Context", Shortcut: "↵"},
-			{ID: "ask_only", Label: "Ask AI Without Selection", Shortcut: "⌘↵"},
+			{ID: "run_ai", Label: i18n.T("engine.action.run_ai"), Shortcut: "↵"},
+			{ID: "ask_only", Label: i18n.T("engine.action.ask_only"), Shortcut: modKey() + "↵"},
 		}
 	case ItemAppIMERule:
 		return []OmniboxActionSpec{
-			{ID: "apply_rule", Label: "Apply App IME Rule", Shortcut: "↵"},
-			{ID: "copy_title", Label: "Copy Rule Title", Shortcut: "⌘↵"},
+			{ID: "apply_rule", Label: i18n.T("engine.action.apply_rule"), Shortcut: "↵"},
+			{ID: "copy_title", Label: i18n.T("engine.action.copy_title"), Shortcut: modKey() + "↵"},
 		}
 	default:
 		return []OmniboxActionSpec{
-			{ID: "primary", Label: "Run Action", Shortcut: "↵"},
-			{ID: "copy_title", Label: "Copy Title", Shortcut: "⌘↵"},
+			{ID: "primary", Label: i18n.T("engine.action.run"), Shortcut: "↵"},
+			{ID: "copy_title", Label: i18n.T("engine.action.copy_item_title"), Shortcut: modKey() + "↵"},
 		}
 	}
 }
@@ -1184,12 +1199,12 @@ func makeClipboardOmniboxItems(entries []OmniboxClipboardEntry) []OmniboxItem {
 		firstLine := firstNonEmptyLine(entry.Content)
 		sub := entry.SourceAppName
 		if sub == "" {
-			sub = "Clipboard"
+			sub = i18n.T("omnibox.tab.clipboard")
 		}
 		keyHint := ""
 		icon := "doc.on.clipboard"
 		if entry.IsPinned {
-			keyHint = "Pinned"
+			keyHint = KeyHintPinned
 			icon = "pin.fill"
 		}
 		var kws []string
@@ -1218,8 +1233,8 @@ func makeSettingsOmniboxItems() []OmniboxItem {
 	return []OmniboxItem{
 		{
 			ID:        "setting:reload-config",
-			Title:     "Reload Configuration",
-			Subtitle:  "Reload TOML configuration files",
+			Title:     i18n.T("common.reload"),
+			Subtitle:  i18n.T("engine.settings.reload.subtitle"),
 			Icon:      "arrow.clockwise",
 			Keywords:  []string{"reload", "config", "toml", "settings", "重载配置"},
 			Kind:      ItemSetting,
@@ -1227,7 +1242,7 @@ func makeSettingsOmniboxItems() []OmniboxItem {
 		},
 		{
 			ID:        "setting:open-config-dir",
-			Title:     "Open Configuration Folder",
+			Title:     i18n.T("engine.settings.open_dir"),
 			Subtitle:  "~/.config/clavis",
 			Icon:      "folder",
 			Keywords:  []string{"folder", "open", "config", "settings", "配置目录"},
@@ -1246,36 +1261,36 @@ func makeAppIMERuleItems(ctx CapsuleContext) []OmniboxItem {
 		targetLabel = strings.TrimSpace(ctx.BundleID)
 	}
 	if targetLabel == "" {
-		targetLabel = "Current App"
+		targetLabel = i18n.T("engine.ime.current_app")
 	}
 	return []OmniboxItem{
 		{
 			ID:       "action:ime-bind-ascii",
-			Title:    "Bind Current App to English (ASCII) IME",
-			Subtitle: fmt.Sprintf("Auto-switch %s to ASCII • 绑定当前应用为英文输入法", targetLabel),
+			Title:    i18n.T("engine.ime.bind_ascii"),
+			Subtitle: i18n.Tf("engine.ime.bind_ascii.subtitle", targetLabel),
 			KeyHint:  "IME",
 			Icon:     "keyboard",
-			Keywords: []string{"ime", "ascii", "english", "bind", "rule", "绑定", "英文", "输入法", "当前应用"},
+			Keywords: []string{"ime", "ascii", "english", "bind", "rule", "绑定", "英文", "输入法", "当前应用", "绑定当前应用为英文输入法"},
 			Kind:     ItemAppIMERule,
 			IMEMode:  config.IMEModeASCII,
 		},
 		{
 			ID:       "action:ime-bind-native",
-			Title:    "Bind Current App to Native (Chinese) IME",
-			Subtitle: fmt.Sprintf("Auto-switch %s to Native IME • 绑定当前应用为中文输入法", targetLabel),
+			Title:    i18n.T("engine.ime.bind_native"),
+			Subtitle: i18n.Tf("engine.ime.bind_native.subtitle", targetLabel),
 			KeyHint:  "IME",
 			Icon:     "keyboard.badge.ellipsis",
-			Keywords: []string{"ime", "native", "chinese", "pinyin", "bind", "rule", "绑定", "中文", "拼音", "输入法", "当前应用"},
+			Keywords: []string{"ime", "native", "chinese", "pinyin", "bind", "rule", "绑定", "中文", "拼音", "输入法", "当前应用", "绑定当前应用为中文输入法"},
 			Kind:     ItemAppIMERule,
 			IMEMode:  config.IMEModeNative,
 		},
 		{
 			ID:       "action:ime-unbind-app",
-			Title:    "Unbind Current App IME Rule",
-			Subtitle: fmt.Sprintf("Remove auto-switch rule for %s • 解除当前应用输入法规则", targetLabel),
+			Title:    i18n.T("engine.ime.unbind"),
+			Subtitle: i18n.Tf("engine.ime.unbind.subtitle", targetLabel),
 			KeyHint:  "IME",
 			Icon:     "keyboard.chevron.compact.down",
-			Keywords: []string{"ime", "unbind", "remove", "clear", "rule", "解绑", "移除", "输入法规则"},
+			Keywords: []string{"ime", "unbind", "remove", "clear", "rule", "解绑", "移除", "输入法规则", "解除当前应用输入法规则"},
 			Kind:     ItemAppIMERule,
 			IMEMode:  "",
 		},
@@ -1461,11 +1476,11 @@ func makeInstalledAppItems(apps []InstalledAppEntry) []OmniboxItem {
 		if idKey == "" {
 			idKey = fmt.Sprintf("%d:%s", i, app.Name)
 		}
-		sub := "Application"
+		sub := i18n.T("engine.app.kind")
 		if app.BundleID != "" {
-			sub = "Application • " + app.BundleID
+			sub = i18n.Tf("engine.app.kind_id", app.BundleID)
 		} else if app.Path != "" {
-			sub = "Application • " + app.Path
+			sub = i18n.Tf("engine.app.kind_id", app.Path)
 		}
 		kws := []string{"app", "application", "launch", "open", app.Name}
 		if app.BundleID != "" {
@@ -1475,7 +1490,7 @@ func makeInstalledAppItems(apps []InstalledAppEntry) []OmniboxItem {
 			ID:          "app:" + idKey,
 			Title:       app.Name,
 			Subtitle:    sub,
-			KeyHint:     "App",
+			KeyHint:     i18n.T("engine.app.hint"),
 			Icon:        "app.badge",
 			Keywords:    kws,
 			Kind:        ItemInstalledApp,
@@ -1489,12 +1504,12 @@ func makeInstalledAppItems(apps []InstalledAppEntry) []OmniboxItem {
 func makeAdhocAIItem(query string, ctx CapsuleContext) OmniboxItem {
 	hasSelection := strings.TrimSpace(ctx.SelectedText) != ""
 	mode := "ask"
-	title := fmt.Sprintf("Ask AI: %q", query)
-	subtitle := "Send freeform prompt to AI"
+	title := i18n.Tf("engine.ai.ask_title", query)
+	subtitle := i18n.T("engine.ai.ask_subtitle")
 	if hasSelection {
 		mode = "custom"
-		title = fmt.Sprintf("Rewrite with AI: %q", query)
-		subtitle = "Use selected text as context"
+		title = i18n.Tf("engine.ai.rewrite_title", query)
+		subtitle = i18n.T("engine.ai.rewrite_subtitle")
 	}
 	return OmniboxItem{
 		ID:       "ai:adhoc:" + query,
@@ -1511,8 +1526,8 @@ func makeNormalizeGlossaryItem() OmniboxItem {
 	act := config.NormalizeGlossaryAction()
 	return OmniboxItem{
 		ID:           "action:normalize-glossary",
-		Title:        "Normalize Terms (Glossary)",
-		Subtitle:     "Replace glossary aliases with canonical terms",
+		Title:        i18n.T("engine.glossary.normalize"),
+		Subtitle:     i18n.T("engine.glossary.normalize.subtitle"),
 		Icon:         "text.badge.checkmark",
 		Keywords:     []string{"glossary", "normalize", "terms", "alias", "fix", "typo"},
 		Kind:         ItemLeaderAction,
@@ -1530,7 +1545,7 @@ func flattenLeaderNodes(nodes []config.LeaderNode, keyPrefix, breadcrumbs []stri
 			continue
 		}
 		keyHint := strings.Join(nextKeys, " ")
-		subtitle := "Action"
+		subtitle := i18n.T("engine.leader.action")
 		if len(breadcrumbs) > 0 {
 			subtitle = strings.Join(breadcrumbs, " › ")
 		}
@@ -1596,7 +1611,7 @@ func makeSnippetItems(snippets []config.SnippetItem) []OmniboxItem {
 		items = append(items, OmniboxItem{
 			ID:       "snippet:" + s.ID,
 			Title:    title,
-			Subtitle: "Snippet • " + s.Trigger,
+			Subtitle: i18n.Tf("engine.snippet.subtitle", s.Trigger),
 			KeyHint:  s.Trigger,
 			Icon:     "text.badge.plus",
 			Keywords: []string{s.ID, s.Trigger, s.Description, "snippet"},
@@ -1617,7 +1632,7 @@ func makeTabSwitchItems(excluded config.CapsuleTab) []OmniboxItem {
 		items = append(items, OmniboxItem{
 			ID:        "tab:" + string(tab),
 			Title:     display,
-			Subtitle:  "Switch Tab",
+			Subtitle:  i18n.T("engine.tab.switch"),
 			KeyHint:   string(tab),
 			Icon:      tabIcon(tab),
 			Keywords:  []string{"tab", "switch", string(tab), display},
@@ -1631,17 +1646,17 @@ func makeTabSwitchItems(excluded config.CapsuleTab) []OmniboxItem {
 func tabDisplayName(tab config.CapsuleTab) string {
 	switch tab {
 	case config.TabActions:
-		return "Actions"
+		return i18n.T("omnibox.tab.actions")
 	case config.TabClipboard:
-		return "Clipboard"
+		return i18n.T("omnibox.tab.clipboard")
 	case config.TabSnippets:
-		return "Snippets"
+		return i18n.T("omnibox.tab.snippets")
 	case config.TabAI:
-		return "AI"
+		return i18n.T("omnibox.tab.ai")
 	case config.TabGlossary:
-		return "Glossary"
+		return i18n.T("omnibox.tab.glossary")
 	case config.TabSettings:
-		return "Settings"
+		return i18n.T("common.settings")
 	default:
 		return string(tab)
 	}
