@@ -145,12 +145,15 @@ type dynamicBridgeUpdater interface {
 }
 
 type desktopApp struct {
-	mu                     sync.Mutex
-	ctx                    context.Context
-	cancel                 context.CancelFunc
-	cfgStore               *config.ConfigStore
-	sqliteStore            *storage.SQLiteClipboardStore
-	learningStore          *storage.LearningStore
+	mu            sync.Mutex
+	ctx           context.Context
+	cancel        context.CancelFunc
+	cfgStore      *config.ConfigStore
+	sqliteStore   *storage.SQLiteClipboardStore
+	learningStore *storage.LearningStore
+	// learningWriter is the only path hook, commit and UI callers use to
+	// learn: RAM mirror at once, SQLite in coalesced background batches.
+	learningWriter         *storage.LearningWriter
 	clipStore              clipboard.Store
 	mediaStore             *clipboard.MediaStore
 	hostBridge             bridge.HostService
@@ -207,6 +210,7 @@ func (a *desktopApp) start() {
 
 	var sqliteStore *storage.SQLiteClipboardStore
 	var learningStore *storage.LearningStore
+	var learningWriter *storage.LearningWriter
 	var clipStore clipboard.Store
 	var mediaStore *clipboard.MediaStore
 	if userDataDir, err := mygo.App.Path(mygo.PathUserData); err == nil && userDataDir != "" {
@@ -219,6 +223,7 @@ func (a *desktopApp) start() {
 			_, _ = s.PruneExpired(ctx, cfg.Main.Clipboard.RetentionDays, cfg.Main.Clipboard.MaxHistoryItems)
 			if ls, lsErr := storage.NewLearningStore(s.DB()); lsErr == nil {
 				learningStore = ls
+				learningWriter = storage.NewLearningWriter(ls, storage.LearningWriterOptions{})
 			}
 		}
 	}
@@ -432,6 +437,7 @@ func (a *desktopApp) start() {
 	a.cfgStore = cfgStore
 	a.sqliteStore = sqliteStore
 	a.learningStore = learningStore
+	a.learningWriter = learningWriter
 	a.clipStore = clipStore
 	a.mediaStore = mediaStore
 	a.hostBridge = hostBridge
@@ -1020,13 +1026,12 @@ func (a *desktopApp) handleRecordItemUse(itemID string) {
 	if sup != nil {
 		sup.RecordInteraction()
 	}
+	if lw := a.learningWriterForUse(); lw != nil {
+		// RAM mirror now (the frecency sync below sees this use), SQLite later
+		// in a coalesced batch: ~12.6ms per native write on Windows.
+		lw.QueueItemUse(itemID, time.Now())
+	}
 	a.goBG(func(ctx context.Context) {
-		a.mu.Lock()
-		ls := a.learningStore
-		a.mu.Unlock()
-		if ls != nil {
-			_ = ls.RecordItemUse(ctx, itemID, time.Now())
-		}
 		a.syncFrecency(ctx)
 	})
 }
@@ -1041,14 +1046,22 @@ func (a *desktopApp) handleRecordPromptVersion(promptID, trigger, rawDraft, fina
 	if sup != nil {
 		sup.RecordInteraction()
 	}
-	a.goBG(func(ctx context.Context) {
-		a.mu.Lock()
-		ls := a.learningStore
-		a.mu.Unlock()
-		if ls != nil {
-			_ = ls.RecordPromptVersion(ctx, promptID, trigger, rawDraft, finalOutput, preset)
-		}
-	})
+	if lw := a.learningWriterForUse(); lw != nil {
+		lw.QueuePromptVersion(promptID, trigger, rawDraft, finalOutput, preset)
+	}
+}
+
+// learningWriterForUse returns the async learning writer, starting it on
+// first use when the app was assembled with a learning store but no writer
+// (tests, alternate setups). It never starts one once shutdown began, so a
+// late event cannot schedule writes against a closing database.
+func (a *desktopApp) learningWriterForUse() *storage.LearningWriter {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.learningWriter == nil && a.learningStore != nil && !a.shuttingDown {
+		a.learningWriter = storage.NewLearningWriter(a.learningStore, storage.LearningWriterOptions{})
+	}
+	return a.learningWriter
 }
 
 func (a *desktopApp) wireInputEngineLearning(br bridge.HostService, ls *storage.LearningStore) {
@@ -1059,25 +1072,23 @@ func (a *desktopApp) wireInputEngineLearning(br bridge.HostService, ls *storage.
 	adapter := storage.NewUserFrequencyAdapter(ls)
 	lh.UpdateInputEngineLearning(adapter, func(c bridge.InputEngineCommit) {
 		a.mu.Lock()
-		store := a.learningStore
 		sup := a.supervisor
 		shuttingDown := a.shuttingDown
-		bgCtx := a.ctx
 		a.mu.Unlock()
 		if shuttingDown {
 			return
 		}
+		writer := a.learningWriterForUse()
 		// Resident telemetry: this runs on the view worker, never the hook.
 		if sup != nil {
 			sup.RecordKeystroke(c.LatencyNs, utf8.RuneCountInString(c.Word))
 		}
-		if store == nil {
-			return
+		// The view worker drains commits right before it refreshes the
+		// candidate window, so this must not wait on SQLite (one or two
+		// native round trips, >=12.6ms each on Windows): queue it.
+		if writer != nil {
+			writer.QueueIMECommit(c.PinyinKey, c.Word, c.PrevWord, c.Pinned)
 		}
-		if bgCtx == nil {
-			bgCtx = context.Background()
-		}
-		_ = store.RecordIMECommit(bgCtx, c.PinyinKey, c.Word, c.PrevWord, c.Pinned)
 	})
 }
 
@@ -1580,6 +1591,7 @@ func (a *desktopApp) shutdown() {
 		sup := a.supervisor
 		ctrl := a.controller
 		sqliteStore := a.sqliteStore
+		learningWriter := a.learningWriter
 		tray := a.tray
 		a.bridgeRunning = false
 		a.mu.Unlock()
@@ -1598,6 +1610,12 @@ func (a *desktopApp) shutdown() {
 			ctrl.Close()
 		}
 		a.bgWG.Wait()
+		if learningWriter != nil {
+			// The app context is cancelled by now: flush on a fresh one.
+			flushCtx, cancelFlush := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = learningWriter.Close(flushCtx)
+			cancelFlush()
+		}
 		if sqliteStore != nil {
 			_ = sqliteStore.Close()
 		}
