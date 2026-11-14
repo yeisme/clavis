@@ -503,8 +503,12 @@ func (a *AppController) renderOmniboxView(
 
 		items := state.OmniboxItems
 		if len(items) == 0 {
+			// Empty-state illustration: the tab's icon above its caption.
 			ui.Box(c).FillWidth().Grow(1).Center().Padding(24).Children(func() {
-				ui.Text(c, omniboxEmptyText(state.OmniboxTab)).TextColor(theme.TextMuted)
+				ui.Column(c).Gap(10).Center().Children(func() {
+					renderSemanticIcon(c, omniboxTabIcon(state.OmniboxTab), 24, withAlpha(theme.TextMuted, 0.55))
+					ui.Text(c, omniboxEmptyText(state.OmniboxTab)).TextColor(theme.TextMuted)
+				})
 			})
 		} else {
 			selectedIdx := state.SelectedIndex
@@ -1030,9 +1034,40 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, st
 	})
 }
 
+// hudIconForMessage picks the semantic icon for a HUD notice: a checkmark
+// for copy/success notices, a keyboard for IME switches, an xmark for
+// failures, and the plain accent dot for everything else.
+func hudIconForMessage(msg string) string {
+	switch {
+	case strings.Contains(msg, i18n.T("hud.copied")),
+		strings.Contains(msg, i18n.T("hud.normalized_glossary")),
+		strings.Contains(msg, i18n.T("hud.normalized_clipboard")),
+		strings.Contains(msg, i18n.T("common.done")):
+		return "checkmark"
+	case strings.Contains(msg, i18n.T("hud.ime_switched")),
+		strings.Contains(msg, i18n.T("hud.ime_bound")),
+		strings.Contains(msg, i18n.T("hud.ime_unbound")):
+		return "keyboard"
+	case strings.Contains(msg, i18n.T("common.error")),
+		strings.Contains(msg, i18n.T("hud.config_reload_failed")),
+		strings.Contains(msg, i18n.T("hud.command_failed")):
+		return "xmark"
+	default:
+		return ""
+	}
+}
+
 func (a *AppController) renderHUDView(c *ui.Context, theme *ui.Theme, state engine.State) {
 	ui.Row(c).Fill().Padding(10, 16).Center().Gap(8).Children(func() {
-		ui.Box(c).Size(8, 8).Radius(4).Background(theme.Accent)
+		if icon := hudIconForMessage(state.HUDMessage); icon != "" {
+			color := theme.Accent
+			if icon == "xmark" {
+				color = theme.Danger
+			}
+			renderSemanticIcon(c, icon, 14, color)
+		} else {
+			ui.Box(c).Size(8, 8).Radius(4).Background(theme.Accent)
+		}
 		ui.Text(c, state.HUDMessage).FontSize(13).FontWeight(600).TextColor(theme.Text).SingleLine()
 	})
 }
@@ -1053,6 +1088,27 @@ func omniboxTabLabel(tab config.CapsuleTab) string {
 		return i18n.T("common.settings")
 	default:
 		return string(tab)
+	}
+}
+
+// omniboxTabIcon maps a tab to its semantic icon for tab bars, empty
+// states and switch items.
+func omniboxTabIcon(tab config.CapsuleTab) string {
+	switch tab {
+	case config.TabActions:
+		return "bolt"
+	case config.TabClipboard:
+		return "doc.on.clipboard"
+	case config.TabSnippets:
+		return "text.badge.plus"
+	case config.TabAI:
+		return "sparkles"
+	case config.TabGlossary:
+		return "character.book.closed"
+	case config.TabSettings:
+		return "gearshape"
+	default:
+		return "bolt"
 	}
 }
 

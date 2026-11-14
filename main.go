@@ -346,6 +346,14 @@ func (a *desktopApp) start() {
 }
 
 func (a *desktopApp) setupTray() {
+	// Monochrome template glyphs beside the tray items, tinted by the OS.
+	menuIcon := func(kind uiapp.TrayMenuIconKind) *mygo.MenuIcon {
+		icon, err := mygo.NewMenuIcon(uiapp.GenerateTrayMenuIconPNG(kind, 16), true)
+		if err != nil {
+			return nil
+		}
+		return icon
+	}
 	permItem := &mygo.MenuItem{
 		Label: i18n.T("tray.permissions_checking"),
 		Click: func(*mygo.MenuItem, *mygo.Window) {
@@ -369,12 +377,14 @@ func (a *desktopApp) setupTray() {
 		mygo.Separator(),
 		{
 			Label: i18n.T("tray.open_capsule"),
+			Icon:  menuIcon(uiapp.TrayMenuIconCapsule),
 			Click: func(*mygo.MenuItem, *mygo.Window) {
 				a.openOmnibox(config.TabActions)
 			},
 		},
 		{
 			Label: i18n.T("tray.clipboard_history"),
+			Icon:  menuIcon(uiapp.TrayMenuIconClipboard),
 			Click: func(*mygo.MenuItem, *mygo.Window) {
 				a.openOmnibox(config.TabClipboard)
 			},
@@ -382,12 +392,14 @@ func (a *desktopApp) setupTray() {
 		mygo.Separator(),
 		{
 			Label: i18n.T("common.reload"),
+			Icon:  menuIcon(uiapp.TrayMenuIconReload),
 			Click: func(*mygo.MenuItem, *mygo.Window) {
 				a.reloadConfiguration()
 			},
 		},
 		{
 			Label: i18n.T("settings.configs.open_dir"),
+			Icon:  menuIcon(uiapp.TrayMenuIconFolder),
 			Click: func(*mygo.MenuItem, *mygo.Window) {
 				a.mu.Lock()
 				ctrl := a.controller
@@ -399,6 +411,7 @@ func (a *desktopApp) setupTray() {
 		},
 		{
 			Label: i18n.T("tray.settings"),
+			Icon:  menuIcon(uiapp.TrayMenuIconSettings),
 			Click: func(*mygo.MenuItem, *mygo.Window) {
 				a.openSettings(uiapp.SettingsTabGeneral)
 			},
@@ -408,6 +421,7 @@ func (a *desktopApp) setupTray() {
 		mygo.Separator(),
 		{
 			Label: i18n.T("tray.quit"),
+			Icon:  menuIcon(uiapp.TrayMenuIconQuit),
 			Click: func(*mygo.MenuItem, *mygo.Window) {
 				mygo.App.Quit()
 			},

@@ -2,10 +2,12 @@ package uiapp
 
 import (
 	"bytes"
+	"encoding/binary"
 	"image"
 	"image/color"
 	"image/png"
 	"math"
+	"sync"
 )
 
 // GenerateAppIconPNG renders a high-craft macOS squircle application icon at size x size
@@ -162,6 +164,167 @@ func sampleAppIcon(u, v, aa float64) (r, g, b, a float64) {
 
 	return clampUnit(bgR), clampUnit(bgG), clampUnit(bgB), outerAlpha
 }
+
+// appIconSetOnce caches the multi-size application icon set: each size is
+// an independent supersampled render of the same SDF painter, so every
+// bitmap stays visually consistent with resources/icon.png (512).
+var (
+	appIconSetOnce sync.Once
+	appIconSet     map[int][]byte
+)
+
+// AppIconSizes lists the raster sizes the app icon is generated at, for
+// window icons, packaging and the Windows .ico.
+func AppIconSizes() []int { return []int{16, 24, 32, 48, 64, 128, 256, 512} }
+
+// GenerateAppIconPNGSet renders the application icon at every AppIconSizes
+// size and returns PNG bytes keyed by size. The set is computed once and
+// cached.
+func GenerateAppIconPNGSet() map[int][]byte {
+	appIconSetOnce.Do(func() {
+		appIconSet = make(map[int][]byte, len(AppIconSizes()))
+		for _, size := range AppIconSizes() {
+			appIconSet[size] = GenerateAppIconPNG(size)
+		}
+	})
+	return appIconSet
+}
+
+// GenerateAppIconICO packs the multi-size application icon into a Windows
+// .ico (PNG-compressed entries, understood by Windows Vista and later) at
+// 16/24/32/48/64/128/256 px. Pure Go, byte-built container.
+func GenerateAppIconICO() []byte {
+	sizes := []int{16, 24, 32, 48, 64, 128, 256}
+	set := GenerateAppIconPNGSet()
+
+	var buf bytes.Buffer
+	// ICONDIR: reserved(2)=0, type(2)=1 (icon), count(2).
+	var header [6]byte
+	binary.LittleEndian.PutUint16(header[0:2], 0)
+	binary.LittleEndian.PutUint16(header[2:4], 1)
+	binary.LittleEndian.PutUint16(header[4:6], uint16(len(sizes)))
+	buf.Write(header[:])
+
+	dirLen := 16 * len(sizes)
+	offset := 6 + dirLen
+	for _, size := range sizes {
+		data := set[size]
+		w, h := size, size
+		wb, hb := byte(w), byte(h)
+		if w >= 256 {
+			wb = 0 // 256 is encoded as 0 per the format
+		}
+		if h >= 256 {
+			hb = 0
+		}
+		var entry [16]byte
+		entry[0] = wb
+		entry[1] = hb
+		entry[2] = 0                                  // palette count: 0 for PNG entries
+		entry[3] = 0                                  // reserved
+		binary.LittleEndian.PutUint16(entry[4:6], 1)  // color planes
+		binary.LittleEndian.PutUint16(entry[6:8], 32) // bits per pixel
+		binary.LittleEndian.PutUint32(entry[8:12], uint32(len(data)))
+		binary.LittleEndian.PutUint32(entry[12:16], uint32(offset))
+		buf.Write(entry[:])
+		offset += len(data)
+	}
+	for _, size := range sizes {
+		buf.Write(set[size])
+	}
+	return buf.Bytes()
+}
+
+// TrayMenuIconKind names the monochrome glyphs drawn for tray menu items.
+type TrayMenuIconKind string
+
+const (
+	TrayMenuIconCapsule  TrayMenuIconKind = "capsule"
+	TrayMenuIconClipboard TrayMenuIconKind = "clipboard"
+	TrayMenuIconReload   TrayMenuIconKind = "reload"
+	TrayMenuIconFolder   TrayMenuIconKind = "folder"
+	TrayMenuIconSettings TrayMenuIconKind = "settings"
+	TrayMenuIconQuit     TrayMenuIconKind = "quit"
+)
+
+// GenerateTrayMenuIconPNG renders a 16×16 (default) monochrome template
+// PNG for a tray menu item glyph — pure black with alpha, so the platform
+// menus tint it like template tray icons.
+func GenerateTrayMenuIconPNG(kind TrayMenuIconKind, size int) []byte {
+	if size <= 0 {
+		size = 16
+	}
+	img := image.NewNRGBA(image.Rect(0, 0, size, size))
+	inv := 2.0 / float64(size)
+	aa := inv * 0.9
+	for py := 0; py < size; py++ {
+		for px := 0; px < size; px++ {
+			// 2×2 supersample like the app icon painter.
+			var aSum float64
+			for _, o := range [2]float64{0.25, 0.75} {
+				x := (float64(px)+o)*inv*16 - 8 // → [-8, 8] on the glyph grid
+				y := (float64(py)+o)*inv*16 - 8
+				aSum += trayMenuGlyphAlpha(string(kind), x, y, aa)
+			}
+			a := aSum / 4
+			i := py*img.Stride + px*4
+			img.Pix[i+3] = uint8(a*255 + 0.5)
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil
+	}
+	return buf.Bytes()
+}
+
+// trayMenuGlyphAlpha coverage of one glyph on the [-8,8] grid: 0 outside,
+// 1 inside, stroke width ~1.7 units.
+func trayMenuGlyphAlpha(kind string, x, y, aa float64) float64 {
+	const sw = 1.7
+	var d float64
+	switch kind {
+	case "capsule": // ⌘ command mark, the app's motif
+		d = sdCommandSymbol(x, y+0.2, 2.4, 0.75, sw*0.55)
+	case "clipboard": // tablet outline with a clip band
+		body := sdRoundedRect(x, y+0.3, 5.4, 6.6, 1.2)
+		d = absStroke(body, sw)
+		clip := sdRoundedRect(x, y-4.3, 2.1, 0.9, 0.7)
+		d = math.Min(d, -clip)
+	case "reload": // circular arrow
+		ring := math.Abs(math.Hypot(x, y)-4.4) - sw*0.85
+		gap := math.Abs(math.Atan2(y, x)) - 1.1 // open sector at the right
+		d = math.Max(ring, gap)
+		head := sdFourPointStar(x-4.4, y+0.2, 1.9, 0.75)
+		d = math.Min(d, head)
+	case "folder": // rounded folder
+		d = absStroke(sdRoundedRect(x, y+0.2, 5.6, 4.4, 1.0), sw)
+		tab := sdAxisBox(x+2.2, y-3.2, 3.4, 1.2)
+		d = math.Min(d, absStroke(tab, sw))
+	case "settings": // gear: ring + teeth via star modulation
+		ring := math.Abs(math.Hypot(x, y)-2.6) - sw*0.8
+		var teeth float64 = 1e9
+		for i := 0; i < 8; i++ {
+			ang := float64(i) * math.Pi / 4
+			tx := 4.6 * math.Cos(ang)
+			ty := 4.6 * math.Sin(ang)
+			teeth = math.Min(teeth, sdRoundedRect(x-tx, y-ty, 0.9, 0.9, 0.35))
+		}
+		d = math.Min(ring, teeth)
+	case "quit": // power symbol
+		ring := math.Abs(math.Hypot(x, y+0.9)-3.6) - sw*0.8
+		gap := math.Abs(x) - 1.0 // slot at top
+		ring = math.Max(ring, -gap)
+		stalk := sdAxisBox(x, y+2.2, sw*0.7, 2.6)
+		d = math.Min(ring, stalk)
+	default:
+		d = 1e9
+	}
+	return smoothCoverage(d, aa)
+}
+
+// absStroke turns an inside-distance field into a centered stroke band.
+func absStroke(d, w float64) float64 { return math.Abs(d) - w*0.5 }
 
 // GenerateTrayIconPNG renders a crisp anti-aliased monochrome template PNG (default 32x32)
 // depicting a rounded keycap outline + key/spark silhouette for macOS/Windows/Linux system trays.
