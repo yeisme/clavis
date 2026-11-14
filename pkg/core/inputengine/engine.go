@@ -350,11 +350,27 @@ func (e *Engine) HandleKey(k Key) Result {
 		}
 		return Result{Consume: true, Changed: true}
 	default:
-		// Other printable (punctuation, upper-case): commit the top candidate then the char.
+		// Other printable (punctuation, upper-case): commit the top dictionary candidate then the char.
+		// AI candidates must never be auto-committed without explicit selection; if only AI
+		// candidates exist, commit nothing and keep composing.
+		hasDict := false
+		var autoCand *Candidate
+		for i := range e.cands {
+			if e.cands[i].AI {
+				continue
+			}
+			hasDict = true
+			if autoCand == nil && e.cands[i].consumed >= len(e.segs) {
+				autoCand = &e.cands[i]
+			}
+		}
+		if len(e.cands) > 0 && !hasDict {
+			return Result{Consume: true}
+		}
 		top := e.rawLetters()
 		committedWord := ""
-		if len(e.cands) > 0 && e.cands[0].consumed >= len(e.segs) {
-			top = e.cands[0].Text
+		if autoCand != nil {
+			top = autoCand.Text
 			committedWord = top
 		}
 		e.clear()

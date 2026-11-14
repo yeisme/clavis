@@ -60,3 +60,55 @@ func TestAIDebouncerDropsStale(t *testing.T) {
 		t.Fatalf("cancelled composition still queried: %v", asked)
 	}
 }
+
+type stubInputEngineBridge struct {
+	bridge.HostService
+	fgStatus bridge.ForegroundIMEStatus
+	fgOK     bool
+	snap     host.ContextSnapshot
+}
+
+func (s *stubInputEngineBridge) ForegroundIMEStatus() (bridge.ForegroundIMEStatus, bool) {
+	return s.fgStatus, s.fgOK
+}
+
+func (s *stubInputEngineBridge) SnapshotContext(context.Context) (host.ContextSnapshot, error) {
+	return s.snap, nil
+}
+
+func TestAIDebouncerPassesFrontmostAppName(t *testing.T) {
+	runCase := func(t *testing.T, br bridge.HostService, wantApp string) {
+		t.Helper()
+		gotCh := make(chan string, 1)
+		d := newInputEngineAIDebouncer(
+			br,
+			10*time.Millisecond,
+			func(_ context.Context, raw, appName string) []string {
+				gotCh <- appName
+				return []string{"你好"}
+			},
+			func(string, []string) {},
+		)
+		d.Changed(context.Background(), "nihao", true)
+		select {
+		case got := <-gotCh:
+			if got != wantApp {
+				t.Fatalf("suggest appName = %q, want %q", got, wantApp)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for aiDebouncer suggest")
+		}
+	}
+
+	// Fast path: cached ForegroundIMEStatus process/app identity.
+	runCase(t, &stubInputEngineBridge{
+		fgOK:     true,
+		fgStatus: bridge.ForegroundIMEStatus{App: bridge.AppIdentity{ProcessName: "WeChat.exe"}},
+	}, "WeChat.exe")
+
+	// Fallback path: SnapshotContext when ForegroundIMEStatus has not reported yet.
+	runCase(t, &stubInputEngineBridge{
+		fgOK: false,
+		snap: host.ContextSnapshot{AppName: "Slack", ProcessName: "Slack.exe"},
+	}, "Slack")
+}

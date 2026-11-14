@@ -205,3 +205,54 @@ func TestRawLengthBounded(t *testing.T) {
 		t.Fatalf("raw grew to %d", len(e.Raw()))
 	}
 }
+
+type stubOnlyDict struct {
+	singles map[string][]string
+}
+
+func (d stubOnlyDict) LookupPhrases([]string, func(string) bool) {}
+
+func (d stubOnlyDict) LookupSingle(seg string, emit func(string) bool) {
+	for _, w := range d.singles[seg] {
+		if !emit(w) {
+			return
+		}
+	}
+}
+
+func TestPunctuationNeverAutoCommitsAICandidate(t *testing.T) {
+	// Case 1: only AI candidate(s) exist -> punctuation commits nothing and keeps composing.
+	e := New(Options{CandidateCount: 5, Dictionary: stubOnlyDict{}})
+	typeLetters(e, "nihao")
+	if !e.SetAICandidates("nihao", []string{"你好AI"}) {
+		t.Fatal("expected AI candidates to be accepted")
+	}
+	if v := e.View(); len(v.Candidates) != 1 || !v.Candidates[0].AI {
+		t.Fatalf("expected only AI candidate, got %+v", v.Candidates)
+	}
+	if r := e.HandleKey(Key{Kind: KeyOther, Rune: ','}); !r.Consume || r.Commit != "" || !e.View().Composing || e.Raw() != "nihao" {
+		t.Fatalf("punctuation with only AI candidate must commit nothing and keep composing, got res=%+v raw=%q", r, e.Raw())
+	}
+
+	// Case 2: AI candidate is cands[0] (full-length) while dict only has a partial single-char fallback ->
+	// punctuation must never commit the AI candidate.
+	e2 := New(Options{CandidateCount: 5, Dictionary: stubOnlyDict{singles: map[string][]string{"ni": {"你"}}}})
+	typeLetters(e2, "nizz")
+	if !e2.SetAICandidates("nizz", []string{"你走"}) {
+		t.Fatal("expected AI candidates to be accepted")
+	}
+	if v := e2.View(); len(v.Candidates) < 2 || !v.Candidates[0].AI || v.Candidates[1].AI {
+		t.Fatalf("expected AI at cands[0] and dict at cands[1], got %+v", v.Candidates)
+	}
+	if r := e2.HandleKey(Key{Kind: KeyOther, Rune: '.'}); !r.Consume || r.Commit != "nizz." {
+		t.Fatalf("punctuation must not auto-commit AI candidate, got res=%+v", r)
+	}
+
+	// Case 3: dictionary-backed full-length match still commits on punctuation even when AI is present.
+	e3 := New(Options{CandidateCount: 9})
+	typeLetters(e3, "nihao")
+	_ = e3.SetAICandidates("nihao", []string{"你好呀"})
+	if r := e3.HandleKey(Key{Kind: KeyOther, Rune: ','}); !r.Consume || r.Commit != "你好," {
+		t.Fatalf("expected dictionary full-length commit, got %+v", r)
+	}
+}
