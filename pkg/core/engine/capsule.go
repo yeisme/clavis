@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -78,7 +79,21 @@ const (
 	ItemInstalledApp   OmniboxItemKind = "installed_app"
 	ItemEmoji          OmniboxItemKind = "emoji"
 	ItemAppIMERule     OmniboxItemKind = "app_ime_rule"
+	ItemPromptTemplate OmniboxItemKind = "prompt_template"
+	ItemScriptCommand  OmniboxItemKind = "script_command"
+	ItemPortProcess    OmniboxItemKind = "port_process"
 )
+
+type PortEntry struct {
+	Port    int    `json:"port"`
+	PID     int    `json:"pid,omitempty"`
+	Process string `json:"process,omitempty"`
+	Command string `json:"command,omitempty"`
+}
+type CandidateCorpus struct {
+	Items      []OmniboxItem `json:"items,omitempty"`
+	Generation uint64        `json:"generation"`
+}
 
 // OmniboxActionSpec describes a contextual primary, secondary, or palette action for an OmniboxItem.
 type OmniboxActionSpec struct {
@@ -89,29 +104,34 @@ type OmniboxActionSpec struct {
 
 // OmniboxItem represents a single selectable row in the Omnibox.
 type OmniboxItem struct {
-	ID               string               `json:"id"`
-	Title            string               `json:"title"`
-	Subtitle         string               `json:"subtitle"`
-	KeyHint          string               `json:"keyHint,omitempty"`
-	Icon             string               `json:"icon,omitempty"`
-	Keywords         []string             `json:"keywords,omitempty"`
-	MatchedIndices   []int                `json:"matchedIndices,omitempty"`
-	Score            int                  `json:"score"`
-	Kind             OmniboxItemKind      `json:"kind"`
-	LeaderAction     *config.LeaderAction `json:"leaderAction,omitempty"`
-	Snippet          *config.SnippetItem  `json:"snippet,omitempty"`
-	SwitchTab        config.CapsuleTab    `json:"switchTab,omitempty"`
-	ClipboardID      string               `json:"clipboardId,omitempty"`
-	ClipboardContent string               `json:"clipboardContent,omitempty"`
-	ClipboardMedia   *ClipboardMedia      `json:"clipboardMedia,omitempty"`
-	GlossaryTerm     *config.GlossaryTerm `json:"glossaryTerm,omitempty"`
-	AIMode           string               `json:"aiMode,omitempty"`
-	AIPrompt         string               `json:"aiPrompt,omitempty"`
-	SettingID        string               `json:"settingId,omitempty"`
-	UtilityValue     string               `json:"utilityValue,omitempty"`
-	AppBundleID      string               `json:"appBundleId,omitempty"`
-	AppPath          string               `json:"appPath,omitempty"`
-	IMEMode          config.IMEMode       `json:"imeMode,omitempty"`
+	ID               string                 `json:"id"`
+	Title            string                 `json:"title"`
+	Subtitle         string                 `json:"subtitle"`
+	KeyHint          string                 `json:"keyHint,omitempty"`
+	Icon             string                 `json:"icon,omitempty"`
+	Keywords         []string               `json:"keywords,omitempty"`
+	MatchedIndices   []int                  `json:"matchedIndices,omitempty"`
+	Score            int                    `json:"score"`
+	Kind             OmniboxItemKind        `json:"kind"`
+	LeaderAction     *config.LeaderAction   `json:"leaderAction,omitempty"`
+	Snippet          *config.SnippetItem    `json:"snippet,omitempty"`
+	SwitchTab        config.CapsuleTab      `json:"switchTab,omitempty"`
+	ClipboardID      string                 `json:"clipboardId,omitempty"`
+	ClipboardContent string                 `json:"clipboardContent,omitempty"`
+	ClipboardMedia   *ClipboardMedia        `json:"clipboardMedia,omitempty"`
+	GlossaryTerm     *config.GlossaryTerm   `json:"glossaryTerm,omitempty"`
+	AIMode           string                 `json:"aiMode,omitempty"`
+	AIPrompt         string                 `json:"aiPrompt,omitempty"`
+	SettingID        string                 `json:"settingId,omitempty"`
+	UtilityValue     string                 `json:"utilityValue,omitempty"`
+	AppBundleID      string                 `json:"appBundleId,omitempty"`
+	AppPath          string                 `json:"appPath,omitempty"`
+	IMEMode          config.IMEMode         `json:"imeMode,omitempty"`
+	PromptTemplate   *config.PromptTemplate `json:"promptTemplate,omitempty"`
+	ScriptID         string                 `json:"scriptId,omitempty"`
+	Port             int                    `json:"port,omitempty"`
+	PortPID          int                    `json:"portPid,omitempty"`
+	PortProcess      string                 `json:"portProcess,omitempty"`
 }
 
 // CapsulePhase identifies the current Capsule UI phase.
@@ -147,6 +167,8 @@ type State struct {
 	Context           CapsuleContext          `json:"context"`
 	ClipboardEntries  []OmniboxClipboardEntry `json:"clipboardEntries,omitempty"`
 	InstalledApps     []InstalledAppEntry     `json:"installedApps,omitempty"`
+	FrecencyScores    map[string]int          `json:"frecencyScores,omitempty"`
+	ListeningPorts    []PortEntry             `json:"listeningPorts,omitempty"`
 }
 
 // NewInitialState returns a hidden initial State.
@@ -163,6 +185,8 @@ const (
 	EventUpdateContext                  EventType = "update_context"
 	EventSetClipboardEntries            EventType = "set_clipboard_entries"
 	EventSetInstalledApps               EventType = "set_installed_apps"
+	EventSetFrecencyScores              EventType = "set_frecency_scores"
+	EventSetListeningPorts              EventType = "set_listening_ports"
 	EventLeaderKeyPress                 EventType = "leader_key_press"
 	EventUpdateQuery                    EventType = "update_query"
 	EventSwitchTab                      EventType = "switch_tab"
@@ -204,6 +228,8 @@ type Event struct {
 	Message          string                  `json:"message,omitempty"`
 	ClipboardEntries []OmniboxClipboardEntry `json:"clipboardEntries,omitempty"`
 	InstalledApps    []InstalledAppEntry     `json:"installedApps,omitempty"`
+	FrecencyScores   map[string]int          `json:"frecencyScores,omitempty"`
+	ListeningPorts   []PortEntry             `json:"listeningPorts,omitempty"`
 }
 
 // EffectType identifies a side effect emitted by Reduce.
@@ -243,18 +269,19 @@ type Effect struct {
 
 // StateMachine wraps State + ClavisConfig with a stateful Handle method.
 type StateMachine struct {
-	config config.ClavisConfig
-	state  State
+	config           config.ClavisConfig
+	state            State
+	CandidateCorpus  CandidateCorpus
+	corpusGeneration uint64
 }
 
 // NewStateMachine constructs a StateMachine with the given config.
 func NewStateMachine(cfg config.ClavisConfig) *StateMachine {
 	st := NewInitialState()
 	st.ActiveAIProfileID = cfg.Main.AI.ActiveProfileID
-	return &StateMachine{
-		config: cfg,
-		state:  st,
-	}
+	m := &StateMachine{config: cfg, state: st}
+	m.rebuildCandidateCorpus()
+	return m
 }
 
 // State returns a copy of the current State.
@@ -265,6 +292,8 @@ func (m *StateMachine) State() State {
 // SetConfig updates the config used for subsequent transitions.
 func (m *StateMachine) SetConfig(cfg config.ClavisConfig) {
 	m.config = cfg
+	m.corpusGeneration++
+	m.rebuildCandidateCorpus()
 	if m.state.ActiveAIProfileID == "" {
 		m.state.ActiveAIProfileID = cfg.Main.AI.ActiveProfileID
 	}
@@ -274,7 +303,26 @@ func (m *StateMachine) SetConfig(cfg config.ClavisConfig) {
 func (m *StateMachine) Handle(ev Event) []Effect {
 	next, effects := Reduce(m.state, ev, m.config)
 	m.state = next
+	if ev.Type == EventSetClipboardEntries || ev.Type == EventSetInstalledApps {
+		m.corpusGeneration++
+		m.rebuildCandidateCorpus()
+	}
 	return effects
+}
+func (m *StateMachine) rebuildCandidateCorpus() {
+	items := append([]OmniboxItem{}, flattenLeaderNodes(m.config.Leader.Nodes, nil, nil)...)
+	items = append(items, makeSnippetItems(m.config.Snippets.Items)...)
+	items = append(items, makeInstalledAppItems(m.state.InstalledApps)...)
+	for _, p := range m.config.Prompts.Items {
+		x := p
+		items = append(items, OmniboxItem{ID: "prompt:" + p.ID, Title: p.Title, Subtitle: p.Description, KeyHint: p.Trigger, Keywords: []string{p.Trigger, p.Category}, Kind: ItemPromptTemplate, PromptTemplate: &x})
+	}
+	for _, x := range m.config.Components.Scripts {
+		if x.Enabled {
+			items = append(items, OmniboxItem{ID: "script:" + x.ID, Title: x.Title, Subtitle: x.Subtitle, KeyHint: x.Trigger, Kind: ItemScriptCommand, ScriptID: x.ID})
+		}
+	}
+	m.CandidateCorpus = CandidateCorpus{Items: items, Generation: m.corpusGeneration}
 }
 
 func effectiveProfileID(state State, cfg config.ClavisConfig) string {
@@ -363,6 +411,23 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 			}
 			next.OmniboxItems = items
 			next.SelectedIndex = preservedIdx
+		}
+		return next, nil
+
+	case EventSetFrecencyScores:
+		next.FrecencyScores = make(map[string]int, len(event.FrecencyScores))
+		for id, score := range event.FrecencyScores {
+			next.FrecencyScores[id] = score
+		}
+		if next.Phase == PhaseOmnibox {
+			next.OmniboxItems = buildOmniboxItems(next.OmniboxTab, next.OmniboxQuery, next, cfg)
+		}
+		return next, nil
+
+	case EventSetListeningPorts:
+		next.ListeningPorts = append([]PortEntry(nil), event.ListeningPorts...)
+		if next.Phase == PhaseOmnibox {
+			next.OmniboxItems = buildOmniboxItems(next.OmniboxTab, next.OmniboxQuery, next, cfg)
 		}
 		return next, nil
 
@@ -1148,6 +1213,35 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 			{Type: EffectClose},
 		}
 
+	case ItemPromptTemplate:
+		if item.PromptTemplate == nil {
+			return next, nil
+		}
+		ctxCopy := next.Context
+		clearPhaseFields(&next)
+		next.Phase = PhaseAIStreaming
+		next.AIMode = "prompt"
+		next.AIPrompt = item.PromptTemplate.Template
+		return next, []Effect{{Type: EffectStartAI, Mode: "prompt", Prompt: item.PromptTemplate.Template, Context: &ctxCopy, ProfileID: effectiveProfileID(next, cfg)}}
+
+	case ItemScriptCommand:
+		for _, spec := range cfg.Components.Scripts {
+			if spec.ID == item.ScriptID {
+				act := config.CLIAction(spec.Command, spec.Args...)
+				ctxCopy := next.Context
+				clearPhaseFields(&next)
+				next.Phase = PhaseHidden
+				return next, []Effect{{Type: EffectRunAction, Action: &act, Context: &ctxCopy}, {Type: EffectClose}}
+			}
+		}
+
+	case ItemPortProcess:
+		act := config.CLIAction("kill", "-TERM", strconv.Itoa(item.PortPID))
+		ctxCopy := next.Context
+		clearPhaseFields(&next)
+		next.Phase = PhaseHidden
+		return next, []Effect{{Type: EffectRunAction, Action: &act, Context: &ctxCopy}, {Type: EffectClose}}
+
 	case ItemInstalledApp:
 		target := strings.TrimSpace(item.AppBundleID)
 		if target == "" {
@@ -1203,7 +1297,7 @@ func ParseOmniboxPrefix(rawQuery string) (prefix rune, rest string, routed bool)
 	firstRune, size := utf8.DecodeRuneInString(trimmedLeft)
 	normFirst := NormalizeFullWidthRune(firstRune)
 	switch normFirst {
-	case '>', ';', '@', '?', ':', '=':
+	case '>', ';', '@', '?', ':', '=', '/':
 		return normFirst, strings.TrimSpace(trimmedLeft[size:]), true
 	}
 	lower := strings.ToLower(trimmedLeft)
@@ -1365,6 +1459,9 @@ func makeAppIMERuleItems(ctx CapsuleContext) []OmniboxItem {
 }
 
 func scoreCandidates(candidates []OmniboxItem, query string) []OmniboxItem {
+	return scoreCandidatesWithFrecency(candidates, query, nil)
+}
+func scoreCandidatesWithFrecency(candidates []OmniboxItem, query string, frecency map[string]int) []OmniboxItem {
 	trimmed := strings.TrimSpace(query)
 	if trimmed == "" {
 		return candidates
@@ -1383,7 +1480,7 @@ func scoreCandidates(candidates []OmniboxItem, query string) []OmniboxItem {
 		}
 		if res, ok := MatchFull(trimmed, cand.Title, keyForScoring, kws); ok {
 			updated := cand
-			updated.Score = res.Score
+			updated.Score = res.Score + frecency[cand.ID]
 			updated.MatchedIndices = res.MatchedLabelIndices
 			scored = append(scored, scoredItem{origIdx: i, item: updated})
 		}
@@ -1402,12 +1499,36 @@ func scoreCandidates(candidates []OmniboxItem, query string) []OmniboxItem {
 }
 
 func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg config.ClavisConfig) []OmniboxItem {
+	// Configured source prefixes take precedence over built-in routes.
+	if tab == config.TabActions {
+		for _, src := range cfg.Components.Sources {
+			if !src.Enabled || strings.TrimSpace(src.Prefix) == "" || !strings.HasPrefix(query, src.Prefix) {
+				continue
+			}
+			rest := strings.TrimSpace(strings.TrimPrefix(query, src.Prefix))
+			switch src.ID {
+			case "prompts":
+				return scoreCandidatesWithFrecency(cfgPromptItems(cfg), rest, state.FrecencyScores)
+			case "scripts":
+				var scripts []OmniboxItem
+				for _, x := range cfg.Components.Scripts {
+					if x.Enabled {
+						scripts = append(scripts, OmniboxItem{ID: "script:" + x.ID, Title: x.Title, Subtitle: x.Subtitle, KeyHint: x.Trigger, Kind: ItemScriptCommand, ScriptID: x.ID})
+					}
+				}
+				return scoreCandidatesWithFrecency(scripts, rest, state.FrecencyScores)
+			}
+		}
+	}
 	// Prefix quick-routing in Actions tab: >, ;, @ (or "cb "), ?, :, =
 	if tab == config.TabActions {
 		if prefix, rest, ok := ParseOmniboxPrefix(query); ok {
 			switch prefix {
 			case '>':
 				var cmds []OmniboxItem
+				for _, port := range state.ListeningPorts {
+					cmds = append(cmds, OmniboxItem{ID: fmt.Sprintf("port:%d", port.Port), Title: fmt.Sprintf(":%d %s", port.Port, port.Process), Subtitle: port.Command, Keywords: []string{"kill", "port", strconv.Itoa(port.Port)}, Kind: ItemPortProcess, Port: port.Port, PortPID: port.PID, PortProcess: port.Process, Score: 1000})
+				}
 				cmds = append(cmds, flattenLeaderNodes(cfg.Leader.Nodes, nil, nil)...)
 				cmds = append(cmds, makeNormalizeGlossaryItem())
 				cmds = append(cmds, makeAppIMERuleItems(state.Context)...)
@@ -1440,9 +1561,18 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 				}
 				return aiModes
 			case ':':
+				for _, port := range state.ListeningPorts {
+					if rest == strconv.Itoa(port.Port) || strings.Contains(strings.ToLower(port.Process), strings.ToLower(rest)) {
+						return []OmniboxItem{{ID: fmt.Sprintf("port:%d", port.Port), Title: fmt.Sprintf("Kill %s on :%d", port.Process, port.Port), Subtitle: port.Command, Kind: ItemPortProcess, Port: port.Port, PortPID: port.PID, PortProcess: port.Process, Score: 1300}}
+					}
+				}
 				return SearchEmojis(":" + rest)
 			case '=':
 				return EvaluateUtilities("="+rest, time.Now())
+			case '/':
+				// Prompt templates use slash triggers; the prefix is accepted when
+				// callers pass a full-width or explicit route through Actions.
+				return scoreCandidates(cfgPromptItems(cfg), rest)
 			}
 		}
 	}
@@ -1453,11 +1583,24 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 	case config.TabActions:
 		candidates = append(candidates, flattenLeaderNodes(cfg.Leader.Nodes, nil, nil)...)
 		candidates = append(candidates, makeNormalizeGlossaryItem())
+		if sourceEnabled(cfg.Components.Sources, "prompts") {
+			candidates = append(candidates, cfgPromptItems(cfg)...)
+		}
+		if sourceEnabled(cfg.Components.Sources, "scripts") {
+			for _, s := range cfg.Components.Scripts {
+				if s.Enabled {
+					candidates = append(candidates, OmniboxItem{ID: "script:" + s.ID, Title: s.Title, Subtitle: s.Subtitle, KeyHint: s.Trigger, Kind: ItemScriptCommand, ScriptID: s.ID, Score: 1000})
+				}
+			}
+		}
+		for _, p := range state.ListeningPorts {
+			candidates = append(candidates, OmniboxItem{ID: fmt.Sprintf("port:%d", p.Port), Title: fmt.Sprintf(":%d %s", p.Port, p.Process), Subtitle: p.Command, Keywords: []string{"port", "kill", strconv.Itoa(p.Port)}, Kind: ItemPortProcess, Port: p.Port, PortPID: p.PID, PortProcess: p.Process, Score: 1000})
+		}
+
 		candidates = append(candidates, makeAppIMERuleItems(state.Context)...)
 		candidates = append(candidates, makeSnippetItems(cfg.Snippets.Items)...)
 		candidates = append(candidates, makeInstalledAppItems(state.InstalledApps)...)
 		candidates = append(candidates, makeTabSwitchItems(config.TabActions)...)
-
 	case config.TabSnippets:
 		candidates = makeSnippetItems(cfg.Snippets.Items)
 
@@ -1501,7 +1644,7 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 		return candidates
 	}
 
-	scoredItems := scoreCandidates(candidates, trimmed)
+	scoredItems := scoreCandidatesWithFrecency(candidates, trimmed, state.FrecencyScores)
 
 	var results []OmniboxItem
 	if tab == config.TabActions {
@@ -1826,6 +1969,15 @@ func cloneState(s State) State {
 	if s.InstalledApps != nil {
 		out.InstalledApps = append([]InstalledAppEntry(nil), s.InstalledApps...)
 	}
+	if s.FrecencyScores != nil {
+		out.FrecencyScores = make(map[string]int, len(s.FrecencyScores))
+		for k, v := range s.FrecencyScores {
+			out.FrecencyScores[k] = v
+		}
+	}
+	if s.ListeningPorts != nil {
+		out.ListeningPorts = append([]PortEntry(nil), s.ListeningPorts...)
+	}
 	if s.AIHistory != nil {
 		out.AIHistory = copyChatTurns(s.AIHistory)
 	}
@@ -1848,4 +2000,25 @@ func copyLeaderNodes(nodes []config.LeaderNode) []config.LeaderNode {
 	out := make([]config.LeaderNode, len(nodes))
 	copy(out, nodes)
 	return out
+}
+
+func sourceEnabled(sources []config.SourceModuleSpec, id string) bool {
+	if len(sources) == 0 {
+		return true
+	}
+	for _, s := range sources {
+		if s.ID == id {
+			return s.Enabled
+		}
+	}
+	return true
+}
+
+func cfgPromptItems(cfg config.ClavisConfig) []OmniboxItem {
+	items := make([]OmniboxItem, 0, len(cfg.Prompts.Items))
+	for _, p := range cfg.Prompts.Items {
+		x := p
+		items = append(items, OmniboxItem{ID: "prompt:" + p.ID, Title: p.Title, Subtitle: p.Description, KeyHint: p.Trigger, Keywords: []string{p.Trigger, p.Category}, Kind: ItemPromptTemplate, PromptTemplate: &x, Score: 1000})
+	}
+	return items
 }

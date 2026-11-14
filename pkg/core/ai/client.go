@@ -36,6 +36,8 @@ type CompletionRequest struct {
 	GlossaryTerms []config.GlossaryTerm
 	History       []ChatMessage
 	Profile       *config.AIProfile
+	// SystemPromptOverride is used by transient workflows such as prompt optimization.
+	SystemPromptOverride string
 }
 
 // ClientError categorizes AI client failures.
@@ -223,8 +225,12 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 	}
 	contextText := strings.Join(ctxParts, "\n")
 
+	systemBase := profile.SystemPrompt
+	if strings.TrimSpace(req.SystemPromptOverride) != "" {
+		systemBase = req.SystemPromptOverride
+	}
 	systemPrompt := activeGlossary.InjectIntoSystemPrompt(
-		profile.SystemPrompt,
+		systemBase,
 		req.Prompt+"\n"+req.SourceText,
 		contextText,
 		0,
