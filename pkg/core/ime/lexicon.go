@@ -190,6 +190,19 @@ func LoadClvDict(data []byte) (*Lexicon, error) {
 func (l *Lexicon) key(i syllableEntry) string { return string(l.image[i.keyOff : i.keyOff+i.keyLen]) }
 func (l *Lexicon) text(w wordRecord) string   { return string(l.image[w.textOff : w.textOff+w.textLen]) }
 func (l *Lexicon) pinyin(w wordRecord) string { return string(l.image[w.pyOff : w.pyOff+w.pyLen]) }
+
+// ForEachWord visits every record in l in canonical key / descending frequency order, stopping
+// early when fn returns false.
+func (l *Lexicon) ForEachWord(fn func(pinyin, word string, freq int32) bool) {
+	if l == nil || fn == nil {
+		return
+	}
+	for _, w := range l.words {
+		if !fn(l.pinyin(w), l.text(w), w.freq) {
+			return
+		}
+	}
+}
 func (l *Lexicon) lookupExact(key string) []Candidate {
 	i := sort.Search(len(l.syllables), func(i int) bool { return l.key(l.syllables[i]) >= key })
 	if i == len(l.syllables) || l.key(l.syllables[i]) != key {

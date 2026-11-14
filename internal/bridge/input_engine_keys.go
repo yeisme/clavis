@@ -1,8 +1,13 @@
 package bridge
 
 import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"unicode/utf8"
 
+	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
 
@@ -20,6 +25,45 @@ const (
 	ieVKF1     = 0x70
 	ieVKF24    = 0x87
 )
+
+// inputEngineOptionsFromConfig converts [input_engine] config into inputengine.Options.
+// Returns ok=false when the own input engine is disabled or configured for a non-hook mode,
+// preserving the zero-overhead disabled default.
+func inputEngineOptionsFromConfig(cfg config.InputEngineConfig, cacheDir string) (inputengine.Options, bool) {
+	if !cfg.Enabled || (cfg.Mode != "" && cfg.Mode != "inline_hook" && cfg.Mode != "dual") {
+		return inputengine.Options{}, false
+	}
+	resolvedCache := strings.TrimSpace(cacheDir)
+	if resolvedCache == "" && len(cfg.CustomDictPaths) > 0 {
+		resolvedCache = defaultInputEngineCacheDir()
+	}
+	return inputengine.Options{
+		CandidateCount:   cfg.CandidateCount,
+		ShiftToggleASCII: cfg.ShiftToggleASCII,
+		Scheme:           cfg.Scheme,
+		FuzzyPinyin:      slices.Clone(cfg.FuzzyPinyin),
+		CustomDictPaths:  slices.Clone(cfg.CustomDictPaths),
+		DictCacheDir:     resolvedCache,
+	}, true
+}
+
+func newInputEngineFromConfig(cfg config.InputEngineConfig, cacheDir string) *inputengine.Engine {
+	opts, ok := inputEngineOptionsFromConfig(cfg, cacheDir)
+	if !ok {
+		return nil
+	}
+	return inputengine.New(opts)
+}
+
+func defaultInputEngineCacheDir() string {
+	if dir, err := os.UserCacheDir(); err == nil && dir != "" {
+		return filepath.Join(dir, "clavis", "dicts")
+	}
+	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+		return filepath.Join(dir, "clavis", "dicts")
+	}
+	return ""
+}
 
 // engineKeyForVK maps a key-down to an inputengine.Key. text is the ToUnicodeEx output for
 // the current layout/shift state; chord is true when Ctrl/Alt/Win is held. ok=false means the

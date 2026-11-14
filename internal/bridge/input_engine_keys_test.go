@@ -1,8 +1,11 @@
 package bridge
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
 
@@ -51,5 +54,61 @@ func TestUTF16UnitsAndEligibility(t *testing.T) {
 		if inputEngineEligible(c[0], c[1], c[2]) {
 			t.Fatalf("must not take over: native=%v secure=%v self=%v", c[0], c[1], c[2])
 		}
+	}
+}
+
+func TestInputEngineConfigPlumbing(t *testing.T) {
+	// Default config has Enabled=false -> nil engine.
+	def := config.DefaultInputEngineConfig()
+	if def.Enabled {
+		t.Fatal("default [input_engine] must stay disabled")
+	}
+	if eng := newInputEngineFromConfig(def, t.TempDir()); eng != nil {
+		t.Fatal("disabled config must not instantiate engine")
+	}
+	for _, mode := range []string{"native_imk", "off"} {
+		cfg := def
+		cfg.Enabled = true
+		cfg.Mode = mode
+		if eng := newInputEngineFromConfig(cfg, t.TempDir()); eng != nil {
+			t.Fatalf("mode %q must not instantiate inline hook engine", mode)
+		}
+	}
+
+	dir := t.TempDir()
+	dictPath := filepath.Join(dir, "bridge_custom.dict.yaml")
+	if err := os.WriteFile(dictPath, []byte("---\nname: bridge\n...\n桥接热词\tqiao jie re ci\t999999\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := def
+	cfg.Enabled = true
+	cfg.Mode = "inline_hook"
+	cfg.Scheme = "xiaohe"
+	cfg.CandidateCount = 1 // clamped to 3
+	cfg.FuzzyPinyin = []string{"z=zh"}
+	cfg.CustomDictPaths = []string{dictPath}
+
+	eng := newInputEngineFromConfig(cfg, filepath.Join(dir, "cache"))
+	if eng == nil {
+		t.Fatal("enabled inline_hook config returned nil engine")
+	}
+	if eng.CandidateCount() != inputengine.MinCandidateCount {
+		t.Fatalf("clamped CandidateCount = %d, want %d", eng.CandidateCount(), inputengine.MinCandidateCount)
+	}
+	// Shuangpin ("nihc" -> 你好) works through the wired engine.
+	for _, r := range "nihc" {
+		eng.HandleKey(inputengine.Key{Kind: inputengine.KeyLetter, Rune: r})
+	}
+	if v := eng.View(); len(v.Candidates) == 0 || v.Candidates[0].Text != "你好" {
+		t.Fatalf("wired xiaohe nihc = %+v", v.Candidates)
+	}
+	eng.Reset()
+
+	// Custom Rime dict ("qcjpreci" -> qiao'jie're'ci -> 桥接热词) works through the wired engine.
+	for _, r := range "qcjpreci" {
+		eng.HandleKey(inputengine.Key{Kind: inputengine.KeyLetter, Rune: r})
+	}
+	if v := eng.View(); len(v.Candidates) == 0 || v.Candidates[0].Text != "桥接热词" {
+		t.Fatalf("wired custom dict in xiaohe = %+v (preedit=%q)", v.Candidates, v.Preedit)
 	}
 }

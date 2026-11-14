@@ -20,25 +20,30 @@ import (
 const keyeventfUnicodeFlag = 0x0004
 
 type inputEngineState struct {
-	eng     atomic.Pointer[inputengine.Engine]
-	viewMu  sync.Mutex
-	viewFn  func(InputEngineView)
-	dirty   chan struct{}
-	anchor  atomic.Pointer[host.CursorAnchor]
-	started atomic.Bool
+	eng      atomic.Pointer[inputengine.Engine]
+	viewMu   sync.Mutex
+	viewFn   func(InputEngineView)
+	dirty    chan struct{}
+	anchor   atomic.Pointer[host.CursorAnchor]
+	started  atomic.Bool
+	cacheDir string
+}
+
+func (st *inputEngineState) buildEngine(cfg config.InputEngineConfig) *inputengine.Engine {
+	return newInputEngineFromConfig(cfg, st.cacheDir)
 }
 
 // ConfigureInputEngine implements InputEngineHost.
 func (b *windowsBridge) ConfigureInputEngine(cfg config.InputEngineConfig) {
 	st := &b.ime
-	if !cfg.Enabled || (cfg.Mode != "" && cfg.Mode != "inline_hook" && cfg.Mode != "dual") {
+	eng := st.buildEngine(cfg)
+	if eng == nil {
 		if old := st.eng.Swap(nil); old != nil {
 			old.Reset()
 			b.notifyInputEngineView()
 		}
 		return
 	}
-	eng := inputengine.New(inputengine.Options{CandidateCount: cfg.CandidateCount, ShiftToggleASCII: cfg.ShiftToggleASCII})
 	if old := st.eng.Swap(eng); old != nil {
 		old.Reset()
 	}
