@@ -7,9 +7,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
 
@@ -304,16 +307,86 @@ func engineKeyForVK(vk uint16, text string, chord bool) (inputengine.Key, bool) 
 
 // utf16Units encodes s for KEYEVENTF_UNICODE SendInput (surrogate pairs for non-BMP).
 func utf16Units(s string) []uint16 {
-	var out []uint16
-	for _, r := range s {
-		if r >= 0x10000 {
-			r -= 0x10000
-			out = append(out, uint16(0xD800+(r>>10)), uint16(0xDC00+(r&0x3FF)))
-			continue
-		}
-		out = append(out, uint16(r))
+	return utf16.Encode([]rune(s))
+}
+
+// inputEngineKeyForInline is the platform-neutral mapping used by macOS' CGEventTap and
+// unit-tested on every platform. Rune carries the layout-decoded printable character.
+func inputEngineKeysForInline(ev host.InlineKeyEvent) ([]inputengine.Key, bool) {
+	if strings.EqualFold(ev.KeyName, "shift_tap") {
+		return []inputengine.Key{{Kind: inputengine.KeyShiftDown}, {Kind: inputengine.KeyShiftUp}}, true
 	}
-	return out
+	chord := false
+	for _, mod := range ev.Modifiers {
+		switch strings.ToLower(mod) {
+		case "ctrl", "control", "alt", "option", "cmd", "command", "meta":
+			chord = true
+		}
+	}
+	name := strings.ToLower(ev.KeyName)
+	r, _ := utf8.DecodeRuneInString(ev.Rune)
+	if r != utf8.RuneError {
+		r = unicode.ToLower(r)
+	}
+	k := inputengine.Key{Rune: r, Chord: chord}
+	switch {
+	case name == "space":
+		k.Kind = inputengine.KeySpace
+	case name == "return" || name == "enter":
+		k.Kind = inputengine.KeyEnter
+	case name == "backspace" || name == "delete":
+		k.Kind = inputengine.KeyBackspace
+	case name == "escape":
+		k.Kind = inputengine.KeyEscape
+	case name == "tab" || name == "left" || name == "right" || name == "up" || name == "down" || name == "home" || name == "end" || name == "pageup" || name == "pagedown" || (len(name) > 1 && name[0] == 'f'):
+		k.Kind = inputengine.KeyNavigation
+	case name == "'" || name == "quote":
+		k.Kind = inputengine.KeyApostrophe
+	case name == "-" || name == "minus":
+		k.Kind = inputengine.KeyPagePrev
+	case name == "=" || name == "equal":
+		k.Kind = inputengine.KeyPageNext
+	case r >= 'a' && r <= 'z':
+		k.Kind = inputengine.KeyLetter
+	case r >= '0' && r <= '9':
+		k.Kind = inputengine.KeyDigit
+	case r == '\'':
+		k.Kind = inputengine.KeyApostrophe
+	case r == '-':
+		k.Kind = inputengine.KeyPagePrev
+	case r == '=':
+		k.Kind = inputengine.KeyPageNext
+	default:
+		if chord {
+			k.Kind = inputengine.KeyNavigation
+		} else {
+			return nil, false
+		}
+	}
+	return []inputengine.Key{k}, true
+}
+
+func inputEngineKeyForInline(ev host.InlineKeyEvent) (inputengine.Key, bool) {
+	keys, ok := inputEngineKeysForInline(ev)
+	if !ok || len(keys) != 1 {
+		return inputengine.Key{}, false
+	}
+	return keys[0], true
+}
+
+func inputEngineCommitUnits(s string) []uint16 { return utf16.Encode([]rune(s)) }
+
+// emitInputEngineCommit posts UTF-16 chunks synchronously. The poster is injectable for tests.
+func emitInputEngineCommit(s string, post func([]uint16)) {
+	units := inputEngineCommitUnits(s)
+	for len(units) > 0 {
+		n := len(units)
+		if n > 20 {
+			n = 20
+		}
+		post(units[:n])
+		units = units[n:]
+	}
 }
 
 // inputEngineEligible applies design §6 rules 3/5 + password guard: the engine only takes over

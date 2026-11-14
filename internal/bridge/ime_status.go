@@ -71,8 +71,8 @@ type InputEngineView struct {
 	Anchor *host.CursorAnchor
 }
 
-// InputEngineHost is implemented by bridges that host the own input engine (Windows, route B;
-// docs/design/own-input-engine.md). Optional; macOS ignores [input_engine] for now.
+// InputEngineHost is implemented by bridges that host the own input engine (Windows and macOS,
+// route B; docs/design/own-input-engine.md). Optional on platforms without a hook.
 type InputEngineHost interface {
 	// ConfigureInputEngine (re)creates or disables the engine. Disabled → no engine object,
 	// the hook pays a single nil check.

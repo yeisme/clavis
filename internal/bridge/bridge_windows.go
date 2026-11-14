@@ -366,6 +366,13 @@ func newPlatformBridge(opts Options) HostService {
 	b.health.resetCh = make(chan struct{}, 1)
 	b.health.reinstallRes = make(chan bool, 1)
 	b.ime.dirty = make(chan struct{}, 1)
+	b.ime.anchorFn = func(ctx context.Context) (host.CursorAnchor, bool) {
+		_, hwnd := winForegroundApp()
+		if a, ok := resolveWinCaretAnchor(hwnd); ok {
+			return a, true
+		}
+		return resolveWinMouseAnchor()
+	}
 	b.inputEngineReset = b.resetInputEngine
 	return b
 }
