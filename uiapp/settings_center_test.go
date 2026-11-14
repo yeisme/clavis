@@ -59,9 +59,9 @@ func TestSettingsCenter_TriggersAndAppearancePersist(t *testing.T) {
 		t.Fatalf("config.toml still shows show_preview_pane = true:\n%s", body)
 	}
 
-	// Pick the dark theme pill.
-	if err := tt.Click("dark"); err != nil {
-		t.Fatalf("click dark theme pill: %v", err)
+	// Pick the dark theme segment: humanized "Dark", stored as "dark".
+	if err := tt.Click("Dark"); err != nil {
+		t.Fatalf("click Dark theme segment: %v", err)
 	}
 	tt.Frame()
 	if got := ctrl.Config().Main.Appearance.Theme; got != "dark" {

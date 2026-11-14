@@ -100,110 +100,30 @@ func settingsLabelled(c *ui.Context, theme *ui.Theme, label string, body func())
 	})
 }
 
+// settingsFieldLabelWidth is the label column of the item editors (AI
+// profile, Leader node, snippet, glossary term).
+const settingsFieldLabelWidth float32 = 84
+
+// settingsInlineNumber renders a number with its unit and a stepper named
+// label, for the item editors, and reports a change.
+func settingsInlineNumber(c *ui.Context, theme *ui.Theme, label string, value, lo, hi, step float64, unit string) (float64, bool) {
+	next, changed := value, false
+	ui.Row(c).Gap(space6).AlignItems(ui.Center).Children(func() {
+		ui.Text(c, formatSettingNumber(value, step, unit)).FontSize(typeBody).TextColor(theme.Text).SingleLine()
+		v := value
+		if ui.Stepper(c, &v, lo, hi, step).Label(label).Changed() {
+			next, changed = v, true
+		}
+	})
+	return next, changed
+}
+
 // settingsInlineRow renders a muted caption left of body, width wide.
 func settingsInlineRow(c *ui.Context, theme *ui.Theme, label string, width float32, body func()) {
 	ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
 		ui.Text(c, label).FontSize(11).TextColor(theme.TextMuted).Width(width).SingleLine()
 		body()
 	})
-}
-
-// settingsPills renders a row of choice pills and reports the chosen value.
-func settingsPills(c *ui.Context, theme *ui.Theme, key string, options []string, current string) (string, bool) {
-	chosen, changed := current, false
-	ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
-		for _, opt := range options {
-			o := opt
-			active := strings.EqualFold(o, current)
-			pill := ui.ButtonBase(c).Key(key+":"+o).Padding(3, 8).Radius(6).FocusRing(false)
-			if active {
-				pill.Background(theme.Accent)
-			} else {
-				pill.Background(theme.Background).Border(1, theme.Border)
-			}
-			pill.Children(func() {
-				txt := ui.Text(c, o).FontSize(11).SingleLine()
-				if active {
-					txt.TextColor(theme.AccentText).FontWeight(600)
-				} else {
-					txt.TextColor(theme.TextMuted)
-				}
-			})
-			if pill.Clicked() {
-				chosen, changed = o, true
-			}
-		}
-	})
-	return chosen, changed
-}
-
-// settingsPillGrid renders choice pills in a grid of columns columns.
-func settingsPillGrid(c *ui.Context, theme *ui.Theme, key string, columns int, options []string, current string) (string, bool) {
-	chosen, changed := current, false
-	ui.Grid(c).Columns(columns).Gap(4).FillWidth().Children(func() {
-		for _, opt := range options {
-			o := opt
-			active := strings.EqualFold(o, current)
-			pill := ui.ButtonBase(c).Key(key+":"+o).Padding(3, 6).Radius(6).FocusRing(false).Center()
-			if active {
-				pill.Background(theme.Accent)
-			} else {
-				pill.Background(theme.Background).Border(1, theme.Border)
-			}
-			pill.Children(func() {
-				txt := ui.Text(c, o).FontSize(11).SingleLine()
-				if active {
-					txt.TextColor(theme.AccentText).FontWeight(600)
-				} else {
-					txt.TextColor(theme.TextMuted)
-				}
-			})
-			if pill.Clicked() {
-				chosen, changed = o, true
-			}
-		}
-	})
-	return chosen, changed
-}
-
-// settingsSwitch renders one labelled switch row and reports a change.
-func settingsSwitch(c *ui.Context, theme *ui.Theme, caption, label string, on bool) (bool, bool) {
-	value, changed := on, false
-	ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-		ui.Text(c, caption).FontSize(12).TextColor(theme.Text).SingleLine().Grow(1)
-		sw := ui.Switch(c, &value).Label(label)
-		if sw.Changed() {
-			changed = true
-		}
-	})
-	return value, changed
-}
-
-// settingsStepper renders a number stepper with a caption and reports a change.
-func settingsStepper(
-	c *ui.Context,
-	theme *ui.Theme,
-	caption string,
-	value float64,
-	lo, hi, step float64,
-	suffix string,
-) (float64, bool) {
-	next, changed := value, false
-	ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-		// The caption always carries the current value: a bare count
-		// (max_visible_results, max_history_items) used to show no number.
-		text := fmt.Sprintf("%s: %.0f", caption, value)
-		if suffix != "" {
-			text = fmt.Sprintf("%s: %.0f %s", caption, value, suffix)
-		}
-		ui.Text(c, text).FontSize(11).TextColor(theme.TextMuted).SingleLine().Grow(1)
-		v := value
-		st := ui.Stepper(c, &v, lo, hi, step)
-		if st.Changed() {
-			next, changed = v, true
-		}
-	})
-	return next, changed
 }
 
 // settingsSelect renders a pop-up selector and reports a change.
@@ -351,54 +271,47 @@ func (a *AppController) renderKeymapControls(c *ui.Context, theme *ui.Theme, cfg
 	se := a.settingsEditor()
 	keymap := cfg.Main.Keymap
 
-	settingsSectionCard(c, theme, i18n.T("settings.card.keymap"), func() {
-		if v, changed := settingsSwitch(c, theme, "Keymap Enabled (keymap.enabled)", i18n.T("settings.keymap.enabled"), keymap.Enabled); changed {
+	settingsSourceCard(c, theme, i18n.T("settings.card.keymap"), "[keymap]", func() {
+		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.keymap.enabled"), "enabled", "", keymap.Enabled); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.Enabled = v })
 		}
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-			ui.Text(c, i18n.T("settings.keymap.nav_layer_caption")).FontSize(12).TextColor(theme.Text).SingleLine().Grow(1)
-			navLayer := keymap.NavLayerEnabled
-			sw := ui.Switch(c, &navLayer).Label(i18n.T("settings.keymap.nav_layer"))
-			if sw.Changed() {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.NavLayerEnabled = navLayer })
-			}
-		})
-
-		if v, changed := settingsStepper(
-			c, theme, "tap_hold_threshold_ms", float64(keymap.TapHoldThresholdMs), 80, 500, 10, "ms",
-		); changed {
+		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.keymap.nav_layer"), "nav_layer_enabled", "", keymap.NavLayerEnabled); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.NavLayerEnabled = v })
+		}
+		if v, changed := settingNumberRow(c, theme, i18n.T("settings.keymap.tap_hold_threshold"), "tap_hold_threshold_ms",
+			i18n.T("settings.keymap.tap_hold_threshold_help"), float64(keymap.TapHoldThresholdMs), 80, 500, 10, "ms"); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.TapHoldThresholdMs = int(v) })
 		}
+		if v, changed := settingSelectRow(c, theme, i18n.T("settings.keymap.caps_lock_tap"), "caps_lock_tap", "",
+			capsLockActionOptions(), keymap.CapsLockTap, 104); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.CapsLockTap = v })
+		}
+		if v, changed := settingSelectRow(c, theme, i18n.T("settings.keymap.caps_lock_hold"), "caps_lock_hold", "",
+			capsLockActionOptions(), keymap.CapsLockHold, 104); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.CapsLockHold = v })
+		}
 
-		settingsInlineRow(c, theme, "caps_lock_tap", 110, func() {
-			if v, changed := settingsSelect(c, []string{"escape", "nav", "hyper", "control", "none"}, keymap.CapsLockTap); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.CapsLockTap = v })
-			}
+		settingsCardDivider(c, theme)
+		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, i18n.T("settings.keymap.custom_remaps")).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Grow(1)
+			ui.Text(c, "[[keymap.remaps]]").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 		})
-		settingsInlineRow(c, theme, "caps_lock_hold", 110, func() {
-			if v, changed := settingsSelect(c, []string{"escape", "nav", "hyper", "control", "none"}, keymap.CapsLockHold); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.CapsLockHold = v })
-			}
-		})
-
-		settingsDivider(c)
-		ui.Text(c, i18n.T("settings.keymap.custom_remaps")).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
 
 		remapDrafts := seGet(se, func(s *settingsEditorState) [4]string {
 			return [4]string{s.remapFrom, s.remapTap, s.remapHold, s.remapApps}
 		})
 		from, tap, hold, apps := remapDrafts[0], remapDrafts[1], remapDrafts[2], remapDrafts[3]
 		ui.Grid(c).Columns(2).Gap(6).FillWidth().Children(func() {
-			if v, changed := settingsTextInput(c, i18n.T("settings.keymap.remap_from"), "caps_lock", from); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.keymap.remap_from"), i18n.T("settings.keymap.remap_from")+": "+"caps_lock", from); changed {
 				seSet(se, func(s *settingsEditorState) { s.remapFrom = v })
 			}
-			if v, changed := settingsTextInput(c, i18n.T("settings.keymap.remap_tap"), "escape", tap); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.keymap.remap_tap"), i18n.T("settings.keymap.remap_tap")+": "+"escape", tap); changed {
 				seSet(se, func(s *settingsEditorState) { s.remapTap = v })
 			}
-			if v, changed := settingsTextInput(c, i18n.T("settings.keymap.remap_hold"), "nav", hold); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.keymap.remap_hold"), i18n.T("settings.keymap.remap_hold")+": "+"nav", hold); changed {
 				seSet(se, func(s *settingsEditorState) { s.remapHold = v })
 			}
-			if v, changed := settingsTextInput(c, i18n.T("settings.keymap.remap_apps"), "com.apple.Safari, com.apple.Terminal", apps); changed {
+			if v, changed := settingsTextInput(c, i18n.T("settings.keymap.remap_apps"), i18n.T("settings.keymap.remap_apps")+": "+"com.apple.Safari, com.apple.Terminal", apps); changed {
 				seSet(se, func(s *settingsEditorState) { s.remapApps = v })
 			}
 		})
@@ -434,7 +347,7 @@ func (a *AppController) renderKeymapControls(c *ui.Context, theme *ui.Theme, cfg
 			}
 			ui.Row(c).Key(fmt.Sprintf("remap:%d:%s", i, r.From)).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, summary).FontSize(11).TextColor(theme.TextMuted).SingleLine().Grow(1)
-				if ui.Button(c, i18n.T("common.delete")).Key(fmt.Sprintf("del-remap:%d", i)).Clicked() {
+				if ui.Button(c, i18n.T("common.delete")).Key(fmt.Sprintf("del-remap:%d", i)).Padding(space2, space10).Shrink(0).Clicked() {
 					_ = a.UpdateMainConfig(func(m *config.MainConfig) {
 						remaps := make([]config.KeyRemapRule, 0, len(m.Keymap.Remaps))
 						for j, item := range m.Keymap.Remaps {
@@ -468,31 +381,33 @@ func splitTokens(raw string) []string {
 // IME configuration
 // ---------------------------------------------------------------------------
 
-// renderIMEConfig draws the IME settings card: switches, delay, default source,
-// an installed-app quick picker and an inline regex validation indicator.
+// renderIMEConfig draws the global IME settings: switches, the switch
+// delay, the current and the default input source.
 func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
 	imeCfg := cfg.Main.IME
 
-	settingsSectionCard(c, theme, i18n.T("settings.card.ime"), func() {
-		ui.Grid(c).Columns(2).Gap(6).FillWidth().Children(func() {
-			if v, changed := settingsSwitch(c, theme, "IME Auto-Switch (ime.enabled)", i18n.T("settings.ime.enabled"), imeCfg.Enabled); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.Enabled = v })
-			}
-			if v, changed := settingsSwitch(c, theme, "Lock ASCII on Leader (lock_ascii_on_leader)", i18n.T("settings.ime.lock_ascii"), imeCfg.LockASCIIOnLeader); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.LockASCIIOnLeader = v })
-			}
-			if v, changed := settingsSwitch(c, theme, "Show Floating Pill (show_floating_pill)", i18n.T("settings.ime.floating_pill"), imeCfg.ShowFloatingPill); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.ShowFloatingPill = v })
-			}
-			if v, changed := settingsSwitch(c, theme, "Show Indicator HUD (show_indicator_hud)", i18n.T("settings.ime.indicator_hud"), imeCfg.ShowIndicatorHUD); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.ShowIndicatorHUD = v })
-			}
-		})
-
-		if v, changed := settingsStepper(c, theme, "switch_delay_ms", float64(imeCfg.SwitchDelayMs), 0, 500, 10, "ms"); changed {
+	settingsSourceCard(c, theme, i18n.T("settings.card.ime"), "[ime]", func() {
+		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.ime.enabled"), "enabled", "", imeCfg.Enabled); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.Enabled = v })
+		}
+		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.ime.lock_ascii"), "lock_ascii_on_leader",
+			i18n.T("settings.ime.lock_ascii_help"), imeCfg.LockASCIIOnLeader); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.LockASCIIOnLeader = v })
+		}
+		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.ime.floating_pill"), "show_floating_pill", "",
+			imeCfg.ShowFloatingPill); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.ShowFloatingPill = v })
+		}
+		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.ime.indicator_hud"), "show_indicator_hud", "",
+			imeCfg.ShowIndicatorHUD); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.ShowIndicatorHUD = v })
+		}
+		if v, changed := settingNumberRow(c, theme, i18n.T("settings.ime.switch_delay"), "switch_delay_ms",
+			i18n.T("settings.ime.switch_delay_help"), float64(imeCfg.SwitchDelayMs), 0, 500, 10, "ms"); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.SwitchDelayMs = int(v) })
 		}
 
+		settingsCardDivider(c, theme)
 		ctx := context.Background()
 		if cur, err := a.CurrentInputSource(ctx); err == nil {
 			settingsKeyValueRow(c, theme, i18n.T("settings.ime.current_source"), FormatInputSourceStatus(cur))
@@ -502,29 +417,30 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 				settingsKeyValueRow(c, theme, row[0], row[1])
 			}
 		}
-		sources := a.AvailableInputSources(ctx)
-		labels, ids := inputSourceOptions(sources, imeCfg.DefaultInputSourceID)
-		settingsInlineRow(c, theme, "default_input_source_id", 130, func() {
-			current := imeCfg.DefaultInputSourceID
-			curLabel := labels[slices.Index(ids, current)]
-			if v, changed := settingsSelect(c, labels, curLabel); changed {
-				if i := slices.Index(labels, v); i >= 0 {
-					_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.DefaultInputSourceID = ids[i] })
-				}
+		labels, ids := inputSourceOptions(a.AvailableInputSources(ctx), imeCfg.DefaultInputSourceID)
+		options := make([]settingOption, len(ids))
+		for i := range ids {
+			options[i] = settingOption{ids[i], labels[i]}
+			if ids[i] == "" {
+				options[i].label = i18n.T("settings.option.none")
 			}
-		})
+		}
+		if v, changed := settingSelectRow(c, theme, i18n.T("settings.ime.default_source"), "default_input_source_id", "",
+			options, imeCfg.DefaultInputSourceID, 0); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.DefaultInputSourceID = v })
+		}
+	})
+}
 
-		settingsDivider(c)
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-			ui.Text(c, i18n.T("settings.ime.app_picker")).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine().Grow(1)
-			settingsHint(c, theme, i18n.Tf("settings.ime.app_count", len(a.State().InstalledApps)))
-		})
-		picked := ""
-		ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
-			apps := a.State().InstalledApps
-			if len(apps) == 0 {
-				settingsHint(c, theme, i18n.T("settings.ime.no_apps"))
-			}
+// renderIMERuleForm draws the new-rule form of the per-app rules card: a
+// quick pick of installed apps, the target and patterns, the mode, and the
+// regex checks of the patterns as they are typed.
+func (a *AppController) renderIMERuleForm(c *ui.Context, theme *ui.Theme) {
+	apps := a.State().InstalledApps
+	picked := ""
+	if len(apps) > 0 {
+		ui.Text(c, i18n.T("settings.ime.app_picker")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+		ui.Row(c).FillWidth().Wrap().Gap(space4).AlignItems(ui.Center).Children(func() {
 			for i, app := range apps {
 				if i >= 6 {
 					break
@@ -539,145 +455,89 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 				}
 			}
 		})
-		if picked != "" {
-			a.mu.Lock()
-			if target := strings.TrimSpace(picked); target != "" {
-				a.uiState.imeRuleTargetDraft = target
-			}
-			a.mu.Unlock()
-		}
-
-		settingsDivider(c)
-		ui.Text(c, i18n.T("settings.ime.new_rule")).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
-
+	}
+	if picked != "" {
 		a.mu.Lock()
-		targetDraft := a.uiState.imeRuleTargetDraft
-		urlDraft := a.uiState.imeRuleURLDraft
-		titleDraft := a.uiState.imeRuleTitleDraft
-		sourceDraft := a.uiState.imeRuleSourceDraft
-		modeDraft := a.uiState.imeRuleModeDraft
+		if target := strings.TrimSpace(picked); target != "" {
+			a.uiState.imeRuleTargetDraft = target
+		}
 		a.mu.Unlock()
-		if modeDraft == "" {
-			modeDraft = config.IMEModeASCII
-		}
+	}
 
-		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.End).Children(func() {
-			ui.Column(c).Gap(2).Grow(2).Children(func() {
-				tIn := ui.TextInput(c, &targetDraft).
-					Placeholder(i18n.T("settings.ime.rule_target_ph")).
-					Label(i18n.T("settings.ime.rule_target")).
-					FillWidth()
-				if tIn.Changed() {
-					a.mu.Lock()
-					a.uiState.imeRuleTargetDraft = targetDraft
-					a.mu.Unlock()
-				}
-			})
-			ui.Column(c).Gap(2).Grow(1).Children(func() {
-				uIn := ui.TextInput(c, &urlDraft).
-					Placeholder(i18n.T("settings.ime.url_pattern_ph")).
-					Label(i18n.T("settings.ime.url_pattern")).
-					FillWidth()
-				if uIn.Changed() {
-					a.mu.Lock()
-					a.uiState.imeRuleURLDraft = urlDraft
-					a.mu.Unlock()
-				}
-			})
-		})
+	a.mu.Lock()
+	targetDraft := a.uiState.imeRuleTargetDraft
+	urlDraft := a.uiState.imeRuleURLDraft
+	titleDraft := a.uiState.imeRuleTitleDraft
+	sourceDraft := a.uiState.imeRuleSourceDraft
+	modeDraft := a.uiState.imeRuleModeDraft
+	a.mu.Unlock()
+	if modeDraft == "" {
+		modeDraft = config.IMEModeASCII
+	}
 
-		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.End).Children(func() {
-			ui.Column(c).Gap(2).Grow(1).Children(func() {
-				tiIn := ui.TextInput(c, &titleDraft).
-					Placeholder(i18n.T("settings.ime.title_pattern_ph")).
-					Label(i18n.T("settings.ime.title_pattern")).
-					FillWidth()
-				if tiIn.Changed() {
-					a.mu.Lock()
-					a.uiState.imeRuleTitleDraft = titleDraft
-					a.mu.Unlock()
-				}
-			})
-			ui.Column(c).Gap(2).Grow(1).Children(func() {
-				sIn := ui.TextInput(c, &sourceDraft).
-					Placeholder(i18n.T("settings.ime.source_id_ph")).
-					Label(i18n.T("settings.ime.source_id")).
-					FillWidth()
-				if sIn.Changed() {
-					a.mu.Lock()
-					a.uiState.imeRuleSourceDraft = sourceDraft
-					a.mu.Unlock()
-				}
-			})
-		})
-
-		if msg := regexIssue(titleDraft); msg != "" {
-			settingsBanner(c, theme.Danger, i18n.Tf("settings.ime.title_regex_bad", msg))
-		} else if strings.TrimSpace(titleDraft) != "" {
-			settingsHint(c, theme, i18n.T("settings.ime.title_regex_ok"))
-		}
-		if msg := regexIssue(urlDraft); msg != "" {
-			settingsBanner(c, theme.Danger, i18n.Tf("settings.ime.url_regex_bad", msg))
-		}
-
-		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-			for _, m := range config.AllIMEModes() {
-				modeVal := m
-				activeMode := modeDraft == modeVal
-				mBtn := ui.ButtonBase(c).
-					Key("ime-mode:"+string(modeVal)).
-					Padding(4, 8).
-					Radius(5).
-					FocusRing(false)
-				if activeMode {
-					mBtn.Background(theme.Accent)
-				} else {
-					mBtn.Background(theme.Background).Border(1, theme.Border)
-				}
-				mBtn.Children(func() {
-					txt := ui.Text(c, string(modeVal)).FontSize(11).SingleLine()
-					if activeMode {
-						txt.TextColor(theme.AccentText).FontWeight(600)
-					} else {
-						txt.TextColor(theme.TextMuted)
-					}
-				})
-				if mBtn.Clicked() {
-					a.mu.Lock()
-					a.uiState.imeRuleModeDraft = modeVal
-					a.mu.Unlock()
-				}
-			}
-
-			ui.Spacer(c)
-		})
-
-		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-			ui.Spacer(c)
+	draftInput := func(value *string, label, placeholder string, grow float32, store func(string)) {
+		in := ui.TextInput(c, value).Placeholder(placeholder).Label(label).Grow(grow).MinWidth(0)
+		if in.Changed() {
+			v := *value
 			a.mu.Lock()
-			curTarget := strings.TrimSpace(a.uiState.imeRuleTargetDraft)
-			curURL := strings.TrimSpace(a.uiState.imeRuleURLDraft)
-			curTitle := strings.TrimSpace(a.uiState.imeRuleTitleDraft)
-			curSource := strings.TrimSpace(a.uiState.imeRuleSourceDraft)
-			curMode := a.uiState.imeRuleModeDraft
+			store(v)
 			a.mu.Unlock()
-			if curMode == "" {
-				curMode = config.IMEModeASCII
-			}
+		}
+	}
+	ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
+		draftInput(&targetDraft, i18n.T("settings.ime.rule_target"), i18n.T("settings.ime.rule_target_ph"), 3,
+			func(v string) { a.uiState.imeRuleTargetDraft = v })
+		draftInput(&urlDraft, i18n.T("settings.ime.url_pattern"), i18n.T("settings.ime.url_pattern_ph"), 2,
+			func(v string) { a.uiState.imeRuleURLDraft = v })
+	})
+	ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
+		draftInput(&titleDraft, i18n.T("settings.ime.title_pattern"), i18n.T("settings.ime.title_pattern_ph"), 2,
+			func(v string) { a.uiState.imeRuleTitleDraft = v })
+		draftInput(&sourceDraft, i18n.T("settings.ime.source_id"), i18n.T("settings.ime.source_id_ph"), 3,
+			func(v string) { a.uiState.imeRuleSourceDraft = v })
+	})
 
-			if ui.PrimaryButton(c, i18n.T("settings.ime.add_rule")).Disabled(curTarget == "").Clicked() {
-				newRule := config.IMERule{
-					AppName:        curTarget,
-					URLPattern:     curURL,
-					TitlePattern:   curTitle,
-					InputSourceID:  curSource,
-					PreferredMode:  curMode,
-					RestoreOnLeave: true,
-				}
-				newRule.BundleID, newRule.ProcessName = imeRuleTargetFields(curTarget, runtime.GOOS)
-				_ = a.AddIMERule(newRule)
+	if msg := regexIssue(titleDraft); msg != "" {
+		settingsBanner(c, theme.Danger, i18n.Tf("settings.ime.title_regex_bad", msg))
+	} else if strings.TrimSpace(titleDraft) != "" {
+		settingsHint(c, theme, i18n.T("settings.ime.title_regex_ok"))
+	}
+	if msg := regexIssue(urlDraft); msg != "" {
+		settingsBanner(c, theme.Danger, i18n.Tf("settings.ime.url_regex_bad", msg))
+	}
+
+	ui.Row(c).FillWidth().Children(func() {
+		modes := config.AllIMEModes()
+		labels := make([]string, len(modes))
+		sel := 0
+		for i, m := range modes {
+			labels[i] = imeModeLabel(m)
+			if m == modeDraft {
+				sel = i
 			}
-		})
+		}
+		if ui.Segmented(c, &sel, labels...).FillEqually().Label(i18n.T("settings.ime.rule_mode")).Changed() && sel < len(modes) {
+			a.mu.Lock()
+			a.uiState.imeRuleModeDraft = modes[sel]
+			a.mu.Unlock()
+		}
+	})
+	ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+		ui.Spacer(c)
+
+		curTarget := strings.TrimSpace(targetDraft)
+		if ui.PrimaryButton(c, i18n.T("settings.ime.add_rule")).Disabled(curTarget == "").Clicked() {
+			newRule := config.IMERule{
+				AppName:        curTarget,
+				URLPattern:     strings.TrimSpace(urlDraft),
+				TitlePattern:   strings.TrimSpace(titleDraft),
+				InputSourceID:  strings.TrimSpace(sourceDraft),
+				PreferredMode:  modeDraft,
+				RestoreOnLeave: true,
+			}
+			newRule.BundleID, newRule.ProcessName = imeRuleTargetFields(curTarget, runtime.GOOS)
+			_ = a.AddIMERule(newRule)
+		}
 	})
 }
 
@@ -748,19 +608,23 @@ func regexIssue(pattern string) string {
 
 // renderIMEKeymapSection draws the IME & Keymap section.
 func (a *AppController) renderIMEKeymapSection(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
+	// Global behavior on the left, per-app rules on the right: the rule form
+	// and the newest rules stay in view without scrolling.
 	ui.Grid(c).Columns(2).Gap(10).FillWidth().Children(func() {
-		a.renderKeymapControls(c, theme, cfg)
 		ui.Column(c).FillWidth().Gap(10).Children(func() {
+			a.renderKeymapControls(c, theme, cfg)
 			a.renderIMEConfig(c, theme, cfg)
-			a.renderIMERulesCard(c, theme, cfg)
 		})
+		a.renderIMERulesCard(c, theme, cfg)
 	})
 }
 
-// renderIMERulesCard lists the configured IME rules with delete buttons,
-// newest first.
+// renderIMERulesCard draws the per-app rules: the new-rule form, then the
+// configured rules with delete buttons, newest first.
 func (a *AppController) renderIMERulesCard(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
-	settingsSectionCard(c, theme, i18n.T("settings.card.ime_rules"), func() {
+	settingsSourceCard(c, theme, i18n.T("settings.card.ime_rules"), "ime-rules.toml", func() {
+		a.renderIMERuleForm(c, theme)
+		settingsCardDivider(c, theme)
 		rules := cfg.IMERules.Rules
 		if len(rules) == 0 {
 			ui.Text(c, i18n.T("settings.ime.no_rules")).FontSize(12).TextColor(theme.TextMuted)
@@ -778,24 +642,35 @@ func (a *AppController) renderIMERulesCard(c *ui.Context, theme *ui.Theme, cfg c
 			}
 
 			var details []string
-			details = append(details, fmt.Sprintf("mode=%s", rule.PreferredMode))
-			details = append(details, fmt.Sprintf("source=%s", rule.InputSourceID))
+			if rule.InputSourceID != "" {
+				details = append(details, rule.InputSourceID)
+			}
 			if rule.URLPattern != "" {
-				details = append(details, fmt.Sprintf("url=%s", rule.URLPattern))
+				details = append(details, "url="+rule.URLPattern)
 			}
 			if rule.TitlePattern != "" {
-				details = append(details, fmt.Sprintf("title=%s", rule.TitlePattern))
+				details = append(details, "title="+rule.TitlePattern)
 			}
-			details = append(details, fmt.Sprintf("restore=%v", rule.RestoreOnLeave))
+			if rule.RestoreOnLeave {
+				details = append(details, i18n.T("settings.ime.restore_on_leave"))
+			}
+			tone := chipNeutral
+			if rule.PreferredMode == config.IMEModeNative {
+				tone = chipAccent
+			}
 
-			ui.Column(c).Key(fmt.Sprintf("ime-rule:%d:%s", idx, targetLabel)).FillWidth().Gap(1).Children(func() {
-				ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, targetLabel).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine().Grow(1)
-					if ui.Button(c, i18n.T("common.delete")).Key(fmt.Sprintf("del-ime-rule:%d", idx)).Clicked() {
-						_ = a.DeleteIMERule(idx)
-					}
+			ui.Row(c).Key(fmt.Sprintf("ime-rule:%d:%s", idx, targetLabel)).FillWidth().Gap(space8).AlignItems(ui.Center).Padding(space2, 0).Children(func() {
+				ui.Column(c).Grow(1).MinWidth(0).Gap(space2).Children(func() {
+					ui.Text(c, targetLabel).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine()
+					ui.Row(c).Gap(space6).AlignItems(ui.Center).Children(func() {
+						chip(c, theme, "", imeModeLabel(rule.PreferredMode), tone).Shrink(0)
+						ui.Text(c, strings.Join(details, " · ")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().MinWidth(0)
+					})
 				})
-				ui.Text(c, strings.Join(details, " • ")).FontSize(10).TextColor(theme.TextMuted).SingleLine()
+				if ui.Button(c, i18n.T("common.delete")).Key(fmt.Sprintf("del-ime-rule:%d", idx)).
+					Padding(space2, space10).Shrink(0).Clicked() {
+					_ = a.DeleteIMERule(idx)
+				}
 			})
 		}
 	})
@@ -811,18 +686,18 @@ func (a *AppController) renderAIProfileEditor(c *ui.Context, theme *ui.Theme, cf
 
 	settingsSectionCard(c, theme, i18n.T("settings.card.profile_config"), func() {
 		settingsHint(c, theme, i18n.Tf("settings.ai.editing_profile", active.ID))
-		ui.Grid(c).Columns(2).GapX(8).GapY(2).FillWidth().Children(func() {
-			settingsInlineRow(c, theme, "name", 58, func() {
+		ui.Column(c).FillWidth().Gap(space4).Children(func() {
+			settingsInlineRow(c, theme, i18n.T("settings.field.name"), settingsFieldLabelWidth, func() {
 				if v, changed := settingsTextInput(c, i18n.T("settings.ai.profile_name"), active.Name, active.Name); changed {
 					a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.Name = v })
 				}
 			})
-			settingsInlineRow(c, theme, "provider", 58, func() {
+			settingsInlineRow(c, theme, i18n.T("settings.field.provider"), settingsFieldLabelWidth, func() {
 				if v, changed := settingsTextInput(c, i18n.T("settings.ai.profile_provider"), "deepseek", active.Provider); changed {
 					a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.Provider = strings.TrimSpace(v) })
 				}
 			})
-			settingsInlineRow(c, theme, "protocol", 58, func() {
+			settingsInlineRow(c, theme, i18n.T("settings.field.protocol"), settingsFieldLabelWidth, func() {
 				opts := make([]string, 0, 3)
 				for _, p := range config.AllAIProtocols() {
 					opts = append(opts, string(p))
@@ -835,37 +710,33 @@ func (a *AppController) renderAIProfileEditor(c *ui.Context, theme *ui.Theme, cf
 					a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.Protocol = config.AIProtocol(v) })
 				}
 			})
-			settingsInlineRow(c, theme, "model", 58, func() {
+			settingsInlineRow(c, theme, i18n.T("settings.field.model"), settingsFieldLabelWidth, func() {
 				if v, changed := settingsTextInput(c, i18n.T("settings.ai.profile_model"), "model-name", active.Model); changed {
 					a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.Model = strings.TrimSpace(v) })
 				}
 			})
-			settingsInlineRow(c, theme, "temperature", 58, func() {
-				v := active.Temperature
-				st := ui.Stepper(c, &v, 0, 2, 0.1)
-				if st.Changed() {
+			settingsInlineRow(c, theme, i18n.T("settings.field.temperature"), settingsFieldLabelWidth, func() {
+				if v, changed := settingsInlineNumber(c, theme, i18n.T("settings.field.temperature"), active.Temperature, 0, 2, 0.1, ""); changed {
 					a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.Temperature = v })
 				}
 			})
-			settingsInlineRow(c, theme, "timeout_s", 58, func() {
-				v := active.TimeoutSeconds
-				st := ui.Stepper(c, &v, 5, 300, 5)
-				if st.Changed() {
+			settingsInlineRow(c, theme, i18n.T("settings.field.timeout_s"), settingsFieldLabelWidth, func() {
+				if v, changed := settingsInlineNumber(c, theme, i18n.T("settings.field.timeout_s"), active.TimeoutSeconds, 5, 300, 5, "s"); changed {
 					a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.TimeoutSeconds = v })
 				}
 			})
 		})
-		settingsInlineRow(c, theme, "base_url", 58, func() {
+		settingsInlineRow(c, theme, i18n.T("settings.field.base_url"), settingsFieldLabelWidth, func() {
 			if v, changed := settingsTextInput(c, i18n.T("settings.ai.profile_base_url"), "https://api.example.com/v1", active.BaseURL); changed {
 				a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.BaseURL = strings.TrimSpace(v) })
 			}
 		})
-		settingsInlineRow(c, theme, "keychain", 58, func() {
+		settingsInlineRow(c, theme, i18n.T("settings.field.keychain"), settingsFieldLabelWidth, func() {
 			if v, changed := settingsTextInput(c, i18n.T("settings.ai.profile_keychain"), "clavis.ai.profile", active.KeychainAccount); changed {
 				a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.KeychainAccount = strings.TrimSpace(v) })
 			}
 		})
-		settingsLabelled(c, theme, "system_prompt", func() {
+		settingsLabelled(c, theme, i18n.T("settings.field.system_prompt"), func() {
 			if v, changed := settingsTextArea(c, i18n.T("settings.ai.system_prompt"), i18n.T("settings.ai.system_prompt_ph"), active.SystemPrompt, 2); changed {
 				a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.SystemPrompt = v })
 			}
@@ -874,7 +745,7 @@ func (a *AppController) renderAIProfileEditor(c *ui.Context, theme *ui.Theme, cf
 			if ui.Button(c, i18n.T("settings.ai.delete_profile")).Disabled(len(cfg.Main.AI.Profiles) <= 1).Clicked() {
 				a.deleteAIProfile(active.ID)
 			}
-			settingsHint(c, theme, fmt.Sprintf("%d profile(s) configured", len(cfg.Main.AI.Profiles)))
+			settingsHint(c, theme, i18n.Tf("settings.ai.profile_count", len(cfg.Main.AI.Profiles)))
 		})
 	})
 }
@@ -1299,29 +1170,16 @@ func (a *AppController) renderLeaderTree(
 		node := nodes[i]
 		path := append(append([]string(nil), prefix...), node.Key)
 		isSelected := slices.Equal(path, selected)
-		row := ui.ButtonBase(c).
-			Key("leader-node:"+strings.Join(path, "/")).
-			FillWidth().
-			Padding(2, 4).
-			Radius(5).
-			FocusRing(false)
-		if isSelected {
-			row.Background(withAlpha(theme.Accent, 0.16))
-		}
+		row := settingsListRow(c, theme, "leader-node:"+strings.Join(path, "/"), isSelected)
 		depth := len(prefix)
 		row.Children(func() {
 			if depth > 0 {
-				ui.Spacer(c).Width(float32(depth) * 10)
+				// A fixed indent: a Spacer would grow into the free width.
+				ui.Box(c).Width(float32(depth) * 18).Shrink(0)
 			}
-			ui.Box(c).
-				Padding(1, 5).
-				Radius(4).
-				Background(withAlpha(theme.Accent, 0.18)).
-				Children(func() {
-					ui.Text(c, node.Key).FontSize(11).FontWeight(700).TextColor(theme.Accent).SingleLine()
-				})
-			ui.Text(c, node.Label).FontSize(12).TextColor(theme.Text).SingleLine().Grow(1)
-			ui.Text(c, string(node.Action.Type)).FontSize(10).TextColor(theme.TextMuted).SingleLine()
+			keycap(c, theme, node.Key, keyToneAccent)
+			ui.Text(c, node.Label).FontSize(typeLabel).TextColor(theme.Text).SingleLine().Grow(1).MinWidth(0)
+			ui.Text(c, string(node.Action.Type)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 		})
 		if row.Clicked() {
 			seSet(se, func(s *settingsEditorState) {
@@ -1348,22 +1206,22 @@ func (a *AppController) renderLeaderNodeEditor(
 	se := a.settingsEditor()
 	draft := seGet(se, func(s *settingsEditorState) config.LeaderNode { return s.leaderDraft })
 
-	settingsInlineRow(c, theme, "key", 76, func() {
+	settingsInlineRow(c, theme, i18n.T("settings.field.key"), settingsFieldLabelWidth, func() {
 		if v, changed := settingsTextInput(c, i18n.T("settings.leader.node_key"), "k", draft.Key); changed {
 			seSet(se, func(s *settingsEditorState) { s.leaderDraft.Key = strings.TrimSpace(v) })
 		}
 	})
-	settingsInlineRow(c, theme, "label", 76, func() {
+	settingsInlineRow(c, theme, i18n.T("settings.field.label"), settingsFieldLabelWidth, func() {
 		if v, changed := settingsTextInput(c, i18n.T("settings.leader.node_label"), i18n.T("settings.leader.node_label_ph"), draft.Label); changed {
 			seSet(se, func(s *settingsEditorState) { s.leaderDraft.Label = v })
 		}
 	})
-	settingsInlineRow(c, theme, "icon", 76, func() {
+	settingsInlineRow(c, theme, i18n.T("settings.field.icon"), settingsFieldLabelWidth, func() {
 		if v, changed := settingsTextInput(c, i18n.T("settings.leader.node_icon"), "sparkles", draft.Icon); changed {
 			seSet(se, func(s *settingsEditorState) { s.leaderDraft.Icon = strings.TrimSpace(v) })
 		}
 	})
-	settingsInlineRow(c, theme, "action", 76, func() {
+	settingsInlineRow(c, theme, i18n.T("settings.field.action"), settingsFieldLabelWidth, func() {
 		if v, changed := settingsSelect(c, leaderActionTypes(), string(draft.Action.Type)); changed {
 			seSet(se, func(s *settingsEditorState) {
 				if string(s.leaderDraft.Action.Type) != v {
@@ -1397,7 +1255,7 @@ func (a *AppController) renderLeaderNodeEditor(
 			a.addLeaderNode(path)
 		}
 	case config.ActionWindow:
-		settingsInlineRow(c, theme, "command", 76, func() {
+		settingsInlineRow(c, theme, i18n.T("settings.field.command"), settingsFieldLabelWidth, func() {
 			cmds := make([]string, 0, len(config.AllWindowCommands()))
 			for _, cmd := range config.AllWindowCommands() {
 				cmds = append(cmds, string(cmd))
@@ -1409,18 +1267,18 @@ func (a *AppController) renderLeaderNodeEditor(
 			}
 		})
 	case config.ActionAIRewrite:
-		settingsInlineRow(c, theme, "mode", 76, func() {
+		settingsInlineRow(c, theme, i18n.T("settings.field.mode"), settingsFieldLabelWidth, func() {
 			if v, changed := settingsTextInput(c, i18n.T("settings.leader.rewrite_mode"), "polish", draft.Action.Mode); changed {
 				seSet(se, func(s *settingsEditorState) { s.leaderDraft.Action.Mode = v })
 			}
 		})
-		settingsLabelled(c, theme, "prompt", func() {
+		settingsLabelled(c, theme, i18n.T("settings.field.prompt"), func() {
 			if v, changed := settingsTextArea(c, i18n.T("settings.leader.rewrite_prompt"), i18n.T("settings.leader.rewrite_prompt_ph"), draft.Action.Prompt, 2); changed {
 				seSet(se, func(s *settingsEditorState) { s.leaderDraft.Action.Prompt = v })
 			}
 		})
 	case config.ActionSnippet:
-		settingsInlineRow(c, theme, "snippet_id", 76, func() {
+		settingsInlineRow(c, theme, i18n.T("settings.field.snippet_id"), settingsFieldLabelWidth, func() {
 			ids := make([]string, 0, len(cfg.Snippets.Items))
 			for _, item := range cfg.Snippets.Items {
 				ids = append(ids, item.ID)
@@ -1436,13 +1294,13 @@ func (a *AppController) renderLeaderNodeEditor(
 			}
 		})
 	case config.ActionOpenApp:
-		settingsInlineRow(c, theme, "target", 76, func() {
+		settingsInlineRow(c, theme, i18n.T("settings.field.target"), settingsFieldLabelWidth, func() {
 			if v, changed := settingsTextInput(c, i18n.T("settings.leader.app_target"), "com.apple.Safari", draft.Action.Target); changed {
 				seSet(se, func(s *settingsEditorState) { s.leaderDraft.Action.Target = v })
 			}
 		})
 	case config.ActionSwitchTab:
-		settingsInlineRow(c, theme, "tab", 76, func() {
+		settingsInlineRow(c, theme, i18n.T("settings.field.tab"), settingsFieldLabelWidth, func() {
 			tabs := make([]string, 0, len(config.AllCapsuleTabs()))
 			for _, tab := range config.AllCapsuleTabs() {
 				tabs = append(tabs, string(tab))
@@ -1458,12 +1316,12 @@ func (a *AppController) renderLeaderNodeEditor(
 			}
 		})
 	case config.ActionCLI:
-		settingsInlineRow(c, theme, "command", 76, func() {
+		settingsInlineRow(c, theme, i18n.T("settings.field.command"), settingsFieldLabelWidth, func() {
 			if v, changed := settingsTextInput(c, i18n.T("settings.leader.cli_command"), "open", draft.Action.Command); changed {
 				seSet(se, func(s *settingsEditorState) { s.leaderDraft.Action.Command = v })
 			}
 		})
-		settingsInlineRow(c, theme, "args", 76, func() {
+		settingsInlineRow(c, theme, i18n.T("settings.field.args"), settingsFieldLabelWidth, func() {
 			if v, changed := settingsTextInput(c, i18n.T("settings.leader.cli_args"), "-a Safari", strings.Join(draft.Action.Args, " ")); changed {
 				seSet(se, func(s *settingsEditorState) { s.leaderDraft.Action.Args = splitTokens(v) })
 			}
@@ -1649,13 +1507,10 @@ func (a *AppController) renderSnippetsSection(c *ui.Context, theme *ui.Theme, cf
 					continue
 				}
 				matches++
-				row := ui.ButtonBase(c).Key("snippet:"+item.ID).FillWidth().Padding(2, 4).Radius(5).FocusRing(false)
-				if item.ID == selected {
-					row.Background(withAlpha(theme.Accent, 0.16))
-				}
+				row := settingsListRow(c, theme, "snippet:"+item.ID, item.ID == selected)
 				row.Children(func() {
-					ui.Text(c, item.Trigger).FontSize(12).FontWeight(600).TextColor(theme.Accent).SingleLine()
-					ui.Text(c, item.Description).FontSize(11).TextColor(theme.TextMuted).SingleLine().Grow(1)
+					ui.Text(c, item.Trigger).FontSize(typeLabel).FontWeight(600).TextColor(accentInk(theme, theme.Surface)).SingleLine().Shrink(0)
+					ui.Text(c, item.Description).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().Grow(1).MinWidth(0)
 				})
 				if row.Clicked() {
 					seSet(se, func(s *settingsEditorState) {
@@ -1672,30 +1527,35 @@ func (a *AppController) renderSnippetsSection(c *ui.Context, theme *ui.Theme, cf
 
 		settingsSectionCard(c, theme, i18n.T("settings.snippets.editor"), func() {
 			draft := seGet(se, func(s *settingsEditorState) config.SnippetItem { return s.snippetDraft })
-			settingsInlineRow(c, theme, "id", 74, func() {
+			settingsInlineRow(c, theme, i18n.T("settings.field.id"), settingsFieldLabelWidth, func() {
 				if v, changed := settingsTextInput(c, i18n.T("settings.snippets.id"), "my-snippet", draft.ID); changed {
 					seSet(se, func(s *settingsEditorState) { s.snippetDraft.ID = v })
 				}
 			})
-			settingsInlineRow(c, theme, "trigger", 74, func() {
+			settingsInlineRow(c, theme, i18n.T("settings.field.trigger"), settingsFieldLabelWidth, func() {
 				if v, changed := settingsTextInput(c, i18n.T("settings.snippets.trigger"), ";sig", draft.Trigger); changed {
 					seSet(se, func(s *settingsEditorState) { s.snippetDraft.Trigger = v })
 				}
 			})
-			settingsInlineRow(c, theme, "description", 74, func() {
+			settingsInlineRow(c, theme, i18n.T("settings.field.description"), settingsFieldLabelWidth, func() {
 				if v, changed := settingsTextInput(c, i18n.T("settings.snippets.description"), i18n.T("settings.snippets.description_ph"), draft.Description); changed {
 					seSet(se, func(s *settingsEditorState) { s.snippetDraft.Description = v })
 				}
 			})
-			if v, changed := settingsSwitch(c, theme, "word_boundary", i18n.T("settings.snippets.word_boundary"), draft.WordBoundary); changed {
-				seSet(se, func(s *settingsEditorState) { s.snippetDraft.WordBoundary = v })
-			}
-			settingsInlineRow(c, theme, "app_bundle_ids", 74, func() {
+			ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
+				name := ui.Text(c, i18n.T("settings.snippets.word_boundary")).FontSize(11).TextColor(theme.TextMuted).
+					Width(settingsFieldLabelWidth).SingleLine()
+				wb := draft.WordBoundary
+				if ui.Switch(c, &wb).LabelledBy(name).Changed() {
+					seSet(se, func(s *settingsEditorState) { s.snippetDraft.WordBoundary = wb })
+				}
+			})
+			settingsInlineRow(c, theme, i18n.T("settings.field.app_bundle_ids"), settingsFieldLabelWidth, func() {
 				if v, changed := settingsTextInput(c, i18n.T("settings.snippets.bundle_ids"), "com.apple.Safari", strings.Join(draft.AppBundleIDs, ", ")); changed {
 					seSet(se, func(s *settingsEditorState) { s.snippetDraft.AppBundleIDs = splitTokens(v) })
 				}
 			})
-			settingsInlineRow(c, theme, "process_names", 74, func() {
+			settingsInlineRow(c, theme, i18n.T("settings.field.process_names"), settingsFieldLabelWidth, func() {
 				if v, changed := settingsTextInput(c, i18n.T("settings.snippets.process_names"), "Safari", strings.Join(draft.ProcessNames, ", ")); changed {
 					seSet(se, func(s *settingsEditorState) { s.snippetDraft.ProcessNames = splitTokens(v) })
 				}
@@ -1838,14 +1698,13 @@ func (a *AppController) renderGlossarySection(c *ui.Context, theme *ui.Theme, cf
 			settingsDivider(c)
 			for _, term := range terms {
 				t := term
-				row := ui.ButtonBase(c).Key("glossary:"+t.Term).FillWidth().Padding(2, 4).Radius(5).FocusRing(false)
-				if t.Term == selected {
-					row.Background(withAlpha(theme.Accent, 0.16))
-				}
+				row := settingsListRow(c, theme, "glossary:"+t.Term, t.Term == selected)
 				row.Children(func() {
-					ui.Text(c, t.Term).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
-					ui.Text(c, strings.Join(t.Aliases, ", ")).FontSize(11).TextColor(theme.TextMuted).SingleLine().Grow(1)
-					ui.Text(c, t.Category).FontSize(10).TextColor(theme.TextMuted).SingleLine()
+					ui.Text(c, t.Term).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Shrink(0)
+					ui.Text(c, strings.Join(t.Aliases, ", ")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().Grow(1).MinWidth(0)
+					if t.Category != "" {
+						chip(c, theme, "", t.Category, chipNeutral).Shrink(0)
+					}
 				})
 				if row.Clicked() {
 					seSet(se, func(s *settingsEditorState) {
@@ -1858,22 +1717,22 @@ func (a *AppController) renderGlossarySection(c *ui.Context, theme *ui.Theme, cf
 
 			settingsDivider(c)
 			draft := seGet(se, func(s *settingsEditorState) config.GlossaryTerm { return s.glossaryDraft })
-			settingsInlineRow(c, theme, "term", 76, func() {
+			settingsInlineRow(c, theme, i18n.T("settings.field.term"), settingsFieldLabelWidth, func() {
 				if v, changed := settingsTextInput(c, i18n.T("settings.glossary.term"), "Kubernetes", draft.Term); changed {
 					seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Term = v })
 				}
 			})
-			settingsInlineRow(c, theme, "aliases", 76, func() {
+			settingsInlineRow(c, theme, i18n.T("settings.field.aliases"), settingsFieldLabelWidth, func() {
 				if v, changed := settingsTextInput(c, i18n.T("settings.glossary.aliases"), "k8s, kube", strings.Join(draft.Aliases, ", ")); changed {
 					seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Aliases = splitTokens(v) })
 				}
 			})
-			settingsInlineRow(c, theme, "category", 76, func() {
+			settingsInlineRow(c, theme, i18n.T("settings.field.category"), settingsFieldLabelWidth, func() {
 				if v, changed := settingsTextInput(c, i18n.T("settings.glossary.category"), "product", draft.Category); changed {
 					seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Category = v })
 				}
 			})
-			settingsInlineRow(c, theme, "hint", 76, func() {
+			settingsInlineRow(c, theme, i18n.T("settings.field.hint"), settingsFieldLabelWidth, func() {
 				if v, changed := settingsTextInput(c, i18n.T("settings.glossary.hint"), i18n.T("settings.glossary.hint_ph"), draft.Hint); changed {
 					seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Hint = v })
 				}
@@ -1957,22 +1816,28 @@ func (a *AppController) renderClipboardCard(c *ui.Context, theme *ui.Theme, cfg 
 	se := a.settingsEditor()
 	clip := cfg.Main.Clipboard
 
-	settingsSectionCard(c, theme, i18n.T("settings.card.clipboard"), func() {
-		if v, changed := settingsSwitch(c, theme, "Clipboard History (clipboard.enabled)", i18n.T("settings.clipboard.enabled"), clip.Enabled); changed {
+	settingsSourceCard(c, theme, i18n.T("settings.card.clipboard"), "[clipboard]", func() {
+		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.clipboard.enabled"), "enabled", "", clip.Enabled); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.Enabled = v })
 		}
-		if v, changed := settingsSwitch(c, theme, "Ignore Concealed Types (ignore_concealed_types)", i18n.T("settings.clipboard.ignore_concealed"), clip.IgnoreConcealedTypes); changed {
+		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.clipboard.ignore_concealed"), "ignore_concealed_types",
+			i18n.T("settings.clipboard.ignore_concealed_help"), clip.IgnoreConcealedTypes); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.IgnoreConcealedTypes = v })
 		}
-		if v, changed := settingsStepper(c, theme, "max_history_items", float64(clip.MaxHistoryItems), 10, 2000, 10, ""); changed {
+		if v, changed := settingNumberRow(c, theme, i18n.T("settings.clipboard.max_items"), "max_history_items", "",
+			float64(clip.MaxHistoryItems), 10, 2000, 10, ""); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.MaxHistoryItems = int(v) })
 		}
-		if v, changed := settingsStepper(c, theme, "retention_days", float64(clip.RetentionDays), 1, 365, 1, i18n.T("common.days")); changed {
+		if v, changed := settingNumberRow(c, theme, i18n.T("settings.clipboard.retention"), "retention_days", "",
+			float64(clip.RetentionDays), 1, 365, 1, i18n.T("common.days")); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.RetentionDays = int(v) })
 		}
 
-		settingsDivider(c)
-		ui.Text(c, i18n.T("settings.clipboard.excluded_apps")).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
+		settingsCardDivider(c, theme)
+		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, i18n.T("settings.clipboard.excluded_apps")).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Grow(1)
+			ui.Text(c, "excluded_bundle_ids").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+		})
 		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.End).Children(func() {
 			ui.Column(c).Gap(2).Grow(1).Children(func() {
 				if v, changed := settingsTextInput(c, i18n.T("settings.clipboard.excluded_id"), "com.example.app", seGet(se, func(s *settingsEditorState) string { return s.clipExcludeDraft })); changed {
@@ -1994,7 +1859,7 @@ func (a *AppController) renderClipboardCard(c *ui.Context, theme *ui.Theme, cfg 
 			idx, id := i, bundleID
 			ui.Row(c).Key(fmt.Sprintf("clip-excl:%d:%s", idx, id)).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, id).FontSize(11).TextColor(theme.TextMuted).SingleLine().Grow(1)
-				if ui.Button(c, i18n.T("settings.clipboard.remove")).Key(fmt.Sprintf("clip-excl-remove:%d", idx)).Clicked() {
+				if ui.Button(c, i18n.T("settings.clipboard.remove")).Key(fmt.Sprintf("clip-excl-remove:%d", idx)).Padding(space2, space10).Shrink(0).Clicked() {
 					_ = a.UpdateMainConfig(func(m *config.MainConfig) {
 						kept := make([]string, 0, len(m.Clipboard.ExcludedBundleIDs))
 						for j, item := range m.Clipboard.ExcludedBundleIDs {

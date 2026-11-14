@@ -42,7 +42,7 @@ func TestClipboardShortcutI18nKeys(t *testing.T) {
 	prev := i18n.Current()
 	defer i18n.SetLanguage(prev)
 	keys := []string{
-		"settings.trigger.clipboard_shortcut_caption",
+		"settings.trigger.clipboard_shortcut",
 		"diag.trigger.clipboard_shortcut.invalid",
 		"tray.clipboard_history",
 	}
@@ -73,7 +73,7 @@ func TestSettingsCenter_ClipboardShortcutRecorder(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
 	tt := ui.NewTester(ctrl.SettingsView, 960, 640)
 	tt.Frame()
-	if !tt.HasText("clipboard_shortcut (Clipboard History): alt+shift+c") {
+	if !tt.HasText("Clipboard History Shortcut") || !tt.HasText("clipboard_shortcut: alt+shift+c") {
 		t.Fatalf("expected clipboard_shortcut row on General & Triggers, got %v", tt.Texts())
 	}
 
