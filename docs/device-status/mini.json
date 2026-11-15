@@ -3,10 +3,10 @@
   "platform": "darwin",
   "project": "clavis",
   "branch": "main",
-  "head": "80706f4",
+  "head": "0f7b8a1",
   "dirty": 0,
   "ahead": 0,
-  "timestamp": "2026-11-15T17:04:51+08:00",
-  "tests": "go test ./... 20包全绿; race(bridge/uiapp/host)通过; vet darwin/windows/linux通过; 真实NSPasteboard集成测试通过",
-  "notes": "选区复制探测(shared+mac)已推,Windows待实现ProbeSelection; 配置清理已推(show_bento_shelf删,两键退役记账); 首次引导未开始"
+  "timestamp": "2026-11-15T19:34:30+08:00",
+  "tests": "go test ./... 20 pkgs ok; -race ok on root, uiapp, internal/bridge; GOOS=windows vet+build ok",
+  "notes": "first-run onboarding b501cb9 + darwin permission guide 0f7b8a1; fixes: tray Quit was canceled by hidden windows 4093e9e, tray menu glyphs drawn in a 6px corner 41ec6a6; real-app run not done (screen locked)"
 }
