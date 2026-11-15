@@ -90,6 +90,12 @@ type ContextSnapshot struct {
 	ClipboardPreview  string           `json:"clipboardPreview,omitempty"`
 	CursorAnchor      *CursorAnchor    `json:"cursorAnchor,omitempty"`
 	ActiveInputSource *InputSourceInfo `json:"activeInputSource,omitempty"`
+
+	// SelectionKnown is true when the platform read the selection itself:
+	// SelectedText is then the selection, possibly empty. When false, the
+	// platform could not tell, and a copy probe may be tried
+	// (bridge.SelectionProber).
+	SelectionKnown bool `json:"selectionKnown,omitempty"`
 }
 
 // WindowCommand aliases config.WindowCommand for host-layer callers.

@@ -2007,7 +2007,7 @@ func (c *AppController) HandleTriggerEvent(ev host.TriggerEvent) {
 		if len(c.State().InstalledApps) == 0 {
 			c.SyncInstalledApps(ctx)
 		}
-		capCtx := c.resolveTriggerContext(ev.Context)
+		capCtx := c.resolveSelectionContext(ev.Context)
 		c.Dispatch(engine.Event{
 			Type:    engine.EventOpenLeader,
 			Context: &capCtx,
@@ -2030,7 +2030,7 @@ func (c *AppController) HandleTriggerEvent(ev host.TriggerEvent) {
 		if len(c.State().InstalledApps) == 0 {
 			c.SyncInstalledApps(ctx)
 		}
-		capCtx := c.resolveTriggerContext(ev.Context)
+		capCtx := c.resolveSelectionContext(ev.Context)
 		c.Dispatch(engine.Event{
 			Type:    engine.EventOpenOmnibox,
 			Tab:     config.TabActions,
@@ -2139,6 +2139,41 @@ func (c *AppController) feedSnippetRune(r rune, opts engine.FeedOptions) (*engin
 }
 
 func (c *AppController) resolveTriggerContext(snap *host.ContextSnapshot) engine.CapsuleContext {
+	return c.resolveContext(snap, false)
+}
+
+// resolveSelectionContext is resolveTriggerContext for triggers that open
+// actions on the selection (Leader, double-tap, Capsule): when the platform
+// could not read the selection, the bridge is asked to copy it.
+func (c *AppController) resolveSelectionContext(snap *host.ContextSnapshot) engine.CapsuleContext {
+	return c.resolveContext(snap, true)
+}
+
+// selectionProbeBudget is how long a trigger waits for the frontmost app to
+// copy its selection when accessibility could not read it. The Leader
+// panel takes the keyboard focus only afterwards, so the budget is short:
+// an app with text selected answers the copy shortcut within a few tens of
+// milliseconds, and only an app with nothing selected makes the probe wait
+// all of it.
+const selectionProbeBudget = 90 * time.Millisecond
+
+// probeSelection asks a bridge that can (bridge.SelectionProber) to copy
+// the frontmost app's selection; "" when it cannot or nothing is selected.
+func (c *AppController) probeSelection() string {
+	p, ok := c.Bridge.(bridge.SelectionProber)
+	if !ok {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*selectionProbeBudget)
+	defer cancel()
+	text, err := p.ProbeSelection(ctx, selectionProbeBudget)
+	if err != nil || strings.TrimSpace(text) == "" {
+		return ""
+	}
+	return text
+}
+
+func (c *AppController) resolveContext(snap *host.ContextSnapshot, probe bool) engine.CapsuleContext {
 	var resolved host.ContextSnapshot
 	if snap != nil {
 		resolved = *snap
@@ -2146,6 +2181,9 @@ func (c *AppController) resolveTriggerContext(snap *host.ContextSnapshot) engine
 		if s, err := c.Bridge.SnapshotContext(context.Background()); err == nil {
 			resolved = s
 		}
+	}
+	if probe && resolved.SelectedText == "" && !resolved.SelectionKnown {
+		resolved.SelectedText = c.probeSelection()
 	}
 	c.mu.Lock()
 	if resolved.BundleID != "" || resolved.ProcessName != "" || resolved.AppName != "" {
