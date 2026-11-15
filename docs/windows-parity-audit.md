@@ -23,8 +23,8 @@ down to how each bridge feeds that interface.
 | Window commands | ✅ | DWM frame compensation; no AX permission gate |
 | Open app | 🟡 | ShellExecute only; macOS bundle-id targets do not resolve |
 | Clipboard polling / history / pin | 🟡 | text only (same as macOS); excluded list is exact-case process names |
-| AI rewrite / streaming | 🟡 | no selected-text capture → rewrites clipboard text |
-| Glossary | 🟡 | normalize-selection needs SelectedText (missing) |
+| AI rewrite / streaming | 🟡 | shared copy probe in place (macOS ✅); Windows still has to implement `ProbeSelection` (Ctrl+C, console-safe) |
+| Glossary | 🟡 | normalize-selection uses the same probed selection; same Windows step |
 | IME | 🟡 | IMM32 compatibility layer; TSF-only IMEs limited; no ToggleInputSource |
 | Tray | ✅ | MyGo tray, same items |
 | Settings | ✅ | shared uiapp; IME card is Windows-aware |
@@ -86,9 +86,16 @@ down to how each bridge feeds that interface.
 - Missing: Windows `SnapshotContext` (`bridge_windows.go:777`) never fills `SelectedText` (darwin reads `AXSelectedText`, `bridge_darwin.go:1284`). So `resolveRewriteSourceText` (`pkg/core/engine/capsule.go:1152`) falls back to the clipboard. **User-visible:** on Windows you must copy the text before running Rewrite, and "Ask about selection" gets no context. A UIA `TextPattern` or Ctrl+C probe would be needed.
 - Result insertion uses `InjectText` (paste), so it shares the snippet UIPI limitation.
 
+**Selection capture, shared since 2026-11-15** (the macOS half of this item):
+- `host.ContextSnapshot.SelectionKnown`: a platform that read the selection itself (even an empty one) sets it. When it is false, the Leader, double-tap and Capsule triggers (`uiapp/controller.go`, `resolveSelectionContext`) ask a bridge that implements `bridge.SelectionProber` to copy the selection, with a 90 ms budget, before the panel takes the focus. Other triggers never probe; a bridge without `ProbeSelection` (Windows today) behaves exactly as before.
+- `internal/bridge/selection_probe.go`, `CopyProbe`: snapshot the pasteboard → send the copy shortcut → wait for the change → read the text (`PasteboardSnapshotText`: macOS UTF-8, Windows `CF_UNICODETEXT`) → restore every flavor. A line copied because nothing was selected (VS Code's `isFromEmptySelection`) and copied files (`public.file-url`, `CF_HDROP`) are not a selection. A copy that lands after the budget is still undone; the copy and the restore stay out of the clipboard history.
+- macOS: `darwinBridge.ProbeSelection` sends ⌘C; it does nothing without Accessibility trust, under secure input, or with Clavis frontmost, and focus on a list, table or button (Finder) counts as a known empty selection. Verified on macOS: probe and controller tests (`-race`), and `CLAVIS_PASTEBOARD_IT=1 go test -run TestDarwinCopyProbe ./internal/bridge/` on the real NSPasteboard (text + a private flavor restored byte for byte). Not verified yet: a real app answering the synthetic ⌘C (the session was locked); it is the same `postTaggedKey` path InjectText uses for ⌘V.
+- **Windows step (Windows device):** implement `func (b *windowsBridge) ProbeSelection(ctx context.Context, budget time.Duration) (string, error)` with `CopyProbe{Backend: &windowsPasteboardBackend{bridge: b}, SendCopy: <tagged Ctrl+C via sendWinCombo>, Ignore: b.IgnoreSelfPasteboardChange, LateWatch: 500 * time.Millisecond}`. Skip console windows (conhost, Windows Terminal: Ctrl+C with nothing selected interrupts the program), elevated windows (UIPI drops the input) and password fields; set `SelectionKnown` where UIA `TextPattern` reads the selection.
+
 ### Glossary — 🟡 partial
 - Engine is shared (`pkg/core/engine/glossary.go:17`); the Glossary tab and search work.
 - "Normalize glossary" on the selection (`uiapp/controller.go:1419`) needs `SelectedText`, which is always empty on Windows, so it can only act on clipboard text (see AI rewrite).
+- Since 2026-11-15 it acts on the probed selection wherever the platform probes (macOS: tested in `uiapp/selection_context_test.go`, the normalized text replaces the selection instead of the clipboard). On Windows it follows once `ProbeSelection` exists (see AI rewrite).
 
 ### IME — 🟡 partial (after T2)
 - ✅ Per-app rules: polled every 200 ms (`bridge_windows.go:631`). Rules match by process name (`engines.go` `matchRule` step 4, normalised by `normalizeProcessName`), and the Windows defaults are `WindowsTerminal.exe` and `Code.exe` with mode-only switching (`pkg/core/config/ime_rules_config.go:144`). Title-pattern rules work.
@@ -126,7 +133,7 @@ down to how each bridge feeds that interface.
 - `--smoke-check` (`main.go:84`, `:95-117`) is platform neutral: it generates configs in a temp dir, decodes them, builds the bridge, and prints `os=windows`. It does not start the hook, so it does not validate hook installation or IME access.
 
 ## Suggested follow-ups (priority order)
-1. Selected-text capture on Windows (UIA TextPattern, else a guarded Ctrl+C probe). Unblocks AI rewrite and glossary on the selection.
+1. Selected-text capture on Windows: implement `ProbeSelection` on the shared `CopyProbe` (console-safe Ctrl+C), then UIA TextPattern for `SelectionKnown`. Unblocks AI rewrite and glossary on the selection.
 2. Re-install the LL keyboard hook when it goes silent (watchdog), and report it through `TapRecoveryCount`.
 3. Mouse hook (or foreground-caret change) for snippet buffer reset; detect password fields (UIA `IsPassword`) for the secure-input guard.
 4. Windows defaults for leader `open_app` targets and `excluded_bundle_ids` (`1Password.exe`, `KeePassXC.exe`), with case-insensitive process matching in the clipboard filter.
