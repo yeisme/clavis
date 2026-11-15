@@ -1358,7 +1358,14 @@ func (b *darwinBridge) SnapshotContext(ctx context.Context) (host.ContextSnapsho
 			if axUIElementCopyAttributeValue(sysWide, axAttr("AXFocusedUIElement"), &focused) == 0 && focused != 0 {
 				defer cfRelease(focused)
 
-				snap.SelectedText = copyAXStringAttr(focused, "AXSelectedText", 4096)
+				// An app that answers AXSelectedText (even with "") has told
+				// us its selection; one that cannot leaves it to a copy probe,
+				// unless the focus is on something that holds no text, as
+				// Finder's file list, where a probe would only cost time.
+				snap.SelectedText, snap.SelectionKnown = axStringAttr(focused, "AXSelectedText", 4096)
+				if !snap.SelectionKnown && axRoleHoldsNoText(copyAXStringAttr(focused, "AXRole", 64)) {
+					snap.SelectionKnown = true
+				}
 				snap.SurroundingText = copyAXStringAttr(focused, "AXValue", 4096)
 				if snap.WindowTitle == "" || snap.ActiveURL == "" {
 					var win uintptr
@@ -1395,16 +1402,26 @@ func (b *darwinBridge) SnapshotContext(ctx context.Context) (host.ContextSnapsho
 }
 
 func copyAXStringAttr(el uintptr, attrName string, maxLen int) string {
+	s, _ := axStringAttr(el, attrName, maxLen)
+	return s
+}
+
+// axStringAttr reads a string attribute and reports whether the element
+// answered: ok with "" means an empty value, not an unsupported attribute.
+func axStringAttr(el uintptr, attrName string, maxLen int) (string, bool) {
 	var val uintptr
-	if axUIElementCopyAttributeValue(el, axAttr(attrName), &val) != 0 || val == 0 {
-		return ""
+	if axUIElementCopyAttributeValue(el, axAttr(attrName), &val) != 0 {
+		return "", false
+	}
+	if val == 0 {
+		return "", true
 	}
 	defer cfRelease(val)
 	s := goStringFromCF(val)
 	if maxLen > 0 {
-		return truncateUTF8(s, maxLen)
+		s = truncateUTF8(s, maxLen)
 	}
-	return s
+	return s, true
 }
 
 func resolveAXCaretAnchor(focused uintptr) (host.CursorAnchor, bool) {
