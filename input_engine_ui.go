@@ -53,7 +53,7 @@ func (a *desktopApp) setupInputEngine(ctx context.Context, br bridge.HostService
 			}
 		}),
 	})
-	u.panel.OnClose(func(e *mygo.CloseEvent) { e.PreventDefault(); u.panel.Hide() })
+	u.panel.OnClose(a.closeHides(u.panel.Hide))
 	h.SetInputEngineViewHandler(func(v bridge.InputEngineView) { u.onView(ctx, v) })
 	h.ConfigureInputEngine(cfg)
 	return u

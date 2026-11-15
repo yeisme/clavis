@@ -617,3 +617,34 @@ func (m *mockMainBridge) InjectText(_ context.Context, text string, _ int, _ int
 	}
 	return nil
 }
+
+// TestCloseHidesLetsQuitThrough: closing one of Clavis's windows hides it,
+// but while the app quits the close must go through: MyGo closes every
+// window before quitting and a refused close cancels the quit, which left
+// tray Quit (and App.Relaunch) doing nothing.
+func TestCloseHidesLetsQuitThrough(t *testing.T) {
+	a := newDesktopApp()
+	hidden := 0
+	onClose := a.closeHides(func() { hidden++ })
+
+	e := &mygo.CloseEvent{}
+	onClose(e)
+	if !e.DefaultPrevented() || hidden != 1 {
+		t.Fatalf("close outside a quit: prevented=%v hidden=%d; want the window kept and hidden", e.DefaultPrevented(), hidden)
+	}
+
+	a.quitting.Store(true)
+	e = &mygo.CloseEvent{}
+	onClose(e)
+	if e.DefaultPrevented() || hidden != 1 {
+		t.Fatalf("close during a quit: prevented=%v hidden=%d; want it to go through", e.DefaultPrevented(), hidden)
+	}
+
+	// A canceled quit restores hiding.
+	a.quitting.Store(false)
+	e = &mygo.CloseEvent{}
+	onClose(e)
+	if !e.DefaultPrevented() || hidden != 2 {
+		t.Fatalf("close after a canceled quit: prevented=%v hidden=%d", e.DefaultPrevented(), hidden)
+	}
+}

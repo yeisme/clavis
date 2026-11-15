@@ -77,6 +77,11 @@ func main() {
 	mygo.App.WhenReady(func() {
 		app.start()
 	})
+	// MyGo closes every window before it quits, and Clavis's windows only
+	// hide when closed (see closeHides): they let the close through while a
+	// quit runs, or tray Quit and App.Relaunch would be canceled.
+	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { app.quitting.Store(true) })
+	mygo.App.OnQuitCanceled(func() { app.quitting.Store(false) })
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
 		app.shutdown()
 	})
@@ -190,6 +195,7 @@ type desktopApp struct {
 	presentTransitionUntil atomic.Int64
 	lastPanelHideNano      atomic.Int64
 	shutdownOnce           sync.Once
+	quitting               atomic.Bool
 }
 
 func newDesktopApp() *desktopApp {
@@ -315,10 +321,9 @@ func (a *desktopApp) start() {
 		SkipTaskbar:   true,
 		Content:       ui.View(controller.CapsuleView),
 	})
-	capsulePanel.OnClose(func(e *mygo.CloseEvent) {
-		e.PreventDefault()
+	capsulePanel.OnClose(a.closeHides(func() {
 		controller.Dispatch(engine.Event{Type: engine.EventDismiss})
-	})
+	}))
 	capsulePanel.OnBlur(func() {
 		if a.isInPresentTransition() {
 			return
@@ -346,10 +351,7 @@ func (a *desktopApp) start() {
 		SkipTaskbar:   true,
 		Content:       ui.View(controller.PromptComposerView),
 	})
-	promptPanel.OnClose(func(e *mygo.CloseEvent) {
-		e.PreventDefault()
-		controller.ClosePromptComposer()
-	})
+	promptPanel.OnClose(a.closeHides(controller.ClosePromptComposer))
 	promptPanel.OnBlur(func() {
 		if a.isInPresentTransition() {
 			return
@@ -377,10 +379,7 @@ func (a *desktopApp) start() {
 			uiapp.IMEPillView(c, a.currentIMEPillLabel())
 		}),
 	})
-	imePillPanel.OnClose(func(e *mygo.CloseEvent) {
-		e.PreventDefault()
-		imePillPanel.Hide()
-	})
+	imePillPanel.OnClose(a.closeHides(imePillPanel.Hide))
 
 	sbW, sbH := uiapp.PreferredSelectionBarWidth(nil), 34
 	selectionBar := mygo.NewWindow(mygo.WindowOptions{
@@ -401,10 +400,7 @@ func (a *desktopApp) start() {
 			uiapp.SelectionBarView(c, a.selectionBarSnapshot(), cfg.Main.Appearance)
 		}),
 	})
-	selectionBar.OnClose(func(e *mygo.CloseEvent) {
-		e.PreventDefault()
-		selectionBar.Hide()
-	})
+	selectionBar.OnClose(a.closeHides(selectionBar.Hide))
 
 	settingsWin := mygo.NewWindow(mygo.WindowOptions{
 		Title:     i18n.T("tray.settings_window"),
@@ -416,10 +412,7 @@ func (a *desktopApp) start() {
 		StateKey:  "settings",
 		Content:   ui.View(controller.SettingsView),
 	})
-	settingsWin.OnClose(func(e *mygo.CloseEvent) {
-		e.PreventDefault()
-		settingsWin.Hide()
-	})
+	settingsWin.OnClose(a.closeHides(settingsWin.Hide))
 
 	frecencySyncer := daemon.NewFrecencySyncer(
 		func(now time.Time) map[string]int {
@@ -510,6 +503,20 @@ func (a *desktopApp) start() {
 	a.goBG(func(bgCtx context.Context) { a.syncFrecency(bgCtx) })
 	a.goBG(func(bgCtx context.Context) { a.runClipboardPoller(bgCtx) })
 	go a.refreshPermissionsAsync()
+}
+
+// closeHides is the close handler of a window that only hides: Clavis lives
+// in the tray and keeps its windows for the next time. While the app quits
+// the close goes through: MyGo closes every window first, and one that
+// refuses cancels the quit.
+func (a *desktopApp) closeHides(hide func()) func(*mygo.CloseEvent) {
+	return func(e *mygo.CloseEvent) {
+		if a.quitting.Load() {
+			return
+		}
+		e.PreventDefault()
+		hide()
+	}
 }
 
 func (a *desktopApp) setupTray() {
