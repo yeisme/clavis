@@ -245,6 +245,7 @@ const (
 	TrayMenuIconFolder    TrayMenuIconKind = "folder"
 	TrayMenuIconSettings  TrayMenuIconKind = "settings"
 	TrayMenuIconQuit      TrayMenuIconKind = "quit"
+	TrayMenuIconGuide     TrayMenuIconKind = "guide"
 )
 
 // GenerateTrayMenuIconPNG renders a 16×16 (default) monochrome template
@@ -327,6 +328,11 @@ func trayMenuGlyphAlpha(kind string, x, y, aa float64) float64 {
 		ring = math.Max(ring, -off*r)
 		stalk := sdRoundedRect(x, y+2.6, sw*0.6, 3.2, sw*0.6)
 		d = math.Min(ring, stalk)
+	case "guide": // ⓘ: a ring holding a dot and a stem, for the welcome guide
+		ring := math.Abs(math.Hypot(x, y)-4.9) - sw*0.5
+		dot := math.Hypot(x, y+2.3) - 0.95
+		stem := sdAxisBox(x, y-1.3, 0.8, 1.7)
+		d = math.Min(ring, math.Min(dot, stem))
 	default:
 		d = 1e9
 	}

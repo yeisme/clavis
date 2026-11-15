@@ -252,6 +252,9 @@ type AppController struct {
 	promptContext         engine.CapsuleContext
 	promptValidationError string
 	promptUI              promptComposerUIState
+
+	// onboarding is the first-run guide's live state (onboarding_view.go).
+	onboarding onboardingState
 }
 
 // NewAppController constructs and initializes an AppController.
@@ -2002,6 +2005,7 @@ func (c *AppController) OpenLeader() {
 func (c *AppController) HandleTriggerEvent(ev host.TriggerEvent) {
 	switch ev.Kind {
 	case host.TriggerLeaderKey, host.TriggerDoubleTap:
+		c.noteOnboardingLeader()
 		ctx := context.Background()
 		c.syncClipboardEntries(ctx)
 		if len(c.State().InstalledApps) == 0 {

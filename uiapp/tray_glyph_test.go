@@ -15,7 +15,7 @@ import (
 func TestTrayMenuGlyphsFillTheirIcon(t *testing.T) {
 	kinds := []TrayMenuIconKind{
 		TrayMenuIconCapsule, TrayMenuIconClipboard, TrayMenuIconReload, TrayMenuIconFolder,
-		TrayMenuIconSettings, TrayMenuIconQuit,
+		TrayMenuIconSettings, TrayMenuIconQuit, TrayMenuIconGuide,
 	}
 	for _, kind := range kinds {
 		img, err := png.Decode(bytes.NewReader(GenerateTrayMenuIconPNG(kind, 16)))

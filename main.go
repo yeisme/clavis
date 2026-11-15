@@ -196,6 +196,16 @@ type desktopApp struct {
 	lastPanelHideNano      atomic.Int64
 	shutdownOnce           sync.Once
 	quitting               atomic.Bool
+
+	// The first-run guide (onboarding.go) and the per-machine data
+	// directory that records it was done.
+	onboardingWin  *mygo.Window
+	onboardingOpen atomic.Bool
+	dataDir        string
+	// bridgeStarting keeps two callers from starting the bridge at once
+	// (startBridgeAndFallbackShortcut runs on the main thread, the config
+	// watcher and the permission watcher).
+	bridgeStarting atomic.Bool
 }
 
 func newDesktopApp() *desktopApp {
@@ -225,10 +235,16 @@ func (a *desktopApp) start() {
 	var learningWriter *storage.LearningWriter
 	var clipStore clipboard.Store
 	var mediaStore *clipboard.MediaStore
+	var dataDir string
+	hadData := false
 	if userDataDir, err := mygo.App.Path(mygo.PathUserData); err == nil && userDataDir != "" {
+		dataDir = userDataDir
 		// Blobs live next to the DB; an in-memory store gets no media (nothing to reference them).
 		mediaStore = clipboard.NewMediaStore(filepath.Join(userDataDir, "clipboard-media"))
 		dbPath := filepath.Join(userDataDir, "clipboard.db")
+		// A database from an earlier launch: not a first run (planOnboarding).
+		_, statErr := os.Stat(dbPath)
+		hadData = statErr == nil
 		if s, openErr := storage.NewSQLiteClipboardStoreFromConfig(ctx, dbPath, cfg.Main.Clipboard); openErr == nil {
 			sqliteStore = s
 			clipStore = s
@@ -414,6 +430,23 @@ func (a *desktopApp) start() {
 	})
 	settingsWin.OnClose(a.closeHides(settingsWin.Hide))
 
+	onboardingWin := mygo.NewWindow(mygo.WindowOptions{
+		Title:     i18n.T("tray.onboarding_window"),
+		Width:     600,
+		Height:    700,
+		MinWidth:  520,
+		MinHeight: 520,
+		Hidden:    true,
+		Content:   ui.View(controller.OnboardingView),
+	})
+	// Closing the guide finishes it, as Get Started does; a quit (a restart
+	// for Input Monitoring) closes it without, so it shows again after.
+	onboardingWin.OnClose(a.closeHides(a.finishOnboarding))
+	controller.SetOnboardingHooks(uiapp.OnboardingHooks{
+		Finish:   a.finishOnboarding,
+		Relaunch: func() { mygo.App.Relaunch() },
+	})
+
 	frecencySyncer := daemon.NewFrecencySyncer(
 		func(now time.Time) map[string]int {
 			a.mu.Lock()
@@ -474,6 +507,8 @@ func (a *desktopApp) start() {
 	a.imePillPanel = imePillPanel
 	a.settingsWin = settingsWin
 	a.selectionBar = selectionBar
+	a.onboardingWin = onboardingWin
+	a.dataDir = dataDir
 	a.mu.Unlock()
 
 	a.setupTray()
@@ -502,7 +537,11 @@ func (a *desktopApp) start() {
 	// startup path never blocks on slow /Applications scans.
 	a.goBG(func(bgCtx context.Context) { a.syncFrecency(bgCtx) })
 	a.goBG(func(bgCtx context.Context) { a.runClipboardPoller(bgCtx) })
+	a.goBG(a.watchPermissions)
 	go a.refreshPermissionsAsync()
+	if planOnboarding(dataDir, hadData, time.Now()) {
+		a.showOnboarding()
+	}
 }
 
 // closeHides is the close handler of a window that only hides: Clavis lives
@@ -590,6 +629,13 @@ func (a *desktopApp) setupTray() {
 				a.openSettings(uiapp.SettingsTabGeneral)
 			},
 		},
+		{
+			Label: i18n.T("tray.welcome"),
+			Icon:  menuIcon(uiapp.TrayMenuIconGuide),
+			Click: func(*mygo.MenuItem, *mygo.Window) {
+				a.showOnboarding()
+			},
+		},
 		mygo.Separator(),
 		loginItem,
 		mygo.Separator(),
@@ -611,6 +657,7 @@ func (a *desktopApp) setupTray() {
 		"reload":               itemByLabel(menu, i18n.T("common.reload")),
 		"open_config":          itemByLabel(menu, i18n.T("settings.configs.open_dir")),
 		"settings":             itemByLabel(menu, i18n.T("tray.settings")),
+		"welcome":              itemByLabel(menu, i18n.T("tray.welcome")),
 		"quit":                 itemByLabel(menu, i18n.T("tray.quit")),
 		"open_at_login":        loginItem,
 	}
@@ -648,12 +695,17 @@ func (a *desktopApp) startBridgeAndFallbackShortcut(trigger config.TriggerConfig
 	}
 
 	if !running {
-		if err := ctrl.Start(ctx); err == nil {
+		if !a.bridgeStarting.CompareAndSwap(false, true) {
+			return // another caller is starting it and sets the fallbacks
+		}
+		err := ctrl.Start(ctx)
+		if err == nil {
 			a.mu.Lock()
 			a.bridgeRunning = true
 			running = true
 			a.mu.Unlock()
 		}
+		a.bridgeStarting.Store(false)
 	}
 
 	caps := host.Capabilities{}
@@ -902,6 +954,9 @@ func (a *desktopApp) syncLanguageFromConfig(cfg config.ClavisConfig) {
 		if a.settingsWin != nil {
 			a.settingsWin.SetTitle(i18n.T("tray.settings_window"))
 		}
+		if a.onboardingWin != nil {
+			a.onboardingWin.SetTitle(i18n.T("tray.onboarding_window"))
+		}
 		if a.imePillPanel != nil {
 			a.imePillPanel.SetTitle(i18n.T("tray.ime_window"))
 		}
@@ -950,6 +1005,9 @@ func (a *desktopApp) refreshPermissionsAsync() {
 		caps = br.Capabilities()
 	}
 	label := formatPermissionsMenuLabel(status, err, caps)
+	if !mygo.App.IsReady() {
+		return // no tray yet (or tests): RunOnMain would wait for a loop
+	}
 	mygo.RunOnMain(func() {
 		a.mu.Lock()
 		item := a.permMenuItem
@@ -1178,8 +1236,12 @@ func (a *desktopApp) handleRepaint() {
 	promptWin := a.promptPanel
 	setWin := a.settingsWin
 	pillWin := a.imePillPanel
+	guideWin := a.onboardingWin
 	ctrl := a.controller
 	a.mu.Unlock()
+	if guideWin != nil && a.onboardingOpen.Load() {
+		guideWin.Invalidate()
+	}
 	if capWin != nil {
 		if ctrl != nil && capWin.IsVisible() {
 			state := ctrl.State()

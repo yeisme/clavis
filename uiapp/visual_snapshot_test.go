@@ -1,6 +1,7 @@
 package uiapp
 
 import (
+	"context"
 	"image/png"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
+	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/pkg/core/i18n"
 	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
@@ -203,4 +205,29 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool) {
 		f.ctrl.setSettingsSection(sec.index)
 		shoot(sec.name, f.ctrl.SettingsView, 960, 900, 1.5, nil)
 	}
+
+	// The first-run guide, from a fresh Mac to a working Leader key, its
+	// smallest window, and Windows.
+	guide := func(goos string) func(c *ui.Context) {
+		return func(c *ui.Context) { f.ctrl.renderOnboarding(c, goos) }
+	}
+	_ = f.ctrl.Stop()
+	f.bridge.mu.Lock()
+	f.bridge.perms = host.PermissionStatus{}
+	f.bridge.mu.Unlock()
+	_, _ = f.ctrl.RefreshPermissions(context.Background())
+	shoot("18-onboarding-fresh", guide("darwin"), 600, 700, 1.5, nil)
+	shoot("18b-onboarding-min", guide("darwin"), 520, 520, 1.5, nil)
+	f.bridge.mu.Lock()
+	f.bridge.perms = host.PermissionStatus{Accessibility: true, InputMonitoring: true, Granted: true}
+	f.bridge.mu.Unlock()
+	_, _ = f.ctrl.RefreshPermissions(context.Background())
+	f.ctrl.SetRelaunchNeeded(true)
+	shoot("18c-onboarding-relaunch", guide("darwin"), 600, 700, 1.5, nil)
+	_ = f.ctrl.Start(context.Background())
+	shoot("18d-onboarding-waiting", guide("darwin"), 600, 700, 1.5, nil)
+	f.ctrl.HandleTriggerEvent(host.TriggerEvent{Kind: host.TriggerLeaderKey})
+	f.ctrl.Dispatch(engine.Event{Type: engine.EventDismiss})
+	shoot("18e-onboarding-ready", guide("darwin"), 600, 700, 1.5, nil)
+	shoot("18f-onboarding-windows", guide("windows"), 600, 700, 1.5, nil)
 }
