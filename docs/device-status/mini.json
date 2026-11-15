@@ -3,10 +3,10 @@
   "platform": "darwin",
   "project": "clavis",
   "branch": "main",
-  "head": "862e671",
-  "dirty": 3,
+  "head": "80706f4",
+  "dirty": 0,
   "ahead": 0,
-  "timestamp": "2026-11-15T15:13:31+08:00",
-  "tests": "macOS: go build ok（本轮未跑全量）",
-  "notes": "合入 ux-polish；main 已推 origin 862e671；20 个已合分支待清理"
+  "timestamp": "2026-11-15T17:04:51+08:00",
+  "tests": "go test ./... 20包全绿; race(bridge/uiapp/host)通过; vet darwin/windows/linux通过; 真实NSPasteboard集成测试通过",
+  "notes": "选区复制探测(shared+mac)已推,Windows待实现ProbeSelection; 配置清理已推(show_bento_shelf删,两键退役记账); 首次引导未开始"
 }
