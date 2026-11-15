@@ -255,16 +255,18 @@ func GenerateTrayMenuIconPNG(kind TrayMenuIconKind, size int) []byte {
 		size = 16
 	}
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
-	inv := 2.0 / float64(size)
-	aa := inv * 0.9
+	unit := 16 / float64(size) // glyph-grid units per pixel
+	aa := unit * 0.9           // edges blend over about a pixel
 	for py := 0; py < size; py++ {
 		for px := 0; px < size; px++ {
 			// 2×2 supersample like the app icon painter.
 			var aSum float64
-			for _, o := range [2]float64{0.25, 0.75} {
-				x := (float64(px)+o)*inv*16 - 8 // → [-8, 8] on the glyph grid
-				y := (float64(py)+o)*inv*16 - 8
-				aSum += trayMenuGlyphAlpha(string(kind), x, y, aa)
+			for _, oy := range [2]float64{0.25, 0.75} {
+				for _, ox := range [2]float64{0.25, 0.75} {
+					x := (float64(px)+ox)*unit - 8 // → [-8, 8] on the glyph grid
+					y := (float64(py)+oy)*unit - 8
+					aSum += trayMenuGlyphAlpha(string(kind), x, y, aa)
+				}
 			}
 			a := aSum / 4
 			i := py*img.Stride + px*4
@@ -286,21 +288,28 @@ func trayMenuGlyphAlpha(kind string, x, y, aa float64) float64 {
 	switch kind {
 	case "capsule": // ⌘ command mark, the app's motif
 		d = sdCommandSymbol(x, y+0.2, 2.4, 0.75, sw*0.55)
-	case "clipboard": // tablet outline with a clip band
-		body := sdRoundedRect(x, y+0.3, 5.4, 6.6, 1.2)
+	case "clipboard": // tablet outline with a solid clip on its top edge
+		body := sdRoundedRect(x, y-1.0, 4.6, 5.2, 1.2)
 		d = absStroke(body, sw)
-		clip := sdRoundedRect(x, y-4.3, 2.1, 0.9, 0.7)
-		d = math.Min(d, -clip)
-	case "reload": // circular arrow
-		ring := math.Abs(math.Hypot(x, y)-4.4) - sw*0.85
-		gap := math.Abs(math.Atan2(y, x)) - 1.1 // open sector at the right
-		d = math.Max(ring, gap)
-		head := sdFourPointStar(x-4.4, y+0.2, 1.9, 0.75)
+		clip := sdRoundedRect(x, y+4.6, 2.5, 1.4, 0.7)
+		d = math.Min(d, clip)
+	case "reload": // ↻ a ring open at the top right, an arrowhead on its end
+		const r, gapAt, gapHalf = 4.6, -math.Pi / 4, 0.6
+		ring := math.Abs(math.Hypot(x, y)-r) - sw*0.6
+		off := math.Abs(math.Remainder(math.Atan2(y, x)-gapAt, 2*math.Pi)) - gapHalf
+		d = math.Max(ring, -off*r)
+		// The arc runs clockwise (y grows down) and ends at gapAt-gapHalf;
+		// the head points on along its tangent.
+		end := gapAt - gapHalf
+		ex, ey := r*math.Cos(end), r*math.Sin(end)
+		tx, ty := -math.Sin(end), math.Cos(end)
+		nx, ny := -ty, tx
+		head := sdTriangle(x, y, ex+tx*2.6, ey+ty*2.6, ex+nx*2.3-tx*0.4, ey+ny*2.3-ty*0.4, ex-nx*2.3-tx*0.4, ey-ny*2.3-ty*0.4)
 		d = math.Min(d, head)
-	case "folder": // rounded folder
-		d = absStroke(sdRoundedRect(x, y+0.2, 5.6, 4.4, 1.0), sw)
-		tab := sdAxisBox(x+2.2, y-3.2, 3.4, 1.2)
-		d = math.Min(d, absStroke(tab, sw))
+	case "folder": // rounded folder with a tab on its top left, one outline
+		body := sdRoundedRect(x, y-0.6, 5.8, 4.2, 1.0)
+		tab := sdRoundedRect(x+2.6, y+4.0, 2.8, 1.3, 0.7)
+		d = absStroke(math.Min(body, tab), sw)
 	case "settings": // gear: ring + teeth via star modulation
 		ring := math.Abs(math.Hypot(x, y)-2.6) - sw*0.8
 		var teeth float64 = 1e9
@@ -311,16 +320,38 @@ func trayMenuGlyphAlpha(kind string, x, y, aa float64) float64 {
 			teeth = math.Min(teeth, sdRoundedRect(x-tx, y-ty, 0.9, 0.9, 0.35))
 		}
 		d = math.Min(ring, teeth)
-	case "quit": // power symbol
-		ring := math.Abs(math.Hypot(x, y+0.9)-3.6) - sw*0.8
-		gap := math.Abs(x) - 1.0 // slot at top
-		ring = math.Max(ring, -gap)
-		stalk := sdAxisBox(x, y+2.2, sw*0.7, 2.6)
+	case "quit": // ⏻ power: a ring open at the top, a stalk through the opening
+		const r = 4.5
+		ring := math.Abs(math.Hypot(x, y-0.6)-r) - sw*0.6
+		off := math.Abs(math.Remainder(math.Atan2(y-0.6, x)+math.Pi/2, 2*math.Pi)) - 0.62
+		ring = math.Max(ring, -off*r)
+		stalk := sdRoundedRect(x, y+2.6, sw*0.6, 3.2, sw*0.6)
 		d = math.Min(ring, stalk)
 	default:
 		d = 1e9
 	}
 	return smoothCoverage(d, aa)
+}
+
+// sdTriangle is the signed distance from (px, py) to the triangle a b c
+// (negative inside), after Inigo Quilez's sdTriangle.
+func sdTriangle(px, py, ax, ay, bx, by, cx, cy float64) float64 {
+	e0x, e0y := bx-ax, by-ay
+	e1x, e1y := cx-bx, cy-by
+	e2x, e2y := ax-cx, ay-cy
+	v0x, v0y := px-ax, py-ay
+	v1x, v1y := px-bx, py-by
+	v2x, v2y := px-cx, py-cy
+	// Squared distance to an edge segment.
+	seg := func(vx, vy, ex, ey float64) float64 {
+		t := clampUnit((vx*ex + vy*ey) / (ex*ex + ey*ey))
+		qx, qy := vx-ex*t, vy-ey*t
+		return qx*qx + qy*qy
+	}
+	s := math.Copysign(1, e0x*e2y-e0y*e2x)
+	dist := math.Min(seg(v0x, v0y, e0x, e0y), math.Min(seg(v1x, v1y, e1x, e1y), seg(v2x, v2y, e2x, e2y)))
+	side := math.Min(s*(v0x*e0y-v0y*e0x), math.Min(s*(v1x*e1y-v1y*e1x), s*(v2x*e2y-v2y*e2x)))
+	return -math.Sqrt(dist) * math.Copysign(1, side)
 }
 
 // absStroke turns an inside-distance field into a centered stroke band.
