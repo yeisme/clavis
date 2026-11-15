@@ -1,0 +1,12 @@
+{
+  "device": "mini",
+  "platform": "darwin",
+  "project": "clavis",
+  "branch": "main",
+  "head": "862e671",
+  "dirty": 3,
+  "ahead": 0,
+  "timestamp": "2026-11-15T15:13:31+08:00",
+  "tests": "macOS: go build ok（本轮未跑全量）",
+  "notes": "合入 ux-polish；main 已推 origin 862e671；20 个已合分支待清理"
+}
