@@ -3,6 +3,8 @@ package uiapp
 import (
 	"context"
 	"fmt"
+	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/egoist/mygo/ui"
@@ -222,78 +224,88 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 	se := a.settingsEditor()
 	trigger := cfg.Main.Trigger
 	appearance := cfg.Main.Appearance
+	keys := triggerKeyOptions(runtime.GOOS)
 
-	settingsSectionCard(c, theme, i18n.T("settings.card.trigger"), func() {
-		settingsInlineRow(c, theme, "leader_key", 110, func() {
-			ui.Column(c).Gap(2).Grow(1).Children(func() {
-				if v, changed := settingsPillGrid(c, theme, "leader-key", 3, triggerPresets(), trigger.LeaderKey); changed {
-					_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.LeaderKey = v })
-				}
-			})
-		})
-		settingsInlineRow(c, theme, "double_tap_key", 110, func() {
-			ui.Column(c).Gap(2).Grow(1).Children(func() {
-				if v, changed := settingsPillGrid(c, theme, "double-tap-key", 3, triggerPresets(), trigger.DoubleTapKey); changed {
-					_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.DoubleTapKey = v })
-				}
-			})
-		})
-		if v, changed := settingsStepper(
-			c, theme, "double_tap_interval_ms", float64(trigger.DoubleTapIntervalMs), 100, 800, 10, "ms",
-		); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.DoubleTapIntervalMs = int(v) })
+	settingsSourceCard(c, theme, i18n.T("settings.card.trigger"), "[trigger]", func() {
+		if v, changed := settingSelectRow(c, theme, i18n.T("settings.trigger.leader_key"), "leader_key",
+			i18n.T("settings.trigger.leader_key_help"), keys, trigger.LeaderKey, 180); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.LeaderKey = v })
 		}
+		if v, changed := settingSelectRow(c, theme, i18n.T("settings.trigger.double_tap_key"), "double_tap_key",
+			i18n.T("settings.trigger.double_tap_key_help"), keys, trigger.DoubleTapKey, 180); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.DoubleTapKey = v })
+		}
+		ui.Grid(c).Columns(2).GapX(space16).GapY(space4).FillWidth().Children(func() {
+			if v, changed := settingNumberRow(c, theme, i18n.T("settings.trigger.double_tap_interval"), "double_tap_interval_ms", "",
+				float64(trigger.DoubleTapIntervalMs), 100, 800, 10, "ms"); changed {
+				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.DoubleTapIntervalMs = int(v) })
+			}
+			// Which-key pause: the Leader menu shows only if no key follows
+			// within this delay (0 shows it at once).
+			if v, changed := settingNumberRow(c, theme, i18n.T("settings.trigger.leader_reveal_delay"), "leader_reveal_delay_ms",
+				i18n.T("settings.trigger.leader_reveal_delay_help"),
+				float64(trigger.LeaderRevealDelayMs), 0, config.MaxLeaderRevealDelayMs, 20, "ms"); changed {
+				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.LeaderRevealDelayMs = int(v) })
+			}
+		})
 
+		settingsCardDivider(c, theme)
 		a.renderShortcutEditor(c, theme, se, "capsule_shortcut", "option+space",
-			i18n.Tf("settings.trigger.shortcut_caption", trigger.CapsuleShortcut), trigger.CapsuleShortcut,
+			i18n.T("settings.trigger.capsule_shortcut"), trigger.CapsuleShortcut,
 			func(m *config.MainConfig, v string) { m.Trigger.CapsuleShortcut = v })
 		a.renderShortcutEditor(c, theme, se, "clipboard_shortcut", "alt+shift+c",
-			i18n.Tf("settings.trigger.clipboard_shortcut_caption", trigger.ClipboardShortcut), trigger.ClipboardShortcut,
+			i18n.T("settings.trigger.clipboard_shortcut"), trigger.ClipboardShortcut,
 			func(m *config.MainConfig, v string) { m.Trigger.ClipboardShortcut = v })
 
-		if v, changed := settingsSwitch(
-			c, theme, "snippet_expansion_enabled", i18n.T("settings.trigger.snippet_expansion"), trigger.SnippetExpansionEnabled,
-		); changed {
+		settingsCardDivider(c, theme)
+		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.trigger.snippet_expansion"),
+			"snippet_expansion_enabled", "", trigger.SnippetExpansionEnabled); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.SnippetExpansionEnabled = v })
+		}
+		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.trigger.snippet_backspace_undo"),
+			"snippet_backspace_undo", "", trigger.SnippetBackspaceUndo); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.SnippetBackspaceUndo = v })
 		}
 	})
 
-	settingsSectionCard(c, theme, i18n.T("settings.card.appearance"), func() {
-		settingsInlineRow(c, theme, "theme", 110, func() {
-			if v, changed := settingsPills(c, theme, "theme", []string{"system", "light", "dark"}, appearance.Theme); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.Theme = v })
-			}
-		})
-		settingsInlineRow(c, theme, "language", 110, func() {
-			if v, changed := settingsPills(c, theme, "language", i18n.AllLanguages(), appearance.Language); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.Language = v })
-			}
-		})
-		settingsInlineRow(c, theme, "animations", 110, func() {
-			if v, changed := settingsPills(c, theme, "animations", AllAnimationModes(), appearance.Animations); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.Animations = v })
-			}
-		})
-		ui.Grid(c).Columns(2).GapX(10).GapY(4).FillWidth().Children(func() {
-			if v, changed := settingsStepper(c, theme, "capsule_width", appearance.CapsuleWidth, 400, 1200, 20, "px"); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.CapsuleWidth = v })
-			}
-			if v, changed := settingsStepper(c, theme, "max_visible_results", float64(appearance.MaxVisibleResults), 3, 20, 1, ""); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.MaxVisibleResults = int(v) })
-			}
-			if v, changed := settingsStepper(c, theme, "corner_radius", appearance.CornerRadius, 0, 32, 2, "px"); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.CornerRadius = v })
-			}
-			if v, changed := settingsStepper(c, theme, "hud_duration_ms", float64(appearance.HUDDurationMs), 200, 5000, 100, "ms"); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.HUDDurationMs = int(v) })
-			}
-		})
-		ui.Grid(c).Columns(2).GapX(10).GapY(4).FillWidth().Children(func() {
-			if v, changed := settingsSwitch(c, theme, "show_key_hints", i18n.T("settings.appearance.key_hints"), appearance.ShowKeyHints); changed {
+	settingsSourceCard(c, theme, i18n.T("settings.card.appearance"), "[appearance]", func() {
+		if v, changed := settingChoiceRow(c, theme, i18n.T("settings.appearance.theme"), "theme", "",
+			themeOptions(), appearance.Theme); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.Theme = v })
+		}
+		if v, changed := settingChoiceRow(c, theme, i18n.T("settings.appearance.language"), "language", "",
+			languageOptions(), appearance.Language); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.Language = v })
+		}
+		if v, changed := settingChoiceRow(c, theme, i18n.T("settings.appearance.animations"), "animations", "",
+			animationOptions(), appearance.Animations); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.Animations = v })
+		}
+		settingsCardDivider(c, theme)
+		ui.Grid(c).Columns(2).GapX(space16).GapY(space4).FillWidth().Children(func() {
+			if v, changed := settingSwitchRow(c, theme, i18n.T("settings.appearance.key_hints"), "show_key_hints", "",
+				appearance.ShowKeyHints); changed {
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.ShowKeyHints = v })
 			}
-			if v, changed := settingsSwitch(c, theme, "show_preview_pane", i18n.T("settings.appearance.preview_pane"), appearance.ShowPreviewPane); changed {
+			if v, changed := settingSwitchRow(c, theme, i18n.T("settings.appearance.preview_pane"), "show_preview_pane", "",
+				appearance.ShowPreviewPane); changed {
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.ShowPreviewPane = v })
+			}
+			if v, changed := settingNumberRow(c, theme, i18n.T("settings.appearance.capsule_width"), "capsule_width", "",
+				appearance.CapsuleWidth, 400, 1200, 20, "px"); changed {
+				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.CapsuleWidth = v })
+			}
+			if v, changed := settingNumberRow(c, theme, i18n.T("settings.appearance.max_visible_results"), "max_visible_results", "",
+				float64(appearance.MaxVisibleResults), minVisibleResults, maxVisibleResults, 1, ""); changed {
+				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.MaxVisibleResults = int(v) })
+			}
+			if v, changed := settingNumberRow(c, theme, i18n.T("settings.appearance.corner_radius"), "corner_radius", "",
+				appearance.CornerRadius, 0, 32, 2, "px"); changed {
+				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.CornerRadius = v })
+			}
+			if v, changed := settingNumberRow(c, theme, i18n.T("settings.appearance.hud_duration"), "hud_duration_ms", "",
+				float64(appearance.HUDDurationMs), 200, 5000, 100, "ms"); changed {
+				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.HUDDurationMs = int(v) })
 			}
 		})
 	})
@@ -532,8 +544,8 @@ func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *u
 			}
 
 			settingsKeyValueRow(c, theme, i18n.T("settings.diag.layer"), layer)
-			settingsKeyValueRow(c, theme, i18n.T("settings.diag.secure_input"), secureInput)
-			settingsKeyValueRow(c, theme, i18n.T("settings.diag.monitor"), fmt.Sprintf("%v", diag.MonitorRunning))
+			settingsKeyValueRow(c, theme, i18n.T("settings.diag.secure_input"), yesNo(secureInput))
+			settingsKeyValueRow(c, theme, i18n.T("settings.diag.monitor"), yesNo(strconv.FormatBool(diag.MonitorRunning)))
 			settingsKeyValueRow(c, theme, i18n.T("settings.diag.recovery"), fmt.Sprintf("%d", diag.RecoveryCount))
 			settingsKeyValueRow(c, theme, i18n.T("settings.diag.input_source"), activeIME)
 			if diag.LastIMEError != "" {
@@ -656,6 +668,45 @@ func renderPermRow(
 	})
 }
 
+// yesNo shows a "true"/"false" diagnostic as Yes or No; other values (a
+// platform detail) show as they are.
+func yesNo(v string) string {
+	switch v {
+	case "true":
+		return i18n.T("common.yes")
+	case "false":
+		return i18n.T("common.no")
+	}
+	return v
+}
+
+// settingsSourceCard is a settings card naming, on the right of its title,
+// the config table or file its rows write ("[trigger]", "ime-rules.toml").
+func settingsSourceCard(c *ui.Context, theme *ui.Theme, title, source string, body func()) {
+	ui.Column(c).
+		FillWidth().
+		Padding(space10, space14).
+		Radius(radiusCard).
+		Background(theme.Surface).
+		Border(1, theme.Border).
+		Gap(space6).
+		Children(func() {
+			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, title).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Grow(1)
+				if source != "" {
+					ui.Text(c, source).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+				}
+			})
+			ui.Divider(c)
+			body()
+		})
+}
+
+// settingsCardDivider separates groups of rows inside a card.
+func settingsCardDivider(c *ui.Context, theme *ui.Theme) {
+	ui.Box(c).FillWidth().Height(1).Margin(space2, 0).Background(hairline(theme))
+}
+
 func settingsSectionCard(c *ui.Context, theme *ui.Theme, title string, body func()) {
 	ui.Column(c).
 		FillWidth().
@@ -703,43 +754,42 @@ func configFileDescription(kind config.ConfigFileKind) string {
 	}
 }
 
-// renderShortcutEditor draws a shortcut text input plus a chord recorder for one trigger field.
+// renderShortcutEditor draws one shortcut setting: its name and config line
+// on the left; on the right, the chord as text (editable) and a recorder.
 func (a *AppController) renderShortcutEditor(
 	c *ui.Context,
 	theme *ui.Theme,
 	se *settingsEditorState,
 	field string,
 	placeholder string,
-	caption string,
+	title string,
 	current string,
 	apply func(m *config.MainConfig, v string),
 ) {
 	recording := seGet(se, func(s *settingsEditorState) bool { return s.recordingShortcut == field })
-	ui.Text(c, caption).
-		FontSize(11).
-		TextColor(theme.TextMuted).
-		SingleLine()
-	ui.Row(c).Key("shortcut-row:" + field).FillWidth().Gap(8).AlignItems(ui.End).Children(func() {
-		ui.Column(c).Gap(2).Grow(1).Children(func() {
-			shortcut := current
-			in := ui.TextInput(c.Key("shortcut-input:"+field), &shortcut).
-				Label(field).
-				Placeholder(placeholder).
-				FillWidth()
-			if in.Changed() {
-				normalized := normalizeShortcutText(shortcut)
-				if normalized != "" && normalized != current {
-					_ = a.UpdateMainConfig(func(m *config.MainConfig) { apply(m, normalized) })
-				}
+	ui.Row(c).Key("shortcut-row:"+field).FillWidth().Gap(space12).AlignItems(ui.Center).Padding(space2, 0).Children(func() {
+		name := settingRowName(c, theme, title, settingCaption(field, current), "")
+		shortcut := current
+		in := ui.TextInput(c.Key("shortcut-input:"+field), &shortcut).
+			Label(field).
+			Placeholder(placeholder).
+			Width(170).
+			Shrink(0)
+		in.LabelledBy(name)
+		if in.Changed() {
+			normalized := normalizeShortcutText(shortcut)
+			if normalized != "" && normalized != current {
+				_ = a.UpdateMainConfig(func(m *config.MainConfig) { apply(m, normalized) })
 			}
-		})
+		}
 		if recording {
 			box := ui.Box(c).
 				Key("shortcut-recorder:"+field).
-				Padding(4, 10).
-				Radius(6).
-				Background(withAlpha(theme.Accent, 0.14)).
-				Border(1, theme.Accent).
+				Padding(space4, space10).
+				Radius(radiusChip).
+				Background(selectionFill(theme)).
+				Border(1, selectionEdge(theme)).
+				Shrink(0).
 				Focusable().
 				AutoFocus().
 				HandleInput(func(ev ui.InputEvent) bool {
@@ -760,14 +810,12 @@ func (a *AppController) renderShortcutEditor(
 				})
 			box.Children(func() {
 				ui.Text(c, i18n.T("settings.trigger.recording")).
-					FontSize(11).
-					TextColor(theme.Accent).
+					FontSize(typeMeta).
+					TextColor(accentInk(theme, theme.Surface)).
 					SingleLine()
 			})
-		} else {
-			if ui.PrimaryButton(c.Key("shortcut-record:"+field), i18n.T("settings.trigger.record")).Clicked() {
-				seSet(se, func(s *settingsEditorState) { s.recordingShortcut = field })
-			}
+		} else if ui.Button(c.Key("shortcut-record:"+field), i18n.T("settings.trigger.record")).Shrink(0).Clicked() {
+			seSet(se, func(s *settingsEditorState) { s.recordingShortcut = field })
 		}
 	})
 }

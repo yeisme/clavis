@@ -91,6 +91,10 @@ capsule_shortcut = "option+space"
 # Shortcut to open Clipboard History directly (Maccy style); press again to close
 clipboard_shortcut = "alt+shift+c"
 snippet_expansion_enabled = true
+# Backspace right after an expansion restores the typed trigger
+snippet_backspace_undo = true
+# Leader menu appears only after this pause (ms); keys typed sooner run at once. 0 = immediately
+leader_reveal_delay_ms = 220
 
 [keymap]
 # Dual-role Tap/Hold key remapping & CapsLock Vim navigation layer

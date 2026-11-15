@@ -7,7 +7,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/markdown"
 	"github.com/yeisme/clavis/pkg/core/config"
@@ -101,38 +100,12 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 	})
 }
 
-// IMEPillView renders a compact floating micro-capsule ("中" / "EN" / IME name)
-// with glass vibrancy and a pill border for the cursor-side IME indicator window.
+// IMEPillView renders the floating, non-activating pill beside the caret: a
+// two-segment 中|EN mode switch for input-mode changes, a layer badge for
+// keymap hold layers, or an icon + sentence for other notices (see
+// renderIMEPill in pill_view.go).
 func IMEPillView(c *ui.Context, label string) {
-	trimmed := strings.TrimSpace(label)
-	if trimmed == "" {
-		trimmed = "EN"
-	}
-	theme := c.Theme()
-	prefs := c.Preferences()
-
-	if !prefs.ReduceTransparency {
-		c.Root().Radius(999)
-	}
-
-	pill := applyTextLocale(ui.Row(c).
-		Fill().
-		Padding(4, 10).
-		Radius(999).
-		Center().
-		Gap(5).
-		Clip())
-	if !prefs.ReduceTransparency {
-		pill.Material(glass.Glass{Native: c.Vibrancy()})
-		pill.Border(1, withAlpha(theme.Border, 0.55))
-	} else {
-		pill.Background(theme.Background).Border(1, theme.Border)
-	}
-
-	pill.Children(func() {
-		renderSemanticIcon(c, "keyboard", 12, theme.Accent)
-		ui.Text(c, trimmed).FontSize(12).FontWeight(700).TextColor(theme.Text).SingleLine()
-	})
+	renderIMEPill(c, label)
 }
 
 func resolveAppearanceTheme(c *ui.Context, mode string) *ui.Theme {
@@ -213,10 +186,7 @@ func (a *AppController) renderCapsuleHeader(
 			})
 
 		case engine.PhaseAIStreaming:
-			modeLabel := state.AIMode
-			if modeLabel == "" {
-				modeLabel = i18n.T("ai.mode.ask")
-			}
+			modeLabel := aiModeLabel(state.AIMode)
 			ui.Text(c, i18n.Tf("ai.header", modeLabel)).FontSize(13).FontWeight(600).TextColor(theme.Text).SingleLine()
 
 			// Active AI Profile pill (clickable to cycle profiles)
@@ -337,36 +307,40 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 				})
 				return
 			}
-			ui.Grid(c).Columns(2).Gap(8).FillWidth().Children(func() {
+			ui.Grid(c).Columns(2).Gap(space8).FillWidth().Children(func() {
 				for idx, node := range state.LeaderNodes {
 					n := node
+					isGroup := n.Action.Type == config.ActionGroup
 					card := ui.ButtonBase(c).
 						Key(fmt.Sprintf("leader:%d:%s", idx, n.Key)).
 						FillWidth().
-						Padding(10, 12).
-						Radius(10).
-						Background(theme.Surface).
-						Border(1, theme.Border)
+						Padding(space8, space10).
+						Radius(radiusCard).
+						FocusRing(false)
+					if card.Hovered() {
+						card.Background(selectionFill(theme)).Border(1, selectionEdge(theme))
+					} else {
+						card.Background(tileFill(theme)).Border(1, hairline(theme))
+					}
 
 					card.Children(func() {
-						ui.Row(c).FillWidth().Gap(10).AlignItems(ui.Center).Children(func() {
-							ui.Box(c).
-								MinWidth(26).
-								Padding(3, 7).
-								Radius(6).
-								Background(withAlpha(theme.Accent, 0.14)).
-								Border(1, withAlpha(theme.Accent, 0.35)).
-								Center().
-								Children(func() {
-									ui.Text(c, n.Key).FontSize(12).FontWeight(700).TextColor(theme.Accent).SingleLine()
-								})
-
-							renderSemanticIcon(c, n.Icon, 16, theme.Accent)
-
-							ui.Text(c, n.Label).FontSize(13).FontWeight(500).TextColor(theme.Text).SingleLine().Grow(1)
-
-							if n.Action.Type == config.ActionGroup {
-								ui.Text(c, "›").FontSize(15).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+						ui.Row(c).FillWidth().Gap(space10).AlignItems(ui.Center).Children(func() {
+							leaderKeycap(c, theme, n.Key)
+							renderSemanticIcon(c, n.Icon, IconSize16, theme.TextMuted)
+							ui.Text(c, i18n.DisplayLabel(n.Label)).
+								FontSize(typeBody).
+								FontWeight(500).
+								TextColor(theme.Text).
+								SingleLine().
+								Grow(1).
+								Shrink(1)
+							if isGroup {
+								// A group shows how much it holds before its chevron.
+								ui.Text(c, strconv.Itoa(len(n.Action.Children))).
+									FontSize(typeMeta).
+									TextColor(theme.TextMuted).
+									SingleLine()
+								renderSemanticIcon(c, "chevron.right", 12, theme.TextMuted)
 							}
 						})
 					})
@@ -380,13 +354,35 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 		})
 
 		ui.Divider(c)
-		ui.Row(c).FillWidth().Gap(12).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, i18n.T("leader.footer")).
-				FontSize(11).
-				TextColor(theme.TextMuted).
-				SingleLine()
+		ui.Row(c).FillWidth().Gap(space12).AlignItems(ui.Center).Children(func() {
+			keyHint(c, theme, "a–z", i18n.T("leader.hint.trigger"), keyToneNeutral)
+			keyHint(c, theme, "/", i18n.T("leader.hint.search"), keyToneNeutral)
+			keyHint(c, theme, "⌫", i18n.T("leader.hint.back"), keyToneNeutral)
+			keyHint(c, theme, "esc", i18n.T("leader.hint.close"), keyToneNeutral)
+			ui.Spacer(c)
+			// While the Leader holds the temporary ASCII lock, say so: it is
+			// why the keys type letters even though a Chinese IME was active.
+			if a.asciiLockedForCapsule() {
+				chip(c, theme, "lock.fill", i18n.T("leader.ascii_locked"), chipAccent)
+			}
 		})
 	})
+}
+
+// leaderKeycap is the Leader menu's mnemonic key: a larger accent keycap, the
+// one thing to press on each card.
+func leaderKeycap(c *ui.Context, theme *ui.Theme, key string) {
+	bg := surfaceBase(theme)
+	ui.Box(c).
+		Size(24, 24).
+		Radius(radiusChip).
+		Center().
+		Background(theme.Accent.Alpha(0.14)).
+		Border(1, theme.Accent.Alpha(0.42)).
+		Shadow(0, 1, 0, 0, theme.Accent.Alpha(0.28)).
+		Children(func() {
+			ui.Text(c, key).FontSize(typeBody).FontWeight(700).TextColor(accentInk(theme, bg)).SingleLine()
+		})
 }
 
 func (a *AppController) handleLeaderInput(ev ui.InputEvent) bool {
@@ -456,62 +452,72 @@ func (a *AppController) renderOmniboxView(
 
 	rootCol.Children(func() {
 		query := state.OmniboxQuery
-		in := ui.TextInput(c, &query).
-			Bind(&a.uiState.searchHandle).
-			AutoFocus().
-			Search().
-			Placeholder(omniboxPlaceholder(state.OmniboxTab)).
-			Label(i18n.T("omnibox.search_label")).
-			FillWidth()
+		searchRow := ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center)
+		searchRow.Children(func() {
+			in := ui.TextInput(c, &query).
+				Bind(&a.uiState.searchHandle).
+				AutoFocus().
+				Search().
+				Placeholder(omniboxPlaceholder(state.OmniboxTab)).
+				Label(i18n.T("omnibox.search_label")).
+				FontSize(typeSearch).
+				Grow(1)
 
-		if query != "" {
-			in.TextRanges(ui.TextRange{
-				Start:  0,
-				End:    utf8.RuneCountInString(query),
-				Color:  theme.Text,
-				Weight: 500,
+			if query != "" {
+				in.TextRanges(ui.TextRange{
+					Start:  0,
+					End:    utf8.RuneCountInString(query),
+					Color:  theme.Text,
+					Weight: 500,
+				})
+			}
+
+			in.ObserveInput(func(ev ui.InputEvent) {
+				switch ev.Kind {
+				case ui.InputCompose:
+					a.uiState.isComposing = ev.Text != ""
+				case ui.InputText, ui.InputCommand:
+					a.uiState.isComposing = false
+				}
 			})
-		}
 
-		in.ObserveInput(func(ev ui.InputEvent) {
-			switch ev.Kind {
-			case ui.InputCompose:
-				a.uiState.isComposing = ev.Text != ""
-			case ui.InputText, ui.InputCommand:
+			if !in.Focused() {
 				a.uiState.isComposing = false
+			} else {
+				a.uiState.isComposing = in.Composing()
 			}
-		})
 
-		if !in.Focused() {
-			a.uiState.isComposing = false
-		} else {
-			a.uiState.isComposing = in.Composing()
-		}
-
-		// Quick chords (⌥1..⌥9 / Alt+1..9) must be taken before the text
-		// editor types the Option+digit character.
-		in.HandleInput(func(ev ui.InputEvent) bool {
-			if ev.Kind != ui.InputKeyDown || a.uiState.isComposing {
-				return false
-			}
-			return a.handleOmniboxKey(ev.Key, ev.Mods, state)
-		})
-
-		in.OnTextKey(func(k ui.TextKey) bool {
-			if a.uiState.isComposing {
-				switch k.Key {
-				case ui.KeyEnter, ui.KeyUp, ui.KeyDown, ui.KeyTab, ui.KeyEscape:
-					return true
-				default:
+			// Quick chords (⌥1..⌥9 / Alt+1..9) must be taken before the text
+			// editor types the Option+digit character.
+			in.HandleInput(func(ev ui.InputEvent) bool {
+				if ev.Kind != ui.InputKeyDown || a.uiState.isComposing {
 					return false
 				}
-			}
-			return a.handleOmniboxKey(k.Key, k.Mods, state)
-		})
+				return a.handleOmniboxKey(ev.Key, ev.Mods, state)
+			})
 
-		if in.Changed() && query != state.OmniboxQuery {
-			a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: query})
-		}
+			in.OnTextKey(func(k ui.TextKey) bool {
+				if a.uiState.isComposing {
+					switch k.Key {
+					case ui.KeyEnter, ui.KeyUp, ui.KeyDown, ui.KeyTab, ui.KeyEscape:
+						return true
+					default:
+						return false
+					}
+				}
+				return a.handleOmniboxKey(k.Key, k.Mods, state)
+			})
+
+			if in.Changed() && query != state.OmniboxQuery {
+				a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: query})
+			}
+
+			// A quick-route prefix (> ; @ ? : = /) switches what the box
+			// searches; the chip names the mode so the prefix isn't magic.
+			if icon, label, ok := omniboxRouteMode(state.OmniboxQuery); ok {
+				chip(c, theme, icon, label, chipAccent)
+			}
+		})
 
 		if a.omniboxActionMenuOpen(state) {
 			a.renderOmniboxActionMenu(c, theme, state)
@@ -548,97 +554,84 @@ func (a *AppController) renderOmniboxView(
 			}
 
 			renderList := func() {
-				list := ui.List(c, &a.uiState.listState, len(items), func(i int) {
-					item := items[i]
-					isSelected := i == state.SelectedIndex
-					row := ui.Row(c).
-						FillWidth().
-						Padding(7, 10).
-						Radius(8).
-						Gap(10).
-						AlignItems(ui.Center).
-						Transition(ui.ElementTransition{
-							Animation: profile.rowEnterAnimation(i),
-							Enter:     profile.rowEnterMotion(),
-							ExitDelay: -1, // rows leave at once; only entering staggers
-						})
-					selAnim := profile.selectionAnimation()
-					if selAnim.Duration > 0 {
+				// ⌥1..⌥9 quick-select badges appear only while Option (Alt)
+				// is held, so the resting list stays quiet.
+				altHeld := cfg.Main.Appearance.ShowKeyHints && c.Modifiers()&ui.Alt != 0
+				// The list paints its chosen row in the theme accent. A
+				// transparent accent in a scoped theme hands that job to the
+				// row, which animates a soft tint instead: a solid accent fill
+				// swallowed the accent-colored icon and match highlights.
+				ui.Themed(c, rowSelectionTheme(theme)).Background(ui.Transparent).FillWidth().Grow(1).Children(func() {
+					list := ui.List(c, &a.uiState.listState, len(items), func(i int) {
+						item := items[i]
+						isSelected := i == state.SelectedIndex
+						row := ui.Row(c).
+							FillWidth().
+							Padding(space6, space8).
+							Radius(radiusRow).
+							Gap(space10).
+							AlignItems(ui.Center).
+							Transition(ui.ElementTransition{
+								Animation: profile.rowEnterAnimation(i),
+								Enter:     profile.rowEnterMotion(),
+								ExitDelay: -1, // rows leave at once; only entering staggers
+							})
+						fill, edge := ui.Transparent, ui.Transparent
 						if isSelected {
-							row.Background(row.AnimateColor("row-sel", withAlpha(theme.Accent, 0.16), selAnim)).
-								Border(1, withAlpha(theme.Accent, 0.45))
+							fill, edge = selectionFill(theme), selectionEdge(theme)
+						}
+						if selAnim := profile.selectionAnimation(); selAnim.Duration > 0 {
+							row.Background(row.AnimateColor("row-sel", fill, selAnim)).
+								Border(1, row.AnimateColor("row-edge", edge, selAnim))
 						} else {
-							row.Background(row.AnimateColor("row-sel", ui.Transparent, selAnim))
+							row.Background(fill).Border(1, edge)
 						}
-					} else if isSelected {
-						row.Background(withAlpha(theme.Accent, 0.16)).Border(1, withAlpha(theme.Accent, 0.45))
-					}
 
-					iconColor := theme.TextMuted
-					if isSelected || item.Kind == engine.ItemAIMode || item.Kind == engine.ItemUtility {
-						iconColor = theme.Accent
-					}
+						row.Children(func() {
+							a.renderOmniboxRowLeadingIcon(c, theme, item, isSelected)
 
-					row.Children(func() {
-						a.renderOmniboxRowLeadingIcon(c, item, iconColor)
-
-						if item.Kind == engine.ItemClipboardEntry && item.KeyHint == engine.KeyHintPinned {
-							ui.Box(c).
-								Padding(2, 6).
-								Radius(4).
-								Background(withAlpha(theme.Accent, 0.16)).
-								Children(func() {
-									ui.Text(c, i18n.T("omnibox.pin_badge")).FontSize(10).FontWeight(700).TextColor(theme.Accent).SingleLine()
+							ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(1).Children(func() {
+								ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
+									spans := buildHighlightedSpans(item.Title, item.MatchedIndices, matchMark(theme), theme.Text)
+									title := ui.RichText(c, spans...).FontSize(typeBody).SingleLine().Shrink(1)
+									if isSelected {
+										title.FontWeight(600)
+									} else {
+										title.FontWeight(500)
+									}
+									if item.Kind == engine.ItemClipboardEntry && item.KeyHint == engine.KeyHintPinned {
+										renderSemanticIcon(c, "pin.fill", 11, accentGlyph(theme, surfaceBase(theme)))
+									}
 								})
-						}
+								if item.Subtitle != "" {
+									ui.Text(c, item.Subtitle).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+								}
+							})
 
-						ui.Column(c).Grow(1).Gap(2).Children(func() {
-							spans := buildHighlightedSpans(item.Title, item.MatchedIndices, theme.Accent, theme.Text)
-							ui.RichText(c, spans...).FontSize(13).SingleLine()
-							if item.Subtitle != "" {
-								ui.Text(c, item.Subtitle).FontSize(11).TextColor(theme.TextMuted).SingleLine()
+							if cfg.Main.Appearance.ShowKeyHints && item.KeyHint != "" && item.KeyHint != engine.KeyHintPinned {
+								keyHint(c, theme, item.KeyHint, "", keyToneNeutral)
+							}
+							if altHeld && i < 9 {
+								keyHint(c, theme, quickIndexLabel(i), "", keyToneAccent)
 							}
 						})
 
-						// Direct quick-select badge (⌥1..⌥9 / Alt+1..9).
-						if cfg.Main.Appearance.ShowKeyHints && i < 9 {
-							ui.Box(c).
-								Padding(2, 6).
-								Radius(5).
-								Background(theme.Surface).
-								Border(1, withAlpha(theme.Border, 0.8)).
-								Children(func() {
-									ui.Text(c, quickIndexLabel(i)).FontSize(10).TextColor(theme.TextMuted).SingleLine()
-								})
+						if row.RowDoubleClicked() {
+							a.SelectIndex(i)
+							a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
+						} else if row.RowClicked() {
+							a.SelectIndex(i)
+							a.uiState.searchHandle.RequestFocus(c)
 						}
+					}).FillWidth().Grow(1)
 
-						if cfg.Main.Appearance.ShowKeyHints && item.KeyHint != "" && item.KeyHint != engine.KeyHintPinned {
-							ui.Box(c).
-								Padding(2, 7).
-								Radius(5).
-								Background(theme.Surface).
-								Border(1, theme.Border).
-								Children(func() {
-									ui.Text(c, item.KeyHint).FontSize(11).TextColor(theme.TextMuted).SingleLine()
-								})
-						}
-					})
-
-					if row.RowDoubleClicked() {
-						a.SelectIndex(i)
-						a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
-					} else if row.RowClicked() {
-						a.SelectIndex(i)
-						a.uiState.searchHandle.RequestFocus(c)
+					if list.Changed() && selectedIdx >= 0 && selectedIdx < len(items) && selectedIdx != state.SelectedIndex {
+						a.SelectIndex(selectedIdx)
 					}
-				}).FillWidth().Grow(1)
-
-				if list.Changed() && selectedIdx >= 0 && selectedIdx < len(items) && selectedIdx != state.SelectedIndex {
-					a.SelectIndex(selectedIdx)
-				}
-				if list.Submitted() {
-					a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
-				}
+					if list.Submitted() {
+						a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
+					}
+				})
 			}
 
 			// Side-by-side split: results list on the left, rich preview on the right.
@@ -656,13 +649,10 @@ func (a *AppController) renderOmniboxView(
 		}
 
 		ui.Divider(c)
-		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).FillWidth().Gap(space12).AlignItems(ui.Center).Children(func() {
 			prefix := modPrefix()
-			hint := i18n.Tf("omnibox.footer.hint", prefix, prefix)
-			if selected, ok := selectedOmniboxItem(state); ok && selected.Kind == engine.ItemClipboardEntry {
-				hint += i18n.Tf("omnibox.footer.hint_clipboard", prefix, prefix)
-			}
-			ui.Text(c, hint).FontSize(11).TextColor(theme.TextMuted).SingleLine().Grow(1)
+			a.renderOmniboxFooterHints(c, theme, cfg, state)
+			ui.Spacer(c)
 
 			a.renderOmniboxFooterFrameToggle(c, theme, state, prefix+i18n.T("omnibox.footer.preview"),
 				a.previewPaneVisible(cfg), func() {
@@ -678,6 +668,58 @@ func (a *AppController) renderOmniboxView(
 	})
 }
 
+// renderOmniboxFooterHints names what the keys do to the chosen row rather
+// than listing every shortcut: its primary (↵) and secondary (⌘↵) actions,
+// then the ⌥-number quick select. The rest lives in the ⌘K action menu.
+func (a *AppController) renderOmniboxFooterHints(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig, state engine.State) {
+	selected, ok := selectedOmniboxItem(state)
+	if !ok {
+		keyHint(c, theme, "Tab", i18n.T("omnibox.footer.switch_tab"), keyToneNeutral)
+		keyHint(c, theme, "esc", i18n.T("omnibox.footer.close"), keyToneNeutral)
+		return
+	}
+	specs := engine.AvailableItemActions(selected)
+	for i, spec := range specs {
+		if i >= 2 {
+			break
+		}
+		keyHint(c, theme, adaptActionShortcut(spec.Shortcut), spec.Label, keyToneNeutral)
+	}
+	if cfg.Main.Appearance.ShowKeyHints && len(state.OmniboxItems) > 1 {
+		tone := keyToneNeutral
+		if c.Modifiers()&ui.Alt != 0 {
+			tone = keyToneAccent
+		}
+		keyHint(c, theme, altPrefix()+"1–9", i18n.T("omnibox.footer.quick_select"), tone)
+	}
+}
+
+// omniboxRouteMode names the search mode a quick-route prefix selects, for
+// the chip beside the search field.
+func omniboxRouteMode(query string) (icon, label string, ok bool) {
+	prefix, _, routed := engine.ParseOmniboxPrefix(query)
+	if !routed {
+		return "", "", false
+	}
+	switch prefix {
+	case '>':
+		return "command", i18n.T("omnibox.mode.command"), true
+	case ';':
+		return "text.badge.plus", i18n.T("omnibox.mode.snippets"), true
+	case '@':
+		return "doc.on.clipboard", i18n.T("omnibox.mode.clipboard"), true
+	case '?':
+		return "sparkles", i18n.T("omnibox.mode.ai"), true
+	case ':':
+		return "face.smiling", i18n.T("omnibox.mode.emoji"), true
+	case '=':
+		return "calculator", i18n.T("omnibox.mode.calc"), true
+	case '/':
+		return "wand.and.stars", i18n.T("omnibox.mode.prompts"), true
+	}
+	return "", "", false
+}
+
 // renderOmniboxFooterFrameToggle renders a small footer toggle button.
 func (a *AppController) renderOmniboxFooterFrameToggle(
 	c *ui.Context,
@@ -688,61 +730,89 @@ func (a *AppController) renderOmniboxFooterFrameToggle(
 	onClick func(),
 ) {
 	btn := ui.ButtonBase(c).
-		Padding(2, 8).
-		Radius(6).
+		Padding(space2, space8).
+		Radius(radiusChip).
 		FocusRing(false).
-		Background(theme.Surface).
-		Border(1, withAlpha(theme.Border, 0.8))
+		Background(tileFill(theme)).
+		Border(1, hairline(theme))
+	fg := theme.TextMuted
 	if active {
-		btn.Background(withAlpha(theme.Accent, 0.16)).Border(1, withAlpha(theme.Accent, 0.45))
+		btn.Background(selectionFill(theme)).Border(1, selectionEdge(theme))
+		fg = accentInk(theme, surfaceBase(theme))
 	}
 	btn.Children(func() {
-		ui.Text(c, label).FontSize(10).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+		ui.Text(c, label).FontSize(typeMicro).FontWeight(600).TextColor(fg).SingleLine()
 	})
 	if btn.Clicked() && onClick != nil {
 		onClick()
 	}
 }
 
-func (a *AppController) renderOmniboxRowLeadingIcon(c *ui.Context, item engine.OmniboxItem, iconColor ui.Color) {
+// renderOmniboxRowLeadingIcon draws a row's leading glyph at one fixed tile
+// size, so titles align whatever the item: media thumbnails and app icons
+// show as they are, a hex color shows as its own swatch, clipboard text gets
+// a content-type icon, everything else its semantic icon in a tinted tile.
+func (a *AppController) renderOmniboxRowLeadingIcon(c *ui.Context, theme *ui.Theme, item engine.OmniboxItem, selected bool) {
 	switch item.Kind {
 	case engine.ItemClipboardEntry:
 		if m := item.ClipboardMedia; m != nil && m.ThumbPath != "" {
 			if bmp := a.ThumbBitmap(m.ThumbPath); bmp != nil {
-				ui.Image(c, bmp).Size(22, 22).Fit(ui.Cover).Radius(4)
+				ui.Image(c, bmp).Size(rowIconTile, rowIconTile).Fit(ui.Cover).Radius(radiusTile)
 				return
 			}
 		}
-		renderSemanticIcon(c, item.Icon, 16, iconColor)
+		if swatch, ok := parseHexSwatch(item.ClipboardContent); ok {
+			ui.Box(c).Size(rowIconTile, rowIconTile).Radius(radiusTile).Background(swatch).Border(1, hairline(theme))
+			return
+		}
+		icon := item.Icon
+		if item.ClipboardMedia == nil || item.ClipboardMedia.Kind == "" {
+			icon = clipboardContentIcon(item.ClipboardContent, item.Icon)
+		}
+		iconTile(c, theme, icon, selected)
 
 	case engine.ItemInstalledApp:
 		if bmp := a.AppIconBitmap(item.AppPath); bmp != nil {
-			ui.Image(c, bmp).Size(22, 22).Radius(5)
+			ui.Box(c).Size(rowIconTile, rowIconTile).Center().Children(func() {
+				ui.Image(c, bmp).Size(24, 24).Radius(radiusChip)
+			})
 			return
 		}
 		iconName := item.Icon
 		if iconName == "" {
 			iconName = "app.badge"
 		}
-		renderSemanticIcon(c, iconName, 16, iconColor)
+		iconTile(c, theme, iconName, selected)
 
 	case engine.ItemEmoji:
 		glyph := strings.TrimSpace(item.UtilityValue)
 		if glyph != "" {
-			ui.Box(c).Size(22, 22).Center().Children(func() {
-				ui.Text(c, glyph).FontSize(18).SingleLine()
+			ui.Box(c).Size(rowIconTile, rowIconTile).Radius(radiusTile).Center().Background(tileFill(theme)).Children(func() {
+				ui.Text(c, glyph).FontSize(17).SingleLine()
 			})
 			return
 		}
-		renderSemanticIcon(c, "face.smiling", 16, iconColor)
+		iconTile(c, theme, "face.smiling", selected)
 
 	default:
 		iconName := item.Icon
 		if iconName == "" {
 			iconName = "bolt"
 		}
-		renderSemanticIcon(c, iconName, 16, iconColor)
+		iconTile(c, theme, iconName, selected)
 	}
+}
+
+// rowSelectionTheme is the theme the Omnibox list builds with: the accent
+// the list would paint its chosen row with is made transparent so the row
+// draws its own soft, animated tint (see renderOmniboxView), and text on the
+// chosen row keeps the regular text color.
+func rowSelectionTheme(theme *ui.Theme) *ui.Theme {
+	t := *theme
+	t.Accent = ui.Transparent
+	t.InactiveAccent = ui.Transparent
+	t.AccentText = theme.Text
+	return &t
 }
 
 func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state engine.State) bool {
@@ -865,6 +935,12 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 			a.Dispatch(engine.Event{Type: engine.EventCopyAIOutput})
 		})
 	}
+	review, hasReview := a.aiReview(state)
+	if hasReview {
+		c.OnWindowShortcut(primaryMod(), ui.KeyD, func() {
+			a.toggleAIReview(review)
+		})
+	}
 
 	ui.Column(c).FillWidth().Grow(1).Padding(12, 14).Gap(8).Children(func() {
 		if state.AISourceText != "" {
@@ -946,6 +1022,10 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 				})
 		}
 
+		if hasReview {
+			a.renderAIReviewToggle(c, theme, review)
+		}
+
 		applyProseLineHeight(ui.Scroll(c).
 			FillWidth().
 			Grow(1).
@@ -976,6 +1056,8 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 					}
 				case state.AIOutput == "":
 					ui.Text(c, i18n.T("ai.generating")).FontSize(13).TextColor(theme.TextMuted)
+				case hasReview && a.aiReviewShowsChanges(review):
+					renderAIReviewChanges(c, theme, review)
 				default:
 					markdown.View(c, state.AIOutput, &a.uiState.mdOpts)
 					if !state.AIComplete {
@@ -1113,17 +1195,12 @@ func hudIconForMessage(msg string) string {
 }
 
 func (a *AppController) renderHUDView(c *ui.Context, theme *ui.Theme, state engine.State) {
-	ui.Row(c).Fill().Padding(10, 16).Center().Gap(8).Children(func() {
-		if icon := hudIconForMessage(state.HUDMessage); icon != "" {
-			color := theme.Accent
-			if icon == "xmark" {
-				color = theme.Danger
-			}
-			renderSemanticIcon(c, icon, 14, color)
-		} else {
-			ui.Box(c).Size(8, 8).Radius(4).Background(theme.Accent)
-		}
-		ui.Text(c, state.HUDMessage).FontSize(13).FontWeight(600).TextColor(theme.Text).SingleLine()
+	ui.Row(c).Fill().Padding(space10, space16).Center().Gap(space8).Children(func() {
+		// Same vocabulary as the floating pill: success, failure, input
+		// method or info, each in its readable semantic color.
+		icon, color := pillMessageIcon(theme, state.HUDMessage)
+		renderSemanticIcon(c, icon, 15, color)
+		ui.Text(c, state.HUDMessage).FontSize(typeBody).FontWeight(600).TextColor(theme.Text).SingleLine().Shrink(1)
 	})
 }
 
@@ -1294,7 +1371,11 @@ func quickIndexLabel(i int) string {
 	return altPrefix() + strconv.Itoa(i+1)
 }
 
-func buildHighlightedSpans(title string, matchedIndices []int, accent, normal ui.Color) []ui.Span {
+// buildHighlightedSpans splits title into spans, marking the fuzzy/pinyin
+// matched runes with a marker-pen background (mark) and a heavier weight.
+// The glyphs keep the readable text color, so a match stays legible on any
+// row tint and with any system accent.
+func buildHighlightedSpans(title string, matchedIndices []int, mark, normal ui.Color) []ui.Span {
 	if title == "" {
 		return nil
 	}
@@ -1317,9 +1398,11 @@ func buildHighlightedSpans(title string, matchedIndices []int, accent, normal ui
 		}
 		if curMatched {
 			spans = append(spans, ui.Span{
-				Text:   buf.String(),
-				Color:  accent,
-				Weight: 700,
+				Text:       buf.String(),
+				Color:      normal,
+				Weight:     700,
+				Background: mark,
+				Radius:     3,
 			})
 		} else {
 			spans = append(spans, ui.Span{

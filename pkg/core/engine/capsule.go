@@ -919,7 +919,7 @@ func executeLeaderNode(
 		clearPhaseFields(&next)
 		next.Phase = PhaseLeader
 		next.LeaderPath = append(append([]string(nil), path...), node.Key)
-		next.LeaderBreadcrumbs = append(append([]string(nil), breadcrumbs...), node.Label)
+		next.LeaderBreadcrumbs = append(append([]string(nil), breadcrumbs...), i18n.DisplayLabel(node.Label))
 		next.LeaderNodes = copyLeaderNodes(node.Action.Children)
 		return next, nil
 
@@ -1907,7 +1907,7 @@ func flattenLeaderNodes(nodes []config.LeaderNode, keyPrefix, breadcrumbs []stri
 	for idx, node := range nodes {
 		nextKeys := append(append([]string(nil), keyPrefix...), node.Key)
 		if node.Action.Type == config.ActionGroup {
-			nextBC := append(append([]string(nil), breadcrumbs...), node.Label)
+			nextBC := append(append([]string(nil), breadcrumbs...), i18n.DisplayLabel(node.Label))
 			result = append(result, flattenLeaderNodes(node.Action.Children, nextKeys, nextBC)...)
 			continue
 		}
@@ -1920,10 +1920,15 @@ func flattenLeaderNodes(nodes []config.LeaderNode, keyPrefix, breadcrumbs []stri
 		kws = append(kws, breadcrumbs...)
 		kws = append(kws, node.Key, strings.Join(nextKeys, ""), "action")
 		kws = append(kws, keywordsForAction(node.Action)...)
+		title := i18n.DisplayLabel(node.Label)
+		if title != node.Label {
+			// Localized stock label: the original stays searchable.
+			kws = append(kws, node.Label)
+		}
 		actCopy := node.Action
 		result = append(result, OmniboxItem{
 			ID:           fmt.Sprintf("leader:%s#%d", strings.Join(nextKeys, "."), idx),
-			Title:        node.Label,
+			Title:        title,
 			Subtitle:     subtitle,
 			KeyHint:      keyHint,
 			Icon:         node.Icon,
@@ -1941,7 +1946,7 @@ func flattenAIModes(nodes []config.LeaderNode, keyPrefix, breadcrumbs []string) 
 		nextKeys := append(append([]string(nil), keyPrefix...), node.Key)
 		switch node.Action.Type {
 		case config.ActionGroup:
-			nextBC := append(append([]string(nil), breadcrumbs...), node.Label)
+			nextBC := append(append([]string(nil), breadcrumbs...), i18n.DisplayLabel(node.Label))
 			result = append(result, flattenAIModes(node.Action.Children, nextKeys, nextBC)...)
 		case config.ActionAIRewrite:
 			icon := node.Icon
@@ -1951,10 +1956,14 @@ func flattenAIModes(nodes []config.LeaderNode, keyPrefix, breadcrumbs []string) 
 			kws := make([]string, 0, len(breadcrumbs)+3)
 			kws = append(kws, breadcrumbs...)
 			kws = append(kws, node.Action.Mode, "ai", node.Key)
+			title := i18n.DisplayLabel(node.Label)
+			if title != node.Label {
+				kws = append(kws, node.Label)
+			}
 			result = append(result, OmniboxItem{
 				ID:       fmt.Sprintf("ai:%s:%d", node.Action.Mode, idx),
-				Title:    node.Label,
-				Subtitle: node.Action.Prompt,
+				Title:    title,
+				Subtitle: i18n.DisplayLabel(node.Action.Prompt),
 				KeyHint:  strings.Join(nextKeys, " "),
 				Icon:     icon,
 				Keywords: kws,

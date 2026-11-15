@@ -132,8 +132,9 @@ func TestLeaderSlashJumpsToCleanOmnibox(t *testing.T) {
 	tt := ui.NewTester(f.ctrl.CapsuleView, w, h)
 	tt.Frame()
 
-	if !tt.HasText("/ Search") {
-		t.Fatalf("expected leader footer '/ Search' hint, got %v", tt.Texts())
+	// The footer shows the "/" keycap beside its "Search" caption.
+	if !tt.HasText("/") || !tt.HasText("Search") {
+		t.Fatalf("expected leader footer '/' + 'Search' key hint, got %v", tt.Texts())
 	}
 
 	tt.Key(0, ui.KeySlash)

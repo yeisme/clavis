@@ -17,6 +17,11 @@ const (
 	defaultCornerRadius  = 16.0
 	defaultHUDDurationMs = 1400
 
+	// Omnibox result rows the panel sizes for; Settings offers the same
+	// range, so every value the stepper allows changes the panel.
+	minVisibleResults = 3
+	maxVisibleResults = 12
+
 	// Floating IME/status pill sizing.
 	pillShortWidth   = 68
 	pillShortHeight  = 30
@@ -64,12 +69,7 @@ func PreferredCapsuleSize(phase engine.CapsulePhase, appearance config.Appearanc
 		if maxVisible <= 0 {
 			maxVisible = 8
 		}
-		if maxVisible < 3 {
-			maxVisible = 3
-		}
-		if maxVisible > 12 {
-			maxVisible = 12
-		}
+		maxVisible = min(max(maxVisible, minVisibleResults), maxVisibleResults)
 		// Header (44) + Search row (52) + padding/dividers/footer (52) + rows (44px each)
 		h := 148 + maxVisible*44
 		if h < 320 {
@@ -92,7 +92,31 @@ func PreferredCapsuleSizeForState(state engine.State, appearance config.Appearan
 	if state.Phase == engine.PhaseAIStreaming && len(state.AIHistory) > 0 && h < 540 {
 		h = 540
 	}
+	if state.Phase == engine.PhaseLeader {
+		h = leaderHeightFor(len(state.LeaderNodes))
+	}
 	return w, h
+}
+
+// Leader menu metrics: header + divider + padding + footer chrome around a
+// two-column grid of cards.
+const (
+	leaderChromeHeight = 114 // header, dividers, paddings, gaps and footer row
+	leaderRowHeight    = 50  // one card (42) plus the grid gap (8)
+	leaderMinHeight    = 172
+	leaderMaxHeight    = 440
+)
+
+// leaderHeightFor fits the Leader menu to its cards (two per row) instead of
+// a fixed height, so a short menu doesn't trail an empty half panel and a
+// long one grows until it scrolls.
+func leaderHeightFor(nodes int) int {
+	rows := (nodes + 1) / 2
+	if rows < 1 {
+		rows = 1
+	}
+	h := leaderChromeHeight + rows*leaderRowHeight
+	return min(max(h, leaderMinHeight), leaderMaxHeight)
 }
 
 // PreferredIMEPillSize returns compact dimensions for the floating IME micro-pill window.

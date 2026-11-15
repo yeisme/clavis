@@ -134,6 +134,10 @@ type uiViewState struct {
 	imeRuleSourceDraft     string
 	imeRuleModeDraft       config.IMEMode
 
+	// aiReview caches the diff of an AI rewrite against its source and the
+	// view the user picked (see ai_review.go).
+	aiReview aiReviewState
+
 	// Animation bookkeeping (view-side, main-thread only).
 	lastExitHideDelay  time.Duration
 	lastAIError        string
@@ -184,7 +188,10 @@ type AppController struct {
 	// Leader temporary ASCII IME lock state
 	preLeaderIMESourceID string
 	imeLockedForCapsule  bool
-	skipIMERestore       bool
+	// snippetUndo is the last inline expansion, revertible by an immediate
+	// Backspace (see snippet_undo.go).
+	snippetUndo    snippetUndoState
+	skipIMERestore bool
 
 	// Keymap hold layer reported by the host bridge (e.g. "nav", "hyper", "")
 	activeKeymapLayer string
@@ -255,6 +262,10 @@ func NewAppController(opts Options) *AppController {
 		cfgStore = config.NewConfigStore(cfgDir)
 	}
 	cfg := cfgStore.Current()
+	// The candidate window reads its appearance from a package global; publish
+	// it now, not on the first Capsule frame, which may be long after the
+	// first composition.
+	SetCandidateAppearance(cfg.Main.Appearance)
 
 	clipStore := opts.ClipboardStore
 	if clipStore == nil {
@@ -2047,6 +2058,9 @@ func (c *AppController) HandleTriggerEvent(ev host.TriggerEvent) {
 		})
 
 	case host.TriggerSnippetKey:
+		// Any typed key ends the window in which Backspace undoes the last
+		// expansion.
+		c.disarmSnippetUndo()
 		cfg := c.ConfigStore.Current()
 		if !cfg.Main.Trigger.SnippetExpansionEnabled || ev.Rune == "" {
 			return
@@ -2078,18 +2092,24 @@ func (c *AppController) HandleTriggerEvent(ev host.TriggerEvent) {
 					backOffset = rendered.CursorBackOffset
 				}
 				c.injectTextAsync(renderedText, delCount, backOffset)
+				c.armSnippetUndo(match.TypedTrigger, renderedText, backOffset)
 				break
 			}
 		}
 
 	case host.TriggerSnippetBack:
+		if c.tryUndoSnippet() {
+			return
+		}
 		c.mu.Lock()
 		c.Snippets.Backspace()
 		c.mu.Unlock()
 
 	case host.TriggerSnippetReset:
 		// Cursor moved, app changed, IME composed, or a click landed: the typed trigger prefix
-		// can no longer be relied on, so drop it instead of risking a wrong expansion.
+		// can no longer be relied on, so drop it instead of risking a wrong expansion. The
+		// caret may no longer sit after the expansion either, so Backspace can't undo it.
+		c.disarmSnippetUndo()
 		c.mu.Lock()
 		if c.Snippets != nil {
 			c.Snippets.Reset()
@@ -2334,6 +2354,7 @@ func (c *AppController) UpdateMainConfig(mutate func(main *config.MainConfig)) e
 	}
 
 	updated := c.ConfigStore.Current()
+	SetCandidateAppearance(updated.Main.Appearance)
 	c.mu.Lock()
 	c.StateMachine.SetConfig(updated)
 	if c.AIClient != nil {
@@ -2601,6 +2622,7 @@ func (c *AppController) ReloadConfig() bool {
 	var br bridge.HostService
 	if ok {
 		c.StateMachine.SetConfig(cfg)
+		SetCandidateAppearance(cfg.Main.Appearance)
 		if c.Snippets != nil {
 			c.Snippets.UpdateSnippets(cfg.Snippets.Items)
 		}

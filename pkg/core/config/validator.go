@@ -98,6 +98,12 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 		})
 	}
 
+	if main.Trigger.LeaderRevealDelayMs < 0 || main.Trigger.LeaderRevealDelayMs > MaxLeaderRevealDelayMs {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "trigger.leader_reveal_delay_ms", Severity: SeverityWarning,
+			Message: i18n.Tf("diag.trigger.leader_reveal_delay.range", MaxLeaderRevealDelayMs, main.Trigger.LeaderRevealDelayMs),
+		})
+	}
 	if main.Trigger.DoubleTapIntervalMs < 100 || main.Trigger.DoubleTapIntervalMs > 800 {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "trigger.double_tap_interval_ms", Severity: SeverityError,

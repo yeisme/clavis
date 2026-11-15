@@ -17,6 +17,13 @@ type TriggerConfig struct {
 	CapsuleShortcut         string `json:"capsuleShortcut"`
 	ClipboardShortcut       string `json:"clipboardShortcut"`
 	SnippetExpansionEnabled bool   `json:"snippetExpansionEnabled"`
+	// SnippetBackspaceUndo reverts an expansion when Backspace is the very
+	// next key, restoring the typed trigger (as espanso's undo_backspace).
+	SnippetBackspaceUndo bool `json:"snippetBackspaceUndo"`
+	// LeaderRevealDelayMs keeps the Leader menu invisible (but listening)
+	// this long after activation: a fast key sequence runs without the menu
+	// ever flashing, a pause reveals it (which-key style). 0 shows at once.
+	LeaderRevealDelayMs int `json:"leaderRevealDelayMs"`
 }
 
 func DefaultTriggerConfig() TriggerConfig {
@@ -27,8 +34,17 @@ func DefaultTriggerConfig() TriggerConfig {
 		CapsuleShortcut:         "option+space",
 		ClipboardShortcut:       "alt+shift+c",
 		SnippetExpansionEnabled: true,
+		SnippetBackspaceUndo:    true,
+		LeaderRevealDelayMs:     DefaultLeaderRevealDelayMs,
 	}
 }
+
+// Leader reveal delay bounds: the default suits fast typists without making
+// newcomers wait; beyond a second the menu would feel broken.
+const (
+	DefaultLeaderRevealDelayMs = 220
+	MaxLeaderRevealDelayMs     = 1000
+)
 
 func decodeTriggerConfig(tbl *toml.Table, path string) (TriggerConfig, error) {
 	cfg := DefaultTriggerConfig()
@@ -65,6 +81,16 @@ func decodeTriggerConfig(tbl *toml.Table, path string) (TriggerConfig, error) {
 	} else if ok {
 		cfg.SnippetExpansionEnabled = b
 	}
+	if b, ok, err := optionalBool(tbl, "snippet_backspace_undo", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.SnippetBackspaceUndo = b
+	}
+	if n, ok, err := optionalInt(tbl, "leader_reveal_delay_ms", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.LeaderRevealDelayMs = n
+	}
 	return cfg, nil
 }
 
@@ -76,6 +102,8 @@ func (c TriggerConfig) toTOML() *toml.Table {
 	t.Set("capsule_shortcut", toml.StringVal(c.CapsuleShortcut))
 	t.Set("clipboard_shortcut", toml.StringVal(c.ClipboardShortcut))
 	t.Set("snippet_expansion_enabled", toml.BoolVal(c.SnippetExpansionEnabled))
+	t.Set("snippet_backspace_undo", toml.BoolVal(c.SnippetBackspaceUndo))
+	t.Set("leader_reveal_delay_ms", toml.IntVal(int64(c.LeaderRevealDelayMs)))
 	return t
 }
 

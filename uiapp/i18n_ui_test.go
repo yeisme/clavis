@@ -35,7 +35,9 @@ func TestChineseLocalizationRendering(t *testing.T) {
 		"代码片段",       // Snippets tab
 		"术语表",        // Glossary tab
 		"Omnibox 搜索", // search field accessibility label
-		"↵ 运行",       // footer hint
+		"运行动作",       // footer: the chosen row's primary action (↵)
+		"数字直选",       // footer: ⌥1–9 quick select
+		"左半屏",        // stock leader label shown in Chinese
 	} {
 		if !tt.HasText(want) {
 			t.Fatalf("Chinese omnibox missing %q; texts: %q", want, tt.Texts())
@@ -45,8 +47,10 @@ func TestChineseLocalizationRendering(t *testing.T) {
 	// Leader view localizes its footer and empty state.
 	ctrl.Dispatch(engine.Event{Type: engine.EventOpenLeader, Context: &engine.CapsuleContext{AppName: "Notes"}})
 	tt.Frame()
-	if !tt.HasText("按键触发") {
-		t.Fatalf("Chinese leader footer missing; texts: %q", tt.Texts())
+	for _, want := range []string{"触发", "搜索", "返回", "关闭", "窗口"} {
+		if !tt.HasText(want) {
+			t.Fatalf("Chinese leader footer/labels missing %q; texts: %q", want, tt.Texts())
+		}
 	}
 
 	// Settings center rail and header localize.

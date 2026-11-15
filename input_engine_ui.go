@@ -29,6 +29,9 @@ type inputEngineUI struct {
 	panel *mygo.Window
 	view  atomic.Pointer[bridge.InputEngineView]
 	ai    aiDebouncer
+	// sizer keeps the panel from resizing on every keystroke: within one
+	// composition it only grows, in steps.
+	sizer uiapp.CandidatePanelSizer
 }
 
 func (a *desktopApp) setupInputEngine(ctx context.Context, br bridge.HostService, cfg config.InputEngineConfig, suggest suggestFunc) *inputEngineUI {
@@ -62,10 +65,11 @@ func (u *inputEngineUI) onView(ctx context.Context, v bridge.InputEngineView) {
 	mygo.RunOnMain(func() {
 		cur := u.view.Load()
 		if cur == nil || !cur.View.Composing || len(cur.View.Candidates) == 0 && cur.View.Preedit == "" {
+			u.sizer.Reset()
 			u.panel.Hide()
 			return
 		}
-		pw, ph := uiapp.PreferredCandidatePanelSize(cur.View)
+		pw, ph := u.sizer.Next(cur.View, uiapp.CandidateAppearance())
 		bounds := computeCandidatePanelBounds(cur.Anchor, mygo.Screen.CursorScreenPoint(),
 			bridge.Size{Width: float64(pw), Height: float64(ph)}, mygo.Screen.Displays())
 		u.panel.SetBounds(bounds)

@@ -40,7 +40,7 @@ const (
 	keychainService           = "com.yeisme.clavis"
 	clipPollInterval          = 400 * time.Millisecond
 	clipPruneEvery            = 5 * time.Minute
-	imePillDuration           = 850 * time.Millisecond
+	imePillFadeOut            = 160 * time.Millisecond
 	imePillOffsetX            = 8.0
 	imePillOffsetY            = 6.0
 	defaultPromptHistoryLimit = 500
@@ -145,35 +145,42 @@ type dynamicBridgeUpdater interface {
 }
 
 type desktopApp struct {
-	mu                     sync.Mutex
-	ctx                    context.Context
-	cancel                 context.CancelFunc
-	cfgStore               *config.ConfigStore
-	sqliteStore            *storage.SQLiteClipboardStore
-	learningStore          *storage.LearningStore
-	clipStore              clipboard.Store
-	mediaStore             *clipboard.MediaStore
-	hostBridge             bridge.HostService
-	controller             *uiapp.AppController
-	supervisor             *daemon.ResidentSupervisor
-	frecencySyncer         *daemon.FrecencySyncer
-	configWatcher          *watcher.ConfigWatcher
-	capsulePanel           *mygo.Window
-	promptPanel            *mygo.Window
-	imePillPanel           *mygo.Window
-	inputUI                *inputEngineUI
-	settingsWin            *mygo.Window
-	selectionBar           *mygo.Window
-	selectionBarPayload    uiapp.SelectionBarPayload
-	tray                   *mygo.Tray
-	permMenuItem           *mygo.MenuItem
-	loginMenuItem          *mygo.MenuItem
-	trayLabelItems         map[string]*mygo.MenuItem
-	bridgeRunning          bool
-	shuttingDown           bool
-	bgWG                   sync.WaitGroup
-	fallbackAccelerators   map[string]host.TriggerKind
-	sessionAnchor          *host.CursorAnchor
+	mu            sync.Mutex
+	ctx           context.Context
+	cancel        context.CancelFunc
+	cfgStore      *config.ConfigStore
+	sqliteStore   *storage.SQLiteClipboardStore
+	learningStore *storage.LearningStore
+	// learningWriter is the only path hook, commit and UI callers use to
+	// learn: RAM mirror at once, SQLite in coalesced background batches.
+	learningWriter       *storage.LearningWriter
+	clipStore            clipboard.Store
+	mediaStore           *clipboard.MediaStore
+	hostBridge           bridge.HostService
+	controller           *uiapp.AppController
+	supervisor           *daemon.ResidentSupervisor
+	frecencySyncer       *daemon.FrecencySyncer
+	configWatcher        *watcher.ConfigWatcher
+	capsulePanel         *mygo.Window
+	promptPanel          *mygo.Window
+	imePillPanel         *mygo.Window
+	inputUI              *inputEngineUI
+	settingsWin          *mygo.Window
+	selectionBar         *mygo.Window
+	selectionBarPayload  uiapp.SelectionBarPayload
+	tray                 *mygo.Tray
+	permMenuItem         *mygo.MenuItem
+	loginMenuItem        *mygo.MenuItem
+	trayLabelItems       map[string]*mygo.MenuItem
+	bridgeRunning        bool
+	shuttingDown         bool
+	bgWG                 sync.WaitGroup
+	fallbackAccelerators map[string]host.TriggerKind
+	sessionAnchor        *host.CursorAnchor
+	// capsuleRevealed is set once the capsule is visibly on screen for the
+	// current session (after a Leader's reveal delay), and cleared when the
+	// window actually hides.
+	capsuleRevealed        bool
 	imePillLabel           string
 	imePillTimer           *time.Timer
 	imePillGen             atomic.Uint64
@@ -209,6 +216,7 @@ func (a *desktopApp) start() {
 
 	var sqliteStore *storage.SQLiteClipboardStore
 	var learningStore *storage.LearningStore
+	var learningWriter *storage.LearningWriter
 	var clipStore clipboard.Store
 	var mediaStore *clipboard.MediaStore
 	if userDataDir, err := mygo.App.Path(mygo.PathUserData); err == nil && userDataDir != "" {
@@ -221,6 +229,7 @@ func (a *desktopApp) start() {
 			_, _ = s.PruneExpired(ctx, cfg.Main.Clipboard.RetentionDays, cfg.Main.Clipboard.MaxHistoryItems)
 			if ls, lsErr := storage.NewLearningStore(s.DB()); lsErr == nil {
 				learningStore = ls
+				learningWriter = storage.NewLearningWriter(ls, storage.LearningWriterOptions{})
 			}
 		}
 	}
@@ -460,6 +469,7 @@ func (a *desktopApp) start() {
 	a.cfgStore = cfgStore
 	a.sqliteStore = sqliteStore
 	a.learningStore = learningStore
+	a.learningWriter = learningWriter
 	a.clipStore = clipStore
 	a.mediaStore = mediaStore
 	a.hostBridge = hostBridge
@@ -1049,13 +1059,12 @@ func (a *desktopApp) handleRecordItemUse(itemID string) {
 	if sup != nil {
 		sup.RecordInteraction()
 	}
+	if lw := a.learningWriterForUse(); lw != nil {
+		// RAM mirror now (the frecency sync below sees this use), SQLite later
+		// in a coalesced batch: ~12.6ms per native write on Windows.
+		lw.QueueItemUse(itemID, time.Now())
+	}
 	a.goBG(func(ctx context.Context) {
-		a.mu.Lock()
-		ls := a.learningStore
-		a.mu.Unlock()
-		if ls != nil {
-			_ = ls.RecordItemUse(ctx, itemID, time.Now())
-		}
 		a.syncFrecency(ctx)
 	})
 }
@@ -1070,14 +1079,22 @@ func (a *desktopApp) handleRecordPromptVersion(promptID, trigger, rawDraft, fina
 	if sup != nil {
 		sup.RecordInteraction()
 	}
-	a.goBG(func(ctx context.Context) {
-		a.mu.Lock()
-		ls := a.learningStore
-		a.mu.Unlock()
-		if ls != nil {
-			_ = ls.RecordPromptVersion(ctx, promptID, trigger, rawDraft, finalOutput, preset)
-		}
-	})
+	if lw := a.learningWriterForUse(); lw != nil {
+		lw.QueuePromptVersion(promptID, trigger, rawDraft, finalOutput, preset)
+	}
+}
+
+// learningWriterForUse returns the async learning writer, starting it on
+// first use when the app was assembled with a learning store but no writer
+// (tests, alternate setups). It never starts one once shutdown began, so a
+// late event cannot schedule writes against a closing database.
+func (a *desktopApp) learningWriterForUse() *storage.LearningWriter {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.learningWriter == nil && a.learningStore != nil && !a.shuttingDown {
+		a.learningWriter = storage.NewLearningWriter(a.learningStore, storage.LearningWriterOptions{})
+	}
+	return a.learningWriter
 }
 
 func (a *desktopApp) wireInputEngineLearning(br bridge.HostService, ls *storage.LearningStore) {
@@ -1088,25 +1105,23 @@ func (a *desktopApp) wireInputEngineLearning(br bridge.HostService, ls *storage.
 	adapter := storage.NewUserFrequencyAdapter(ls)
 	lh.UpdateInputEngineLearning(adapter, func(c bridge.InputEngineCommit) {
 		a.mu.Lock()
-		store := a.learningStore
 		sup := a.supervisor
 		shuttingDown := a.shuttingDown
-		bgCtx := a.ctx
 		a.mu.Unlock()
 		if shuttingDown {
 			return
 		}
+		writer := a.learningWriterForUse()
 		// Resident telemetry: this runs on the view worker, never the hook.
 		if sup != nil {
 			sup.RecordKeystroke(c.LatencyNs, utf8.RuneCountInString(c.Word))
 		}
-		if store == nil {
-			return
+		// The view worker drains commits right before it refreshes the
+		// candidate window, so this must not wait on SQLite (one or two
+		// native round trips, >=12.6ms each on Windows): queue it.
+		if writer != nil {
+			writer.QueueIMECommit(c.PinyinKey, c.Word, c.PrevWord, c.Pinned)
 		}
-		if bgCtx == nil {
-			bgCtx = context.Background()
-		}
-		_ = store.RecordIMECommit(bgCtx, c.PinyinKey, c.Word, c.PrevWord, c.Pinned)
 	})
 }
 
@@ -1267,6 +1282,7 @@ func (a *desktopApp) presentIMEPillAsync(ctx context.Context, gen uint64, br bri
 		}, displays)
 
 		pill.SetBounds(bounds)
+		pill.SetOpacity(1) // undo a fade-out the new label interrupted
 		pill.ShowInactive()
 		pill.Invalidate()
 		a.scheduleIMEPillAutoHide(gen)
@@ -1282,10 +1298,30 @@ func (a *desktopApp) scheduleIMEPillAutoHide(gen uint64) {
 	if a.imePillTimer != nil {
 		a.imePillTimer.Stop()
 	}
-	a.imePillTimer = time.AfterFunc(imePillDuration, func() {
+	// A mode badge is glanceable; sentences and failures stay longer.
+	hold := uiapp.PillDisplayDuration(a.imePillLabel)
+	a.imePillTimer = time.AfterFunc(hold, func() {
 		if a.imePillGen.Load() != gen {
 			return
 		}
+		a.fadeOutIMEPill(gen)
+	})
+}
+
+// fadeOutIMEPill fades the pill window out over imePillFadeOut and hides it,
+// instead of letting it vanish mid-glance. A newer pill (gen changed) stops
+// the fade; presentIMEPillAsync restores full opacity before showing it.
+// With [appearance].animations = "off" the pill hides at once.
+func (a *desktopApp) fadeOutIMEPill(gen uint64) {
+	const steps = 8
+	animate := true
+	a.mu.Lock()
+	if a.cfgStore != nil {
+		animate = config.NormalizeAnimationMode(a.cfgStore.Current().Main.Appearance.Animations) != "off"
+	}
+	a.mu.Unlock()
+
+	hide := func() {
 		mygo.RunOnMain(func() {
 			if a.imePillGen.Load() != gen {
 				return
@@ -1295,9 +1331,38 @@ func (a *desktopApp) scheduleIMEPillAutoHide(gen uint64) {
 			a.mu.Unlock()
 			if p != nil && p.IsVisible() {
 				p.Hide()
+				p.SetOpacity(1)
 			}
 		})
-	})
+	}
+	if !animate {
+		hide()
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(imePillFadeOut / steps)
+		defer ticker.Stop()
+		for i := 1; i < steps; i++ {
+			<-ticker.C
+			if a.imePillGen.Load() != gen {
+				return
+			}
+			opacity := 1 - float64(i)/steps
+			mygo.RunOnMain(func() {
+				if a.imePillGen.Load() != gen {
+					return
+				}
+				a.mu.Lock()
+				p := a.imePillPanel
+				a.mu.Unlock()
+				if p != nil {
+					p.SetOpacity(opacity)
+				}
+			})
+		}
+		<-ticker.C
+		hide()
+	}()
 }
 
 func (a *desktopApp) handlePresentPhase(phase engine.CapsulePhase) {
@@ -1360,14 +1425,88 @@ func (a *desktopApp) handlePresentPhase(phase engine.CapsulePhase) {
 
 			panel.SetBounds(bounds)
 			if state.Phase == engine.PhaseHUD {
+				panel.SetOpacity(1)
 				panel.ShowInactive()
 			} else {
+				// A Leader menu not yet on screen takes the keyboard focus
+				// at once but stays transparent for the reveal delay: a fast
+				// key sequence runs without the menu ever flashing.
+				a.mu.Lock()
+				revealed := a.capsuleRevealed
+				a.mu.Unlock()
+				delay := capsuleRevealDelay(state.Phase, revealed, cfg.Main.Trigger)
+				if delay > 0 {
+					panel.SetOpacity(0)
+				} else {
+					panel.SetOpacity(1)
+					a.mu.Lock()
+					a.capsuleRevealed = true
+					a.mu.Unlock()
+				}
 				panel.Show()
 				panel.Focus()
+				if delay > 0 {
+					fade := config.NormalizeAnimationMode(cfg.Main.Appearance.Animations) != "off"
+					a.scheduleCapsuleReveal(seq, delay, fade)
+				}
 			}
 			panel.Invalidate()
 		})
 	}()
+}
+
+// capsuleRevealFade is the Leader menu's fade-in once its delay elapses.
+const capsuleRevealFade = 120 * time.Millisecond
+
+// capsuleRevealDelay is how long the capsule stays invisible after it is
+// presented. Only a Leader menu that is not on screen yet waits (which-key
+// style), so a quick key sequence runs without the menu flashing; every
+// other phase, and a Leader already visible (drilling into a group), shows
+// at once.
+func capsuleRevealDelay(phase engine.CapsulePhase, revealed bool, trigger config.TriggerConfig) time.Duration {
+	if phase != engine.PhaseLeader || revealed {
+		return 0
+	}
+	ms := min(max(trigger.LeaderRevealDelayMs, 0), config.MaxLeaderRevealDelayMs)
+	return time.Duration(ms) * time.Millisecond
+}
+
+// scheduleCapsuleReveal fades the capsule in after delay unless the session
+// moved on (presentSeq changed: a newer present, an executed key or a hide).
+func (a *desktopApp) scheduleCapsuleReveal(seq uint64, delay time.Duration, fade bool) {
+	time.AfterFunc(delay, func() {
+		if a.presentSeq.Load() != seq {
+			return
+		}
+		a.mu.Lock()
+		a.capsuleRevealed = true
+		panel := a.capsulePanel
+		a.mu.Unlock()
+		if panel == nil {
+			return
+		}
+		setOpacity := func(v float64) {
+			mygo.RunOnMain(func() {
+				if a.presentSeq.Load() == seq {
+					panel.SetOpacity(v)
+				}
+			})
+		}
+		if !fade {
+			setOpacity(1)
+			return
+		}
+		const steps = 6
+		ticker := time.NewTicker(capsuleRevealFade / steps)
+		defer ticker.Stop()
+		for i := 1; i <= steps; i++ {
+			<-ticker.C
+			if a.presentSeq.Load() != seq {
+				return
+			}
+			setOpacity(float64(i) / steps)
+		}
+	})
 }
 
 func (a *desktopApp) handleHide() {
@@ -1407,6 +1546,11 @@ func (a *desktopApp) handleHide() {
 				panel.Hide()
 				a.lastPanelHideNano.Store(time.Now().UnixNano())
 			}
+			// Hidden for real: the next Leader waits for its reveal again.
+			a.mu.Lock()
+			a.capsuleRevealed = false
+			a.mu.Unlock()
+			panel.SetOpacity(1)
 		})
 	}
 	if delay <= 0 {
@@ -1559,6 +1703,7 @@ func (a *desktopApp) shutdown() {
 		sup := a.supervisor
 		ctrl := a.controller
 		sqliteStore := a.sqliteStore
+		learningWriter := a.learningWriter
 		tray := a.tray
 		a.bridgeRunning = false
 		a.mu.Unlock()
@@ -1577,6 +1722,12 @@ func (a *desktopApp) shutdown() {
 			ctrl.Close()
 		}
 		a.bgWG.Wait()
+		if learningWriter != nil {
+			// The app context is cancelled by now: flush on a fresh one.
+			flushCtx, cancelFlush := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = learningWriter.Close(flushCtx)
+			cancelFlush()
+		}
 		if sqliteStore != nil {
 			_ = sqliteStore.Close()
 		}
