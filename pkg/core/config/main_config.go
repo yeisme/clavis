@@ -122,7 +122,6 @@ type AppearanceConfig struct {
 	Enable3DEffects         bool    `json:"enable3DEffects"`
 	EnableShaders           bool    `json:"enableShaders"`
 	GlassClarity            float64 `json:"glassClarity"`
-	ShowBentoShelf          bool    `json:"showBentoShelf"`
 	CandidateBarOrientation string  `json:"candidateBarOrientation"`
 }
 
@@ -141,7 +140,6 @@ func DefaultAppearanceConfig() AppearanceConfig {
 		Enable3DEffects:         true,
 		EnableShaders:           true,
 		GlassClarity:            0.18,
-		ShowBentoShelf:          true,
 		CandidateBarOrientation: "horizontal",
 	}
 }
@@ -216,11 +214,6 @@ func decodeAppearanceConfig(tbl *toml.Table, path string) (AppearanceConfig, err
 	} else if ok {
 		cfg.GlassClarity = f
 	}
-	if b, ok, err := optionalBool(tbl, "show_bento_shelf", path); err != nil {
-		return cfg, err
-	} else if ok {
-		cfg.ShowBentoShelf = b
-	}
 	if s, ok, err := optionalString(tbl, "candidate_bar_orientation", path); err != nil {
 		return cfg, err
 	} else if ok {
@@ -244,7 +237,6 @@ func (c AppearanceConfig) toTOML() *toml.Table {
 	t.Set("enable_3d_effects", toml.BoolVal(c.Enable3DEffects))
 	t.Set("enable_shaders", toml.BoolVal(c.EnableShaders))
 	t.Set("glass_clarity", toml.FloatVal(c.GlassClarity))
-	t.Set("show_bento_shelf", toml.BoolVal(c.ShowBentoShelf))
 	t.Set("candidate_bar_orientation", toml.StringVal(c.CandidateBarOrientation))
 	return t
 }
@@ -1087,13 +1079,19 @@ func (c IMEConfig) toTOML() *toml.Table {
 }
 
 // InputEngineConfig configures Clavis' built-in input engine.
+//
+// MixedEnglish and AutoPairPunctuation are deprecated and have no effect:
+// the engine never read mixed_english or auto_pair_punctuation, and they are
+// no longer read from or written to config.toml (docs/design/
+// own-input-engine.md, §11). The fields stay until internal/bridge's
+// inputEngineConfigEqual stops comparing them.
 type InputEngineConfig struct {
 	Enabled             bool     `json:"enabled"`
 	Mode                string   `json:"mode"`
 	Scheme              string   `json:"scheme"`
 	CandidateCount      int      `json:"candidateCount"`
-	MixedEnglish        bool     `json:"mixedEnglish"`
-	AutoPairPunctuation bool     `json:"autoPairPunctuation"`
+	MixedEnglish        bool     `json:"mixedEnglish"`        // Deprecated: no effect.
+	AutoPairPunctuation bool     `json:"autoPairPunctuation"` // Deprecated: no effect.
 	ShiftToggleASCII    bool     `json:"shiftToggleASCII"`
 	FuzzyPinyin         []string `json:"fuzzyPinyin"`
 	CustomDictPaths     []string `json:"customDictPaths"`
@@ -1129,16 +1127,6 @@ func decodeInputEngineConfig(tbl *toml.Table, path string) (InputEngineConfig, e
 	} else if ok {
 		c.CandidateCount = n
 	}
-	if b, ok, e := optionalBool(tbl, "mixed_english", path); e != nil {
-		return c, e
-	} else if ok {
-		c.MixedEnglish = b
-	}
-	if b, ok, e := optionalBool(tbl, "auto_pair_punctuation", path); e != nil {
-		return c, e
-	} else if ok {
-		c.AutoPairPunctuation = b
-	}
 	if b, ok, e := optionalBool(tbl, "shift_toggle_ascii", path); e != nil {
 		return c, e
 	} else if ok {
@@ -1172,8 +1160,6 @@ func (c InputEngineConfig) toTOML() *toml.Table {
 	t.Set("mode", toml.StringVal(c.Mode))
 	t.Set("scheme", toml.StringVal(c.Scheme))
 	t.Set("candidate_count", toml.IntVal(int64(c.CandidateCount)))
-	t.Set("mixed_english", toml.BoolVal(c.MixedEnglish))
-	t.Set("auto_pair_punctuation", toml.BoolVal(c.AutoPairPunctuation))
 	t.Set("shift_toggle_ascii", toml.BoolVal(c.ShiftToggleASCII))
 	t.Set("fuzzy_pinyin", stringsToTOMLArray(c.FuzzyPinyin))
 	t.Set("custom_dict_paths", stringsToTOMLArray(c.CustomDictPaths))

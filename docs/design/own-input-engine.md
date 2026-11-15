@@ -132,3 +132,15 @@ MVP 切分：合法音节表最长匹配 + 回溯；末段允许为合法音节�
 | 定位不准 | 窗口/鼠标锚点回退，同 pill。 |
 | macOS 回归 | 逻辑在纯 Go 包，接线只在 `*_windows.go`；`bridge_darwin.go` 不动。macOS 上 `enabled=true` 暂不生效（后续走 IMK）。 |
 | 词频学习写库阻塞钩子（Windows 原生 SQLite 往返约 12.6ms/次，自动提交另含 fsync） | 钩子线程、提交路径、UI 线程只调用 `storage.LearningWriter` 的 `Queue*`：同步更新 RAM 镜像（`LookupBoost` 立即生效），持久化由后台按 750ms / 256 条合并为一个事务（计数按增量 UPSERT）；**禁止**在这些路径直接调用 `LearningStore.RecordIMECommit` / `RecordItemUse`。失败重试 3 次后丢弃并计入 `Stats().Dropped`。 |
+
+## 11. 技术债：`mixed_english` / `auto_pair_punctuation`（2026-11-15 记账）
+
+两个键从未接到 `pkg/core/inputengine`：引擎只收 `candidate_count`、`shift_toggle_ascii`、`scheme`、`fuzzy_pinyin`、`custom_dict_paths`、`user_learning`；读 `AutoPairPunctuation` 的只有 `pkg/core/ime.Composer`，而它没有运行时调用方。为不让用户改一个无效开关，2026-11-15 起这两个键不再写入默认模板、不再读取、不再写回（老配置里残留的键会被忽略，下次保存时清除）。`InputEngineConfig` 的两个字段暂留并标 Deprecated，因为 `internal/bridge/input_engine_keys.go` 的 `inputEngineConfigEqual` 仍在比较它们（该文件当前由 Windows 副本冻结）。
+
+接入估时超过 2 小时，需要：
+
+1. 引擎：中文模式下的全角标点映射；成对符号（`（）`、`【】`、`“”`、`《》`）插入后光标回到中间，并在随后输入闭合符号时跳过已补的那一个（type-over），导航键、点击、回车时清空待闭合栈；数字后的 `.` `,` `:` 保持半角（`3.14`、`1,000`）；`Result` 增加光标移动字段。
+2. 桥接：上屏后按 `Result` 移动光标。darwin 用 `postTaggedKey` 发左右方向键；Windows 用 `sendWinKeyTap(vkLeft/vkRight)`（Windows 设备负责）。
+3. **已知缺陷（darwin）**：`inputEngineKeysForInline` 对 `, . ? ! ; :` 这类可打印标点返回 `!ok`，按键直接放行给应用。组字中打标点时，标点会先于尚未上屏的拼音进入应用。需要补一个「可打印字符 → `KeyOther`」分支，与 Windows 的 `engineKeyForVK` 对齐。另外 darwin 按键名分类：`quote` 键打出 `"` 仍归为 `KeyApostrophe`，`minus` 键打出 `_` 仍归为翻页键，需要在引擎侧按实际字符归一化。
+4. `mixed_english`：输入串没有任何词典候选覆盖时，把原始字母作为首选（否则放在末位）；纯 ASCII 词不进学习库（在 `main.go` 的提交回调里过滤）。
+5. 接通后恢复这两个配置键和设置页开关，再同时删掉 Deprecated 字段及 `inputEngineConfigEqual` 里的两行比较。

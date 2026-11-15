@@ -122,7 +122,6 @@ visual_preset = "spatial_3d"
 enable_3d_effects = true
 enable_shaders = true
 glass_clarity = 0.18
-show_bento_shelf = true
 candidate_bar_orientation = "horizontal"
 
 [ai]
@@ -212,8 +211,6 @@ enabled = false
 mode = "inline_hook"
 scheme = "quanpin"
 candidate_count = 7
-mixed_english = true
-auto_pair_punctuation = true
 shift_toggle_ascii = true
 fuzzy_pinyin = []
 custom_dict_paths = []

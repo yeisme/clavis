@@ -10,9 +10,8 @@ import (
 )
 
 // Settings of Clavis's own input engine ([input_engine]). Only options the
-// engine reads are offered: mixed_english and auto_pair_punctuation do not
-// reach it, and mode depends on platform parts (IMK), so those stay in the
-// TOML file. The config watcher applies a change at once.
+// engine reads are offered; mode depends on platform parts (IMK), so it
+// stays in the TOML file. The config watcher applies a change at once.
 
 // inputSchemes are the pinyin schemes the engine accepts.
 var inputSchemes = []string{"quanpin", "xiaohe", "ziranma", "microsoft", "sogou", "pinyin_plus"}
