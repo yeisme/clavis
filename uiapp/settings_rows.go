@@ -1,6 +1,7 @@
 package uiapp
 
 import (
+	"math"
 	"runtime"
 	"strconv"
 	"strings"
@@ -113,11 +114,26 @@ func settingSliderRow(
 		v := value
 		slider := ui.StepSlider(c, &v, lo, hi, step).MinWidth(space32 * 4).Grow(0)
 		if slider.Changed() {
-			next, changed = config.NormalizeStageIntensity(v), true
+			// The slider is bounded by lo/hi, but a drag can still report a value
+			// a hair outside; clamp to the declared range rather than to one
+			// field's rule, so stage intensity and glass clarity share the
+			// control without inheriting each other's semantics.
+			next, changed = clampSetting(v, lo, hi), true
 		}
 		return slider
 	})
 	return next, changed
+}
+
+// clampSetting bounds v to [lo, hi], mapping NaN to lo.
+func clampSetting(v, lo, hi float64) float64 {
+	if math.IsNaN(v) || v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // formatSettingNumber shows value with the decimals of step ("0.7" for a

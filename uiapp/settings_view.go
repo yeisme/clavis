@@ -337,7 +337,7 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 		}
 		if v, changed := settingSliderRow(c, theme, i18n.T("settings.appearance.glass_clarity"), "glass_clarity", "",
 			appearance.GlassClarity, 0, 1, 0.05); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.GlassClarity = config.NormalizeStageIntensity(v) })
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.GlassClarity = v })
 		}
 	})
 
