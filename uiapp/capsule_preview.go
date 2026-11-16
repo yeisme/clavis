@@ -645,7 +645,20 @@ func (a *AppController) renderClipboardMediaPreview(c *ui.Context, theme *ui.The
 				bmp = original
 			}
 		}
-		if bmp != nil {
+		if len(m.FilePaths) > 1 {
+			CoverFlowDeck3D(c, len(m.FilePaths), 0, effectiveSpatialAppearance(c, a.Config().Main.Appearance), func(i int, active bool) {
+				path := m.FilePaths[i]
+				image := a.ThumbBitmap(path)
+				if image == nil && i == 0 {
+					image = bmp
+				}
+				if image != nil {
+					ui.Image(c, image).Fill().Fit(ui.Contain).Radius(radiusChip)
+				} else {
+					ui.Text(c, path).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+				}
+			})
+		} else if bmp != nil {
 			ui.Image(c, bmp).FillWidth().Height(220).Fit(ui.Contain).Radius(radiusChip)
 		}
 		for _, row := range clipboardMediaMetaRows(m) {

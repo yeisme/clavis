@@ -195,6 +195,8 @@ func (a *AppController) renderCapsuleHeader(
 			})
 
 		case engine.PhaseAIStreaming:
+			activeOrb := !state.AIComplete && state.AIError == ""
+			RenderLiquidOrb(c, 24, activeOrb, effectiveSpatialAppearance(c, cfg.Main.Appearance))
 			modeLabel := aiModeLabel(state.AIMode)
 			ui.Text(c, i18n.Tf("ai.header", modeLabel)).FontSize(typeBody).FontWeight(600).
 				TextColor(theme.Text).SingleLine()
@@ -296,41 +298,31 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 				for idx, node := range state.LeaderNodes {
 					n := node
 					isGroup := n.Action.Type == config.ActionGroup
-					card := ui.ButtonBase(c).
-						Key(fmt.Sprintf("leader:%d:%s", idx, n.Key)).
-						FillWidth().
-						Padding(space8, space10).
-						Radius(radiusCard).
-						FocusRing(false)
-					if card.Hovered() {
-						card.Background(selectionFill(theme)).Border(1, selectionEdge(theme))
-					} else {
-						card.Background(tileFill(theme)).Border(1, hairline(theme))
-					}
-
-					card.Children(func() {
-						ui.Row(c).FillWidth().Gap(space10).AlignItems(ui.Center).Children(func() {
-							leaderKeycap(c, theme, n.Key)
-							renderSemanticIcon(c, n.Icon, IconSize16, theme.TextMuted)
-							ui.Text(c, i18n.DisplayLabel(n.Label)).
-								FontSize(typeBody).
-								FontWeight(500).
-								TextColor(theme.Text).
-								SingleLine().
-								Grow(1).
-								Shrink(1)
-							if isGroup {
-								// A group shows how much it holds before its chevron.
-								ui.Text(c, strconv.Itoa(len(n.Action.Children))).
-									FontSize(typeMeta).
-									TextColor(theme.TextMuted).
-									SingleLine()
-								renderSemanticIcon(c, "chevron.right", 12, theme.TextMuted)
-							}
+					clicked := false
+					TiltCard3D(c, fmt.Sprintf("leader:%d:%s", idx, n.Key), effectiveSpatialAppearance(c, a.Config().Main.Appearance), TiltCardOpts{
+						Width: 180, Height: 70, Radius: radiusCard, Accent: theme.Accent, Interactive: true,
+					}, func() {
+						button := ui.ButtonBase(c).FillWidth().FillHeight().Padding(space8, space10).Radius(radiusCard).FocusRing(false)
+						if button.Hovered() {
+							button.Background(selectionFill(theme)).Border(1, selectionEdge(theme))
+						} else {
+							button.Background(tileFill(theme)).Border(1, hairline(theme))
+						}
+						button.Children(func() {
+							ui.Row(c).FillWidth().Gap(space10).AlignItems(ui.Center).Children(func() {
+								leaderKeycap(c, theme, n.Key)
+								renderSemanticIcon(c, n.Icon, IconSize16, theme.TextMuted)
+								ui.Text(c, i18n.DisplayLabel(n.Label)).FontSize(typeBody).FontWeight(500).TextColor(theme.Text).SingleLine().Grow(1).Shrink(1)
+								if isGroup {
+									ui.Text(c, strconv.Itoa(len(n.Action.Children))).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+									renderSemanticIcon(c, "chevron.right", 12, theme.TextMuted)
+								}
+							})
 						})
+						clicked = button.Clicked()
 					})
 
-					if card.Clicked() {
+					if clicked {
 						a.Dispatch(engine.Event{Type: engine.EventLeaderKeyPress, Key: n.Key})
 						a.uiState.leaderHandle.RequestFocus(c)
 					}
@@ -780,8 +772,8 @@ func (a *AppController) renderOmniboxRowLeadingIcon(c *ui.Context, theme *ui.The
 				return
 			}
 		}
-		if swatch, ok := parseHexSwatch(item.ClipboardContent); ok {
-			ui.Box(c).Size(rowIconTile, rowIconTile).Radius(radiusTile).Background(swatch).Border(1, hairline(theme))
+		if _, ok := parseHexSwatch(item.ClipboardContent); ok {
+			ColorSwatch3D(c, item.ClipboardContent, rowIconTile, effectiveSpatialAppearance(c, a.Config().Main.Appearance)).Border(1, hairline(theme))
 			return
 		}
 		icon := item.Icon
@@ -962,6 +954,31 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 	}
 
 	ui.Column(c).FillWidth().Grow(1).Padding(space12, space14).Gap(8).Children(func() {
+		if profiles := cfg.Main.AI.Profiles; len(profiles) > 1 {
+			active := a.ActiveAIProfile()
+			selected := 0
+			for i, p := range profiles {
+				if strings.EqualFold(p.ID, active.ID) {
+					selected = i
+					break
+				}
+			}
+			CoverFlowDeck3D(c, len(profiles), selected, effectiveSpatialAppearance(c, cfg.Main.Appearance), func(i int, active bool) {
+				p := profiles[i]
+				button := ui.ButtonBase(c).Width(180).Height(34).Radius(radiusPill).FocusRing(false)
+				if active {
+					button.Background(theme.Accent)
+				} else {
+					button.Background(tileFill(theme)).Border(space1, hairline(theme))
+				}
+				button.Children(func() {
+					ui.Text(c, p.ID).FontSize(typeMeta).FontWeight(600).TextColor(map[bool]ui.Color{true: theme.AccentText, false: theme.Text}[active]).SingleLine()
+				})
+				if button.Clicked() {
+					_ = a.SelectAIProfile(p.ID)
+				}
+			})
+		}
 		if state.AISourceText != "" {
 			srcRunes := utf8.RuneCountInString(state.AISourceText)
 			headerLabel := i18n.Tf("ai.source_text", srcRunes)

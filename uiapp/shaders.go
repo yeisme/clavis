@@ -2,6 +2,7 @@ package uiapp
 
 import (
 	"math"
+	"sync/atomic"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/shader"
@@ -56,10 +57,12 @@ func Fragment(dst vec4, pos vec2) vec4 {
 	return vec4(colour, inside * Accent.a * (0.48 + shine * 0.32))
 }`)
 
+var shaderDrawCount atomic.Int64
+
 // ShadersActive is deliberately conservative: expensive pixel work is not
 // attempted for reduced-motion users, classic surfaces, or software frames.
 func ShadersActive(c *ui.Context, p *ui.Painter, cfg config.AppearanceConfig) bool {
-	if c == nil || p == nil || !cfg.EnableShaders {
+	if c == nil || p == nil || !cfg.EnableShaders || cfg.StageIntensity <= 0 {
 		return false
 	}
 	prefs := c.Preferences()
@@ -70,7 +73,7 @@ func ShadersActive(c *ui.Context, p *ui.Painter, cfg config.AppearanceConfig) bo
 		ReduceTransparency: prefs.ReduceTransparency,
 		HighContrast:       prefs.HighContrast,
 		Accelerated:        p.Accelerated(),
-		Intensity:          1,
+		Intensity:          cfg.StageIntensity,
 	}).EnabledShaders
 }
 
@@ -79,6 +82,7 @@ func DrawSpecularSheen(c *ui.Context, p *ui.Painter, r ui.Rect, pointer ui.Point
 		return
 	}
 	if ShadersActive(c, p, cfg) {
+		shaderDrawCount.Add(1)
 		SpecularTiltShader.Draw(p, r, shader.Options{Radius: 14, Uniforms: map[string]any{
 			"Pointer": []float32{pointer.X, pointer.Y}, "Intensity": intensity, "Accent": accent,
 		}})
@@ -93,6 +97,7 @@ func DrawAIStageGlow(c *ui.Context, p *ui.Painter, r ui.Rect, intensity float32,
 		return
 	}
 	if ShadersActive(c, p, cfg) {
+		shaderDrawCount.Add(1)
 		AIStageGlowShader.Draw(p, r, shader.Options{Radius: 16, Uniforms: map[string]any{
 			"Time": float32(p.Now().UnixNano()) / 1e9, "Intensity": intensity, "Accent": accent,
 		}})
@@ -112,6 +117,7 @@ func RenderLiquidOrb(c *ui.Context, size float32, active bool, cfg config.Appear
 	accent := c.Theme().Accent
 	return ui.Box(c).Size(size, size).Radius(size / 2).Clip().Draw(func(p *ui.Painter, r ui.Rect) {
 		if active && ShadersActive(c, p, cfg) {
+			shaderDrawCount.Add(1)
 			LiquidOrbShader.Draw(p, r, shader.Options{Radius: size / 2, Uniforms: map[string]any{
 				"Time": float32(p.Now().UnixNano()) / 1e9, "Speed": 0.8, "Accent": accent,
 			}})
