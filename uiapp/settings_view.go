@@ -292,6 +292,7 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 			animationOptions(), appearance.Animations); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.Animations = v })
 		}
+
 		settingsCardDivider(c, theme)
 		ui.Grid(c).Columns(2).GapX(space16).GapY(space4).FillWidth().Children(func() {
 			if v, changed := settingSwitchRow(c, theme, i18n.T("settings.appearance.key_hints"), "show_key_hints", "",
@@ -319,6 +320,25 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.HUDDurationMs = int(v) })
 			}
 		})
+
+		settingsCardDivider(c, theme)
+		ui.Text(c, i18n.T("settings.appearance.spatial_look")).FontSize(typeMeta).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+		if v, changed := settingChoiceRow(c, theme, i18n.T("settings.appearance.visual_preset"), "visual_preset", "",
+			visualPresetOptions(), appearance.VisualPreset); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.VisualPreset = v })
+		}
+		if v, changed := settingSliderRow(c, theme, i18n.T("settings.appearance.stage_intensity"), "stage_intensity", "",
+			appearance.StageIntensity, 0, 1, 0.05); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.StageIntensity = config.NormalizeStageIntensity(v) })
+		}
+		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.appearance.oblique_rows"), "oblique_rows", "",
+			appearance.ObliqueRows); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.ObliqueRows = v })
+		}
+		if v, changed := settingSliderRow(c, theme, i18n.T("settings.appearance.glass_clarity"), "glass_clarity", "",
+			appearance.GlassClarity, 0, 1, 0.05); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.GlassClarity = config.NormalizeStageIntensity(v) })
+		}
 	})
 
 	a.mu.Lock()

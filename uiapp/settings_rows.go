@@ -99,6 +99,27 @@ func settingNumberRow(
 	return next, changed
 }
 
+// settingSliderRow is a named stepped slider. The caption repeats the value
+// as a percentage so the current visual setting remains visible while the
+// thumb is adjusted.
+func settingSliderRow(
+	c *ui.Context, theme *ui.Theme,
+	title, key, help string,
+	value, lo, hi, step float64,
+) (float64, bool) {
+	next, changed := value, false
+	shown := formatSettingNumber(value*100, step*100, "%")
+	settingRow(c, theme, title, settingCaption(key, shown), help, func() ui.Element {
+		v := value
+		slider := ui.StepSlider(c, &v, lo, hi, step).MinWidth(space32 * 4).Grow(0)
+		if slider.Changed() {
+			next, changed = config.NormalizeStageIntensity(v), true
+		}
+		return slider
+	})
+	return next, changed
+}
+
 // formatSettingNumber shows value with the decimals of step ("0.7" for a
 // step of 0.1, "300" for 10) and its unit.
 func formatSettingNumber(value, step float64, unit string) string {
@@ -313,6 +334,14 @@ func animationOptions() []settingOption {
 		out = append(out, settingOption{m, label})
 	}
 	return out
+}
+
+func visualPresetOptions() []settingOption {
+	return []settingOption{
+		{"classic", i18n.T("settings.option.visual_preset_classic")},
+		{"liquid_glass", i18n.T("settings.option.visual_preset_liquid_glass")},
+		{"spatial_3d", i18n.T("settings.option.visual_preset_spatial_3d")},
+	}
 }
 
 // capsLockActionOptions are what a tap or hold of Caps Lock can do.
