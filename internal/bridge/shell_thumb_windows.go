@@ -5,7 +5,9 @@ package bridge
 import (
 	"errors"
 	"image"
+	"mime"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -219,11 +221,45 @@ func winMediaDurationMs(path string) int64 {
 	return ms
 }
 
+// winMediaDimensions is the optional dimensions hook for the Windows probe.
+// The property-store accessors vary by shell handler and Windows SDK version; keep
+// this hook conservative until a verified property key set is available. The zero
+// result is intentionally safe and lets SaveFileList preserve all existing behavior.
+func winMediaDimensions(string) (int, int) { return 0, 0 }
+
+// winMediaMIME returns a stable MIME based on the file extension. Shell's
+// System.MIMEType is not consistently populated across Windows versions, so
+// extension mapping is deliberately used instead of another property lookup.
+func winMediaMIME(path string) string {
+	name := strings.ToLower(baseNameForMIME(path))
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		// TypeByExtension is backed by Go's fixed MIME table and strips optional
+		// charset parameters below, keeping persisted values stable across hosts.
+		if value := mime.TypeByExtension(name[i:]); value != "" {
+			if semi := strings.IndexByte(value, ';'); semi >= 0 {
+				value = value[:semi]
+			}
+			return value
+		}
+	}
+	return ""
+}
+
+func baseNameForMIME(path string) string {
+	path = strings.TrimRight(path, `/\\`)
+	if i := strings.LastIndexAny(path, `/\\`); i >= 0 {
+		return path[i+1:]
+	}
+	return path
+}
+
 // FileProbe implements FileMediaProber for the clipboard poller.
 func (b *windowsBridge) FileProbe() clipboard.FileProbe {
 	return clipboard.FileProbe{
 		Size:       statFileSize,
 		Thumbnail:  func(p string) (image.Image, error) { return winShellThumbnail(p, clipboard.ThumbMaxEdge) },
 		DurationMs: winMediaDurationMs,
+		Dimensions: winMediaDimensions,
+		MIME:       winMediaMIME,
 	}
 }

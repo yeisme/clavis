@@ -43,6 +43,8 @@ type FileProbe struct {
 	Size       func(path string) (int64, bool)        // false = missing
 	Thumbnail  func(path string) (image.Image, error) // Windows: shell thumbnail (video first frame)
 	DurationMs func(path string) int64                // Windows: System.Media.Duration
+	Dimensions func(path string) (width, height int)  // optional pixel dimensions; zero when unknown
+	MIME       func(path string) string               // optional stable MIME type; empty when unknown
 }
 
 // SaveFileList builds Media for a CF_HDROP file list and returns the searchable content
@@ -80,10 +82,18 @@ func (m *MediaStore) SaveFileList(paths []string, probe FileProbe) (Media, strin
 	joined := JoinFilePaths(clean)
 	sum := sha256.Sum256([]byte(strings.ToLower(joined))) // Windows paths are case-insensitive
 	media := Media{Kind: KindFile, MediaPath: joined, BlobSHA: hex.EncodeToString(sum[:]), ByteSize: total}
-	if len(clean) == 1 && IsVideoPath(clean[0]) {
-		media.Kind = KindVideo
-		if probe.DurationMs != nil {
-			media.DurationMs = probe.DurationMs(clean[0])
+	if len(clean) == 1 {
+		if IsVideoPath(clean[0]) {
+			media.Kind = KindVideo
+			if probe.DurationMs != nil {
+				media.DurationMs = probe.DurationMs(clean[0])
+			}
+		}
+		if probe.Dimensions != nil {
+			media.Width, media.Height = probe.Dimensions(clean[0])
+		}
+		if probe.MIME != nil {
+			media.MediaMime = probe.MIME(clean[0])
 		}
 	}
 	if probe.Thumbnail != nil {

@@ -26,12 +26,14 @@ func TestSaveFileListVideoAndFiles(t *testing.T) {
 		Size:       func(p string) (int64, bool) { return 1000, !strings.Contains(p, "missing") },
 		Thumbnail:  func(string) (image.Image, error) { thumbCalls++; return image.NewRGBA(image.Rect(0, 0, 640, 360)), nil },
 		DurationMs: func(string) int64 { return 42_000 },
+		Dimensions: func(string) (int, int) { return 1920, 1080 },
+		MIME:       func(string) string { return "video/mp4" },
 	}
 	m, content, err := ms.SaveFileList([]string{`C:\Videos\Trip.mp4`}, probe)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Kind != KindVideo || m.DurationMs != 42_000 || m.ByteSize != 1000 || content != "Trip.mp4" || m.ThumbPath == "" {
+	if m.Kind != KindVideo || m.DurationMs != 42_000 || m.Width != 1920 || m.Height != 1080 || m.MediaMime != "video/mp4" || m.ByteSize != 1000 || content != "Trip.mp4" || m.ThumbPath == "" {
 		t.Fatalf("video media = %+v content=%q", m, content)
 	}
 	if _, err := os.Stat(m.ThumbPath); err != nil {
@@ -49,6 +51,25 @@ func TestSaveFileListVideoAndFiles(t *testing.T) {
 	}
 	if got := SplitFilePaths(f.MediaPath); len(got) != 3 {
 		t.Fatalf("paths = %v", got)
+	}
+}
+
+func TestSaveFileListSingleImageMetadata(t *testing.T) {
+	ms := NewMediaStore(t.TempDir())
+	calls := 0
+	m, content, err := ms.SaveFileList([]string{`C:\Pictures\still.PNG`}, FileProbe{
+		Size: func(string) (int64, bool) { return 7, true },
+		Dimensions: func(string) (int, int) {
+			calls++
+			return 800, 600
+		},
+		MIME: func(string) string { return "image/png" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Kind != KindFile || m.Width != 800 || m.Height != 600 || m.MediaMime != "image/png" || content != "still.PNG" || calls != 1 {
+		t.Fatalf("image media = %+v content=%q dimensions calls=%d", m, content, calls)
 	}
 }
 
