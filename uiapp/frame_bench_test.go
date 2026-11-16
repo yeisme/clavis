@@ -53,6 +53,34 @@ func BenchmarkFrameOmnibox(b *testing.B) {
 	benchFrames(b, ctrl)
 }
 
+// BenchmarkFrameOmniboxSpatial measures the spatial preset against the
+// 16ms/frame budget; a sustained result above 16ms is a visual frame regression.
+func BenchmarkFrameOmniboxSpatial(b *testing.B) {
+	ctrl := benchController(b)
+	if err := ctrl.UpdateMainConfig(func(m *config.MainConfig) {
+		m.Appearance.VisualPreset = "spatial_3d"
+		m.Appearance.Animations = "full"
+	}); err != nil {
+		b.Fatal(err)
+	}
+	ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions})
+	benchFrames(b, ctrl)
+}
+
+// BenchmarkFrameOmniboxClassic measures the flat classic baseline against the
+// 16ms/frame budget; compare it with BenchmarkFrameOmniboxSpatial for regressions.
+func BenchmarkFrameOmniboxClassic(b *testing.B) {
+	ctrl := benchController(b)
+	if err := ctrl.UpdateMainConfig(func(m *config.MainConfig) {
+		m.Appearance.VisualPreset = "classic"
+		m.Appearance.Animations = "reduced"
+	}); err != nil {
+		b.Fatal(err)
+	}
+	ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions})
+	benchFrames(b, ctrl)
+}
+
 func BenchmarkFrameLeader(b *testing.B) {
 	ctrl := benchController(b)
 	ctrl.Dispatch(engine.Event{Type: engine.EventOpenLeader})
