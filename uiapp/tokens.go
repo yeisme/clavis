@@ -35,6 +35,26 @@ const (
 	radiusPill   float32 = 999
 )
 
+// Extended spacing scale. The original 2–16 ramp covered the transient
+// surfaces; these steps cover the wider radii, empty-state padding and card
+// insets the persistent surfaces need, so no view has to invent a number.
+const (
+	space1  float32 = 1
+	space18 float32 = 18
+	space20 float32 = 20
+	space24 float32 = 24
+	space32 float32 = 32
+)
+
+// Radii beyond the original set: markers, inline controls, panels and the
+// two-segment pill. Everything else keeps the 5/6/7/9/10/999 ramp above.
+const (
+	radius4       float32 = 4  // underline, marker-pen edge
+	radius8       float32 = 8  // inline controls: fields, steppers, swatches
+	radius12      float32 = 12 // panels and stage cards
+	radiusSegment float32 = 11 // pill segments (28x22 caps)
+)
+
 // Type scale (points). typeSearch is the Spotlight-sized query text.
 const (
 	typeMicro  float32 = 10
@@ -43,6 +63,103 @@ const (
 	typeBody   float32 = 13
 	typeTitle  float32 = 14
 	typeSearch float32 = 16
+	typeGlyph  float32 = 17 // geometric glyphs: emoji, calculator output
+	typeHero   float32 = 20 // onboarding and section hero titles
+)
+
+// Line-height multipliers. Headings and single-line labels stay tight; prose
+// (help text, permission purposes, preview bodies) gets room to be read.
+const (
+	lineTight float32 = 1.25
+	lineProse float32 = 1.55
+)
+
+// Elevation is one step of the shadow scale. Levels are semantic, not pixel
+// values: elev1 rests, elev2 is a card on the desktop, elev3 is a card under
+// the pointer, elev4 is a floating stage surface.
+type elevation struct {
+	X, Y, Blur, Spread float32
+}
+
+// Elevation levels, from flat to floating.
+const (
+	elevNone = iota
+	elev1
+	elev2
+	elev3
+	elev4
+)
+
+// elevationSteps is the geometry of each level: the shadow grows down and out
+// monotonically so a rising card reads as rising without a colour change.
+var elevationSteps = [5]elevation{
+	elevNone: {},
+	elev1:    {X: 0, Y: 1, Blur: 2, Spread: 0},
+	elev2:    {X: 0, Y: 3, Blur: 10, Spread: 0},
+	elev3:    {X: 0, Y: 8, Blur: 24, Spread: 0},
+	elev4:    {X: 0, Y: 16, Blur: 40, Spread: 0},
+}
+
+// elevationAlpha is the shadow opacity per level. Dark surfaces need more
+// alpha than light ones to read as the same depth.
+var (
+	elevationAlphaLight = [5]float32{elevNone: 0, elev1: 0.10, elev2: 0.14, elev3: 0.18, elev4: 0.22}
+	elevationAlphaDark  = [5]float32{elevNone: 0, elev1: 0.28, elev2: 0.34, elev3: 0.40, elev4: 0.46}
+)
+
+// elevationStep returns the shadow geometry of a level, clamped into range so
+// a caller cannot ask for elev9 and silently get no shadow.
+func elevationStep(level int) elevation {
+	if level < elevNone {
+		level = elevNone
+	}
+	if level > elev4 {
+		level = elev4
+	}
+	return elevationSteps[level]
+}
+
+// elevationShadow resolves a level to concrete Shadow() arguments for the
+// theme. A flat level yields a transparent shadow rather than a zero blur, so
+// callers can apply it unconditionally.
+func elevationShadow(t *ui.Theme, level int) (x, y, blur, spread float32, c ui.Color) {
+	if level <= elevNone || t == nil {
+		return 0, 0, 0, 0, ui.Transparent
+	}
+	if level > elev4 {
+		level = elev4
+	}
+	e := elevationStep(level)
+	alpha := elevationAlphaLight[level]
+	if t.Dark {
+		alpha = elevationAlphaDark[level]
+	}
+	return e.X, e.Y, e.Blur, e.Spread, ui.RGBA(0, 0, 0, alpha)
+}
+
+// surfaceHighlight is the 1px inset top highlight that separates a raised
+// card from the surface behind it. It is deliberately opaque-ish in light mode
+// and a whisper in dark mode, matching how macOS draws card chrome.
+func surfaceHighlight(t *ui.Theme) ui.Color {
+	if t.Dark {
+		return ui.RGBA(255, 255, 255, 0.08)
+	}
+	return ui.RGBA(255, 255, 255, 0.75)
+}
+
+// Density metrics shared by the Capsule and the Settings Center. These replace
+// the literals the views used to inline (header 40, search 52, row 44, footer
+// 44) and are the numbers layout.go's Preferred* formulas build on.
+const (
+	headerHeight     float32 = 40
+	searchRowHeight  float32 = 52
+	rowHeightOmnibox float32 = 44
+	footerHeight     float32 = 44
+	controlHeight    float32 = 28
+	cardPadX         float32 = 12
+	cardPadY         float32 = 10
+	cardGap          float32 = 10
+	railWidth        float32 = 200
 )
 
 // Row metrics for the Omnibox result list.
