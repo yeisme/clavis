@@ -264,7 +264,8 @@ func (a *AppController) onboardingPermRow(c *ui.Context, theme *ui.Theme, kind, 
 	})
 }
 
-// renderOnboardingLeader is step 2: press the Leader key. It shows the key
+// renderOnboardingLeader is step 2: double-tap the Leader key (both trigger
+// keys fire on a double tap, see bridge.DoubleTapDetector). It shows the key
 // as configured and the first entries of the user's own Leader menu, and
 // turns green when the trigger arrives. Until the keyboard monitor runs it
 // says what it waits for: the permissions, or the monitor itself.
