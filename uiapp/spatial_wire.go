@@ -55,20 +55,21 @@ func effectiveSpatialAppearance(c *ui.Context, cfg config.AppearanceConfig) conf
 		eff.EnableShaders = false
 		return eff
 	}
-	profile := appMotionProfile(c, cfg)
+	prefs := c.Preferences()
+	plan := resolveStagePlan(stageInputs{
+		Preset:             cfg.VisualPreset,
+		Animations:         cfg.Animations,
+		ReducedMotion:      prefs.ReduceMotion,
+		ReduceTransparency: prefs.ReduceTransparency,
+		Accelerated:        true,
+		Intensity:          1,
+	})
+	// The config capability remains an adapter-level gate; stageInputs keeps
+	// the resolver focused on geometry and runtime accessibility inputs.
+	eff.Enable3DEffects = cfg.Enable3DEffects && plan.Enabled3D
+	eff.EnableShaders = cfg.EnableShaders && plan.EnabledShaders
 	if isClassicPreset(cfg) {
 		eff.VisualPreset = "classic"
-		eff.Enable3DEffects = false
-		eff.EnableShaders = false
-		return eff
-	}
-	if isLiquidGlassPreset(cfg) {
-		// Liquid Glass keeps GlassSurface + GPU shaders while keeping the stage planar.
-		eff.Enable3DEffects = false
-	}
-	if !profile.MotionEnabled() || c.Preferences().ReduceMotion {
-		eff.Enable3DEffects = false
-		eff.EnableShaders = false
 	}
 	return eff
 }

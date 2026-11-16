@@ -59,8 +59,19 @@ func Fragment(dst vec4, pos vec2) vec4 {
 // ShadersActive is deliberately conservative: expensive pixel work is not
 // attempted for reduced-motion users, classic surfaces, or software frames.
 func ShadersActive(c *ui.Context, p *ui.Painter, cfg config.AppearanceConfig) bool {
-	return c != nil && p != nil && cfg.EnableShaders && cfg.VisualPreset != "classic" &&
-		!c.Preferences().ReduceMotion && p.Accelerated()
+	if c == nil || p == nil || !cfg.EnableShaders {
+		return false
+	}
+	prefs := c.Preferences()
+	return resolveStagePlan(stageInputs{
+		Preset:             cfg.VisualPreset,
+		Animations:         cfg.Animations,
+		ReducedMotion:      prefs.ReduceMotion,
+		ReduceTransparency: prefs.ReduceTransparency,
+		HighContrast:       prefs.HighContrast,
+		Accelerated:        p.Accelerated(),
+		Intensity:          1,
+	}).EnabledShaders
 }
 
 func DrawSpecularSheen(c *ui.Context, p *ui.Painter, r ui.Rect, pointer ui.Point, intensity float32, accent ui.Color, cfg config.AppearanceConfig) {

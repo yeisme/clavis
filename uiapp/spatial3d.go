@@ -19,11 +19,15 @@ type TiltCardOpts struct {
 }
 
 func Spatial3DEnabled(c *ui.Context, cfg config.AppearanceConfig) bool {
-	if c == nil || c.Preferences().ReduceMotion || !cfg.Enable3DEffects ||
-		cfg.VisualPreset == "classic" || resolveAnimationMode(cfg.Animations) == AnimationOff {
+	if c == nil || !cfg.Enable3DEffects {
 		return false
 	}
-	return cfg.VisualPreset == "spatial_3d" || cfg.VisualPreset == "liquid_glass" || cfg.VisualPreset == ""
+	return resolveStagePlan(stageInputs{
+		Preset:        cfg.VisualPreset,
+		Animations:    cfg.Animations,
+		ReducedMotion: c.Preferences().ReduceMotion,
+		Intensity:     1,
+	}).Enabled3D
 }
 
 func TiltCard3D(c *ui.Context, key string, cfg config.AppearanceConfig, opts TiltCardOpts, children func()) ui.Element {
