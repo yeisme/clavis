@@ -390,19 +390,19 @@ func TestPreferredCapsuleSize(t *testing.T) {
 		t.Fatalf("PhaseLeader = (%d,%d), want width 680", w, h)
 	}
 	w, h = PreferredCapsuleSize(engine.PhaseOmnibox, app)
-	if w != 680 || h < 320 {
-		t.Fatalf("PhaseOmnibox = (%d,%d)", w, h)
+	if w != 680 || h != 536 {
+		t.Fatalf("PhaseOmnibox = (%d,%d), want (680,536)", w, h)
 	}
 	w, h = PreferredCapsuleSize(engine.PhaseAIStreaming, app)
-	if w != 680 || h <= 0 {
-		t.Fatalf("PhaseAIStreaming = (%d,%d)", w, h)
+	if w != 680 || h != 520 {
+		t.Fatalf("PhaseAIStreaming = (%d,%d), want (680,520)", w, h)
 	}
 	w, h = PreferredCapsuleSizeForState(engine.State{
 		Phase:     engine.PhaseAIStreaming,
 		AIHistory: []engine.ChatTurn{{Role: "user", Content: "Hi"}},
 	}, app)
-	if w != 680 || h < 540 {
-		t.Fatalf("PreferredCapsuleSizeForState with history = (%d,%d), want (680, >=540)", w, h)
+	if w != 680 || h != 580 {
+		t.Fatalf("PreferredCapsuleSizeForState with history = (%d,%d), want (680,580)", w, h)
 	}
 	w, h = PreferredCapsuleSize(engine.PhaseHUD, app)
 	if w > 360 || h != 56 {

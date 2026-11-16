@@ -61,7 +61,7 @@ func PreferredCapsuleSize(phase engine.CapsulePhase, appearance config.Appearanc
 		if hudW < 240 {
 			hudW = 240
 		}
-		return hudW, 56
+		return hudW, int(headerHeight + space16)
 	case engine.PhaseLeader:
 		return w, 340
 	case engine.PhaseOmnibox:
@@ -70,17 +70,19 @@ func PreferredCapsuleSize(phase engine.CapsulePhase, appearance config.Appearanc
 			maxVisible = 8
 		}
 		maxVisible = min(max(maxVisible, minVisibleResults), maxVisibleResults)
-		// Header (44) + Search row (52) + padding/dividers/footer (52) + rows (44px each)
-		h := 148 + maxVisible*44
+		// Header, search row, footer, and the 16 DIP breathing room around the
+		// list are chrome; each result row also gets a 4 DIP grid gap.
+		h := int(headerHeight + searchRowHeight + footerHeight + omniboxChrome +
+			float32(maxVisible)*(rowHeightOmnibox+rowGap))
 		if h < 320 {
 			h = 320
 		}
-		if h > 640 {
-			h = 640
+		if h > 720 {
+			h = 720
 		}
 		return w, h
 	case engine.PhaseAIStreaming:
-		return w, 480
+		return w, 520
 	default:
 		return w, 420
 	}
@@ -89,8 +91,8 @@ func PreferredCapsuleSize(phase engine.CapsulePhase, appearance config.Appearanc
 // PreferredCapsuleSizeForState computes Capsule dimensions taking multi-turn AI history into account.
 func PreferredCapsuleSizeForState(state engine.State, appearance config.AppearanceConfig) (width, height int) {
 	w, h := PreferredCapsuleSize(state.Phase, appearance)
-	if state.Phase == engine.PhaseAIStreaming && len(state.AIHistory) > 0 && h < 540 {
-		h = 540
+	if state.Phase == engine.PhaseAIStreaming && len(state.AIHistory) > 0 && h < 580 {
+		h = 580
 	}
 	if state.Phase == engine.PhaseLeader {
 		h = leaderHeightFor(len(state.LeaderNodes))
@@ -98,13 +100,27 @@ func PreferredCapsuleSizeForState(state engine.State, appearance config.Appearan
 	return w, h
 }
 
-// Leader menu metrics: header + divider + padding + footer chrome around a
-// two-column grid of cards.
+// Omnibox row metrics: the list's small grid gap is kept here because it is
+// specific to the sizing pitch rather than a shared view token.
 const (
-	leaderChromeHeight = 114 // header, dividers, paddings, gaps and footer row
-	leaderRowHeight    = 50  // one card (42) plus the grid gap (8)
-	leaderMinHeight    = 172
-	leaderMaxHeight    = 440
+	rowGap        float32 = 4  // breathing room between adjacent Omnibox result rows
+	omniboxChrome float32 = 16 // list padding and dividers not covered by row tokens
+)
+
+// Leader menu metrics: the chrome surrounds a two-column grid of cards. Keep
+// each term named so a card or footer density change has an obvious derivation.
+const (
+	leaderCardHeight   = 52           // card content and vertical padding in the Leader grid
+	leaderGridGap      = int(space8)  // grid gap between the two-column Leader cards
+	leaderDivider      = 1            // each divider consumes one DIP in the menu chrome
+	leaderBodyPadding  = int(space12) // padding between the header and card grid
+	leaderFooterGap    = int(space16) // breathing room before the footer row
+	leaderFooterHeight = int(space20) // compact footer row containing Leader key hints
+	leaderChromeHeight = int(headerHeight) + leaderDivider + leaderBodyPadding +
+		leaderDivider + leaderFooterGap + leaderFooterHeight + int(space16) // header, dividers, padding and footer spacing
+	leaderRowHeight = leaderCardHeight + leaderGridGap // one card plus its grid gap
+	leaderMinHeight = 172                              // minimum that keeps the header, one card row and footer usable
+	leaderMaxHeight = 480                              // maximum before a long Leader menu relies on scrolling
 )
 
 // leaderHeightFor fits the Leader menu to its cards (two per row) instead of

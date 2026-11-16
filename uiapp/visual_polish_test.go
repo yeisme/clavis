@@ -224,6 +224,11 @@ func TestLeaderHeightFitsCards(t *testing.T) {
 		}
 		prev = h
 	}
+	for nodes, want := range map[int]int{4: 226, 12: 466, 24: 480} {
+		if got := leaderHeightFor(nodes); got != want {
+			t.Fatalf("leaderHeightFor(%d) = %d, want %d", nodes, got, want)
+		}
+	}
 	if leaderHeightFor(5) >= 340 {
 		t.Fatalf("five cards should no longer get the old fixed 340pt panel, got %d", leaderHeightFor(5))
 	}
