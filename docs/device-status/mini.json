@@ -3,10 +3,10 @@
   "platform": "darwin",
   "project": "clavis",
   "branch": "main",
-  "head": "f008f61",
-  "dirty": 0,
+  "head": "73d5c41",
+  "dirty": 7,
   "ahead": 0,
-  "timestamp": "2026-11-16T13:01:26+08:00",
-  "tests": "go test ./... ok; -race ok on root, uiapp, internal/bridge; GOOS=windows vet+build ok; real app: main thread idle in NSApplication run, SIGTERM exit 0.5s",
-  "notes": "fixed launch deadlock 23fd86e, TIS crash f63dded, live settings + guide key picker f008f61; deployed to /Applications, Clavis TCC entries reset for the new build"
+  "timestamp": "2026-11-16T14:56:34+08:00",
+  "tests": "go test ./... ok on a clean worktree at 73d5c41; GOOS=windows vet+build ok",
+  "notes": "reasoning_effort per AI profile 73d5c41; user AI profile set to magpie huoshan/deepseek-v4-1-flash-261017 (key in Keychain); not redeployed; working tree holds another session's uncommitted edits, untouched"
 }
