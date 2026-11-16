@@ -177,3 +177,43 @@ func TestShortcutKeyLabels(t *testing.T) {
 		}
 	}
 }
+
+// TestOnboardingLeaderPicker: a keyboard without the default Leader key
+// picks another in the guide. It is saved and handed to the host at once
+// (OnConfigSaved: the config watcher skips Clavis's own writes), and the
+// check waits for the new key. Caps Lock is not offered: the default keymap
+// uses it.
+func TestOnboardingLeaderPicker(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	saved := 0
+	ctrl.OnConfigSaved = func() { saved++ }
+	if err := ctrl.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	ctrl.HandleTriggerEvent(host.TriggerEvent{Kind: host.TriggerLeaderKey})
+	tt := onboardingTester(ctrl, "darwin")
+	if !tt.HasText(i18n.T("onboarding.leader.seen")) {
+		t.Fatal("precondition: the Leader check passed")
+	}
+
+	if err := tt.Click(i18n.T("settings.trigger.leader_key")); err != nil {
+		t.Fatalf("open the Leader key picker: %v", err)
+	}
+	tt.Frame()
+	if tt.HasText(i18n.T("settings.key.caps_lock")) {
+		t.Error("the guide offers Caps Lock, which the default keymap uses")
+	}
+	if err := tt.Click(triggerKeyLabel("left_option", "darwin")); err != nil {
+		t.Fatalf("pick left Option: %v", err)
+	}
+	tt.Frame()
+	if got := ctrl.Config().Main.Trigger.LeaderKey; got != "left_option" {
+		t.Fatalf("leader_key = %q after picking left Option", got)
+	}
+	if saved == 0 {
+		t.Error("the new key was not handed to the host (OnConfigSaved)")
+	}
+	if !tt.HasText(i18n.T("onboarding.leader.waiting")) || !tt.HasText(triggerKeyLabel("left_option", "darwin")) {
+		t.Error("after a new key the check should wait for it, naming it")
+	}
+}

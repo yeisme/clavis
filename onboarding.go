@@ -27,22 +27,40 @@ const onboardingVersion = 1
 type onboardingMarker struct {
 	Version int       `json:"version"`
 	DoneAt  time.Time `json:"doneAt"`
-	// How is "finished" (Get Started or closed) or "existing-install".
+	// How is onboardingStarted, onboardingFinished or onboardingExisting.
 	How string `json:"how"`
 }
 
-// onboardingDone reports whether the guide was done on this machine. An
-// unreadable marker counts as done: better no guide than one on every launch.
-func onboardingDone(dir string) bool {
+const (
+	// onboardingStarted: shown, not finished yet. It shows again on the
+	// next launch, as after the restart macOS asks for once Input
+	// Monitoring is granted.
+	onboardingStarted = "started"
+	// onboardingFinished: Get Started, or the window closed.
+	onboardingFinished = "finished"
+	// onboardingExisting: data from before the guide existed; never shown.
+	onboardingExisting = "existing-install"
+)
+
+// readOnboardingMarker reports whether dir has a marker and whether it says
+// the guide is done. An unreadable marker counts as done: better no guide
+// than one on every launch. One from an older guide is not done.
+func readOnboardingMarker(dir string) (exists, done bool) {
 	data, err := os.ReadFile(filepath.Join(dir, onboardingMarkerFile))
 	if err != nil {
-		return false
+		return false, false
 	}
 	var m onboardingMarker
 	if json.Unmarshal(data, &m) != nil {
-		return true
+		return true, true
 	}
-	return m.Version >= onboardingVersion
+	return true, m.Version >= onboardingVersion && m.How != onboardingStarted
+}
+
+// onboardingDone reports whether the guide was done on this machine.
+func onboardingDone(dir string) bool {
+	_, done := readOnboardingMarker(dir)
+	return done
 }
 
 // writeOnboardingMarker records that the guide was done, atomically.
@@ -63,16 +81,24 @@ func writeOnboardingMarker(dir, how string, now time.Time) error {
 
 // planOnboarding decides at launch whether to show the guide. dir is the
 // per-machine data directory ("" when unknown: nowhere to remember it, so no
-// guide). hadData reports data left by an earlier launch: an install from
-// before the guide, which is recorded as done instead of greeted.
+// guide). hadData reports data left by an earlier launch: without a marker
+// that is an install from before the guide, recorded as done instead of
+// greeted. A guide that starts is recorded as started first, so the
+// database this launch creates does not pass for an older install when
+// Clavis restarts before the guide is finished.
 func planOnboarding(dir string, hadData bool, now time.Time) bool {
-	if dir == "" || onboardingDone(dir) {
+	if dir == "" {
 		return false
 	}
-	if hadData {
-		_ = writeOnboardingMarker(dir, "existing-install", now)
+	exists, done := readOnboardingMarker(dir)
+	if done {
 		return false
 	}
+	if !exists && hadData {
+		_ = writeOnboardingMarker(dir, onboardingExisting, now)
+		return false
+	}
+	_ = writeOnboardingMarker(dir, onboardingStarted, now)
 	return true
 }
 
@@ -103,7 +129,7 @@ func (a *desktopApp) finishOnboarding() {
 	dir := a.dataDir
 	a.mu.Unlock()
 	if dir != "" {
-		_ = writeOnboardingMarker(dir, "finished", time.Now())
+		_ = writeOnboardingMarker(dir, onboardingFinished, time.Now())
 	}
 	if win != nil {
 		win.Hide()

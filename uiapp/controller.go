@@ -104,6 +104,11 @@ type Options struct {
 	// OnRecordPromptVersion fires when a prompt template is rendered and injected or an
 	// AI-upgraded draft is committed.
 	OnRecordPromptVersion func(promptID, trigger, rawDraft, finalOutput, preset string)
+	// OnConfigSaved fires after Clavis saved config.toml itself (Settings,
+	// the first-run guide), for the host to apply what runs outside the
+	// controller (trigger keys, input engine, clipboard filter): its config
+	// watcher skips Clavis's own writes.
+	OnConfigSaved func()
 }
 
 type clipTask struct {
@@ -179,6 +184,7 @@ type AppController struct {
 	OnLanguageChange      func()
 	OnRecordItemUse       func(itemID string)
 	OnRecordPromptVersion func(promptID, trigger, rawDraft, finalOutput, preset string)
+	OnConfigSaved         func()
 
 	// Decoded application icon bitmap cache
 	iconMu       sync.Mutex
@@ -324,6 +330,7 @@ func NewAppController(opts Options) *AppController {
 		OnLanguageChange:      opts.OnLanguageChange,
 		OnRecordItemUse:       opts.OnRecordItemUse,
 		OnRecordPromptVersion: opts.OnRecordPromptVersion,
+		OnConfigSaved:         opts.OnConfigSaved,
 		appIconCache:          make(map[string]*ui.Bitmap),
 		clipDone:              make(chan struct{}),
 		clipBaseCtx:           clipBaseCtx,
@@ -2428,6 +2435,7 @@ func (c *AppController) UpdateMainConfig(mutate func(main *config.MainConfig)) e
 	br := c.Bridge
 	onRepaint := c.OnRepaint
 	onLanguageChange := c.OnLanguageChange
+	onConfigSaved := c.OnConfigSaved
 	langChanged := syncAppearanceLanguage(updated)
 	c.mu.Unlock()
 
@@ -2435,6 +2443,9 @@ func (c *AppController) UpdateMainConfig(mutate func(main *config.MainConfig)) e
 	if br != nil {
 		br.UpdateKeymapConfig(updated.Main.Keymap)
 		br.UpdateIMEConfig(updated.Main.IME, updated.IMERules)
+	}
+	if onConfigSaved != nil {
+		onConfigSaved()
 	}
 	if langChanged && onLanguageChange != nil {
 		onLanguageChange()

@@ -297,23 +297,62 @@ func (a *AppController) renderOnboardingLeader(c *ui.Context, theme *ui.Theme, c
 				ui.Text(c, i18n.T("onboarding.leader.double_tap_after")).FontSize(typeLabel).TextColor(theme.TextMuted).SingleLine()
 			})
 		}
-		ui.Row(c).FillWidth().Gap(space10).AlignItems(ui.Center).Children(func() {
-			ui.Box(c).Grow(1).Shrink(1).Children(func() {
-				switch {
-				case seen:
-					onboardingNote(c, theme, "checkmark", theme.Success, i18n.T("onboarding.leader.seen"))
-				case !granted:
-					onboardingNote(c, theme, "lock.fill", theme.TextMuted, i18n.T("onboarding.leader.blocked"))
-				case !listening:
-					onboardingNote(c, theme, "clock", theme.TextMuted, i18n.T("onboarding.leader.blocked_monitor"))
-				default:
-					onboardingNote(c, theme, "keyboard", accentInk(theme, theme.Surface), i18n.T("onboarding.leader.waiting"))
-				}
-			})
-			if ui.Button(c, i18n.T("onboarding.leader.change")).Key("onboarding-change-key").Clicked() {
-				a.OpenSettings(SettingsTabGeneral)
+		switch {
+		case seen:
+			onboardingNote(c, theme, "checkmark", theme.Success, i18n.T("onboarding.leader.seen"))
+		case !granted:
+			onboardingNote(c, theme, "lock.fill", theme.TextMuted, i18n.T("onboarding.leader.blocked"))
+		case !listening:
+			onboardingNote(c, theme, "clock", theme.TextMuted, i18n.T("onboarding.leader.blocked_monitor"))
+		default:
+			onboardingNote(c, theme, "keyboard", accentInk(theme, theme.Surface), i18n.T("onboarding.leader.waiting"))
+		}
+		a.renderOnboardingLeaderPicker(c, theme, trig.LeaderKey, goos)
+	})
+}
+
+// renderOnboardingLeaderPicker lets the user pick a Leader key their
+// keyboard has: many compact keyboards have no right Option. The choice is
+// saved and applied at once, and the check waits for the new key. Caps
+// Lock is left to Settings: the default keymap gives it Esc and the
+// navigation layer.
+func (a *AppController) renderOnboardingLeaderPicker(c *ui.Context, theme *ui.Theme, current, goos string) {
+	var options []settingOption
+	for _, o := range triggerKeyOptions(goos) {
+		if o.value != "caps_lock" || current == "caps_lock" {
+			options = append(options, o)
+		}
+	}
+	labels := make([]string, 0, len(options))
+	chosen := ""
+	for _, o := range options {
+		labels = append(labels, o.label)
+		if o.value == current {
+			chosen = o.label
+		}
+	}
+	if chosen == "" { // a key the list doesn't name stays selectable
+		chosen = current
+		labels = append(labels, current)
+	}
+	ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+		ui.Text(c, i18n.T("onboarding.leader.no_key")).FontSize(typeLabel).TextColor(theme.TextMuted).SingleLine().Shrink(1)
+		picked := chosen
+		sel := ui.Select(c.Key("onboarding-leader-key"), &picked, labels).
+			Label(i18n.T("settings.trigger.leader_key")).Width(160).Shrink(0)
+		if !sel.Changed() || picked == chosen {
+			return
+		}
+		for _, o := range options {
+			if o.label != picked {
+				continue
 			}
-		})
+			if err := a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.LeaderKey = o.value }); err == nil {
+				a.mu.Lock()
+				a.onboarding.leaderSeen = false
+				a.mu.Unlock()
+			}
+		}
 	})
 }
 

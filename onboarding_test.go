@@ -29,13 +29,15 @@ func TestPlanOnboarding(t *testing.T) {
 	if !planOnboarding(fresh, false, now) {
 		t.Fatal("fresh install: want the guide")
 	}
-	if !planOnboarding(fresh, false, now) {
-		t.Fatal("deciding must not record it as done; finishing does")
+	// That launch created the clipboard database; Clavis restarts (macOS
+	// asks for it after Input Monitoring) before the guide is finished.
+	if !planOnboarding(fresh, true, now) {
+		t.Fatal("restarted before finishing: the guide must show again, not pass for an older install")
 	}
-	if err := writeOnboardingMarker(fresh, "finished", now); err != nil {
+	if err := writeOnboardingMarker(fresh, onboardingFinished, now); err != nil {
 		t.Fatal(err)
 	}
-	if planOnboarding(fresh, false, now) {
+	if planOnboarding(fresh, true, now) {
 		t.Fatal("finished: no guide")
 	}
 
@@ -76,6 +78,7 @@ type permBridge struct {
 	perms   host.PermissionStatus
 	startOK bool
 	starts  int
+	trigger config.TriggerConfig
 }
 
 func (b *permBridge) set(ax, im, startOK bool) {
@@ -110,6 +113,16 @@ func (b *permBridge) CurrentInputSource(context.Context) (host.InputSourceInfo, 
 func (b *permBridge) TapRecoveryCount() int64 { return 0 }
 
 func (b *permBridge) ActiveKeymapLayer() string { return "" }
+
+func (b *permBridge) UpdateTriggerConfig(cfg config.TriggerConfig) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.trigger = cfg
+}
+
+func (b *permBridge) UpdateKeymapConfig(config.KeymapConfig)                  {}
+func (b *permBridge) UpdateIMEConfig(config.IMEConfig, config.IMERulesConfig) {}
+func (b *permBridge) leaderKey() string                                       { b.mu.Lock(); defer b.mu.Unlock(); return b.trigger.LeaderKey }
 
 func (b *permBridge) Capabilities() host.Capabilities {
 	return host.Capabilities{Accessibility: true, InputMonitoring: true, GlobalHotkeys: true}
@@ -245,4 +258,37 @@ func TestWatchPermissionsRetriesOnChange(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// TestSavedLeaderKeyReachesTheBridge: a Leader key picked in Settings or the
+// guide is saved by Clavis itself, which the config watcher skips; the host
+// must hand it to the bridge at once, or it worked only after a restart.
+func TestSavedLeaderKeyReachesTheBridge(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfgStore := config.NewConfigStore(t.TempDir())
+	if _, err := cfgStore.LoadOrInitialize(); err != nil {
+		t.Fatal(err)
+	}
+	br := &permBridge{}
+	a := newDesktopApp()
+	ctrl := uiapp.NewAppController(uiapp.Options{
+		ConfigStore:     cfgStore,
+		ClipboardStore:  clipboard.NewMemoryStore(clipboard.NewPrivacyFilter()),
+		SecretStore:     secrets.NewMemoryAPIKeyStore(),
+		Bridge:          br,
+		ClipboardWriter: func(string) {},
+		OnConfigSaved:   a.applySavedConfig,
+	})
+	defer ctrl.Close()
+	a.mu.Lock()
+	a.ctx, a.cancel, a.controller, a.hostBridge = ctx, cancel, ctrl, br
+	a.mu.Unlock()
+
+	if err := ctrl.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.LeaderKey = "left_option" }); err != nil {
+		t.Fatal(err)
+	}
+	if got := br.leaderKey(); got != "left_option" {
+		t.Fatalf("the bridge has leader key %q after saving left_option", got)
+	}
 }

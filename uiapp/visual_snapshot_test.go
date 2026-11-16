@@ -216,18 +216,18 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool) {
 	f.bridge.perms = host.PermissionStatus{}
 	f.bridge.mu.Unlock()
 	_, _ = f.ctrl.RefreshPermissions(context.Background())
-	shoot("18-onboarding-fresh", guide("darwin"), 600, 700, 1.5, nil)
+	shoot("18-onboarding-fresh", guide("darwin"), 600, 740, 1.5, nil)
 	shoot("18b-onboarding-min", guide("darwin"), 520, 520, 1.5, nil)
 	f.bridge.mu.Lock()
 	f.bridge.perms = host.PermissionStatus{Accessibility: true, InputMonitoring: true, Granted: true}
 	f.bridge.mu.Unlock()
 	_, _ = f.ctrl.RefreshPermissions(context.Background())
 	f.ctrl.SetRelaunchNeeded(true)
-	shoot("18c-onboarding-relaunch", guide("darwin"), 600, 700, 1.5, nil)
+	shoot("18c-onboarding-relaunch", guide("darwin"), 600, 740, 1.5, nil)
 	_ = f.ctrl.Start(context.Background())
-	shoot("18d-onboarding-waiting", guide("darwin"), 600, 700, 1.5, nil)
+	shoot("18d-onboarding-waiting", guide("darwin"), 600, 740, 1.5, nil)
 	f.ctrl.HandleTriggerEvent(host.TriggerEvent{Kind: host.TriggerLeaderKey})
 	f.ctrl.Dispatch(engine.Event{Type: engine.EventDismiss})
-	shoot("18e-onboarding-ready", guide("darwin"), 600, 700, 1.5, nil)
-	shoot("18f-onboarding-windows", guide("windows"), 600, 700, 1.5, nil)
+	shoot("18e-onboarding-ready", guide("darwin"), 600, 740, 1.5, nil)
+	shoot("18f-onboarding-windows", guide("windows"), 600, 740, 1.5, nil)
 }

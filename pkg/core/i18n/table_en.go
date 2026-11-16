@@ -560,7 +560,7 @@ var enTable = map[string]string{
 	"onboarding.leader.seen":               "Got it! Your Leader key works.",
 	"onboarding.leader.blocked":            "Available once the permissions are granted.",
 	"onboarding.leader.blocked_monitor":    "Available once the keyboard monitor runs.",
-	"onboarding.leader.change":             "Change Key…",
+	"onboarding.leader.no_key":             "No such key on your keyboard? Pick another:",
 	"onboarding.step.shortcuts":            "A few more to remember",
 	"onboarding.shortcut.capsule":          "Open the Capsule: search actions, apps and snippets",
 	"onboarding.shortcut.clipboard":        "Clipboard history",

@@ -561,7 +561,7 @@ var zhTable = map[string]string{
 	"onboarding.leader.seen":               "收到了！Leader 键已经可以用了。",
 	"onboarding.leader.blocked":            "授予权限后就能试。",
 	"onboarding.leader.blocked_monitor":    "键盘监听启动后就能试。",
-	"onboarding.leader.change":             "换一个键…",
+	"onboarding.leader.no_key":             "键盘上没有这个键？换一个：",
 	"onboarding.step.shortcuts":            "再记住这几个",
 	"onboarding.shortcut.capsule":          "打开 Capsule：搜索动作、应用和片段",
 	"onboarding.shortcut.clipboard":        "剪贴板历史",

@@ -317,6 +317,7 @@ func (a *desktopApp) start() {
 		OnLanguageChange:      a.handleLanguageChange,
 		OnRecordItemUse:       a.handleRecordItemUse,
 		OnRecordPromptVersion: a.handleRecordPromptVersion,
+		OnConfigSaved:         a.applySavedConfig,
 		OnShowSelectionBar:    a.handleShowSelectionBar,
 		OnHideSelectionBar:    a.handleHideSelectionBar,
 	})
@@ -433,7 +434,7 @@ func (a *desktopApp) start() {
 	onboardingWin := mygo.NewWindow(mygo.WindowOptions{
 		Title:     i18n.T("tray.onboarding_window"),
 		Width:     600,
-		Height:    700,
+		Height:    740,
 		MinWidth:  520,
 		MinHeight: 520,
 		Hidden:    true,
@@ -686,7 +687,6 @@ func (a *desktopApp) setupTray() {
 func (a *desktopApp) startBridgeAndFallbackShortcut(trigger config.TriggerConfig) {
 	a.mu.Lock()
 	ctrl := a.controller
-	br := a.hostBridge
 	ctx := a.ctx
 	running := a.bridgeRunning
 	a.mu.Unlock()
@@ -698,16 +698,24 @@ func (a *desktopApp) startBridgeAndFallbackShortcut(trigger config.TriggerConfig
 		if !a.bridgeStarting.CompareAndSwap(false, true) {
 			return // another caller is starting it and sets the fallbacks
 		}
-		err := ctrl.Start(ctx)
-		if err == nil {
+		if err := ctrl.Start(ctx); err == nil {
 			a.mu.Lock()
 			a.bridgeRunning = true
-			running = true
 			a.mu.Unlock()
 		}
 		a.bridgeStarting.Store(false)
 	}
+	a.syncFallbackShortcuts(trigger)
+}
 
+// syncFallbackShortcuts registers the capsule and clipboard shortcuts with
+// MyGo when the bridge cannot provide them (not running, or no global
+// hotkeys), and drops them when it can.
+func (a *desktopApp) syncFallbackShortcuts(trigger config.TriggerConfig) {
+	a.mu.Lock()
+	br := a.hostBridge
+	running := a.bridgeRunning
+	a.mu.Unlock()
 	caps := host.Capabilities{}
 	if br != nil {
 		caps = br.Capabilities()
@@ -716,7 +724,6 @@ func (a *desktopApp) startBridgeAndFallbackShortcut(trigger config.TriggerConfig
 		a.unregisterFallbackShortcuts()
 		return
 	}
-
 	a.registerFallbackShortcuts(planFallbackShortcuts(trigger))
 }
 
@@ -886,10 +893,8 @@ func (a *desktopApp) reloadConfiguration() {
 func (a *desktopApp) applyConfigReload() {
 	a.mu.Lock()
 	ctrl := a.controller
-	br := a.hostBridge
 	sqliteStore := a.sqliteStore
 	learningStore := a.learningStore
-	sup := a.supervisor
 	ms := a.mediaStore
 	a.mu.Unlock()
 	if ctrl == nil {
@@ -899,23 +904,7 @@ func (a *desktopApp) applyConfigReload() {
 	ok := ctrl.ReloadConfig()
 	cfg := ctrl.Config()
 	if ok {
-		if updater, canUpdate := br.(dynamicBridgeUpdater); canUpdate {
-			updater.UpdateTriggerConfig(cfg.Main.Trigger)
-			updater.UpdateKeymapConfig(cfg.Main.Keymap)
-			updater.UpdateIMEConfig(cfg.Main.IME, cfg.IMERules)
-		}
-		if h, ok := br.(bridge.InputEngineHost); ok {
-			h.ConfigureInputEngine(cfg.Main.InputEngine)
-		}
-		if ext, ok := br.(bridge.ExtendedHostService); ok {
-			ext.UpdateDaemonShortcut(cfg.Main.Daemon.InPlaceOptimizeShortcut)
-		}
-		if sqliteStore != nil {
-			sqliteStore.SetPrivacyFilter(clipboard.NewPrivacyFilterFromConfig(cfg.Main.Clipboard))
-		}
-		if sup != nil {
-			sup.UpdateConfig(cfg.Main.Daemon)
-		}
+		a.applyRuntimeConfig(cfg)
 		if sqliteStore != nil || learningStore != nil {
 			clipCfg := cfg.Main.Clipboard
 			a.goBG(func(ctx context.Context) {
@@ -935,6 +924,50 @@ func (a *desktopApp) applyConfigReload() {
 	// A language change on disk takes effect on the next reload.
 	a.syncLanguageFromConfig(cfg)
 	go a.refreshPermissionsAsync()
+}
+
+// applyRuntimeConfig hands cfg to what runs outside the controller: the
+// bridge's trigger keys, keymap and IME rules, the input engine, the
+// in-place optimize shortcut, the clipboard privacy filter and the daemon.
+func (a *desktopApp) applyRuntimeConfig(cfg config.ClavisConfig) {
+	a.mu.Lock()
+	br := a.hostBridge
+	sqliteStore := a.sqliteStore
+	sup := a.supervisor
+	a.mu.Unlock()
+	if updater, ok := br.(dynamicBridgeUpdater); ok {
+		updater.UpdateTriggerConfig(cfg.Main.Trigger)
+		updater.UpdateKeymapConfig(cfg.Main.Keymap)
+		updater.UpdateIMEConfig(cfg.Main.IME, cfg.IMERules)
+	}
+	if h, ok := br.(bridge.InputEngineHost); ok {
+		h.ConfigureInputEngine(cfg.Main.InputEngine)
+	}
+	if ext, ok := br.(bridge.ExtendedHostService); ok {
+		ext.UpdateDaemonShortcut(cfg.Main.Daemon.InPlaceOptimizeShortcut)
+	}
+	if sqliteStore != nil {
+		sqliteStore.SetPrivacyFilter(clipboard.NewPrivacyFilterFromConfig(cfg.Main.Clipboard))
+	}
+	if sup != nil {
+		sup.UpdateConfig(cfg.Main.Daemon)
+	}
+}
+
+// applySavedConfig applies a configuration Clavis saved itself (Settings,
+// the first-run guide). The config watcher skips Clavis's own writes, so
+// without it a new Leader key, input engine setting or clipboard filter
+// waited for the next restart.
+func (a *desktopApp) applySavedConfig() {
+	a.mu.Lock()
+	ctrl := a.controller
+	a.mu.Unlock()
+	if ctrl == nil {
+		return
+	}
+	cfg := ctrl.Config()
+	a.applyRuntimeConfig(cfg)
+	a.syncFallbackShortcuts(cfg.Main.Trigger)
 }
 
 // syncLanguageFromConfig re-resolves the UI language after a config change
