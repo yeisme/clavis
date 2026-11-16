@@ -81,6 +81,10 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 
 	card.Children(func() {
 		if state.Phase == engine.PhaseHUD {
+			// HUD keeps the same compact context header as the interactive
+			// phases, so transient notices do not change the window's identity.
+			a.renderCapsuleHeader(c, theme, cfg, state, diag)
+			ui.Divider(c)
 			a.renderHUDView(c, theme, state)
 			return
 		}
@@ -93,7 +97,7 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 		StageContainer3D(c, "capsule", stageIdx, stageCfg, func() {
 			col := ui.Column(c).Fill()
 			if Spatial3DEnabled(c, stageCfg) && stageIdx != 0 && appearance.CapsuleWidth > 720 {
-				col.Padding(0, 6)
+				col.Padding(space0, space6)
 			}
 			col.Children(renderInteractivePhase)
 		})
@@ -120,6 +124,31 @@ func resolveAppearanceTheme(c *ui.Context, mode string) *ui.Theme {
 	}
 }
 
+func capsuleSegmentedTabs(c *ui.Context, theme *ui.Theme, labels []string, active int, onPick func(int)) {
+	ui.Row(c).Gap(space2).AlignItems(ui.Center).Children(func() {
+		for i, label := range labels {
+			selected := i == active
+			segment := ui.ButtonBase(c).Padding(space4, space8).Radius(radiusSegment).FocusRing(false)
+			if selected {
+				segment.Background(theme.Accent)
+			} else {
+				segment.Background(tileFill(theme))
+			}
+			segment.Children(func() {
+				text := ui.Text(c, label).FontSize(typeLabel).SingleLine()
+				if selected {
+					text.TextColor(theme.AccentText).FontWeight(600)
+				} else {
+					text.TextColor(theme.TextMuted)
+				}
+			})
+			if segment.Clicked() && onPick != nil {
+				onPick(i)
+			}
+		}
+	})
+}
+
 func (a *AppController) renderCapsuleHeader(
 	c *ui.Context,
 	theme *ui.Theme,
@@ -127,137 +156,93 @@ func (a *AppController) renderCapsuleHeader(
 	state engine.State,
 	diag DiagnosticsSnapshot,
 ) {
-	header := ui.Row(c).FillWidth().Padding(10, 14).Gap(8).AlignItems(ui.Center)
+	header := kitHeaderBar(c)
 	if state.Phase == engine.PhaseAIStreaming && !isClassicPreset(cfg.Main.Appearance) {
 		header.Draw(func(p *ui.Painter, r ui.Rect) {
 			drawCapsuleAIHeaderGlow(c, p, r, theme, cfg.Main.Appearance, state)
 		})
 	}
 	header.Children(func() {
-		// Clavis brand badge with command icon
-		ui.Row(c).
-			Padding(3, 8).
-			Radius(6).
-			Gap(5).
-			AlignItems(ui.Center).
-			Background(withAlpha(theme.Accent, 0.16)).
-			Children(func() {
-				renderSemanticIcon(c, "command", 13, theme.Accent)
-				ui.Text(c, "Clavis").FontSize(12).FontWeight(700).TextColor(theme.Accent).SingleLine()
-			})
-
 		switch state.Phase {
 		case engine.PhaseLeader:
+			// Keep the brand in Leader only: Omnibox's query and tabs need the
+			// horizontal room, while Leader benefits from the orientation cue.
+			ui.Row(c).Padding(space2, space8).Radius(radiusChip).Gap(space4).
+				AlignItems(ui.Center).Background(theme.Accent.Alpha(alphaSubtle)).Children(func() {
+				renderSemanticIcon(c, "command", typeBody, theme.Accent)
+				ui.Text(c, "Clavis").FontSize(typeLabel).FontWeight(700).TextColor(theme.Accent).SingleLine()
+			})
 			crumbs := make([]string, 0, 1+len(state.LeaderBreadcrumbs))
 			crumbs = append(crumbs, i18n.T("leader.root"))
 			crumbs = append(crumbs, state.LeaderBreadcrumbs...)
-			ui.Text(c, strings.Join(crumbs, " › ")).
-				FontSize(13).
-				FontWeight(600).
-				TextColor(theme.Text).
-				SingleLine()
+			ui.Text(c, strings.Join(crumbs, " › ")).FontSize(typeBody).FontWeight(600).
+				TextColor(theme.Text).SingleLine()
 
 		case engine.PhaseOmnibox:
-			ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
-				for _, tab := range omniboxTabs {
-					active := state.OmniboxTab == tab
-					pill := ui.ButtonBase(c).
-						Padding(4, 9).
-						Radius(6).
-						FocusRing(false)
-					if active {
-						pill.Background(theme.Accent)
-					} else {
-						pill.Background(theme.Surface).Border(1, withAlpha(theme.Border, 0.7))
-					}
-					pill.Children(func() {
-						txt := ui.Text(c, omniboxTabLabel(tab)).FontSize(12).SingleLine()
-						if active {
-							txt.TextColor(theme.AccentText).FontWeight(600)
-						} else {
-							txt.TextColor(theme.TextMuted)
-						}
-					})
-					if pill.Clicked() {
-						a.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: tab})
-						a.uiState.searchHandle.RequestFocus(c)
-					}
+			labels := make([]string, len(omniboxTabs))
+			active := 0
+			for i, tab := range omniboxTabs {
+				labels[i] = omniboxTabLabel(tab)
+				if tab == state.OmniboxTab {
+					active = i
 				}
+			}
+			// The capsule owns the tab hit targets so a dispatch rebuild cannot
+			// retain a glass-group pane from the previous immediate-mode pass.
+			capsuleSegmentedTabs(c, theme, labels, active, func(i int) {
+				a.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: omniboxTabs[i]})
+				a.uiState.searchHandle.RequestFocus(c)
 			})
 
 		case engine.PhaseAIStreaming:
 			modeLabel := aiModeLabel(state.AIMode)
-			ui.Text(c, i18n.Tf("ai.header", modeLabel)).FontSize(13).FontWeight(600).TextColor(theme.Text).SingleLine()
-
-			// Active AI Profile pill (clickable to cycle profiles)
+			ui.Text(c, i18n.Tf("ai.header", modeLabel)).FontSize(typeBody).FontWeight(600).
+				TextColor(theme.Text).SingleLine()
 			activeProf := a.ActiveAIProfile()
 			profID := activeProf.ID
 			if profID == "" {
 				profID = activeProf.Provider
 			}
 			profLabel := fmt.Sprintf("%s / %s", profID, activeProf.Model)
-			profPill := ui.ButtonBase(c).
-				Padding(2, 8).
-				Radius(999).
-				Background(theme.Surface).
-				Border(1, withAlpha(theme.Border, 0.7)).
-				FocusRing(false)
-			profPill.Children(func() {
-				ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
-					renderSemanticIcon(c, "sparkles", 11, theme.Accent)
-					ui.Text(c, profLabel).FontSize(11).FontWeight(600).TextColor(theme.Text).SingleLine()
+			profile := ui.ButtonBase(c).Padding(space2, space8).Radius(radiusPill).
+				Background(tileFill(theme)).Border(space1, hairline(theme)).FocusRing(false)
+			profile.Children(func() {
+				ui.Row(c).Gap(space4).AlignItems(ui.Center).Children(func() {
+					renderSemanticIcon(c, "sparkles", typeMeta, theme.Accent)
+					ui.Text(c, profLabel).FontSize(typeMeta).FontWeight(600).TextColor(theme.Text).SingleLine()
 				})
 			})
-			if profPill.Clicked() {
-				nextID := nextAIProfileID(cfg.Main.AI, activeProf.ID)
-				if nextID != "" {
+			if profile.Clicked() {
+				if nextID := nextAIProfileID(cfg.Main.AI, activeProf.ID); nextID != "" {
 					_ = a.SelectAIProfile(nextID)
 				}
 			}
-
-			statusText := i18n.T("ai.status.streaming")
-			statusBg := withAlpha(theme.Accent, 0.15)
-			statusFg := theme.Accent
-			if state.AIError != "" {
-				statusText = i18n.T("common.error")
-				statusBg = withAlpha(theme.Danger, 0.16)
-				statusFg = theme.Danger
-			} else if state.AIComplete {
-				statusText = i18n.T("common.done")
-				statusBg = withAlpha(theme.Success, 0.16)
-				statusFg = theme.Success
-			}
-			ui.Box(c).Padding(2, 8).Radius(999).Background(statusBg).Children(func() {
-				ui.Text(c, statusText).FontSize(11).FontWeight(600).TextColor(statusFg).SingleLine()
-			})
 		}
 
 		ui.Spacer(c)
-
+		items := make([]string, 0, 2)
 		if state.Context.AppName != "" {
-			ui.Box(c).
-				Padding(2, 7).
-				Radius(5).
-				Background(theme.Surface).
-				Border(1, withAlpha(theme.Border, 0.6)).
-				Children(func() {
-					ui.Text(c, state.Context.AppName).FontSize(11).TextColor(theme.TextMuted).SingleLine()
-				})
+			items = append(items, state.Context.AppName)
 		}
-
 		imeLabel := diag.ActiveInputSource.Name
 		if imeLabel == "" {
 			imeLabel = diag.ActiveInputSource.ID
 		}
 		if imeLabel != "" {
-			ui.Box(c).
-				Padding(2, 7).
-				Radius(5).
-				Background(theme.Surface).
-				Border(1, withAlpha(theme.Border, 0.6)).
-				Children(func() {
-					ui.Text(c, imeLabel).FontSize(11).TextColor(theme.TextMuted).SingleLine()
-				})
+			items = append(items, imeLabel)
+		}
+		if len(items) > 0 {
+			kitChipGroup(c, theme, items)
+		}
+		if state.Phase == engine.PhaseAIStreaming {
+			statusText := i18n.T("ai.status.streaming")
+			tone := chipAccent
+			if state.AIError != "" {
+				statusText, tone = i18n.T("common.error"), chipDanger
+			} else if state.AIComplete {
+				statusText, tone = i18n.T("common.done"), chipSuccess
+			}
+			kitStatusPill(c, theme, statusText, tone)
 		}
 	})
 }
@@ -288,7 +273,7 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 		FocusRing(false).
 		FillWidth().
 		Grow(1).
-		Padding(12, 14).
+		Padding(space12, space14).
 		Gap(10)
 
 	if a.uiState.lastPhase != engine.PhaseLeader || !a.uiState.leaderHandle.Focused(c) {
@@ -302,7 +287,7 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 	container.Children(func() {
 		ui.Scroll(c).FillWidth().Grow(1).Children(func() {
 			if len(state.LeaderNodes) == 0 {
-				ui.Box(c).FillWidth().Padding(24).Center().Children(func() {
+				ui.Box(c).FillWidth().Padding(space24).Center().Children(func() {
 					ui.Text(c, i18n.T("leader.empty")).TextColor(theme.TextMuted)
 				})
 				return
@@ -377,7 +362,7 @@ func leaderKeycap(c *ui.Context, theme *ui.Theme, key string) {
 		Size(24, 24).
 		Radius(radiusChip).
 		Center().
-		Background(theme.Accent.Alpha(0.14)).
+		Background(theme.Accent.Alpha(alphaSubtle)).
 		Border(1, theme.Accent.Alpha(0.42)).
 		Shadow(0, 1, 0, 0, theme.Accent.Alpha(0.28)).
 		Children(func() {
@@ -434,17 +419,40 @@ func (a *AppController) renderOmniboxView(
 		a.uiState.searchHandle.RequestFocus(c)
 	}
 
-	rootCol := ui.Column(c).FillWidth().Grow(1).Padding(10, 14).Gap(8)
+	rootCol := ui.Column(c).FillWidth().Grow(1).Padding(space10, space14).Gap(8)
 	rootCol.HandleInput(func(ev ui.InputEvent) bool {
-		if ev.Kind != ui.InputKeyDown || a.uiState.isComposing {
+		if ev.Kind != ui.InputKeyDown {
+			return false
+		}
+		// IME owns unmodified Enter/Tab/arrows/Escape during preedit, but
+		// Cmd/Ctrl chords are application shortcuts and must still work.
+		if a.uiState.isComposing && ev.Mods == 0 {
 			return false
 		}
 		return a.handleOmniboxKey(ev.Key, ev.Mods, state)
 	})
 
-	// While the contextual action menu is open, Escape closes only the menu,
-	// wherever the keyboard focus is.
-	if a.omniboxActionMenuOpen(state) {
+	// Keep the important Omnibox chords alive after a footer/list click moves
+	// focus away from the search field. Unmodified navigation remains in the
+	// focused editor so the IME can claim it during preedit.
+	mods := primaryMod()
+	for _, shortcut := range []struct {
+		key ui.Key
+	}{
+		{ui.KeyEnter},
+		{ui.KeyK},
+		{ui.KeyI},
+		{ui.KeyP},
+	} {
+		shortcut := shortcut
+		c.OnWindowShortcut(mods, shortcut.key, func() {
+			// Modified chords remain application-owned during IME preedit.
+			a.handleOmniboxKey(shortcut.key, mods, state)
+		})
+	}
+	// Do not claim Escape while an IME preedit is active: the focused text
+	// editor must be able to cancel the candidate composition first.
+	if a.omniboxActionMenuOpen(state) && !a.uiState.isComposing {
 		c.OnWindowShortcut(0, ui.KeyEscape, func() {
 			capsuleUI.setActionMenuShown(a, false)
 		})
@@ -490,19 +498,20 @@ func (a *AppController) renderOmniboxView(
 			// Quick chords (⌥1..⌥9 / Alt+1..9) must be taken before the text
 			// editor types the Option+digit character.
 			in.HandleInput(func(ev ui.InputEvent) bool {
-				if ev.Kind != ui.InputKeyDown || a.uiState.isComposing {
+				if ev.Kind != ui.InputKeyDown {
+					return false
+				}
+				if a.uiState.isComposing && ev.Mods == 0 {
 					return false
 				}
 				return a.handleOmniboxKey(ev.Key, ev.Mods, state)
 			})
 
 			in.OnTextKey(func(k ui.TextKey) bool {
-				if a.uiState.isComposing {
+				if a.uiState.isComposing && k.Mods == 0 {
 					switch k.Key {
 					case ui.KeyEnter, ui.KeyUp, ui.KeyDown, ui.KeyTab, ui.KeyEscape:
 						return true
-					default:
-						return false
 					}
 				}
 				return a.handleOmniboxKey(k.Key, k.Mods, state)
@@ -528,9 +537,9 @@ func (a *AppController) renderOmniboxView(
 		items := state.OmniboxItems
 		if len(items) == 0 {
 			// Empty-state illustration: the tab's icon above its caption.
-			ui.Box(c).FillWidth().Grow(1).Center().Padding(24).Children(func() {
+			ui.Box(c).FillWidth().Grow(1).Center().Padding(space24).Children(func() {
 				ui.Column(c).Gap(10).Center().Children(func() {
-					renderSemanticIcon(c, omniboxTabIcon(state.OmniboxTab), 24, withAlpha(theme.TextMuted, 0.55))
+					renderSemanticIcon(c, omniboxTabIcon(state.OmniboxTab), 24, withAlpha(theme.TextMuted, alphaHalf))
 					ui.Text(c, omniboxEmptyText(state.OmniboxTab)).TextColor(theme.TextMuted)
 				})
 			})
@@ -557,12 +566,26 @@ func (a *AppController) renderOmniboxView(
 				// ⌥1..⌥9 quick-select badges appear only while Option (Alt)
 				// is held, so the resting list stays quiet.
 				altHeld := cfg.Main.Appearance.ShowKeyHints && c.Modifiers()&ui.Alt != 0
+				prefs := c.Preferences()
+				plan := resolveStagePlan(stageInputs{
+					Phase:              state.Phase,
+					Preset:             cfg.Main.Appearance.VisualPreset,
+					Animations:         cfg.Main.Appearance.Animations,
+					Intensity:          cfg.Main.Appearance.StageIntensity,
+					ObliqueRows:        cfg.Main.Appearance.ObliqueRows,
+					Composing:          a.uiState.isComposing,
+					ReducedMotion:      prefs.ReduceMotion,
+					ReduceTransparency: prefs.ReduceTransparency,
+					HighContrast:       prefs.HighContrast,
+					// Row fan geometry is renderer-independent. Shader capability is
+					// queried inside Draw callbacks, never used to shape rows.
+				})
 				// The list paints its chosen row in the theme accent. A
 				// transparent accent in a scoped theme hands that job to the
 				// row, which animates a soft tint instead: a solid accent fill
 				// swallowed the accent-colored icon and match highlights.
 				ui.Themed(c, rowSelectionTheme(theme)).Background(ui.Transparent).FillWidth().Grow(1).Children(func() {
-					list := ui.List(c, &a.uiState.listState, len(items), func(i int) {
+					list := stageRowList(c, &a.uiState.listState, plan, len(items), selectedIdx, func(i int) ui.Element {
 						item := items[i]
 						isSelected := i == state.SelectedIndex
 						row := ui.Row(c).
@@ -623,6 +646,7 @@ func (a *AppController) renderOmniboxView(
 							a.SelectIndex(i)
 							a.uiState.searchHandle.RequestFocus(c)
 						}
+						return row
 					}).FillWidth().Grow(1)
 
 					if list.Changed() && selectedIdx >= 0 && selectedIdx < len(items) && selectedIdx != state.SelectedIndex {
@@ -654,12 +678,12 @@ func (a *AppController) renderOmniboxView(
 			a.renderOmniboxFooterHints(c, theme, cfg, state)
 			ui.Spacer(c)
 
-			a.renderOmniboxFooterFrameToggle(c, theme, state, prefix+i18n.T("omnibox.footer.preview"),
+			a.renderOmniboxFooterFrameToggle(c, theme, "eye", prefix+i18n.T("omnibox.footer.preview"),
 				a.previewPaneVisible(cfg), func() {
 					capsuleUI.togglePreview(a, cfg.Main.Appearance.ShowPreviewPane)
 					a.uiState.searchHandle.RequestFocus(c)
 				})
-			a.renderOmniboxFooterFrameToggle(c, theme, state, prefix+i18n.T("omnibox.footer.actions"),
+			a.renderOmniboxFooterFrameToggle(c, theme, "command", prefix+i18n.T("omnibox.footer.actions"),
 				a.omniboxActionMenuOpen(state), func() {
 					a.toggleOmniboxActionMenu()
 					a.uiState.searchHandle.RequestFocus(c)
@@ -674,24 +698,35 @@ func (a *AppController) renderOmniboxView(
 func (a *AppController) renderOmniboxFooterHints(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig, state engine.State) {
 	selected, ok := selectedOmniboxItem(state)
 	if !ok {
-		keyHint(c, theme, "Tab", i18n.T("omnibox.footer.switch_tab"), keyToneNeutral)
-		keyHint(c, theme, "esc", i18n.T("omnibox.footer.close"), keyToneNeutral)
+		ui.Row(c).Gap(space8).AlignItems(ui.Center).Children(func() {
+			keyHint(c, theme, "Tab", i18n.T("omnibox.footer.switch_tab"), keyToneNeutral)
+			ui.Box(c).Width(space1).Height(space12).Background(hairline(theme))
+			keyHint(c, theme, "esc", i18n.T("omnibox.footer.close"), keyToneNeutral)
+		})
 		return
 	}
 	specs := engine.AvailableItemActions(selected)
-	for i, spec := range specs {
-		if i >= 2 {
-			break
+	ui.Row(c).Gap(space8).AlignItems(ui.Center).Children(func() {
+		for i, spec := range specs {
+			if i >= 2 {
+				break
+			}
+			if i > 0 {
+				ui.Box(c).Width(space1).Height(space12).Background(hairline(theme))
+			}
+			keyHint(c, theme, adaptActionShortcut(spec.Shortcut), spec.Label, keyToneNeutral)
 		}
-		keyHint(c, theme, adaptActionShortcut(spec.Shortcut), spec.Label, keyToneNeutral)
-	}
-	if cfg.Main.Appearance.ShowKeyHints && len(state.OmniboxItems) > 1 {
-		tone := keyToneNeutral
-		if c.Modifiers()&ui.Alt != 0 {
-			tone = keyToneAccent
+		if cfg.Main.Appearance.ShowKeyHints && len(state.OmniboxItems) > 1 {
+			if len(specs) > 0 {
+				ui.Box(c).Width(space1).Height(space12).Background(hairline(theme))
+			}
+			tone := keyToneNeutral
+			if c.Modifiers()&ui.Alt != 0 {
+				tone = keyToneAccent
+			}
+			keyHint(c, theme, altPrefix()+"1–9", i18n.T("omnibox.footer.quick_select"), tone)
 		}
-		keyHint(c, theme, altPrefix()+"1–9", i18n.T("omnibox.footer.quick_select"), tone)
-	}
+	})
 }
 
 // omniboxRouteMode names the search mode a quick-route prefix selects, for
@@ -724,28 +759,12 @@ func omniboxRouteMode(query string) (icon, label string, ok bool) {
 func (a *AppController) renderOmniboxFooterFrameToggle(
 	c *ui.Context,
 	theme *ui.Theme,
-	_ engine.State,
+	icon string,
 	label string,
 	active bool,
 	onClick func(),
 ) {
-	btn := ui.ButtonBase(c).
-		Padding(space2, space8).
-		Radius(radiusChip).
-		FocusRing(false).
-		Background(tileFill(theme)).
-		Border(1, hairline(theme))
-	fg := theme.TextMuted
-	if active {
-		btn.Background(selectionFill(theme)).Border(1, selectionEdge(theme))
-		fg = accentInk(theme, surfaceBase(theme))
-	}
-	btn.Children(func() {
-		ui.Text(c, label).FontSize(typeMicro).FontWeight(600).TextColor(fg).SingleLine()
-	})
-	if btn.Clicked() && onClick != nil {
-		onClick()
-	}
+	kitIconButton(c, theme, icon, active, label, onClick)
 }
 
 // renderOmniboxRowLeadingIcon draws a row's leading glyph at one fixed tile
@@ -788,7 +807,7 @@ func (a *AppController) renderOmniboxRowLeadingIcon(c *ui.Context, theme *ui.The
 		glyph := strings.TrimSpace(item.UtilityValue)
 		if glyph != "" {
 			ui.Box(c).Size(rowIconTile, rowIconTile).Radius(radiusTile).Center().Background(tileFill(theme)).Children(func() {
-				ui.Text(c, glyph).FontSize(17).SingleLine()
+				ui.Text(c, glyph).FontSize(typeGlyph).SingleLine()
 			})
 			return
 		}
@@ -828,7 +847,7 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 			return true
 		}
 	}
-	if mods == (ui.Alt|primaryMod()) || mods == (ui.Alt|ui.Cmd) {
+	if mods == (ui.Alt|primaryMod()) || mods == (ui.Alt|ui.Cmd) || mods == (ui.Alt|ui.Ctrl) {
 		if idx, ok := rowQuickKeyIndex(key); ok && idx < len(state.OmniboxItems) {
 			a.Dispatch(engine.Event{
 				Type:      engine.EventSelectAndConfirmIndex,
@@ -942,25 +961,25 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 		})
 	}
 
-	ui.Column(c).FillWidth().Grow(1).Padding(12, 14).Gap(8).Children(func() {
+	ui.Column(c).FillWidth().Grow(1).Padding(space12, space14).Gap(8).Children(func() {
 		if state.AISourceText != "" {
 			srcRunes := utf8.RuneCountInString(state.AISourceText)
 			headerLabel := i18n.Tf("ai.source_text", srcRunes)
 			toggle := ui.ButtonBase(c).
 				FillWidth().
-				Padding(6, 10).
-				Radius(8).
+				Padding(space6, space10).
+				Radius(radius8).
 				Background(theme.Surface).
 				Border(1, theme.Border)
 			toggle.Children(func() {
 				ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-					ui.Text(c, headerLabel).FontSize(12).FontWeight(500).TextColor(theme.TextMuted).SingleLine()
+					ui.Text(c, headerLabel).FontSize(typeLabel).FontWeight(500).TextColor(theme.TextMuted).SingleLine()
 					ui.Spacer(c)
 					chevron := "▸"
 					if a.uiState.sourceExpanded {
 						chevron = "▾"
 					}
-					ui.Text(c, chevron).FontSize(12).TextColor(theme.TextMuted).SingleLine()
+					ui.Text(c, chevron).FontSize(typeLabel).TextColor(theme.TextMuted).SingleLine()
 				})
 			})
 			if toggle.Clicked() {
@@ -970,13 +989,13 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 				ui.Box(c).
 					FillWidth().
 					MaxHeight(84).
-					Padding(8, 10).
-					Radius(8).
+					Padding(space8, space10).
+					Radius(radius8).
 					Background(theme.Surface).
-					Border(1, withAlpha(theme.Border, 0.6)).
+					Border(1, withAlpha(theme.Border, alphaStrong)).
 					Children(func() {
 						ui.Scroll(c).FillWidth().Children(func() {
-							ui.Text(c, state.AISourceText).FontSize(12).TextColor(theme.TextMuted)
+							ui.Text(c, state.AISourceText).FontSize(typeLabel).TextColor(theme.TextMuted)
 						})
 					})
 			}
@@ -987,10 +1006,10 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 			ui.Box(c).
 				FillWidth().
 				MaxHeight(96).
-				Padding(6, 8).
-				Radius(8).
-				Background(withAlpha(theme.Surface, 0.7)).
-				Border(1, withAlpha(theme.Border, 0.6)).
+				Padding(space6, space8).
+				Radius(radius8).
+				Background(withAlpha(theme.Surface, alphaStrong)).
+				Border(1, withAlpha(theme.Border, alphaStrong)).
 				Children(func() {
 					ui.Scroll(c).FillWidth().Children(func() {
 						ui.Column(c).FillWidth().Gap(4).Children(func() {
@@ -1008,13 +1027,13 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 									AlignItems(ui.Center).
 									Children(func() {
 										ui.Box(c).
-											Padding(1, 6).
-											Radius(4).
-											Background(withAlpha(roleColor, 0.14)).
+											Padding(space1, space6).
+											Radius(radius4).
+											Background(withAlpha(roleColor, alphaSubtle)).
 											Children(func() {
-												ui.Text(c, roleLabel).FontSize(10).FontWeight(700).TextColor(roleColor).SingleLine()
+												ui.Text(c, roleLabel).FontSize(typeMicro).FontWeight(700).TextColor(roleColor).SingleLine()
 											})
-										ui.Text(c, turn.Content).FontSize(11).TextColor(theme.TextMuted).SingleLine().Grow(1)
+										ui.Text(c, turn.Content).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().Grow(1)
 									})
 							}
 						})
@@ -1029,8 +1048,8 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 		applyProseLineHeight(ui.Scroll(c).
 			FillWidth().
 			Grow(1).
-			Padding(10, 12).
-			Radius(10).
+			Padding(space10, space12).
+			Radius(radiusCard).
 			Background(theme.Surface).
 			Border(1, theme.Border)).
 			Children(func() {
@@ -1043,26 +1062,26 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 					}
 					errBox := ui.Box(c).
 						FillWidth().
-						Padding(10, 12).
-						Radius(8).
-						Background(withAlpha(theme.Danger, 0.12)).
-						Border(1, withAlpha(theme.Danger, 0.4)).
+						Padding(space10, space12).
+						Radius(radius8).
+						Background(withAlpha(theme.Danger, alphaFaint)).
+						Border(1, withAlpha(theme.Danger, alphaHalf)).
 						Children(func() {
-							ui.Text(c, state.AIError).FontSize(13).TextColor(theme.Danger)
+							ui.Text(c, state.AIError).FontSize(typeBody).TextColor(theme.Danger)
 						})
 					if frames := shakeKeyframes(profile); frames != nil {
 						jolt := errBox.Keyframes("ai-error-shake", frames, ui.KeyframeOptions{Run: a.uiState.aiShakeRun})
 						errBox.Translate(jolt*3, 0)
 					}
 				case state.AIOutput == "":
-					ui.Text(c, i18n.T("ai.generating")).FontSize(13).TextColor(theme.TextMuted)
+					ui.Text(c, i18n.T("ai.generating")).FontSize(typeBody).TextColor(theme.TextMuted)
 				case hasReview && a.aiReviewShowsChanges(review):
 					renderAIReviewChanges(c, theme, review)
 				default:
 					markdown.View(c, state.AIOutput, &a.uiState.mdOpts)
 					if !state.AIComplete {
 						// Pulsing caret while the answer streams in (900ms loop).
-						caret := ui.Box(c).Width(7).Height(15).Radius(2)
+						caret := ui.Box(c).Width(7).Height(15).Radius(radius4)
 						caret.Background(theme.Accent.Alpha(cursorOpacity(caret, profile)))
 					}
 				}
@@ -1095,14 +1114,17 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 			// Quick chords (⌥1..⌥9 / Alt+1..9) must be taken before the text
 			// editor types the Option+digit character.
 			in.HandleInput(func(ev ui.InputEvent) bool {
-				if ev.Kind != ui.InputKeyDown || a.uiState.isComposing {
+				if ev.Kind != ui.InputKeyDown {
+					return false
+				}
+				if a.followUpComposing() && ev.Mods == 0 {
 					return false
 				}
 				return a.handleOmniboxKey(ev.Key, ev.Mods, state)
 			})
 
 			in.OnTextKey(func(k ui.TextKey) bool {
-				if a.followUpComposing() {
+				if a.followUpComposing() && k.Mods == 0 {
 					switch k.Key {
 					case ui.KeyEnter, ui.KeyEscape, ui.KeyUp, ui.KeyDown, ui.KeyTab:
 						// IME candidate selection keys belong to the input method.
@@ -1195,13 +1217,16 @@ func hudIconForMessage(msg string) string {
 }
 
 func (a *AppController) renderHUDView(c *ui.Context, theme *ui.Theme, state engine.State) {
-	ui.Row(c).Fill().Padding(space10, space16).Center().Gap(space8).Children(func() {
-		// Same vocabulary as the floating pill: success, failure, input
-		// method or info, each in its readable semantic color.
-		icon, color := pillMessageIcon(theme, state.HUDMessage)
-		renderSemanticIcon(c, icon, 15, color)
-		ui.Text(c, state.HUDMessage).FontSize(typeBody).FontWeight(600).TextColor(theme.Text).SingleLine().Shrink(1)
+	hud := kitCard(c, theme, cardFlat, func() {
+		ui.Row(c).Fill().Center().Gap(space8).Children(func() {
+			// Same vocabulary as the floating pill: success, failure, input
+			// method or info, each in its readable semantic color.
+			icon, color := pillMessageIcon(theme, state.HUDMessage)
+			renderSemanticIcon(c, icon, typeBody, color)
+			ui.Text(c, state.HUDMessage).FontSize(typeBody).FontWeight(600).TextColor(theme.Text).SingleLine().Shrink(1)
+		})
 	})
+	hud.Fill()
 }
 
 func omniboxTabLabel(tab config.CapsuleTab) string {
