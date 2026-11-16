@@ -3,10 +3,10 @@
   "platform": "darwin",
   "project": "clavis",
   "branch": "main",
-  "head": "73d5c41",
+  "head": "3228eab",
   "dirty": 7,
   "ahead": 0,
-  "timestamp": "2026-11-16T14:56:34+08:00",
-  "tests": "go test ./... ok on a clean worktree at 73d5c41; GOOS=windows vet+build ok",
-  "notes": "reasoning_effort per AI profile 73d5c41; user AI profile set to magpie huoshan/deepseek-v4-1-flash-261017 (key in Keychain); not redeployed; working tree holds another session's uncommitted edits, untouched"
+  "timestamp": "2026-11-16T15:26:04+08:00",
+  "tests": "部署 3228eab 自签名构建: codesign verify 与 DR ok, smoke-check ok, 主线程在 run loop, 事件 tap 已启用, 引导走完, 用户配置解析 ok",
+  "notes": "mini 改用自签名证书 Clavis Local Signing (DR 为 certificate leaf), 以后重建不再丢辅助功能和输入监控授权; AI 密钥的钥匙串条目每个新构建仍会询问一次 (无 Team ID 时按 cdhash 分区); magpie 已设 reasoning_effort=low"
 }
