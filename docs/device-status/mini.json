@@ -3,10 +3,10 @@
   "platform": "darwin",
   "project": "clavis",
   "branch": "main",
-  "head": "0f7b8a1",
+  "head": "9551eb2",
   "dirty": 0,
   "ahead": 0,
-  "timestamp": "2026-11-15T19:34:30+08:00",
-  "tests": "go test ./... 20 pkgs ok; -race ok on root, uiapp, internal/bridge; GOOS=windows vet+build ok",
-  "notes": "first-run onboarding b501cb9 + darwin permission guide 0f7b8a1; fixes: tray Quit was canceled by hidden windows 4093e9e, tray menu glyphs drawn in a 6px corner 41ec6a6; real-app run not done (screen locked)"
+  "timestamp": "2026-11-16T10:26:19+08:00",
+  "tests": "i18n+uiapp tests ok; mygo build darwin/arm64 ok: codesign verify ok, --smoke-check ok",
+  "notes": "9551eb2 fixes onboarding copy: Leader is double-tap; fresh build/darwin-arm64/Clavis.app + clavis-0.1.0-arm64.dmg (ad hoc signed, not installed)"
 }
