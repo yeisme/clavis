@@ -270,7 +270,10 @@ func isValidAIProtocol(p AIProtocol) bool {
 
 const defaultAISystemPrompt = "You are a concise macOS writing and productivity assistant. Return only the requested output unless asked otherwise."
 
-// AIProfile defines one named AI provider/model profile.
+// AIProfile defines one named AI provider/model profile. ReasoningEffort,
+// optional, is sent as "reasoning_effort" by the OpenAI-compatible
+// protocol for reasoning models ("low" keeps DeepSeek V4.1 Flash quick);
+// empty sends nothing.
 type AIProfile struct {
 	ID              string     `json:"id"`
 	Name            string     `json:"name"`
@@ -283,6 +286,7 @@ type AIProfile struct {
 	SystemPrompt    string     `json:"systemPrompt"`
 	KeychainAccount string     `json:"keychainAccount"`
 	APIKeyEnvVar    string     `json:"apiKeyEnvVar,omitempty"`
+	ReasoningEffort string     `json:"reasoningEffort,omitempty"`
 }
 
 // DefaultAIProfiles returns the built-in multi-provider AI profiles (DeepSeek, Ollama, Claude, Gemini).
@@ -545,6 +549,10 @@ func decodeAIProfile(tbl *toml.Table, path string) (AIProfile, error) {
 	if err != nil {
 		return AIProfile{}, err
 	}
+	effort, _, err := optionalString(tbl, "reasoning_effort", path)
+	if err != nil {
+		return AIProfile{}, err
+	}
 
 	return AIProfile{
 		ID:              id,
@@ -558,6 +566,7 @@ func decodeAIProfile(tbl *toml.Table, path string) (AIProfile, error) {
 		SystemPrompt:    sysPrompt,
 		KeychainAccount: keychainAcc,
 		APIKeyEnvVar:    envVar,
+		ReasoningEffort: strings.TrimSpace(effort),
 	}, nil
 }
 
@@ -578,6 +587,9 @@ func (p AIProfile) toTOML() *toml.Table {
 	t.Set("system_prompt", toml.StringVal(p.SystemPrompt))
 	t.Set("keychain_account", toml.StringVal(p.KeychainAccount))
 	t.Set("api_key_env_var", toml.StringVal(p.APIKeyEnvVar))
+	if p.ReasoningEffort != "" {
+		t.Set("reasoning_effort", toml.StringVal(p.ReasoningEffort))
+	}
 	return t
 }
 

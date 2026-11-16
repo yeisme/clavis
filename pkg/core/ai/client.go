@@ -372,6 +372,12 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 			"temperature": profile.Temperature,
 			"messages":    messages,
 		}
+		// Reasoning models think before the first token; the profile may cap
+		// it (DeepSeek V4.1 Flash: seconds with "low", up to a minute and
+		// more without).
+		if effort := strings.TrimSpace(profile.ReasoningEffort); effort != "" {
+			payload["reasoning_effort"] = effort
+		}
 		bodyBytes, err := json.Marshal(payload)
 		if err != nil {
 			return nil, &ClientError{Kind: "encoding_error", Message: err.Error()}
