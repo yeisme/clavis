@@ -54,14 +54,14 @@ type styleDebt [styleKindCount]int
 // Later tasks (T5, T6, T7) migrate the surfaces and lower these numbers; T14
 // empties the map, which makes the guard a zero-tolerance check.
 var styleDebtBaseline = map[string]styleDebt{
-	"capsule_preview.go":      {6, 23, 4},
-	"capsule_view.go":         {13, 16, 19},
+	"capsule_preview.go":      {0, 0, 0},
+	"capsule_view.go":         {0, 0, 0},
 	"components.go":           {0, 0, 1},
 	"input_candidate_view.go": {3, 6, 5},
 	"onboarding_view.go":      {0, 1, 0},
-	"pill_view.go":            {1, 0, 0},
-	"prompt_composer.go":      {9, 11, 12},
-	"selection_bar_view.go":   {3, 3, 2},
+	"pill_view.go":            {0, 0, 0},
+	"prompt_composer.go":      {0, 0, 0},
+	"selection_bar_view.go":   {0, 0, 0},
 	"settings_editors.go":     {0, 0, 0},
 	"settings_view.go":        {0, 0, 0},
 	"spatial3d.go":            {1, 2, 1},

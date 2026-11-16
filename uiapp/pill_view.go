@@ -91,7 +91,7 @@ func renderIMEPill(c *ui.Context, label string) {
 	}
 	if !prefs.ReduceTransparency {
 		pill.Material(glass.Glass{Native: c.Vibrancy()})
-		pill.Border(1, theme.Border.Alpha(0.55))
+		pill.Border(1, theme.Border.Alpha(alphaHalf))
 	} else {
 		pill.Background(theme.Background).Border(1, theme.Border)
 	}
@@ -118,11 +118,11 @@ func renderIMEPill(c *ui.Context, label string) {
 // kept under reduced motion).
 func renderIMEModeSegments(c *ui.Context, theme *ui.Theme, spec pillSpec) {
 	anim := ui.Animation{Duration: 140 * time.Millisecond, Ease: ui.EaseOut}
-	neutralFill := theme.Text.Alpha(0.88)
+	neutralFill := theme.Text.Alpha(alphaHalf)
 	neutralText := theme.Background
 	ui.Row(c).Gap(space2).AlignItems(ui.Center).Children(func() {
 		segment := func(key, glyph string, active bool, fill, ink ui.Color) {
-			box := ui.Box(c).Size(28, 22).Radius(11).Center()
+			box := ui.Box(c).Size(28, space20).Radius(radiusSegment).Center()
 			bg, fg := ui.Transparent, theme.TextMuted
 			if active {
 				bg, fg = fill, ink

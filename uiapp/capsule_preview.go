@@ -261,20 +261,20 @@ func (a *AppController) renderOmniboxActionMenu(c *ui.Context, theme *ui.Theme, 
 
 	card := ui.Column(c).
 		FillWidth().
-		Padding(7, 9).
+		Padding(space6, space8).
 		Gap(3).
-		Radius(10).
+		Radius(radiusCard).
 		Background(theme.Background).
-		Border(1, withAlpha(theme.Accent, 0.5)).
+		Border(1, withAlpha(theme.Accent, alphaHalf)).
 		Shadow(0, 10, 24, 0, ui.RGBA(0, 0, 0, 0.3))
 
 	card.Children(func() {
 		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 			renderSemanticIcon(c, "command", 11, theme.Accent)
-			ui.Text(c, i18n.T("omnibox.tab.actions")).FontSize(11).FontWeight(700).TextColor(theme.Text).SingleLine()
+			ui.Text(c, i18n.T("omnibox.tab.actions")).FontSize(typeMeta).FontWeight(700).TextColor(theme.Text).SingleLine()
 			ui.Spacer(c)
 			ui.Text(c, i18n.T("preview.menu_hint")).
-				FontSize(10).
+				FontSize(typeMicro).
 				TextColor(theme.TextMuted).
 				SingleLine()
 		})
@@ -285,20 +285,20 @@ func (a *AppController) renderOmniboxActionMenu(c *ui.Context, theme *ui.Theme, 
 			row := ui.ButtonBase(c).
 				Key(fmt.Sprintf("action-menu:%s", action.ID)).
 				FillWidth().
-				Padding(5, 8).
-				Radius(6).
+				Padding(space4, space8).
+				Radius(radiusChip).
 				FocusRing(false)
 			if specIdx == idx {
-				row.Background(withAlpha(theme.Accent, 0.18)).
-					Border(1, withAlpha(theme.Accent, 0.4))
+				row.Background(withAlpha(theme.Accent, alphaSubtle)).
+					Border(1, withAlpha(theme.Accent, alphaHalf))
 			}
 			row.Children(func() {
 				ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
 					renderSemanticIcon(c, "chevron.right", 10, theme.TextMuted)
-					ui.Text(c, action.Label).FontSize(12).TextColor(theme.Text).SingleLine().Grow(1)
+					ui.Text(c, action.Label).FontSize(typeLabel).TextColor(theme.Text).SingleLine().Grow(1)
 					if action.Shortcut != "" {
 						ui.Text(c, adaptActionShortcut(action.Shortcut)).
-							FontSize(10).
+							FontSize(typeMicro).
 							FontWeight(600).
 							TextColor(theme.TextMuted).
 							SingleLine()
@@ -336,34 +336,27 @@ func (a *AppController) renderOmniboxPreviewCard(
 		flashFrames = []ui.Keyframe{{At: 0, Value: 1}, {At: profile.flash, Value: 0, Ease: ui.EaseOut}}
 	}
 
-	card := ui.Column(c).
-		Fill().
-		Padding(9, 10).
-		Gap(6).
-		Radius(10).
-		Background(theme.Surface).
-		Border(1, withAlpha(theme.Border, 0.85))
-	if len(flashFrames) == 2 {
-		glow := card.Keyframes("snippet-flash", flashFrames, ui.KeyframeOptions{Run: flashRun, NonMotion: true})
-		card.Border(1, mixColor(withAlpha(theme.Accent, 0.85), withAlpha(theme.Border, 0.85), 1-glow))
-	}
-
-	card.Children(func() {
-		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-			renderSemanticIcon(c, previewIcon(item), 12, theme.Accent)
-			ui.Text(c, i18n.T("preview.title")).FontSize(11).FontWeight(700).TextColor(theme.Text).SingleLine()
+	card := kitCard(c, theme, cardElevated, func() {
+		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
+			renderSemanticIcon(c, previewIcon(item), typeLabel, theme.Accent)
+			ui.Text(c, i18n.T("preview.title")).FontSize(typeMeta).FontWeight(700).TextColor(theme.Text).SingleLine()
 			ui.Spacer(c)
-			ui.Text(c, previewKindLabel(item)).FontSize(10).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, previewKindLabel(item)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 		})
-		ui.Divider(c)
-
+		kitDivider(c, theme)
 		ui.Scroll(c).FillWidth().Grow(1).Children(func() {
-			ui.Column(c).FillWidth().Gap(5).Children(func() {
+			ui.Column(c).FillWidth().Gap(space4).Children(func() {
 				a.renderOmniboxPreviewBody(c, theme, state, item)
 				a.renderPreviewActionHints(c, theme, item)
 			})
 		})
 	})
+	// Preserve the snippet flash as a border animation on the elevated card.
+	if len(flashFrames) == 2 {
+		glow := card.Keyframes("snippet-flash", flashFrames, ui.KeyframeOptions{Run: flashRun, NonMotion: true})
+		card.Border(space1, mixColor(theme.Accent.Alpha(alphaStrong), hairline(theme), 1-glow))
+	}
+
 }
 
 func (a *AppController) renderOmniboxPreviewBody(
@@ -390,7 +383,7 @@ func (a *AppController) renderOmniboxPreviewBody(
 			}
 		})
 		ui.Text(c, i18n.Tf("preview.clipboard_stats", utf8.RuneCountInString(content), previewLineCount(content))).
-			FontSize(10).
+			FontSize(typeMicro).
 			TextColor(theme.TextMuted).
 			SingleLine()
 		renderPreviewLines(c, theme, content, 200)
@@ -407,23 +400,25 @@ func (a *AppController) renderOmniboxPreviewBody(
 			if snippet.WordBoundary {
 				bounds = i18n.T("preview.word_boundary_on")
 			}
-			ui.Text(c, bounds).FontSize(10).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, bounds).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 		})
 		scope := i18n.T("preview.any_app")
 		if len(snippet.AppBundleIDs) > 0 {
 			scope = strings.Join(snippet.AppBundleIDs, ", ")
 		}
-		ui.Text(c, i18n.Tf("preview.scope", scope)).FontSize(10).TextColor(theme.TextMuted).SingleLine()
-		ui.Text(c, i18n.T("preview.template")).FontSize(10).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
-		renderPreviewLines(c, theme, snippet.Content, 24)
-		rendered := engine.RenderSnippet(snippet.Content, engine.RenderOptions{
-			TriggerLength: utf8.RuneCountInString(snippet.Trigger),
-			Now:           time.Now(),
-			ClipboardText: state.Context.ClipboardPreview,
-			AppName:       state.Context.AppName,
+		kitInsetWell(c, theme, func() {
+			ui.Text(c, i18n.Tf("preview.scope", scope)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, i18n.T("preview.template")).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+			renderPreviewLines(c, theme, snippet.Content, 24)
+			rendered := engine.RenderSnippet(snippet.Content, engine.RenderOptions{
+				TriggerLength: utf8.RuneCountInString(snippet.Trigger),
+				Now:           time.Now(),
+				ClipboardText: state.Context.ClipboardPreview,
+				AppName:       state.Context.AppName,
+			})
+			ui.Text(c, i18n.T("preview.rendered")).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+			renderPreviewLines(c, theme, rendered.RenderedText, 24)
 		})
-		ui.Text(c, i18n.T("preview.rendered")).FontSize(10).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
-		renderPreviewLines(c, theme, rendered.RenderedText, 24)
 
 	case engine.ItemGlossaryTerm:
 		term := item.GlossaryTerm
@@ -432,7 +427,7 @@ func (a *AppController) renderOmniboxPreviewBody(
 			return
 		}
 		ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, term.Term).FontSize(13).FontWeight(700).TextColor(theme.Text).SingleLine()
+			ui.Text(c, term.Term).FontSize(typeBody).FontWeight(700).TextColor(theme.Text).SingleLine()
 			if term.Category != "" {
 				previewBadge(c, theme, "tag", term.Category, true)
 			}
@@ -441,16 +436,16 @@ func (a *AppController) renderOmniboxPreviewBody(
 		if len(term.Aliases) > 0 {
 			aliases = strings.Join(term.Aliases, ", ")
 		}
-		ui.Text(c, i18n.Tf("preview.aliases", aliases)).FontSize(11).TextColor(theme.Text).SingleLine()
+		ui.Text(c, i18n.Tf("preview.aliases", aliases)).FontSize(typeMeta).TextColor(theme.Text).SingleLine()
 		if term.Hint != "" {
-			ui.Text(c, term.Hint).FontSize(10).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, term.Hint).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 		}
 
 	case engine.ItemAIMode:
 		ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
 			previewBadge(c, theme, "sparkles", i18n.Tf("preview.ai_mode", aiModeLabel(item.AIMode)), true)
 		})
-		ui.Text(c, i18n.T("preview.prompt")).FontSize(10).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+		ui.Text(c, i18n.T("preview.prompt")).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
 		prompt := item.AIPrompt
 		if prompt == "" {
 			prompt = item.Title
@@ -458,27 +453,27 @@ func (a *AppController) renderOmniboxPreviewBody(
 		renderPreviewLines(c, theme, prompt, 32)
 
 	case engine.ItemUtility:
-		ui.Text(c, i18n.T("preview.value")).FontSize(10).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+		ui.Text(c, i18n.T("preview.value")).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
 		renderPreviewLines(c, theme, item.UtilityValue, 16)
 
 	case engine.ItemAppIMERule:
 		ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
 			previewBadge(c, theme, "keyboard", i18n.Tf("preview.ime_mode", string(item.IMEMode)), true)
 		})
-		ui.Text(c, item.Title).FontSize(12).TextColor(theme.Text).SingleLine()
+		ui.Text(c, item.Title).FontSize(typeLabel).TextColor(theme.Text).SingleLine()
 		if item.Subtitle != "" {
-			ui.Text(c, item.Subtitle).FontSize(10).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, item.Subtitle).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 		}
 
 	case engine.ItemInstalledApp:
 		if bmp := a.AppIconBitmap(item.AppPath); bmp != nil {
 			ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-				ui.Image(c, bmp).Size(44, 44).Radius(9)
+				ui.Image(c, bmp).Size(44, 44).Radius(radiusTile)
 			})
 		}
-		ui.Text(c, item.Title).FontSize(13).FontWeight(700).TextColor(theme.Text).SingleLine()
+		ui.Text(c, item.Title).FontSize(typeBody).FontWeight(700).TextColor(theme.Text).SingleLine()
 		if item.AppBundleID != "" {
-			ui.Text(c, item.AppBundleID).FontSize(10).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, item.AppBundleID).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 		}
 		if item.AppPath != "" {
 			renderPreviewLines(c, theme, item.AppPath, 4)
@@ -510,18 +505,18 @@ func (a *AppController) renderPreviewActionHints(c *ui.Context, theme *ui.Theme,
 func previewBadge(c *ui.Context, theme *ui.Theme, iconName, label string, accent bool) {
 	fg := theme.TextMuted
 	bg := theme.Background
-	border := withAlpha(theme.Border, 0.8)
+	border := withAlpha(theme.Border, alphaStrong)
 	if accent {
 		fg = theme.Accent
-		bg = withAlpha(theme.Accent, 0.14)
-		border = withAlpha(theme.Accent, 0.4)
+		bg = withAlpha(theme.Accent, alphaSubtle)
+		border = withAlpha(theme.Accent, alphaHalf)
 	}
-	ui.Box(c).Padding(1, 6).Radius(4).Background(bg).Border(1, border).Children(func() {
-		ui.Row(c).Gap(3).AlignItems(ui.Center).Children(func() {
+	ui.Box(c).Padding(space1, space6).Radius(radius4).Background(bg).Border(space1, border).Children(func() {
+		ui.Row(c).Gap(space2).AlignItems(ui.Center).Children(func() {
 			if iconName != "" {
-				renderSemanticIcon(c, iconName, 9, fg)
+				renderSemanticIcon(c, iconName, typeMicro-1, fg)
 			}
-			ui.Text(c, label).FontSize(10).FontWeight(600).TextColor(fg).SingleLine()
+			ui.Text(c, label).FontSize(typeMicro).FontWeight(600).TextColor(fg).SingleLine()
 		})
 	})
 }
@@ -531,7 +526,7 @@ func previewBadge(c *ui.Context, theme *ui.Theme, iconName, label string, accent
 func renderPreviewLines(c *ui.Context, theme *ui.Theme, text string, limit int) {
 	lines, hidden := previewLines(text, limit)
 	if len(lines) == 0 {
-		ui.Text(c, "—").FontSize(11).TextColor(theme.TextMuted).SingleLine()
+		ui.Text(c, "—").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 		return
 	}
 	// Code, commands and paths keep their shape in the monospace face on a
@@ -643,19 +638,21 @@ func (a *AppController) renderClipboardMediaPreview(c *ui.Context, theme *ui.The
 			previewBadge(c, theme, "pin.fill", i18n.T("common.pinned"), true)
 		}
 	})
-	bmp := a.ThumbBitmap(m.ThumbPath)
-	if m.Kind == "image" {
-		if original := a.OriginalBitmap(m.Path); original != nil {
-			bmp = original
+	kitInsetWell(c, theme, func() {
+		bmp := a.ThumbBitmap(m.ThumbPath)
+		if m.Kind == "image" {
+			if original := a.OriginalBitmap(m.Path); original != nil {
+				bmp = original
+			}
 		}
-	}
-	if bmp != nil {
-		ui.Image(c, bmp).FillWidth().Height(220).Fit(ui.Contain).Radius(6)
-	}
-	for _, row := range clipboardMediaMetaRows(m) {
-		ui.Text(c, row).FontSize(10).TextColor(theme.TextMuted).SingleLine()
-	}
-	if len(m.FilePaths) > 0 {
-		renderPreviewLines(c, theme, strings.Join(m.FilePaths, "\n"), 20)
-	}
+		if bmp != nil {
+			ui.Image(c, bmp).FillWidth().Height(220).Fit(ui.Contain).Radius(radiusChip)
+		}
+		for _, row := range clipboardMediaMetaRows(m) {
+			ui.Text(c, row).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+		}
+		if len(m.FilePaths) > 0 {
+			renderPreviewLines(c, theme, strings.Join(m.FilePaths, "\n"), 20)
+		}
+	})
 }

@@ -46,6 +46,23 @@ func TestStageRowFrozenIsFlat(t *testing.T) {
 	}
 }
 
+func TestStageRowGeometryIgnoresAcceleration(t *testing.T) {
+	base := stageInputs{Preset: "spatial_3d", Animations: "full", Intensity: 1, ObliqueRows: true}
+	withoutAcceleration := resolveStagePlan(base)
+	withAcceleration := resolveStagePlan(func() stageInputs {
+		in := base
+		in.Accelerated = true
+		return in
+	}())
+	for i := 0; i < 9; i++ {
+		gotSkew, gotZ := stageRowPose(withoutAcceleration, i, 4, nil, ui.Element{})
+		wantSkew, wantZ := stageRowPose(withAcceleration, i, 4, nil, ui.Element{})
+		if gotSkew != wantSkew || gotZ != wantZ {
+			t.Fatalf("row %d differs by acceleration: false=(%v,%v), true=(%v,%v)", i, gotSkew, gotZ, wantSkew, wantZ)
+		}
+	}
+}
+
 func TestStageRowSelectedTransformIsIdentity(t *testing.T) {
 	plan := stagePlan{Enabled3D: true, Perspective: 1000, RowSkew: 5}
 	selected, _ := stageRowPose(plan, 2, 2, nil, ui.Element{})

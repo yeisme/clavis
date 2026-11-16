@@ -326,7 +326,7 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 		if prefs.HighContrast {
 			card.Border(1.5, theme.Border)
 		} else {
-			card.Border(1, withAlpha(theme.Border, 0.5))
+			card.Border(space1, withAlpha(theme.Border, alphaHalf))
 		}
 	} else {
 		borderW := float32(1)
@@ -343,28 +343,28 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 
 	card.Children(func() {
 		// Header
-		ui.Row(c).FillWidth().Padding(10, 14).Gap(8).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).FillWidth().Padding(space10, space14).Gap(8).AlignItems(ui.Center).Children(func() {
 			ui.Row(c).
-				Padding(3, 8).
-				Radius(6).
+				Padding(space2, space8).
+				Radius(radiusChip).
 				Gap(5).
 				AlignItems(ui.Center).
-				Background(withAlpha(theme.Accent, 0.16)).
+				Background(withAlpha(theme.Accent, alphaSubtle)).
 				Children(func() {
 					renderSemanticIcon(c, "wand.and.stars", 13, theme.Accent)
-					ui.Text(c, i18n.T("prompts.composer_title")).FontSize(12).FontWeight(700).TextColor(theme.Accent).SingleLine()
+					ui.Text(c, i18n.T("prompts.composer_title")).FontSize(typeLabel).FontWeight(700).TextColor(theme.Accent).SingleLine()
 				})
 
-			ui.Text(c, tpl.Title).FontSize(13).FontWeight(600).TextColor(theme.Text).SingleLine()
+			ui.Text(c, tpl.Title).FontSize(typeBody).FontWeight(600).TextColor(theme.Text).SingleLine()
 
 			if tpl.Trigger != "" {
 				ui.Box(c).
-					Padding(2, 7).
-					Radius(5).
+					Padding(space2, space6).
+					Radius(radiusKeycap).
 					Background(theme.Surface).
-					Border(1, withAlpha(theme.Border, 0.8)).
+					Border(1, withAlpha(theme.Border, alphaStrong)).
 					Children(func() {
-						ui.Text(c, tpl.Trigger).FontSize(11).TextColor(theme.TextMuted).SingleLine()
+						ui.Text(c, tpl.Trigger).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 					})
 			}
 
@@ -372,19 +372,19 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 
 			if appCtx.AppName != "" {
 				ui.Box(c).
-					Padding(2, 7).
-					Radius(5).
+					Padding(space2, space6).
+					Radius(radiusKeycap).
 					Background(theme.Surface).
-					Border(1, withAlpha(theme.Border, 0.6)).
+					Border(1, withAlpha(theme.Border, alphaStrong)).
 					Children(func() {
-						ui.Text(c, appCtx.AppName).FontSize(11).TextColor(theme.TextMuted).SingleLine()
+						ui.Text(c, appCtx.AppName).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 					})
 			}
 		})
 
 		ui.Divider(c)
 
-		body := ui.Column(c).FillWidth().Grow(1).Padding(12, 14).Gap(10)
+		body := ui.Column(c).FillWidth().Grow(1).Padding(space12, space14).Gap(10)
 		if len(slots) == 0 {
 			body.Bind(&a.promptUI.rootHandle).Focusable().AutoFocus().FocusRing(false)
 			if needFocusSync {
@@ -425,12 +425,12 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 			if len(slots) == 0 {
 				ui.Box(c).
 					FillWidth().
-					Padding(10, 12).
-					Radius(8).
+					Padding(space10, space12).
+					Radius(radius8).
 					Background(theme.Surface).
-					Border(1, withAlpha(theme.Border, 0.7)).
+					Border(1, withAlpha(theme.Border, alphaStrong)).
 					Children(func() {
-						ui.Text(c, i18n.T("prompts.no_slots")).FontSize(12).TextColor(theme.TextMuted)
+						ui.Text(c, i18n.T("prompts.no_slots")).FontSize(typeLabel).TextColor(theme.TextMuted)
 					})
 			} else {
 				ui.Column(c).FillWidth().Gap(8).Children(func() {
@@ -443,22 +443,16 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 						}
 						isActive := slotIdx == activeSlotIdx
 
-						ui.Column(c).Key("prompt-slot:" + sl.Name).FillWidth().Gap(4).Children(func() {
-							ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-								lbl := ui.Text(c, label).FontSize(12).FontWeight(600).SingleLine()
+						ui.Column(c).Key("prompt-slot:" + sl.Name).FillWidth().Gap(space4).Children(func() {
+							kitControlRow(c, theme, label, func() {
 								if isActive {
-									lbl.TextColor(theme.Accent)
-								} else {
-									lbl.TextColor(theme.Text)
+									ui.Box(c).Width(space1).Height(space12).Background(theme.Accent)
 								}
 								if sl.Required {
-									ui.Box(c).
-										Padding(1, 5).
-										Radius(4).
-										Background(withAlpha(theme.Accent, 0.14)).
-										Children(func() {
-											ui.Text(c, i18n.T("prompts.required_badge")).FontSize(10).FontWeight(600).TextColor(theme.Accent).SingleLine()
-										})
+									ui.Box(c).Padding(space1, space4).Radius(radius4).
+										Background(theme.Accent.Alpha(alphaSubtle)).Children(func() {
+										ui.Text(c, i18n.T("prompts.required_badge")).FontSize(typeMicro).FontWeight(600).TextColor(theme.Accent).SingleLine()
+									})
 								}
 							})
 
@@ -469,13 +463,13 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 									FocusRing(false).
 									FillWidth().
 									Gap(6).
-									Padding(4, 6).
-									Radius(8).
+									Padding(space4, space6).
+									Radius(radius8).
 									Background(theme.Surface)
 								if isActive {
-									selRow.Border(1, withAlpha(theme.Accent, 0.6))
+									selRow.Border(1, withAlpha(theme.Accent, alphaStrong))
 								} else {
-									selRow.Border(1, withAlpha(theme.Border, 0.7))
+									selRow.Border(1, withAlpha(theme.Border, alphaStrong))
 								}
 								selRow.HandleInput(func(ev ui.InputEvent) bool {
 									if ev.Kind != ui.InputKeyDown {
@@ -517,16 +511,16 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 										chosen := optVal == curVal
 										pill := ui.ButtonBase(c).
 											Key("opt:"+sl.Name+":"+optVal).
-											Padding(4, 10).
-											Radius(6).
+											Padding(space4, space10).
+											Radius(radiusChip).
 											FocusRing(false)
 										if chosen {
 											pill.Background(theme.Accent)
 										} else {
-											pill.Background(theme.Background).Border(1, withAlpha(theme.Border, 0.7))
+											pill.Background(theme.Background).Border(1, withAlpha(theme.Border, alphaStrong))
 										}
 										pill.Children(func() {
-											t := ui.Text(c, optVal).FontSize(12).SingleLine()
+											t := ui.Text(c, optVal).FontSize(typeLabel).SingleLine()
 											if chosen {
 												t.TextColor(theme.AccentText).FontWeight(600)
 											} else {
@@ -620,33 +614,27 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 			if validationErr != "" {
 				ui.Box(c).
 					FillWidth().
-					Padding(8, 10).
-					Radius(8).
-					Background(withAlpha(theme.Danger, 0.12)).
-					Border(1, withAlpha(theme.Danger, 0.4)).
+					Padding(space8, space10).
+					Radius(radius8).
+					Background(withAlpha(theme.Danger, alphaFaint)).
+					Border(1, withAlpha(theme.Danger, alphaHalf)).
 					Children(func() {
-						ui.Text(c, validationErr).FontSize(12).FontWeight(600).TextColor(theme.Danger)
+						ui.Text(c, validationErr).FontSize(typeLabel).FontWeight(600).TextColor(theme.Danger)
 					})
 			}
 
-			// Live-rendered preview
-			ui.Column(c).FillWidth().Grow(1).Gap(4).Children(func() {
-				ui.Text(c, i18n.T("prompts.preview")).FontSize(11).FontWeight(700).TextColor(theme.TextMuted).SingleLine()
-				ui.Scroll(c).
-					FillWidth().
-					Grow(1).
-					Padding(8, 10).
-					Radius(8).
-					Background(theme.Surface).
-					Border(1, withAlpha(theme.Border, 0.8)).
-					Children(func() {
-						renderPreviewLines(c, theme, preview.RenderedText, 40)
-					})
+			// Live-rendered preview is an inset kit card so the composer reads as
+			// one elevated surface with a clearly separated output well.
+			kitCard(c, theme, cardInset, func() {
+				ui.Text(c, i18n.T("prompts.preview")).FontSize(typeMeta).FontWeight(700).TextColor(theme.TextMuted).SingleLine()
+				ui.Scroll(c).FillWidth().Grow(1).Children(func() {
+					renderPreviewLines(c, theme, preview.RenderedText, 40)
+				})
 			})
 		})
 
 		ui.Divider(c)
-		ui.Row(c).FillWidth().Padding(8, 14).Gap(8).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).FillWidth().Padding(space8, space14).Gap(8).AlignItems(ui.Center).Children(func() {
 			if ui.PrimaryButton(c, i18n.T("prompts.insert")).Clicked() {
 				a.CommitPromptComposer()
 			}
@@ -654,7 +642,7 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 				a.CopyPromptComposer()
 			}
 			ui.Spacer(c)
-			ui.Text(c, i18n.T("prompts.footer.hint")).FontSize(10).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, i18n.T("prompts.footer.hint")).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 			if ui.Button(c, i18n.T("prompts.cancel")).Clicked() {
 				a.ClosePromptComposer()
 			}

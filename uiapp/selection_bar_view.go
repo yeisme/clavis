@@ -78,42 +78,39 @@ func SelectionBarView(c *ui.Context, p SelectionBarPayload, appearance config.Ap
 	prefs := c.Preferences()
 
 	if !prefs.ReduceTransparency {
-		c.Root().Radius(999)
+		c.Root().Radius(radiusPill)
 	}
 
 	bar := ui.Row(c).
 		Fill().
-		Padding(4, selectionBarPaddingX).
-		Radius(999).
+		Padding(space4, selectionBarPaddingX).
+		Radius(radiusPill).
 		Gap(4).
 		Center().
 		Clip()
 	if !prefs.ReduceTransparency {
 		bar.Material(glass.Glass{Native: c.Vibrancy(), Clarity: float32(appearance.GlassClarity)})
-		bar.Border(1, withAlpha(theme.Border, 0.55))
+		bar.Border(1, withAlpha(theme.Border, alphaHalf))
 	} else {
 		bar.Background(theme.Background).Border(1, theme.Border)
 	}
 
 	bar.Children(func() {
 		for i, action := range p.Actions {
-			pill := ui.Row(c).
-				Padding(3, 9).
-				Radius(999).
-				Gap(5).
-				Center().
-				Background(withAlpha(theme.Accent, 0.14))
-			pill.Children(func() {
-				renderSemanticIcon(c, selectionBarIcon(action), 11, theme.Accent)
+			// Selection actions share the same row interaction language as the
+			// Capsule list; the bar remains non-activating but hover/focus styling
+			// is still owned by the kit rather than a bespoke pill.
+			kitRow(c, theme, interactionState{}, motionProfiles[animationOff], func() {
+				renderSemanticIcon(c, selectionBarIcon(action), typeMeta, theme.Accent)
 				hint := SelectionBarActionShortcut(i)
 				if hint != "" {
-					ui.Text(c, hint).FontSize(10).TextColor(withAlpha(theme.Accent, 0.75)).SingleLine()
+					ui.Text(c, hint).FontSize(typeMicro).TextColor(theme.Accent.Alpha(alphaStrong)).SingleLine()
 				}
-				ui.Text(c, SelectionBarActionLabel(action)).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
+				ui.Text(c, SelectionBarActionLabel(action)).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine()
 			})
 		}
 		if len(p.Actions) == 0 {
-			ui.Text(c, "No actions").FontSize(12).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, "No actions").FontSize(typeLabel).TextColor(theme.TextMuted).SingleLine()
 		}
 	})
 }
