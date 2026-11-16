@@ -52,12 +52,18 @@ func kitControlRow(c *ui.Context, t *ui.Theme, label string, body func()) {
 }
 
 func kitKeycap(c *ui.Context, t *ui.Theme, label string, tone keyTone) ui.Element {
-	face := ui.Box(c).MinWidth(space18).Height(space18).Padding(space1-space1, space4).Radius(radiusKeycap).Center()
+	// Alpha values are opacity, not spacing: expressing them as spaceN/spaceM
+	// would make a keycap's tint change if the spacing ramp ever moved.
+	const (
+		keycapAccentFill   float32 = 0.16
+		keycapAccentBorder float32 = alphaHalf
+	)
+	face := ui.Box(c).MinWidth(space18).Height(space18).Padding(space0, space4).Radius(radiusKeycap).Center()
 	fg := t.TextMuted
 	switch tone {
 	case keyToneAccent:
 		fg = accentInk(t, surfaceBase(t))
-		face.Background(t.Accent.Alpha(space2/space8)).Border(space1, t.Accent.Alpha(space4/space8))
+		face.Background(t.Accent.Alpha(keycapAccentFill)).Border(space1, t.Accent.Alpha(keycapAccentBorder))
 	case keyToneQuiet:
 		face.Background(tileFill(t))
 	default:

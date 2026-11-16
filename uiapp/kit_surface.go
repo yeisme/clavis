@@ -22,7 +22,7 @@ func kitCard(c *ui.Context, t *ui.Theme, v cardVariant, body func()) ui.Element 
 		x, y, blur, spread, shadow := elevationShadow(t, elev2)
 		card.Shadow(x, y, blur, spread, shadow).InsetShadow(0, -space1, space1, 0, surfaceHighlight(t))
 	case cardInset:
-		card.Background(t.Surface.Mix(t.Text, space1/space16)).Border(space1, hairline(t))
+		card.Background(t.Surface.Mix(t.Text, alphaFaint)).Border(space1, hairline(t))
 	case cardGlass:
 		GlassSurface(c, card, config.DefaultAppearanceConfig(), GlassOpts{Interactive: true, Tint: t.Surface, Radius: radiusCard})
 	}
@@ -37,7 +37,7 @@ func kitPanel(c *ui.Context, t *ui.Theme, v cardVariant, body func()) ui.Element
 		x, y, blur, spread, shadow := elevationShadow(t, elev2)
 		panel.Shadow(x, y, blur, spread, shadow).InsetShadow(0, -space1, space1, 0, surfaceHighlight(t))
 	} else if v == cardInset {
-		panel.Background(t.Surface.Mix(t.Text, space1/space16))
+		panel.Background(t.Surface.Mix(t.Text, alphaFaint))
 	} else if v == cardGlass {
 		GlassSurface(c, panel, config.DefaultAppearanceConfig(), GlassOpts{Interactive: true, Tint: t.Surface, Radius: radius12})
 	}

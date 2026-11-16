@@ -39,11 +39,23 @@ const (
 // surfaces; these steps cover the wider radii, empty-state padding and card
 // insets the persistent surfaces need, so no view has to invent a number.
 const (
+	space0  float32 = 0
 	space1  float32 = 1
 	space18 float32 = 18
 	space20 float32 = 20
 	space24 float32 = 24
 	space32 float32 = 32
+)
+
+// Opacity steps for translucent fills and tints. These are deliberately NOT
+// expressed as a ratio of the spacing ramp: a tint must not change when the
+// spacing scale moves, and "space2/space8" hides the fact that it is a ratio.
+const (
+	alphaFaint  float32 = 0.06 // resting tile washes
+	alphaSubtle float32 = 0.14 // selected-row and status tints
+	alphaSoft   float32 = 0.24 // chosen-row fill in dark mode
+	alphaHalf   float32 = 0.50 // keycap and chip outlines
+	alphaStrong float32 = 0.70 // focus rings and emphasis borders
 )
 
 // Radii beyond the original set: markers, inline controls, panels and the

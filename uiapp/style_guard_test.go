@@ -281,3 +281,28 @@ func TestDensityMetrics(t *testing.T) {
 		}
 	}
 }
+
+// TestOpacityIsNotExpressedAsSpacing bans the "spaceN/spaceM" idiom for alpha
+// and mix ratios. It hides an opacity inside the spacing ramp, so a spacing
+// change silently retints the UI, and it reads as geometry when it is not.
+func TestOpacityIsNotExpressedAsSpacing(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	ratio := regexp.MustCompile(`(?:Alpha\(\s*space\d+\s*/|Mix\([^)]*,\s*space\d+\s*/)`)
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || name == "tokens.go" {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if loc := ratio.FindIndex(src); loc != nil {
+			t.Fatalf("%s expresses opacity as a spacing ratio (%q); use an alpha* token from tokens.go",
+				name, src[loc[0]:loc[1]])
+		}
+	}
+}

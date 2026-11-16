@@ -86,7 +86,7 @@ func kitStatusPillElement(c *ui.Context, t *ui.Theme, icon, label string, tone c
 	if tone == chipNeutral {
 		pill.Background(tileFill(t)).Border(space1, hairline(t))
 	} else {
-		pill.Background(base.Alpha(space2/space8)).Border(space1, base.Alpha(space4/space8))
+		pill.Background(base.Alpha(alphaSubtle)).Border(space1, base.Alpha(alphaHalf))
 	}
 	pill.Children(func() {
 		if icon != "" {

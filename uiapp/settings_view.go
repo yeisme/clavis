@@ -183,7 +183,11 @@ func settingsSectionBadge(index int, cfg config.ClavisConfig) string {
 // renderSettingsPaneHeader draws the section caption and the status pill.
 func (a *AppController) renderSettingsPaneHeader(c *ui.Context, theme *ui.Theme, section int, statusMsg string) {
 	meta := settingsSectionMetaFor(section)
-	kitHeaderBar(c).Height(space20).MinHeight(space20).Padding(space1-space1, space1-space1).Children(func() {
+	// A plain row rather than kitHeaderBar: the pane header sits directly under
+	// the window's title bar and must not add the bar's own padding. The height
+	// stays deliberately tight so the first card of every section is reachable
+	// without scrolling at the window's default size.
+	ui.Row(c).FillWidth().Height(controlHeight).Gap(space8).AlignItems(ui.Center).Children(func() {
 		renderSemanticIcon(c, meta.Icon, IconSize16, theme.Accent)
 		ui.Column(c).Gap(space1).Grow(1).Children(func() {
 			ui.Text(c, meta.Label+" — "+meta.Hint).FontSize(typeTitle).FontWeight(600).TextColor(theme.Text).SingleLine()

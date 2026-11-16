@@ -17,10 +17,10 @@ func kitEmptyState(c *ui.Context, t *ui.Theme, icon, title, body string) {
 }
 
 func kitErrorBanner(c *ui.Context, t *ui.Theme, text string) {
-	background := t.Danger.Alpha(space2 / space8)
+	background := t.Danger.Alpha(alphaSubtle)
 	foreground := readableOn(t.Danger, t.Text, background.Over(t.Surface), minTextContrast)
 	ui.Row(c).FillWidth().Padding(space8, space10).Radius(radius8).Gap(space8).
-		AlignItems(ui.Center).Background(background).Border(space1, t.Danger.Alpha(space4/space8)).Children(func() {
+		AlignItems(ui.Center).Background(background).Border(space1, t.Danger.Alpha(alphaHalf)).Children(func() {
 		renderSemanticIcon(c, "xmark", IconSize16, foreground)
 		ui.Text(c, text).FontSize(typeBody).TextColor(foreground).SingleLine()
 	})
