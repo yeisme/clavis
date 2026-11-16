@@ -1,10 +1,8 @@
 package uiapp
 
 import (
-	"strings"
-	"unicode/utf8"
-
 	"github.com/egoist/mygo/ui"
+	"strings"
 )
 
 // keyTone selects how a keycap stands out.
@@ -23,34 +21,7 @@ const (
 // a light face, a hairline outline and a 1px bottom lip that reads as key
 // travel. Single glyphs sit in a square-ish cap; words get side padding.
 func keycap(c *ui.Context, t *ui.Theme, label string, tone keyTone) ui.Element {
-	label = strings.TrimSpace(label)
-	face := ui.Box(c).
-		MinWidth(18).
-		Height(18).
-		Padding(0, space4).
-		Radius(radiusKeycap).
-		Center()
-	fg := t.TextMuted
-	switch tone {
-	case keyToneAccent:
-		bg := surfaceBase(t)
-		fg = accentInk(t, bg)
-		face.Background(t.Accent.Alpha(0.16)).Border(1, t.Accent.Alpha(0.5))
-	case keyToneQuiet:
-		face.Background(tileFill(t))
-	default:
-		face.Background(keycapFill(t)).
-			Border(1, keycapEdge(t)).
-			Shadow(0, 1, 0, 0, keycapLip(t))
-	}
-	size := typeMicro
-	if utf8.RuneCountInString(label) == 1 {
-		size = typeMeta
-	}
-	face.Children(func() {
-		ui.Text(c, label).FontSize(size).FontWeight(600).TextColor(fg).SingleLine()
-	})
-	return face
+	return kitKeycap(c, t, strings.TrimSpace(label), tone)
 }
 
 // keyHint renders a shortcut as keycaps followed by a muted caption:
@@ -113,47 +84,11 @@ const (
 
 // chip renders a compact rounded label with an optional leading icon.
 func chip(c *ui.Context, t *ui.Theme, icon, label string, tone chipTone) ui.Element {
-	base := t.TextMuted
-	switch tone {
-	case chipAccent:
-		base = t.Accent
-	case chipSuccess:
-		base = t.Success
-	case chipWarning:
-		base = t.Warning
-	case chipDanger:
-		base = t.Danger
-	}
-	bg := surfaceBase(t)
-	fg := readableOn(base, t.Text, bg, minTextContrast)
-	box := ui.Row(c).Padding(space2, space6+1).Radius(radiusChip).Gap(space4).AlignItems(ui.Center)
-	if tone == chipNeutral {
-		box.Background(tileFill(t)).Border(1, hairline(t))
-		fg = t.TextMuted
-	} else {
-		box.Background(base.Alpha(0.14)).Border(1, base.Alpha(0.35))
-	}
-	box.Children(func() {
-		if icon != "" {
-			renderSemanticIcon(c, icon, 11, fg)
-		}
-		ui.Text(c, label).FontSize(typeMeta).FontWeight(600).TextColor(fg).SingleLine()
-	})
-	return box
+	return kitStatusPillElement(c, t, icon, label, tone)
 }
 
 // iconTile renders a semantic icon centered in a rounded tile, the leading
 // glyph of an Omnibox row: neutral at rest, accent-tinted when chosen.
 func iconTile(c *ui.Context, t *ui.Theme, icon string, selected bool) {
-	tile := ui.Box(c).Size(rowIconTile, rowIconTile).Radius(radiusTile).Center()
-	color := t.TextMuted
-	if selected {
-		tile.Background(selectedTileFill(t))
-		color = selectedTileGlyph(t)
-	} else {
-		tile.Background(tileFill(t))
-	}
-	tile.Children(func() {
-		renderSemanticIcon(c, icon, rowIconSize, color)
-	})
+	kitIconTile(c, t, icon, selected)
 }
