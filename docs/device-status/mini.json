@@ -3,10 +3,10 @@
   "platform": "darwin",
   "project": "clavis",
   "branch": "main",
-  "head": "9551eb2",
+  "head": "f008f61",
   "dirty": 0,
   "ahead": 0,
-  "timestamp": "2026-11-16T10:26:19+08:00",
-  "tests": "i18n+uiapp tests ok; mygo build darwin/arm64 ok: codesign verify ok, --smoke-check ok",
-  "notes": "9551eb2 fixes onboarding copy: Leader is double-tap; fresh build/darwin-arm64/Clavis.app + clavis-0.1.0-arm64.dmg (ad hoc signed, not installed)"
+  "timestamp": "2026-11-16T13:01:26+08:00",
+  "tests": "go test ./... ok; -race ok on root, uiapp, internal/bridge; GOOS=windows vet+build ok; real app: main thread idle in NSApplication run, SIGTERM exit 0.5s",
+  "notes": "fixed launch deadlock 23fd86e, TIS crash f63dded, live settings + guide key picker f008f61; deployed to /Applications, Clavis TCC entries reset for the new build"
 }
