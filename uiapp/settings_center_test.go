@@ -484,3 +484,33 @@ func TestSettingsCenter_AIProfileEditAndAdd(t *testing.T) {
 		t.Fatalf("config.toml does not persist the custom profile:\n%s", body)
 	}
 }
+
+func TestSettingsCenter_ClipboardMediaControlsPersist(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	tt := ui.NewTester(ctrl.SettingsView, 960, 640)
+	tt.Frame()
+	openSettingsSection(t, tt, "Glossary & Clipboard")
+
+	if !tt.HasText("Capture Images & Files") {
+		t.Fatalf("expected media capture setting, got %v", tt.Texts())
+	}
+	if err := tt.Click("Capture Images & Files"); err != nil {
+		t.Fatalf("click media capture: %v", err)
+	}
+	tt.Frame()
+	if ctrl.Config().Main.Clipboard.MediaCapture {
+		t.Fatal("expected media capture to be disabled")
+	}
+	body := readConfigFile(t, ctrl, config.FileMain)
+	if !strings.Contains(body, "media_capture = false") {
+		t.Fatalf("config.toml does not persist media_capture=false:\n%s", body)
+	}
+
+	if err := tt.Click("Media Storage Quota"); err != nil {
+		t.Fatalf("click media quota stepper: %v", err)
+	}
+	tt.Frame()
+	if got := ctrl.Config().Main.Clipboard.MediaQuotaMB; got < 0 {
+		t.Fatalf("media quota = %d, want non-negative", got)
+	}
+}

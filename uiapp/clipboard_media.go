@@ -1,9 +1,14 @@
 package uiapp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	"image/png"
 	"os"
 	"strings"
 
@@ -61,6 +66,31 @@ func pasteFormatFor(m engine.ClipboardMedia) pasteFormat {
 
 var errMediaMissing = errors.New("clipboard media is no longer available")
 
+// normalizeImagePNG converts stored image formats to PNG, the portable image
+// representation understood by MyGo across platforms. The header guard runs
+// before decoding so malformed or oversized blobs never reach image.Decode.
+func normalizeImagePNG(data []byte) ([]byte, error) {
+	cfg, format, err := clipboard.CheckImage(data)
+	if err != nil {
+		return nil, err
+	}
+	if format == "png" {
+		return data, nil
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	if err := png.Encode(&out, img); err != nil {
+		return nil, err
+	}
+	if len(out.Bytes()) > clipboard.MaxImageBytes || cfg.Width > clipboard.MaxImageDim || cfg.Height > clipboard.MaxImageDim {
+		return nil, clipboard.ErrImageTooLarge
+	}
+	return out.Bytes(), nil
+}
+
 // writeClipboardMedia puts a media entry back on the system clipboard via MyGo's transfer API
 // (no new Win32 code: MyGo's Windows backend renders PNG + CF_DIB / CF_HDROP).
 func writeClipboardMedia(m engine.ClipboardMedia) error {
@@ -73,12 +103,11 @@ func writeClipboardMedia(m engine.ClipboardMedia) error {
 		if err != nil {
 			return fmt.Errorf("%w: %v", errMediaMissing, err)
 		}
-		mime := transfer.PNG
-		if m.Mime != "" && m.Mime != string(transfer.PNG) {
-			// Only PNG is a portable clipboard image format; re-encoding JPEG/GIF is out of MVP scope.
-			mime = transfer.Format(m.Mime)
+		data, err = normalizeImagePNG(data)
+		if err != nil {
+			return fmt.Errorf("%w: %v", errMediaMissing, err)
 		}
-		if err := mygo.Clipboard.Write(transfer.New(transfer.NewItem(transfer.Bytes(mime, data)))); err != nil {
+		if err := mygo.Clipboard.Write(transfer.New(transfer.NewItem(transfer.Bytes(transfer.PNG, data)))); err != nil {
 			return err
 		}
 	case pasteFiles:
@@ -154,6 +183,40 @@ func (c *AppController) ThumbBitmap(path string) *ui.Bitmap {
 		clear(c.thumbCache)
 	}
 	c.thumbCache[path] = bmp // cache misses too: a GC'd path stays nil until restart
+	c.mu.Unlock()
+	return bmp
+}
+
+// OriginalBitmap lazily decodes a selected image blob for the split preview.
+// Rows continue using ThumbBitmap, keeping list rendering cheap.
+func (c *AppController) OriginalBitmap(path string) *ui.Bitmap {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	c.mu.Lock()
+	if c.originalCache == nil {
+		c.originalCache = map[string]*ui.Bitmap{}
+	}
+	if bmp, ok := c.originalCache[path]; ok {
+		c.mu.Unlock()
+		return bmp
+	}
+	c.mu.Unlock()
+
+	var bmp *ui.Bitmap
+	if data, err := os.ReadFile(path); err == nil {
+		if _, _, err := clipboard.CheckImage(data); err == nil {
+			if b, err := ui.DecodeBitmap(data); err == nil {
+				bmp = b
+			}
+		}
+	}
+	c.mu.Lock()
+	if len(c.originalCache) >= 32 {
+		clear(c.originalCache)
+	}
+	c.originalCache[path] = bmp
 	c.mu.Unlock()
 	return bmp
 }

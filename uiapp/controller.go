@@ -77,6 +77,7 @@ const (
 type Options struct {
 	ConfigStore           *config.ConfigStore
 	ClipboardStore        clipboard.Store
+	ClipboardMediaStore   *clipboard.MediaStore
 	ClipboardSearcher     ClipboardSearcher
 	SecretStore           secrets.APIKeyStore
 	Bridge                bridge.HostService
@@ -156,17 +157,18 @@ type uiViewState struct {
 type AppController struct {
 	mu sync.Mutex
 
-	ConfigStore       *config.ConfigStore
-	StateMachine      *engine.StateMachine
-	ClipboardStore    clipboard.Store
-	ClipboardSearcher ClipboardSearcher
-	SecretStore       secrets.APIKeyStore
-	Bridge            bridge.HostService
-	AppProvider       apps.AppProvider
-	AIClient          *ai.OpenAICompatibleClient
-	CLIExecutor       actions.CLIExecutor
-	Glossary          engine.GlossaryEngine
-	Snippets          *engine.SnippetEngine
+	ConfigStore         *config.ConfigStore
+	StateMachine        *engine.StateMachine
+	ClipboardStore      clipboard.Store
+	ClipboardMediaStore *clipboard.MediaStore
+	ClipboardSearcher   ClipboardSearcher
+	SecretStore         secrets.APIKeyStore
+	Bridge              bridge.HostService
+	AppProvider         apps.AppProvider
+	AIClient            *ai.OpenAICompatibleClient
+	CLIExecutor         actions.CLIExecutor
+	Glossary            engine.GlossaryEngine
+	Snippets            *engine.SnippetEngine
 
 	httpDoer              ai.HTTPDoer
 	ClipboardWriter       func(text string)
@@ -187,9 +189,10 @@ type AppController struct {
 	OnConfigSaved         func()
 
 	// Decoded application icon bitmap cache
-	iconMu       sync.Mutex
-	appIconCache map[string]*ui.Bitmap
-	thumbCache   map[string]*ui.Bitmap
+	iconMu        sync.Mutex
+	appIconCache  map[string]*ui.Bitmap
+	thumbCache    map[string]*ui.Bitmap
+	originalCache map[string]*ui.Bitmap
 
 	// Leader temporary ASCII IME lock state
 	preLeaderIMESourceID string
@@ -307,6 +310,7 @@ func NewAppController(opts Options) *AppController {
 		ConfigStore:           cfgStore,
 		StateMachine:          sm,
 		ClipboardStore:        clipStore,
+		ClipboardMediaStore:   opts.ClipboardMediaStore,
 		ClipboardSearcher:     clipSearcher,
 		SecretStore:           secStore,
 		Bridge:                opts.Bridge,
@@ -332,6 +336,8 @@ func NewAppController(opts Options) *AppController {
 		OnRecordPromptVersion: opts.OnRecordPromptVersion,
 		OnConfigSaved:         opts.OnConfigSaved,
 		appIconCache:          make(map[string]*ui.Bitmap),
+		thumbCache:            make(map[string]*ui.Bitmap),
+		originalCache:         make(map[string]*ui.Bitmap),
 		clipDone:              make(chan struct{}),
 		clipBaseCtx:           clipBaseCtx,
 		clipBaseCancel:        clipBaseCancel,
@@ -802,7 +808,15 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 	case engine.EffectDeleteClipboard:
 		id := eff.ClipboardID
 		c.enqueueClipboardTask(func(ctx context.Context) error {
-			return c.ClipboardStore.Delete(ctx, id)
+			if err := c.ClipboardStore.Delete(ctx, id); err != nil {
+				return err
+			}
+			if c.ClipboardMediaStore != nil {
+				if items, err := c.ClipboardStore.Recent(ctx, 0); err == nil {
+					_, _ = c.ClipboardMediaStore.GC(items)
+				}
+			}
+			return nil
 		})
 
 	case engine.EffectRunAction:

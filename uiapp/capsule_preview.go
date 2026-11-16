@@ -643,8 +643,14 @@ func (a *AppController) renderClipboardMediaPreview(c *ui.Context, theme *ui.The
 			previewBadge(c, theme, "pin.fill", i18n.T("common.pinned"), true)
 		}
 	})
-	if bmp := a.ThumbBitmap(m.ThumbPath); bmp != nil {
-		ui.Image(c, bmp).FillWidth().Height(160).Fit(ui.Contain).Radius(6)
+	bmp := a.ThumbBitmap(m.ThumbPath)
+	if m.Kind == "image" {
+		if original := a.OriginalBitmap(m.Path); original != nil {
+			bmp = original
+		}
+	}
+	if bmp != nil {
+		ui.Image(c, bmp).FillWidth().Height(220).Fit(ui.Contain).Radius(6)
 	}
 	for _, row := range clipboardMediaMetaRows(m) {
 		ui.Text(c, row).FontSize(10).TextColor(theme.TextMuted).SingleLine()

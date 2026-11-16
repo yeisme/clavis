@@ -295,11 +295,12 @@ func (a *desktopApp) start() {
 	)
 
 	controller := uiapp.NewAppController(uiapp.Options{
-		ConfigStore:    cfgStore,
-		ClipboardStore: clipStore,
-		SecretStore:    secretStore,
-		Bridge:         hostBridge,
-		AppProvider:    appProvider,
+		ConfigStore:         cfgStore,
+		ClipboardStore:      clipStore,
+		ClipboardMediaStore: mediaStore,
+		SecretStore:         secretStore,
+		Bridge:              hostBridge,
+		AppProvider:         appProvider,
 		ClipboardWriter: func(text string) {
 			mygo.Clipboard.WriteText(text)
 		},
@@ -702,6 +703,10 @@ func (a *desktopApp) startBridgeAndFallbackShortcut(trigger config.TriggerConfig
 			a.mu.Lock()
 			a.bridgeRunning = true
 			a.mu.Unlock()
+		} else {
+			// Keep startup failures observable; permission refreshes can call this
+			// method again after the user grants access.
+			fmt.Fprintf(os.Stderr, "Clavis bridge start failed: %v\n", err)
 		}
 		a.bridgeStarting.Store(false)
 	}
@@ -1075,11 +1080,11 @@ func (a *desktopApp) runClipboardPoller(ctx context.Context) {
 			if !cfg.Main.Clipboard.Enabled {
 				continue
 			}
-			cand, _, err := br.PollClipboardCandidate(ctx)
+			cand, observedSeq, err := br.PollClipboardCandidate(ctx)
 			if err != nil || cand == nil {
 				continue
 			}
-			if cand.IsMedia() && sqliteStoreFor(store) {
+			if cand.IsMedia() && ms != nil {
 				src := mediaSource{
 					ReadPNG:   func() ([]byte, error) { return mygo.Clipboard.ReadFormat(transfer.PNG) },
 					ReadFiles: mygo.Clipboard.ReadFiles,
@@ -1090,11 +1095,10 @@ func (a *desktopApp) runClipboardPoller(ctx context.Context) {
 				if seqr, ok := br.(bridge.ClipboardSequencer); ok {
 					src.Sequence = seqr.ClipboardSequence
 				}
+				src.ObservedSequence = observedSeq
 				if keep, _ := enrichMediaCandidate(cand, cfg.Main.Clipboard, ms, src); !keep {
 					continue
 				}
-			} else if cand.IsMedia() {
-				continue
 			}
 			if _, changed, recErr := store.Record(ctx, *cand); recErr == nil && changed {
 				a.syncFrecency(ctx)
@@ -2126,7 +2130,8 @@ func mapShortcutKeyToMyGo(k string) string {
 		return "Escape"
 	case "tab":
 		return "Tab"
-	case "backspace":
+	case "backspace", "delete":
+		// Delete is accepted as the recorder/runtime alias for Backspace.
 		return "Backspace"
 	case "forwarddelete":
 		return "Delete"

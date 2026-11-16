@@ -174,13 +174,20 @@ func (s *SQLiteClipboardStore) migrateMediaColumns(ctx context.Context) error {
 			}
 		}
 	}
+	statements := make([]sqlite.Statement, 0, len(mediaColumns))
 	for _, col := range mediaColumns {
 		if have[col[0]] {
 			continue
 		}
-		if _, err := s.db.Execute(ctx, `ALTER TABLE clipboard_items ADD COLUMN `+col[0]+` `+col[1]); err != nil {
-			return fmt.Errorf("add clipboard column %s: %w", col[0], err)
-		}
+		statements = append(statements, sqlite.Statement{
+			SQL: `ALTER TABLE clipboard_items ADD COLUMN ` + col[0] + ` ` + col[1],
+		})
+	}
+	if len(statements) == 0 {
+		return nil
+	}
+	if _, err := s.db.Transaction(ctx, statements); err != nil {
+		return fmt.Errorf("migrate clipboard media columns: %w", err)
 	}
 	return nil
 }

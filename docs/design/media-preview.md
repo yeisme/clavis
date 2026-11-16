@@ -79,9 +79,9 @@
 - 缓存失效：位图缓存 key = 路径；行被删除/GC 后路径不存在 → 解码失败返回 nil → 显示类型图标。
 - 粘贴：新增 `EffectPasteClipboardMedia`。控制器用 `mygo.Clipboard.Write(transfer.Bytes(PNG,…))`（MyGo 自动同时提供 `"PNG"` + `CF_DIB`），或 `WriteFiles(paths…)`（`CF_HDROP`）；`Flush()` 让延迟渲染落地后读取序列号并 `IgnoreSelfPasteboardChange`，再发送 Ctrl+V（Windows：可选接口 `PasteShortcutSender`；macOS 不实现 → 仅复制并提示）。粘贴格式选择是纯函数 `PasteFormatsFor(kind)`，单测覆盖。
 
-## 8. macOS
+## 8. macOS / Linux
 
-`bridge_darwin.go:2069` 文本为空即返回 nil；本轮不改 darwin 行为分支，因此 macOS **不采集** 图片/视频。数据模型、存储、UI、粘贴回写是跨平台代码，日后只需在 darwin 轮询里补 `NSPasteboardTypePNG/fileURL` 判定即可。
+macOS 通过 `NSPasteboard` 的 changeCount 与 representation identifiers 分类文本、file URL 和图片类型；Linux 通过 MyGo advertised formats 分类文本、URI/file-list 和 `image/*`。两端都保持文本优先，并只在共享轮询器完成隐私过滤后读取媒体 payload。macOS 使用 changeCount 做稳定性校验；Linux 在 MyGo 未提供原生 generation 时使用文本与 advertised-format 指纹去重，因此同格式图片替换存在不可避免的检测限制。平台无法提供自动粘贴能力时，媒体仍写入系统剪贴板并提示用户手动粘贴。
 
 ## 9. 风险与回退
 

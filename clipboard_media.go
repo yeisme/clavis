@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 
-	"github.com/yeisme/clavis/internal/storage"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/config"
 )
@@ -113,11 +112,4 @@ func maintainClipboardMedia(ctx context.Context, store clipboard.Store, ms *clip
 		items = kept
 	}
 	_, _ = ms.GC(items)
-}
-
-// sqliteStoreFor reports whether media can be recorded: blobs are only kept alongside the
-// persistent store so GC has a durable reference set.
-func sqliteStoreFor(store clipboard.Store) bool {
-	_, ok := store.(*storage.SQLiteClipboardStore)
-	return ok
 }

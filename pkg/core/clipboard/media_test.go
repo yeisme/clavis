@@ -86,6 +86,9 @@ func TestCheckImageLimits(t *testing.T) {
 	if _, _, err := CheckImage(make([]byte, MaxImageBytes+1)); err != ErrImageTooLarge {
 		t.Fatalf("oversize bytes: %v", err)
 	}
+	if MaxImagePixels <= 0 {
+		t.Fatal("pixel budget must be positive")
+	}
 }
 
 func TestThumbnailNoUpscale(t *testing.T) {

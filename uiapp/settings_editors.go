@@ -222,7 +222,9 @@ func shortcutKeyName(key ui.Key) (string, bool) {
 	case ui.KeyEscape:
 		return "escape", true
 	case ui.KeyBackspace:
-		return "delete", true
+		return "backspace", true
+	case ui.KeyDelete:
+		return "forwarddelete", true
 	case ui.KeyUp:
 		return "up", true
 	case ui.KeyDown:
@@ -235,6 +237,56 @@ func shortcutKeyName(key ui.Key) (string, bool) {
 		return "home", true
 	case ui.KeyEnd:
 		return "end", true
+	case ui.KeyPageUp:
+		return "pageup", true
+	case ui.KeyPageDown:
+		return "pagedown", true
+	case ui.KeyF1:
+		return "f1", true
+	case ui.KeyF2:
+		return "f2", true
+	case ui.KeyF3:
+		return "f3", true
+	case ui.KeyF4:
+		return "f4", true
+	case ui.KeyF5:
+		return "f5", true
+	case ui.KeyF6:
+		return "f6", true
+	case ui.KeyF7:
+		return "f7", true
+	case ui.KeyF8:
+		return "f8", true
+	case ui.KeyF9:
+		return "f9", true
+	case ui.KeyF10:
+		return "f10", true
+	case ui.KeyF11:
+		return "f11", true
+	case ui.KeyF12:
+		return "f12", true
+	case ui.KeyMinus:
+		return "minus", true
+	case ui.KeyEqual:
+		return "equal", true
+	case ui.KeyBracketLeft:
+		return "leftbracket", true
+	case ui.KeyBracketRight:
+		return "rightbracket", true
+	case ui.KeySemicolon:
+		return "semicolon", true
+	case ui.KeyQuote:
+		return "quote", true
+	case ui.KeyComma:
+		return "comma", true
+	case ui.KeyPeriod:
+		return "period", true
+	case ui.KeySlash:
+		return "slash", true
+	case ui.KeyBackslash:
+		return "backslash", true
+	case ui.KeyBackquote:
+		return "grave", true
 	}
 	return "", false
 }
@@ -1832,6 +1884,14 @@ func (a *AppController) renderClipboardCard(c *ui.Context, theme *ui.Theme, cfg 
 		if v, changed := settingNumberRow(c, theme, i18n.T("settings.clipboard.retention"), "retention_days", "",
 			float64(clip.RetentionDays), 1, 365, 1, i18n.T("common.days")); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.RetentionDays = int(v) })
+		}
+		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.clipboard.media_capture"), "media_capture",
+			i18n.T("settings.clipboard.media_capture_help"), clip.MediaCapture); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.MediaCapture = v })
+		}
+		if v, changed := settingNumberRow(c, theme, i18n.T("settings.clipboard.media_quota"), "media_quota_mb",
+			i18n.T("settings.clipboard.media_quota_help"), float64(clip.MediaQuotaMB), 0, 4096, 64, "MB"); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.MediaQuotaMB = int(v) })
 		}
 
 		settingsCardDivider(c, theme)

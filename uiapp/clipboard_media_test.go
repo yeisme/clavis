@@ -7,6 +7,13 @@ import (
 	"github.com/yeisme/clavis/pkg/core/engine"
 )
 
+func TestNormalizeImagePNG(t *testing.T) {
+	pngData := []byte("not-a-real-png")
+	if _, err := normalizeImagePNG(pngData); err == nil {
+		t.Fatal("expected invalid image to be rejected")
+	}
+}
+
 func TestPasteFormatFor(t *testing.T) {
 	cases := []struct {
 		m    engine.ClipboardMedia

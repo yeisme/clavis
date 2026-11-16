@@ -24,6 +24,7 @@ import (
 const (
 	MaxImageBytes   = 40 << 20 // reject larger clipboard images (decompression-bomb guard)
 	MaxImageDim     = 8000     // reject images wider/taller than this
+	MaxImagePixels  = 32_000_000
 	ThumbMaxEdge    = 256
 	thumbsDirName   = "thumbs"
 	defaultQuotaMiB = 512
@@ -58,7 +59,8 @@ func CheckImage(data []byte) (image.Config, string, error) {
 	if err != nil {
 		return image.Config{}, "", fmt.Errorf("%w: %v", ErrNotImage, err)
 	}
-	if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width > MaxImageDim || cfg.Height > MaxImageDim {
+	if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width > MaxImageDim || cfg.Height > MaxImageDim ||
+		int64(cfg.Width)*int64(cfg.Height) > MaxImagePixels {
 		return cfg, format, ErrImageTooLarge
 	}
 	return cfg, format, nil
