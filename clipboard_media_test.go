@@ -70,7 +70,7 @@ func TestEnrichMediaCandidate(t *testing.T) {
 	})
 	t.Run("clipboard changed mid-read", func(t *testing.T) {
 		seq := int64(1)
-		s := mediaSource{ReadPNG: func() ([]byte, error) { seq++; return data, nil }, Sequence: func() int64 { return seq }}
+		s := mediaSource{ReadPNG: func() ([]byte, error) { seq++; return data, nil }, Sequence: func() int64 { return seq }, ObservedSequence: 1}
 		c := &clipboard.CaptureCandidate{Media: clipboard.Media{Kind: clipboard.KindImage}}
 		if keep, err := enrichMediaCandidate(c, cfg, clipboard.NewMediaStore(t.TempDir()), s); keep || !errors.Is(err, errClipboardChanged) {
 			t.Fatal(keep, err)
@@ -112,6 +112,102 @@ func TestMaintainClipboardMediaQuotaAndGC(t *testing.T) {
 	if _, err := os.Stat(m1.MediaPath); err == nil {
 		t.Fatal("orphan blob not GC'd")
 	}
+}
+
+func TestEnrichMediaCandidateClipboardSequence(t *testing.T) {
+	cfg := config.DefaultClipboardConfig()
+
+	t.Run("stable image reads are saved", func(t *testing.T) {
+		ms := clipboard.NewMediaStore(t.TempDir())
+		seq := int64(11)
+		sequenceReads := 0
+		src := mediaSource{
+			ReadPNG: func() ([]byte, error) { return testPNG(t), nil },
+			Sequence: func() int64 {
+				sequenceReads++
+				return seq
+			},
+			ObservedSequence: 11,
+		}
+		c := &clipboard.CaptureCandidate{Media: clipboard.Media{Kind: clipboard.KindImage}}
+		keep, err := enrichMediaCandidate(c, cfg, ms, src)
+		if !keep || err != nil || c.BlobSHA == "" {
+			t.Fatalf("keep=%v err=%v media=%+v", keep, err, c.Media)
+		}
+		if sequenceReads != 2 {
+			t.Fatalf("sequence reads=%d, want before and after reads", sequenceReads)
+		}
+	})
+
+	t.Run("image changes during read are discarded before saving", func(t *testing.T) {
+		ms := clipboard.NewMediaStore(t.TempDir())
+		seq := int64(21)
+		src := mediaSource{
+			ReadPNG: func() ([]byte, error) {
+				seq++
+				return testPNG(t), nil
+			},
+			Sequence:         func() int64 { return seq },
+			ObservedSequence: 21,
+		}
+		c := &clipboard.CaptureCandidate{Media: clipboard.Media{Kind: clipboard.KindImage}}
+		keep, err := enrichMediaCandidate(c, cfg, ms, src)
+		if keep || !errors.Is(err, errClipboardChanged) {
+			t.Fatalf("keep=%v err=%v, want changed clipboard discarded", keep, err)
+		}
+		if entries, readErr := os.ReadDir(ms.Dir); readErr != nil || len(entries) != 0 {
+			t.Fatalf("media written after image changed: entries=%v err=%v", entries, readErr)
+		}
+	})
+
+	t.Run("stable file reads are saved", func(t *testing.T) {
+		ms := clipboard.NewMediaStore(t.TempDir())
+		seq := int64(31)
+		sequenceReads := 0
+		src := mediaSource{
+			ReadFiles: func() ([]string, error) { return []string{`C:\\clip.txt`}, nil },
+			Sequence: func() int64 {
+				sequenceReads++
+				return seq
+			},
+			ObservedSequence: 31,
+			Probe:            clipboard.FileProbe{Size: func(string) (int64, bool) { return 1, true }},
+		}
+		c := &clipboard.CaptureCandidate{Media: clipboard.Media{Kind: clipboard.KindFile}}
+		keep, err := enrichMediaCandidate(c, cfg, ms, src)
+		if !keep || err != nil || c.MediaPath == "" || c.Content != "clip.txt" {
+			t.Fatalf("keep=%v err=%v media=%+v content=%q", keep, err, c.Media, c.Content)
+		}
+		if sequenceReads != 2 {
+			t.Fatalf("sequence reads=%d, want before and after reads", sequenceReads)
+		}
+	})
+
+	t.Run("file list changes during read are discarded before saving", func(t *testing.T) {
+		ms := clipboard.NewMediaStore(t.TempDir())
+		seq := int64(41)
+		probeCalled := false
+		src := mediaSource{
+			ReadFiles: func() ([]string, error) {
+				seq++
+				return []string{`C:\\clip.txt`}, nil
+			},
+			Sequence:         func() int64 { return seq },
+			ObservedSequence: 41,
+			Probe: clipboard.FileProbe{Size: func(string) (int64, bool) {
+				probeCalled = true
+				return 1, true
+			}},
+		}
+		c := &clipboard.CaptureCandidate{Media: clipboard.Media{Kind: clipboard.KindFile}}
+		keep, err := enrichMediaCandidate(c, cfg, ms, src)
+		if keep || !errors.Is(err, errClipboardChanged) {
+			t.Fatalf("keep=%v err=%v, want changed clipboard discarded", keep, err)
+		}
+		if probeCalled {
+			t.Fatal("file metadata read after clipboard changed")
+		}
+	})
 }
 
 func TestEnrichMediaCandidateFiles(t *testing.T) {

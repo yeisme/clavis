@@ -15,10 +15,18 @@ var errClipboardChanged = errors.New("clipboard changed while reading media")
 
 // mediaSource abstracts the platform reads so enrichMediaCandidate is unit-testable.
 type mediaSource struct {
-	ReadPNG   func() ([]byte, error)
-	ReadFiles func() ([]string, error)
-	Probe     clipboard.FileProbe
-	Sequence  func() int64 // nil when the bridge has no change counter
+	ReadPNG          func() ([]byte, error)
+	ReadFiles        func() ([]string, error)
+	Probe            clipboard.FileProbe
+	Sequence         func() int64 // nil when the bridge has no change counter
+	ObservedSequence int64        // sequence returned with PollClipboardCandidate
+}
+
+// clipboardSequenceMatches verifies that the clipboard still contains the snapshot that
+// produced the candidate. The observed sequence is supplied by PollClipboardCandidate, rather
+// than sampled after the candidate has already been returned.
+func clipboardSequenceMatches(src mediaSource) bool {
+	return src.Sequence == nil || src.Sequence() == src.ObservedSequence
 }
 
 // enrichMediaCandidate fills an image candidate's payload. It returns false when the candidate
@@ -36,15 +44,14 @@ func enrichMediaCandidate(cand *clipboard.CaptureCandidate, cfg config.Clipboard
 	}
 	switch cand.Kind {
 	case clipboard.KindImage:
-		var before int64
-		if src.Sequence != nil {
-			before = src.Sequence()
+		if !clipboardSequenceMatches(src) {
+			return false, errClipboardChanged
 		}
 		data, err := src.ReadPNG()
 		if err != nil {
 			return false, err
 		}
-		if src.Sequence != nil && src.Sequence() != before {
+		if !clipboardSequenceMatches(src) {
 			return false, errClipboardChanged
 		}
 		media, err := ms.SaveImage(data)
@@ -57,9 +64,15 @@ func enrichMediaCandidate(cand *clipboard.CaptureCandidate, cfg config.Clipboard
 		if src.ReadFiles == nil {
 			return false, nil
 		}
+		if !clipboardSequenceMatches(src) {
+			return false, errClipboardChanged
+		}
 		paths, err := src.ReadFiles()
 		if err != nil {
 			return false, err
+		}
+		if !clipboardSequenceMatches(src) {
+			return false, errClipboardChanged
 		}
 		// Files are referenced, not copied: only a thumbnail may be written.
 		media, names, err := ms.SaveFileList(paths, src.Probe)
