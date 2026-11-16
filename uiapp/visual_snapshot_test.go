@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/host"
@@ -45,17 +46,31 @@ func TestVisualSnapshots(t *testing.T) {
 			if dark {
 				mode = "dark"
 			}
-			suffix := l.tag + "-" + mode
-			t.Run(suffix, func(t *testing.T) {
-				defer i18n.SetLanguage(i18n.English)
-				i18n.SetLanguage(l.lang)
-				renderSnapshotMatrix(t, dir, suffix, dark)
-			})
+			for _, preset := range []string{"classic", "liquid_glass", "spatial_3d"} {
+				for _, motion := range []string{"full", "reduced"} {
+					suffix := l.tag + "-" + mode + "-" + preset + "-" + motion
+					t.Run(suffix, func(t *testing.T) {
+						defer i18n.SetLanguage(i18n.English)
+						i18n.SetLanguage(l.lang)
+						renderSnapshotMatrix(t, dir, suffix, dark, preset, motion)
+					})
+				}
+			}
 		}
 	}
+	validateVisualSnapshotPNGs(t, dir)
 }
 
-func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool) {
+func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, motion string) {
+	core := preset == "spatial_3d" && motion == "full"
+	coreFrame := func(name string) bool {
+		return name == "01-leader" || name == "02-omnibox" || (len(name) >= 2 && name[:2] == "06") || (len(name) >= 2 && name[:2] == "09") || (len(name) >= 2 && name[:2] == "18")
+	}
+	if core {
+		t.Log("snapshot coverage: full matrix for core frames; non-core frames are narrowed to spatial_3d/full")
+	} else {
+		t.Log("snapshot coverage narrowed: Leader, Omnibox, AI, Settings General, and all onboarding frames only; non-core frames omitted outside spatial_3d/full")
+	}
 	doer := mockHTTPDoer{fn: func(req *http.Request) (*http.Response, error) {
 		return sseResponse("这段代码的作用是：", "\\n\\n1. 读取配置文件；", "\\n2. 校验字段并返回错误；", "\\n3. 原子写回磁盘。"), nil
 	}}
@@ -67,11 +82,30 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool) {
 		"#3B82F6",
 		"SELECT id, content, kind FROM clipboard_items WHERE kind = 'image' ORDER BY updated_at DESC LIMIT 20;",
 	)
+	ctxRecord := context.Background()
+	mediaPath := filepath.Join(t.TempDir(), "preview.png")
+	if err := os.WriteFile(mediaPath, testPNG16(t), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.clips.Record(ctxRecord, clipboard.CaptureCandidate{
+		Content: "preview-media-deck", SourceAppName: "Photos", Timestamp: time.Now(),
+		Media: clipboard.Media{Kind: clipboard.KindImage, BlobSHA: "deck-sha", MediaPath: mediaPath, ThumbPath: mediaPath, Width: 1920, Height: 1080, ByteSize: 2400000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.ctrl.UpdateMainConfig(func(m *config.MainConfig) {
+		m.Appearance.VisualPreset = preset
+		m.Appearance.Animations = motion
+		m.Appearance.ObliqueRows = true
+	})
 	appearance := f.ctrl.Config().Main.Appearance
 	ctx := &engine.CapsuleContext{AppName: "Visual Studio Code", SelectedText: "func main() {}"}
 
 	shoot := func(name string, view func(c *ui.Context), w, h int, scale float32, drive func(tt *ui.Tester)) {
 		t.Helper()
+		if !core && !coreFrame(name) {
+			return
+		}
 		tt := ui.NewTester(view, w, h)
 		tt.SetDark(dark)
 		tt.SetScale(scale)
@@ -106,6 +140,14 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool) {
 	})
 
 	f.ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Context: ctx})
+	shoot("03b-omnibox-hover", f.ctrl.CapsuleView, w, h, 2, func(tt *ui.Tester) {
+		tt.Move(float32(w/2), float32(h/2+20))
+		tt.Frame()
+	})
+	shoot("03c-omnibox-focused", f.ctrl.CapsuleView, w, h, 2, func(tt *ui.Tester) {
+		tt.Key(0, ui.KeyDown)
+		tt.Frame()
+	})
 	shoot("04-omnibox-alt-held", f.ctrl.CapsuleView, w, h, 2, func(tt *ui.Tester) {
 		tt.HoldModifiers(ui.Alt)
 		tt.Frame()
@@ -119,6 +161,12 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool) {
 		tt.Key(0, ui.KeyDown)
 		tt.Frame()
 	})
+	f.ctrl.OpenOmnibox(config.TabClipboard, "#3B82F6")
+	w, h = PreferredCapsuleSizeForState(f.ctrl.State(), appearance)
+	shoot("05b-hex-colour", f.ctrl.CapsuleView, w, h, 2, nil)
+	f.ctrl.OpenOmnibox(config.TabClipboard, "")
+	w, h = PreferredCapsuleSizeForState(f.ctrl.State(), appearance)
+	shoot("05c-preview-media-deck", f.ctrl.CapsuleView, w, h, 2, nil)
 
 	f.ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Context: ctx})
 	tt := ui.NewTester(f.ctrl.CapsuleView, w, h)
@@ -126,6 +174,9 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool) {
 	tt.Type("?解释这段代码")
 	tt.Frame()
 	tt.Key(0, ui.KeyEnter)
+	// Capture the active orb as soon as the AI phase opens.
+	w, h = PreferredCapsuleSizeForState(f.ctrl.State(), appearance)
+	shoot("06a-ai-streaming", f.ctrl.CapsuleView, w, h, 2, nil)
 	waitUntil(t, 2*time.Second, func() bool {
 		st := f.ctrl.State()
 		return st.Phase == engine.PhaseAIStreaming && st.AIComplete
@@ -195,11 +246,11 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool) {
 		name  string
 		index int
 	}{
+		{"16-settings-permissions-telemetry", settingsSectionPermissions},
 		{"12-settings-glossary-clipboard", settingsSectionGlossary},
 		{"13-settings-leader", settingsSectionLeader},
 		{"14-settings-snippets", settingsSectionSnippets},
 		{"15-settings-ai", settingsSectionAI},
-		{"16-settings-permissions", settingsSectionPermissions},
 		{"17-settings-configs", settingsSectionConfigs},
 	} {
 		f.ctrl.setSettingsSection(sec.index)
@@ -216,18 +267,18 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool) {
 	f.bridge.perms = host.PermissionStatus{}
 	f.bridge.mu.Unlock()
 	_, _ = f.ctrl.RefreshPermissions(context.Background())
-	shoot("18-onboarding-fresh", guide("darwin"), 600, 740, 1.5, nil)
+	shoot("18-onboarding-fresh", guide("darwin"), 520, 520, 1.5, nil)
 	shoot("18b-onboarding-min", guide("darwin"), 520, 520, 1.5, nil)
 	f.bridge.mu.Lock()
 	f.bridge.perms = host.PermissionStatus{Accessibility: true, InputMonitoring: true, Granted: true}
 	f.bridge.mu.Unlock()
 	_, _ = f.ctrl.RefreshPermissions(context.Background())
 	f.ctrl.SetRelaunchNeeded(true)
-	shoot("18c-onboarding-relaunch", guide("darwin"), 600, 740, 1.5, nil)
+	shoot("18c-onboarding-relaunch", guide("darwin"), 520, 520, 1.5, nil)
 	_ = f.ctrl.Start(context.Background())
-	shoot("18d-onboarding-waiting", guide("darwin"), 600, 740, 1.5, nil)
+	shoot("18d-onboarding-waiting", guide("darwin"), 520, 520, 1.5, nil)
 	f.ctrl.HandleTriggerEvent(host.TriggerEvent{Kind: host.TriggerLeaderKey})
 	f.ctrl.Dispatch(engine.Event{Type: engine.EventDismiss})
-	shoot("18e-onboarding-ready", guide("darwin"), 600, 740, 1.5, nil)
-	shoot("18f-onboarding-windows", guide("windows"), 600, 740, 1.5, nil)
+	shoot("18e-onboarding-ready", guide("darwin"), 520, 520, 1.5, nil)
+	shoot("18f-onboarding-windows", guide("windows"), 520, 520, 1.5, nil)
 }

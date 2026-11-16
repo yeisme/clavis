@@ -1,6 +1,7 @@
 package uiapp
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -32,18 +33,25 @@ func testThemes() map[string]*ui.Theme {
 }
 
 func TestTokenContrast(t *testing.T) {
+	for _, alpha := range []float32{alphaFaint, alphaSubtle, alphaSoft, alphaHalf, alphaStrong} {
+		if alpha <= 0 || alpha > 1 {
+			t.Errorf("opacity token %v outside (0,1]", alpha)
+		}
+	}
 	for name, theme := range testThemes() {
 		bg := surfaceBase(theme)
 		selected := selectionFill(theme).Over(bg)
 		marked := matchMark(theme).Over(selected)
 
-		checks := []struct {
+		type contrastCheck struct {
 			what string
 			fg   ui.Color
 			bg   ui.Color
 			min  float64
-		}{
+		}
+		checks := []contrastCheck{
 			{"accent ink on surface", accentInk(theme, bg), bg, minTextContrast},
+			{"text on reconstructed card", theme.Text, surfaceHighlight(theme).Over(theme.Surface), minTextContrast},
 			{"accent glyph on surface", accentGlyph(theme, bg), bg, minGlyphContrast},
 			{"title on chosen row", theme.Text, selected, minTextContrast},
 			{"subtitle on chosen row", theme.TextMuted, selected, minGlyphContrast},
@@ -53,6 +61,10 @@ func TestTokenContrast(t *testing.T) {
 			{"pill EN segment", theme.Background, theme.Text.Alpha(0.88).Over(bg), minTextContrast},
 			{"diff insertion", theme.Text, diffInsertMark(theme).Over(theme.Surface), minTextContrast},
 			{"diff deletion", diffDeleteInk(theme, theme.Surface), diffDeleteMark(theme).Over(theme.Surface), minTextContrast},
+		}
+		for level := elev1; level <= elev4; level++ {
+			_, _, _, _, shadow := elevationShadow(theme, level)
+			checks = append(checks, contrastCheck{fmt.Sprintf("text on elevation %d", level), theme.Text, shadow.Over(theme.Background), minTextContrast})
 		}
 		for _, ck := range checks {
 			if got := contrastRatio(ck.fg, ck.bg); got < ck.min {
