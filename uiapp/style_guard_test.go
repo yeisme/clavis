@@ -58,7 +58,7 @@ var styleDebtBaseline = map[string]styleDebt{
 	"capsule_view.go":         {13, 16, 19},
 	"components.go":           {0, 0, 1},
 	"input_candidate_view.go": {3, 6, 5},
-	"onboarding_view.go":      {0, 1, 0},
+	"onboarding_view.go":      {0, 0, 0},
 	"pill_view.go":            {1, 0, 0},
 	"prompt_composer.go":      {9, 11, 12},
 	"selection_bar_view.go":   {3, 3, 2},
