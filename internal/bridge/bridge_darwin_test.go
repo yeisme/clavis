@@ -5,7 +5,32 @@ package bridge
 import (
 	"context"
 	"testing"
+
+	"github.com/yeisme/clavis/pkg/core/clipboard"
 )
+
+func TestClassifyDarwinClipboard(t *testing.T) {
+	tests := []struct {
+		name  string
+		text  string
+		types []string
+		want  clipboard.Kind
+	}{
+		{name: "text wins over file and image", text: "hello", types: []string{"public.file-url", "public.png"}, want: clipboard.KindText},
+		{name: "file URL", types: []string{"public.file-url"}, want: clipboard.KindFile},
+		{name: "PNG", types: []string{"public.png"}, want: clipboard.KindImage},
+		{name: "image MIME", types: []string{"image/png"}, want: clipboard.KindImage},
+		{name: "file wins over image", types: []string{"public.png", "public.file-url"}, want: clipboard.KindFile},
+		{name: "unknown representations", types: []string{"public.rtf", "org.example.custom"}, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyDarwinClipboard(tt.text, tt.types); got != tt.want {
+				t.Fatalf("classifyDarwinClipboard(%q, %v) = %q, want %q", tt.text, tt.types, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestDarwinBridge_PureGoRuntimeCalls(t *testing.T) {
 	b := NewHostService().(*darwinBridge)

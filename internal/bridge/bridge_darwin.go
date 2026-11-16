@@ -2205,6 +2205,49 @@ func (b *darwinBridge) IgnoreSelfPasteboardChange(changeCount int64) {
 	b.pbTracker.Ignore(changeCount)
 }
 
+// ClipboardSequence implements ClipboardSequencer so the poller can verify that an image or
+// file-list read still belongs to the candidate returned by PollClipboardCandidate.
+func (b *darwinBridge) ClipboardSequence() int64 {
+	if initDarwin() != nil {
+		return 0
+	}
+	var changeCount int64
+	withAutoreleasePool(func() {
+		pb := cls("NSPasteboard").Send(sel("generalPasteboard"))
+		if pb != 0 {
+			changeCount = int64(objc.Send[int](pb, sel("changeCount")))
+		}
+	})
+	return changeCount
+}
+
+// classifyDarwinClipboard applies the clipboard media priority used by the poller: non-empty
+// text wins over file URLs and images, then file URLs win over image representations. It only
+// examines representation identifiers; payload bytes and file paths are deliberately not read.
+func classifyDarwinClipboard(text string, types []string) clipboard.Kind {
+	if text != "" {
+		return clipboard.KindText
+	}
+	for _, raw := range types {
+		t := strings.ToLower(strings.TrimSpace(raw))
+		switch t {
+		case "public.file-url", "nsfilenamespboardtype", "com.apple.pasteboard.promised-file-url":
+			return clipboard.KindFile
+		}
+	}
+	for _, raw := range types {
+		t := strings.ToLower(strings.TrimSpace(raw))
+		switch t {
+		case "public.png", "public.tiff", "public.jpeg", "public.jpg", "public.gif", "public.heic", "public.heif", "public.bmp", "public.image", "nspasteboardtypepng", "nstiffpboardtype", "nspictpboardtype", "com.apple.tiff":
+			return clipboard.KindImage
+		}
+		if strings.HasPrefix(t, "image/") {
+			return clipboard.KindImage
+		}
+	}
+	return ""
+}
+
 func (b *darwinBridge) PollClipboardCandidate(ctx context.Context) (*clipboard.CaptureCandidate, int64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
@@ -2250,13 +2293,19 @@ func (b *darwinBridge) PollClipboardCandidate(ctx context.Context) (*clipboard.C
 		}
 	})
 
-	if text == "" {
+	kind := classifyDarwinClipboard(text, types)
+	if kind == "" {
 		return nil, changeCount, nil
 	}
 
 	app := darwinFrontmostAppIdentity()
+	var media clipboard.Media
+	if kind != clipboard.KindText {
+		media.Kind = kind
+	}
 	return &clipboard.CaptureCandidate{
 		Content:         text,
+		Media:           media,
 		SourceBundleID:  app.BundleID,
 		SourceAppName:   app.ProcessName,
 		PasteboardTypes: types,
