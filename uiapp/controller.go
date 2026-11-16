@@ -77,7 +77,6 @@ const (
 type Options struct {
 	ConfigStore           *config.ConfigStore
 	ClipboardStore        clipboard.Store
-	ClipboardMediaStore   *clipboard.MediaStore
 	ClipboardSearcher     ClipboardSearcher
 	SecretStore           secrets.APIKeyStore
 	Bridge                bridge.HostService
@@ -157,18 +156,17 @@ type uiViewState struct {
 type AppController struct {
 	mu sync.Mutex
 
-	ConfigStore         *config.ConfigStore
-	StateMachine        *engine.StateMachine
-	ClipboardStore      clipboard.Store
-	ClipboardMediaStore *clipboard.MediaStore
-	ClipboardSearcher   ClipboardSearcher
-	SecretStore         secrets.APIKeyStore
-	Bridge              bridge.HostService
-	AppProvider         apps.AppProvider
-	AIClient            *ai.OpenAICompatibleClient
-	CLIExecutor         actions.CLIExecutor
-	Glossary            engine.GlossaryEngine
-	Snippets            *engine.SnippetEngine
+	ConfigStore       *config.ConfigStore
+	StateMachine      *engine.StateMachine
+	ClipboardStore    clipboard.Store
+	ClipboardSearcher ClipboardSearcher
+	SecretStore       secrets.APIKeyStore
+	Bridge            bridge.HostService
+	AppProvider       apps.AppProvider
+	AIClient          *ai.OpenAICompatibleClient
+	CLIExecutor       actions.CLIExecutor
+	Glossary          engine.GlossaryEngine
+	Snippets          *engine.SnippetEngine
 
 	httpDoer              ai.HTTPDoer
 	ClipboardWriter       func(text string)
@@ -310,7 +308,6 @@ func NewAppController(opts Options) *AppController {
 		ConfigStore:           cfgStore,
 		StateMachine:          sm,
 		ClipboardStore:        clipStore,
-		ClipboardMediaStore:   opts.ClipboardMediaStore,
 		ClipboardSearcher:     clipSearcher,
 		SecretStore:           secStore,
 		Bridge:                opts.Bridge,
@@ -807,16 +804,10 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 
 	case engine.EffectDeleteClipboard:
 		id := eff.ClipboardID
+		// Media GC remains on the serialized desktop poller/prune path. Running it
+		// here could race a just-captured blob that has not yet been persisted.
 		c.enqueueClipboardTask(func(ctx context.Context) error {
-			if err := c.ClipboardStore.Delete(ctx, id); err != nil {
-				return err
-			}
-			if c.ClipboardMediaStore != nil {
-				if items, err := c.ClipboardStore.Recent(ctx, 0); err == nil {
-					_, _ = c.ClipboardMediaStore.GC(items)
-				}
-			}
-			return nil
+			return c.ClipboardStore.Delete(ctx, id)
 		})
 
 	case engine.EffectRunAction:

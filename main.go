@@ -295,12 +295,11 @@ func (a *desktopApp) start() {
 	)
 
 	controller := uiapp.NewAppController(uiapp.Options{
-		ConfigStore:         cfgStore,
-		ClipboardStore:      clipStore,
-		ClipboardMediaStore: mediaStore,
-		SecretStore:         secretStore,
-		Bridge:              hostBridge,
-		AppProvider:         appProvider,
+		ConfigStore:    cfgStore,
+		ClipboardStore: clipStore,
+		SecretStore:    secretStore,
+		Bridge:         hostBridge,
+		AppProvider:    appProvider,
 		ClipboardWriter: func(text string) {
 			mygo.Clipboard.WriteText(text)
 		},
