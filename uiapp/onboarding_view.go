@@ -49,6 +49,9 @@ type onboardingState struct {
 // user in System Settings.
 const onboardingGuideTimeout = 10 * time.Minute
 
+// onboardingIconSize keeps the welcome mark comfortably larger than a toolbar icon.
+const onboardingIconSize float32 = 52
+
 // onboardingLeaderPreview is how many top-level Leader entries the guide
 // shows as examples.
 const onboardingLeaderPreview = 4
@@ -135,11 +138,16 @@ func (a *AppController) renderOnboarding(c *ui.Context, goos string) {
 
 	applyTextLocale(ui.Column(c).Fill().Background(theme.Background)).Children(func() {
 		ui.Scroll(c).FillWidth().Grow(1).Children(func() {
-			ui.Column(c).FillWidth().Padding(space16+4, space16+8).Gap(space12).Children(func() {
+			ui.Column(c).FillWidth().Padding(space16, space16).Gap(space12).Children(func() {
 				renderOnboardingHeader(c, theme)
-				a.renderOnboardingPermissions(c, theme, goos, diag, st, ready)
-				a.renderOnboardingLeader(c, theme, cfg, goos, st.leaderSeen, granted, diag.MonitorRunning)
-				renderOnboardingShortcuts(c, theme, cfg, goos)
+				ui.Row(c).FillWidth().Gap(space10).AlignItems(ui.Start).Children(func() {
+					renderOnboardingRail(c, theme, granted, st.leaderSeen, ready)
+					ui.Column(c).FillWidth().Grow(1).Gap(space12).Children(func() {
+						a.renderOnboardingPermissions(c, theme, goos, diag, st, ready)
+						a.renderOnboardingLeader(c, theme, cfg, goos, st.leaderSeen, granted, diag.MonitorRunning)
+						renderOnboardingShortcuts(c, theme, cfg, goos)
+					})
+				})
 			})
 		})
 		renderOnboardingFooter(c, theme, a, st.hooks, ready)
@@ -164,42 +172,61 @@ func onboardingAppIcon() *ui.Bitmap {
 func renderOnboardingHeader(c *ui.Context, theme *ui.Theme) {
 	ui.Row(c).FillWidth().Gap(space14).AlignItems(ui.Center).Children(func() {
 		if icon := onboardingAppIcon(); icon != nil {
-			ui.Image(c, icon).Size(52, 52).Shrink(0)
+			ui.Box(c).Size(onboardingIconSize, onboardingIconSize).Radius(radius12).Clip().Shrink(0).Children(func() {
+				ui.Image(c, icon).Size(onboardingIconSize, onboardingIconSize)
+			})
 		}
 		ui.Column(c).Grow(1).Shrink(1).Gap(space4).Children(func() {
-			ui.Text(c, i18n.T("onboarding.title")).FontSize(20).FontWeight(700).TextColor(theme.Text).SingleLine()
+			ui.Text(c, i18n.T("onboarding.title")).FontSize(typeHero).FontWeight(700).TextColor(theme.Text).SingleLine()
 			applyProseLineHeight(ui.Text(c, i18n.T("onboarding.subtitle"))).FontSize(typeBody).TextColor(theme.TextMuted)
 		})
+	})
+}
+
+// renderOnboardingRail is a compact progress guide that keeps the three steps
+// legible even when the body is scrolled. Completion uses the existing success
+// semantic and the current step uses the accent, with no extra status colour.
+func renderOnboardingRail(c *ui.Context, theme *ui.Theme, permissionsDone, leaderDone, ready bool) {
+	ui.Column(c).Width(space20).Gap(space8).AlignItems(ui.Center).Padding(space8, space0).Children(func() {
+		for i, done := range []bool{permissionsDone, leaderDone, ready} {
+			if i > 0 {
+				ui.Box(c).Width(space1).Height(space12).Background(hairline(theme))
+			}
+			color := theme.Accent
+			if done {
+				color = theme.Success
+			}
+			kitStatusDot(c, color, false)
+		}
 	})
 }
 
 // onboardingStep frames one numbered step: its number, or a check once it
 // is done, beside the title and the body.
 func onboardingStep(c *ui.Context, theme *ui.Theme, n int, title string, done bool, body func()) {
-	ui.Row(c).Key(fmt.Sprintf("onboarding-step:%d", n)).FillWidth().Gap(space12).AlignItems(ui.Start).
-		Padding(space12, space14).Radius(radiusCard).Background(theme.Surface).Border(1, theme.Border).
-		Children(func() {
-			badge := ui.Box(c).Size(24, 24).Radius(radiusPill).Center().Shrink(0)
-			if done {
-				badge.Background(theme.Success.Alpha(0.16)).Children(func() {
-					renderSemanticIcon(c, "checkmark", 12, readableOn(theme.Success, theme.Text, theme.Surface, minTextContrast))
-				})
-			} else {
-				badge.Background(theme.Accent.Alpha(0.14)).Children(func() {
+	kitCard(c, theme, cardElevated, func() {
+		ui.Row(c).Key(fmt.Sprintf("onboarding-step:%d", n)).FillWidth().Gap(space12).AlignItems(ui.Start).Children(func() {
+			badge := ui.Box(c).Size(space24, space24).Radius(radiusPill).Center().Shrink(0)
+			badge.Background(tileFill(theme)).Children(func() {
+				if done {
+					renderSemanticIcon(c, "checkmark", typeLabel, theme.Success)
+				} else {
 					ui.Text(c, strconv.Itoa(n)).FontSize(typeLabel).FontWeight(700).TextColor(accentInk(theme, theme.Surface)).SingleLine()
-				})
-			}
+				}
+			})
 			ui.Column(c).Grow(1).Shrink(1).Gap(space8).Children(func() {
 				ui.Text(c, title).FontSize(typeTitle).FontWeight(600).TextColor(theme.Text).SingleLine()
 				body()
 			})
 		})
+	})
 }
 
 // onboardingNote is a status line: an icon and a sentence in one color.
 func onboardingNote(c *ui.Context, theme *ui.Theme, icon string, color ui.Color, text string) {
 	ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
-		renderSemanticIcon(c, icon, 12, color)
+		kitStatusDot(c, color, false)
+		renderSemanticIcon(c, icon, typeLabel, color)
 		applyProseLineHeight(ui.Text(c, text)).FontSize(typeLabel).TextColor(color).Grow(1).Shrink(1)
 	})
 }
@@ -218,10 +245,15 @@ func (a *AppController) renderOnboardingPermissions(c *ui.Context, theme *ui.The
 		}
 		perms := diag.Permissions
 		// The one accent button is the next permission to grant.
-		a.onboardingPermRow(c, theme, "accessibility", i18n.T("settings.perm.accessibility"),
-			i18n.T("onboarding.perm.why_accessibility"), perms.Accessibility, true)
-		a.onboardingPermRow(c, theme, "input_monitoring", i18n.T("settings.perm.input_monitoring"),
-			i18n.T("onboarding.perm.why_input_monitoring"), perms.InputMonitoring, perms.Accessibility)
+		kitCard(c, theme, cardInset, func() {
+			a.onboardingPermRow(c, theme, "accessibility", i18n.T("settings.perm.accessibility"),
+				i18n.T("onboarding.perm.why_accessibility"), perms.Accessibility, true)
+		})
+		kitDivider(c, theme)
+		kitCard(c, theme, cardInset, func() {
+			a.onboardingPermRow(c, theme, "input_monitoring", i18n.T("settings.perm.input_monitoring"),
+				i18n.T("onboarding.perm.why_input_monitoring"), perms.InputMonitoring, perms.Accessibility)
+		})
 		if !perms.Accessibility || !perms.InputMonitoring || diag.MonitorRunning {
 			return
 		}
@@ -242,25 +274,43 @@ func (a *AppController) renderOnboardingPermissions(c *ui.Context, theme *ui.The
 
 func (a *AppController) onboardingPermRow(c *ui.Context, theme *ui.Theme, kind, label, purpose string, granted, primary bool) {
 	ui.Row(c).Key("onboarding-perm:" + kind).FillWidth().Gap(space10).AlignItems(ui.Center).Children(func() {
+		icon := "lock.fill"
+		if kind == "input_monitoring" {
+			icon = "keyboard"
+		}
+		kitIconTile(c, theme, icon, !granted && primary)
 		ui.Column(c).Grow(1).Shrink(1).Gap(space2).Children(func() {
 			ui.Text(c, label).FontSize(typeBody).FontWeight(600).TextColor(theme.Text).SingleLine()
 			applyProseLineHeight(ui.Text(c, purpose)).FontSize(typeMeta).TextColor(theme.TextMuted)
 		})
+		color := theme.TextMuted
+		tone := chipNeutral
+		state := i18n.T("onboarding.perm.grant")
 		if granted {
-			chip(c, theme, "checkmark", i18n.T("settings.perm.granted"), chipSuccess)
-			return
+			color = theme.Success
+			tone = chipSuccess
+			state = i18n.T("settings.perm.granted")
+		} else if primary {
+			color = theme.Accent
+			tone = chipAccent
 		}
-		btn := ui.Button
-		if primary {
-			btn = ui.PrimaryButton
-		}
-		if btn(c, i18n.T("onboarding.perm.grant")).Key("onboarding-grant:" + kind).Clicked() {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), onboardingGuideTimeout)
-				defer cancel()
-				_, _ = a.GuidePermission(ctx, kind)
-			}()
-		}
+		ui.Row(c).Gap(space4).AlignItems(ui.Center).Shrink(0).Children(func() {
+			kitStatusDot(c, color, !granted && primary)
+			if !granted {
+				btn := ui.Button
+				if primary {
+					btn = ui.PrimaryButton
+				}
+				if btn(c, i18n.T("onboarding.perm.grant")).Key("onboarding-grant:" + kind).Clicked() {
+					go func() {
+						ctx, cancel := context.WithTimeout(context.Background(), onboardingGuideTimeout)
+						defer cancel()
+						_, _ = a.GuidePermission(ctx, kind)
+					}()
+				}
+			}
+			kitStatusPill(c, theme, state, tone)
+		})
 	})
 }
 
@@ -272,10 +322,12 @@ func (a *AppController) onboardingPermRow(c *ui.Context, theme *ui.Theme, kind, 
 func (a *AppController) renderOnboardingLeader(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig, goos string, seen, granted, listening bool) {
 	trig := cfg.Main.Trigger
 	onboardingStep(c, theme, 2, i18n.T("onboarding.step.leader"), seen, func() {
-		ui.Row(c).FillWidth().Wrap().Gap(space6).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, i18n.T("onboarding.leader.press_before")).FontSize(typeBody).TextColor(theme.Text).SingleLine()
-			onboardingKeycap(c, theme, triggerKeyLabel(trig.LeaderKey, goos))
-			ui.Text(c, i18n.T("onboarding.leader.press_after")).FontSize(typeBody).TextColor(theme.Text).SingleLine()
+		kitInsetWell(c, theme, func() {
+			ui.Row(c).FillWidth().Wrap().Gap(space6).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, i18n.T("onboarding.leader.press_before")).FontSize(typeBody).TextColor(theme.Text).SingleLine()
+				onboardingKeycap(c, theme, triggerKeyLabel(trig.LeaderKey, goos))
+				ui.Text(c, i18n.T("onboarding.leader.press_after")).FontSize(typeBody).TextColor(theme.Text).SingleLine()
+			})
 		})
 		if nodes := cfg.Leader.Nodes; len(nodes) > 0 {
 			ui.Grid(c).Columns(2).GapX(space12).GapY(space6).FillWidth().Children(func() {
@@ -335,12 +387,26 @@ func (a *AppController) renderOnboardingLeaderPicker(c *ui.Context, theme *ui.Th
 		chosen = current
 		labels = append(labels, current)
 	}
-	ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+	ui.Column(c).FillWidth().Gap(space6).Children(func() {
 		ui.Text(c, i18n.T("onboarding.leader.no_key")).FontSize(typeLabel).TextColor(theme.TextMuted).SingleLine().Shrink(1)
 		picked := chosen
-		sel := ui.Select(c.Key("onboarding-leader-key"), &picked, labels).
-			Label(i18n.T("settings.trigger.leader_key")).Width(160).Shrink(0)
-		if !sel.Changed() || picked == chosen {
+		changed := false
+		if len(options) <= 4 {
+			values := make([]string, 0, len(options))
+			for _, o := range options {
+				values = append(values, o.label)
+			}
+			var selected bool
+			pickedLabel, selected := kitSegmentedPicker(c, theme, values, chosen)
+			if selected {
+				picked, changed = pickedLabel, pickedLabel != chosen
+			}
+		} else {
+			sel := ui.Select(c.Key("onboarding-leader-key"), &picked, labels).
+				Label(i18n.T("settings.trigger.leader_key")).Width(160).Shrink(0)
+			changed = sel.Changed() && picked != chosen
+		}
+		if !changed {
 			return
 		}
 		for _, o := range options {
@@ -359,8 +425,9 @@ func (a *AppController) renderOnboardingLeaderPicker(c *ui.Context, theme *ui.Th
 // onboardingKeycap is the Leader key in the sentence that asks for it:
 // a keycap at body size.
 func onboardingKeycap(c *ui.Context, theme *ui.Theme, label string) {
+	x, y, blur, spread, shadow := elevationShadow(theme, elev1)
 	ui.Box(c).Padding(space4, space10).Radius(radiusChip).Shrink(0).
-		Background(keycapFill(theme)).Border(1, keycapEdge(theme)).Shadow(0, 1, 0, 0, keycapLip(theme)).
+		Background(keycapFill(theme)).Border(space1, keycapEdge(theme)).Shadow(x, y, blur, spread, shadow).
 		Children(func() {
 			ui.Text(c, label).FontSize(typeBody).FontWeight(600).TextColor(theme.Text).SingleLine()
 		})
@@ -371,30 +438,30 @@ func onboardingKeycap(c *ui.Context, theme *ui.Theme, label string) {
 func renderOnboardingShortcuts(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig, goos string) {
 	trig := cfg.Main.Trigger
 	onboardingStep(c, theme, 3, i18n.T("onboarding.step.shortcuts"), false, func() {
-		shortcut := func(key, keys, caption string) {
-			labels := shortcutKeyLabels(keys, goos)
-			if len(labels) == 0 {
-				return
+		kitInsetWell(c, theme, func() {
+			shortcut := func(key, keys, caption string) {
+				labels := shortcutKeyLabels(keys, goos)
+				if len(labels) == 0 {
+					return
+				}
+				kitControlRow(c, theme, caption, func() {
+					ui.Row(c).Width(onboardingKeysWidth).Shrink(0).Gap(space2).AlignItems(ui.Center).Children(func() {
+						for _, l := range labels {
+							keycap(c, theme, l, keyToneNeutral)
+						}
+					})
+				})
 			}
-			ui.Row(c).Key("onboarding-shortcut:" + key).FillWidth().Gap(space10).AlignItems(ui.Center).Children(func() {
-				ui.Row(c).Width(onboardingKeysWidth).Shrink(0).Gap(space2).AlignItems(ui.Center).Children(func() {
-					for _, l := range labels {
-						keycap(c, theme, l, keyToneNeutral)
-					}
+			shortcut("capsule", trig.CapsuleShortcut, i18n.T("onboarding.shortcut.capsule"))
+			shortcut("clipboard", trig.ClipboardShortcut, i18n.T("onboarding.shortcut.clipboard"))
+			if trigger := firstSnippetTrigger(cfg); trig.SnippetExpansionEnabled && trigger != "" {
+				kitControlRow(c, theme, i18n.T("onboarding.shortcut.snippet"), func() {
+					ui.Row(c).Width(onboardingKeysWidth).Shrink(0).Children(func() {
+						chip(c, theme, "", trigger, chipNeutral)
+					})
 				})
-				ui.Text(c, caption).FontSize(typeLabel).TextColor(theme.Text).SingleLine().Shrink(1)
-			})
-		}
-		shortcut("capsule", trig.CapsuleShortcut, i18n.T("onboarding.shortcut.capsule"))
-		shortcut("clipboard", trig.ClipboardShortcut, i18n.T("onboarding.shortcut.clipboard"))
-		if trigger := firstSnippetTrigger(cfg); trig.SnippetExpansionEnabled && trigger != "" {
-			ui.Row(c).Key("onboarding-shortcut:snippet").FillWidth().Gap(space10).AlignItems(ui.Center).Children(func() {
-				ui.Row(c).Width(onboardingKeysWidth).Shrink(0).Children(func() {
-					chip(c, theme, "", trigger, chipNeutral)
-				})
-				ui.Text(c, i18n.T("onboarding.shortcut.snippet")).FontSize(typeLabel).TextColor(theme.Text).SingleLine().Shrink(1)
-			})
-		}
+			}
+		})
 	})
 }
 
@@ -409,18 +476,15 @@ func firstSnippetTrigger(cfg config.ClavisConfig) string {
 }
 
 func renderOnboardingFooter(c *ui.Context, theme *ui.Theme, a *AppController, hooks OnboardingHooks, ready bool) {
-	ui.Box(c).FillWidth().Height(1).Background(theme.Border)
+	ui.Box(c).FillWidth().Height(space1).Background(hairline(theme))
 	ui.Row(c).FillWidth().Padding(space12, space16+8).Gap(space10).AlignItems(ui.Center).Children(func() {
 		ui.Text(c, i18n.T("onboarding.footer.reopen")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().Grow(1).Shrink(1)
 		if ui.Button(c, i18n.T("onboarding.footer.settings")).Key("onboarding-settings").Clicked() {
 			a.OpenSettings(SettingsTabGeneral)
 		}
-		// Until the permissions are in place the accent stays on step 1.
-		btn := ui.Button
-		if ready {
-			btn = ui.PrimaryButton
-		}
-		if btn(c, i18n.T("onboarding.footer.start")).Key("onboarding-start").Clicked() && hooks.Finish != nil {
+		// Until the permissions and keyboard monitor are ready, the action is
+		// visibly disabled rather than merely looking secondary.
+		if ui.PrimaryButton(c, i18n.T("onboarding.footer.start")).Key("onboarding-start").Disabled(!ready).Clicked() && hooks.Finish != nil {
 			hooks.Finish()
 		}
 	})

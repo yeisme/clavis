@@ -146,9 +146,13 @@ func TestOnboardingLeaderCheck(t *testing.T) {
 
 // TestOnboardingFinish: Get Started hands over to the host.
 func TestOnboardingFinish(t *testing.T) {
-	ctrl, _, _, _ := newTestController(t, nil)
+	ctrl, br, _, _ := newTestController(t, nil)
 	finished := 0
 	ctrl.SetOnboardingHooks(OnboardingHooks{Finish: func() { finished++ }})
+	setMockPerms(t, ctrl, br, true, true)
+	if err := ctrl.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	tt := onboardingTester(ctrl, "darwin")
 	if err := tt.Click(i18n.T("onboarding.footer.start")); err != nil || finished != 1 {
 		t.Fatalf("click Get Started: err=%v finished=%d", err, finished)
