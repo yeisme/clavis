@@ -47,6 +47,55 @@ func TestSQLiteClipboardStore_MigratesPreMediaSchema(t *testing.T) {
 	defer store.Close()
 }
 
+func TestSQLiteClipboardStore_DedupRepairsMediaMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t, ":memory:", clipboard.NewPrivacyFilter())
+	first, ok, err := store.Record(ctx, clipboard.CaptureCandidate{
+		Media: clipboard.Media{Kind: clipboard.KindImage, MediaPath: "/tmp/old.png", MediaMime: "image/png", BlobSHA: "blob-1", Width: 100},
+	})
+	if err != nil || !ok {
+		t.Fatalf("record initial media: item=%+v ok=%v err=%v", first, ok, err)
+	}
+	if err := store.Pin(ctx, first.ID, true); err != nil {
+		t.Fatalf("pin initial media: %v", err)
+	}
+
+	updated, ok, err := store.Record(ctx, clipboard.CaptureCandidate{
+		SourceAppName: "Preview",
+		Media:         clipboard.Media{Kind: clipboard.KindImage, MediaPath: "/tmp/new.png", MediaMime: "image/png", BlobSHA: "blob-1", Height: 200, ThumbPath: "/tmp/thumb.png", ByteSize: 42},
+	})
+	if err != nil || !ok || updated.ID != first.ID {
+		t.Fatalf("dedup media: item=%+v ok=%v err=%v", updated, ok, err)
+	}
+	if !updated.IsPinned {
+		t.Fatal("deduplication must preserve pinned state")
+	}
+	if updated.MediaPath != "/tmp/new.png" || updated.Width != 100 || updated.Height != 200 ||
+		updated.ThumbPath != "/tmp/thumb.png" || updated.ByteSize != 42 {
+		t.Fatalf("deduplication did not merge media metadata: %+v", updated.Media)
+	}
+
+	items, err := store.Recent(ctx, 10)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("expected one repaired item, got %+v (err=%v)", items, err)
+	}
+	if items[0].MediaPath != updated.MediaPath || items[0].Height != updated.Height || items[0].ThumbPath != updated.ThumbPath {
+		t.Fatalf("repaired media metadata was not persisted: %+v", items[0].Media)
+	}
+}
+
+func TestSQLiteClipboardStore_RejectsMediaWithoutBlobSHA(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t, ":memory:", clipboard.NewPrivacyFilter())
+	item, ok, err := store.Record(ctx, clipboard.CaptureCandidate{
+		Content: "same text",
+		Media:   clipboard.Media{Kind: clipboard.KindImage},
+	})
+	if err == nil || ok || item != nil {
+		t.Fatalf("expected malformed media rejection, item=%+v ok=%v err=%v", item, ok, err)
+	}
+}
+
 func TestSQLiteClipboardStore_MediaRoundTripAndDedupe(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t, filepath.Join(t.TempDir(), "m.db"), clipboard.NewPrivacyFilter())

@@ -2,6 +2,7 @@ package clipboard
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -46,12 +47,58 @@ type Media struct {
 // IsMedia reports whether the entry carries a non-text payload.
 func (m Media) IsMedia() bool { return m.Kind != "" && m.Kind != KindText }
 
-// DedupeHash is the content_hash used for an item: the blob/paths hash for media, else the text hash.
+// DedupeHash is the content_hash used for an item: the blob hash for media, else the text hash.
+// Malformed media candidates get a kind-prefixed fallback so they can never share a text hash;
+// stores reject them via Validate before persistence.
 func (c CaptureCandidate) DedupeHash() string {
-	if c.IsMedia() && c.BlobSHA != "" {
-		return string(c.Kind) + ":" + c.BlobSHA
+	if c.IsMedia() {
+		if strings.TrimSpace(c.BlobSHA) != "" {
+			return string(c.Kind) + ":" + c.BlobSHA
+		}
+		return string(c.Kind) + ":" + contentSHA256(c.Content)
 	}
 	return contentSHA256(c.Content)
+}
+
+// Validate rejects candidates that cannot be safely deduplicated as media.
+func (c CaptureCandidate) Validate() error {
+	if c.IsMedia() && strings.TrimSpace(c.BlobSHA) == "" {
+		return fmt.Errorf("media candidate of kind %q is missing BlobSHA", c.Kind)
+	}
+	return nil
+}
+
+// MergeMediaMetadata repairs an existing media row with every non-zero field from incoming.
+// KindText is the storage representation for text rows and must not erase media metadata.
+func MergeMediaMetadata(existing, incoming Media) Media {
+	if incoming.Kind != "" && incoming.Kind != KindText {
+		existing.Kind = incoming.Kind
+	}
+	if incoming.MediaPath != "" {
+		existing.MediaPath = incoming.MediaPath
+	}
+	if incoming.MediaMime != "" {
+		existing.MediaMime = incoming.MediaMime
+	}
+	if incoming.Width != 0 {
+		existing.Width = incoming.Width
+	}
+	if incoming.Height != 0 {
+		existing.Height = incoming.Height
+	}
+	if incoming.BlobSHA != "" {
+		existing.BlobSHA = incoming.BlobSHA
+	}
+	if incoming.ThumbPath != "" {
+		existing.ThumbPath = incoming.ThumbPath
+	}
+	if incoming.ByteSize != 0 {
+		existing.ByteSize = incoming.ByteSize
+	}
+	if incoming.DurationMs != 0 {
+		existing.DurationMs = incoming.DurationMs
+	}
+	return existing
 }
 
 // CaptureCandidate represents a candidate pasteboard snapshot before privacy filtering.

@@ -54,6 +54,55 @@ func TestPrivacyFilterConcealedTypesAndBundles(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreDedupRepairsMediaMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := clipboard.NewMemoryStore(clipboard.NewPrivacyFilter())
+	first, ok, err := store.Record(ctx, clipboard.CaptureCandidate{
+		Content: "",
+		Media:   clipboard.Media{Kind: clipboard.KindImage, MediaPath: "/tmp/old.png", MediaMime: "image/png", BlobSHA: "blob-1", Width: 100},
+	})
+	if err != nil || !ok {
+		t.Fatalf("record initial media: item=%+v ok=%v err=%v", first, ok, err)
+	}
+	if err := store.Pin(ctx, first.ID, true); err != nil {
+		t.Fatalf("pin initial media: %v", err)
+	}
+
+	updated, ok, err := store.Record(ctx, clipboard.CaptureCandidate{
+		Content:       "",
+		SourceAppName: "Preview",
+		Media:         clipboard.Media{Kind: clipboard.KindImage, MediaPath: "/tmp/new.png", MediaMime: "image/png", BlobSHA: "blob-1", Height: 200, ThumbPath: "/tmp/thumb.png", ByteSize: 42},
+	})
+	if err != nil || !ok || updated.ID != first.ID {
+		t.Fatalf("dedup media: item=%+v ok=%v err=%v", updated, ok, err)
+	}
+	if !updated.IsPinned {
+		t.Fatal("deduplication must preserve pinned state")
+	}
+	if updated.MediaPath != "/tmp/new.png" || updated.Width != 100 || updated.Height != 200 ||
+		updated.ThumbPath != "/tmp/thumb.png" || updated.ByteSize != 42 {
+		t.Fatalf("deduplication did not merge media metadata: %+v", updated.Media)
+	}
+	if updated.SourceAppName != "Preview" {
+		t.Fatalf("expected source app repair, got %q", updated.SourceAppName)
+	}
+}
+
+func TestMemoryStoreRejectsMediaWithoutBlobSHA(t *testing.T) {
+	ctx := context.Background()
+	store := clipboard.NewMemoryStore(clipboard.NewPrivacyFilter())
+	item, ok, err := store.Record(ctx, clipboard.CaptureCandidate{
+		Content: "same text",
+		Media:   clipboard.Media{Kind: clipboard.KindImage},
+	})
+	if err == nil || ok || item != nil {
+		t.Fatalf("expected malformed media rejection, item=%+v ok=%v err=%v", item, ok, err)
+	}
+	if textHash := (clipboard.CaptureCandidate{Content: "same text"}).DedupeHash(); textHash == (clipboard.CaptureCandidate{Content: "same text", Media: clipboard.Media{Kind: clipboard.KindImage}}).DedupeHash() {
+		t.Fatal("malformed media must not use the text dedupe hash")
+	}
+}
+
 func TestMemoryStoreLifecycle(t *testing.T) {
 	ctx := context.Background()
 	store := clipboard.NewMemoryStore(clipboard.NewPrivacyFilter())

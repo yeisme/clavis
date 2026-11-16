@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -198,6 +197,9 @@ func (s *SQLiteClipboardStore) Record(ctx context.Context, candidate clipboard.C
 	if !filter.ShouldRecord(candidate) {
 		return nil, false, nil
 	}
+	if err := candidate.Validate(); err != nil {
+		return nil, false, err
+	}
 
 	now := candidate.Timestamp.UTC()
 	if candidate.Timestamp.IsZero() {
@@ -228,12 +230,20 @@ func (s *SQLiteClipboardStore) Record(ctx context.Context, candidate clipboard.C
 		if candidate.SourceAppName != "" {
 			newAppName = candidate.SourceAppName
 		}
+		newMedia := existing.Media
+		if candidate.IsMedia() {
+			newMedia = clipboard.MergeMediaMetadata(newMedia, candidate.Media)
+		}
 
 		if _, err := s.db.Execute(ctx,
 			`UPDATE clipboard_items
-			 SET updated_at_ns = ?, source_bundle_id = ?, source_app_name = ?
+			 SET updated_at_ns = ?, source_bundle_id = ?, source_app_name = ?,
+				 kind = ?, media_path = ?, media_mime = ?, width = ?, height = ?,
+				 blob_sha = ?, thumb_path = ?, byte_size = ?, duration_ms = ?
 			 WHERE id = ?`,
-			nowNs, newBundleID, newAppName, existing.ID,
+			nowNs, newBundleID, newAppName, kindOrText(newMedia.Kind), newMedia.MediaPath,
+			newMedia.MediaMime, newMedia.Width, newMedia.Height, newMedia.BlobSHA,
+			newMedia.ThumbPath, newMedia.ByteSize, newMedia.DurationMs, existing.ID,
 		); err != nil {
 			return nil, false, fmt.Errorf("update deduplicated clipboard item: %w", err)
 		}
@@ -241,6 +251,7 @@ func (s *SQLiteClipboardStore) Record(ctx context.Context, candidate clipboard.C
 		existing.UpdatedAt = now
 		existing.SourceBundleID = newBundleID
 		existing.SourceAppName = newAppName
+		existing.Media = newMedia
 		s.generation.Add(1)
 		return &existing, true, nil
 	}
@@ -495,11 +506,6 @@ func (s *SQLiteClipboardStore) Generation() uint64 { return s.generation.Load() 
 
 // DB exposes the shared database handle for related stores.
 func (s *SQLiteClipboardStore) DB() *sqlite.DB { return s.db }
-
-func contentSHA256(content string) string {
-	sum := sha256.Sum256([]byte(content))
-	return hex.EncodeToString(sum[:])
-}
 
 func newItemID(nowNs int64) string {
 	var b [6]byte

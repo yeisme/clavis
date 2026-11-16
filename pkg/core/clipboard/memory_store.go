@@ -48,6 +48,9 @@ func (s *MemoryStore) Record(ctx context.Context, candidate CaptureCandidate) (*
 	if !s.filter.ShouldRecord(candidate) {
 		return nil, false, nil
 	}
+	if err := candidate.Validate(); err != nil {
+		return nil, false, err
+	}
 
 	now := candidate.Timestamp
 	if now.IsZero() {
@@ -66,6 +69,9 @@ func (s *MemoryStore) Record(ctx context.Context, candidate CaptureCandidate) (*
 		}
 		if candidate.SourceAppName != "" {
 			item.SourceAppName = candidate.SourceAppName
+		}
+		if candidate.IsMedia() {
+			item.Media = MergeMediaMetadata(item.Media, candidate.Media)
 		}
 		s.items[existingID] = item
 		s.generation.Add(1)
