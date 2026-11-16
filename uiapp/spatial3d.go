@@ -22,12 +22,13 @@ func Spatial3DEnabled(c *ui.Context, cfg config.AppearanceConfig) bool {
 	if c == nil || !cfg.Enable3DEffects {
 		return false
 	}
-	return resolveStagePlan(stageInputs{
+	plan := resolveStagePlan(stageInputs{
 		Preset:        cfg.VisualPreset,
 		Animations:    cfg.Animations,
 		ReducedMotion: c.Preferences().ReduceMotion,
-		Intensity:     1,
-	}).Enabled3D
+		Intensity:     cfg.StageIntensity,
+	})
+	return plan.Enabled3D && cfg.StageIntensity > 0
 }
 
 func TiltCard3D(c *ui.Context, key string, cfg config.AppearanceConfig, opts TiltCardOpts, children func()) ui.Element {
@@ -66,9 +67,15 @@ func TiltCard3D(c *ui.Context, key string, cfg config.AppearanceConfig, opts Til
 		if children != nil {
 			children()
 		}
-		ui.Box(c).Absolute().Fill().PassThrough().DrawOver(func(p *ui.Painter, box ui.Rect) {
-			DrawSpecularSheen(c, p, box, ui.Point{X: .35, Y: .28}, .7, accent, cfg)
-		})
+		// Only an interactive card under the pointer gets the expensive sheen;
+		// static cards retain their spatial geometry without spending a shader
+		// invocation. This keeps the frame budget bounded when a grid/deck has
+		// many cards.
+		if opts.Interactive && card.Hovered() {
+			ui.Box(c).Absolute().Fill().PassThrough().DrawOver(func(p *ui.Painter, box ui.Rect) {
+				DrawSpecularSheen(c, p, box, ui.Point{X: .35, Y: .28}, .7, accent, cfg)
+			})
+		}
 	})
 	return card
 }

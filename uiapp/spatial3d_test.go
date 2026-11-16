@@ -1,6 +1,8 @@
 package uiapp
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
@@ -13,6 +15,29 @@ func testSpatialConfig(preset, animations string) config.AppearanceConfig {
 	cfg.VisualPreset = preset
 	cfg.Animations = animations
 	return cfg
+}
+
+func TestSpatialComponentsAreWiredIntoProductionSurfaces(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var source strings.Builder
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasSuffix(entry.Name(), "_test.go") || !strings.HasSuffix(entry.Name(), ".go") {
+			continue
+		}
+		data, err := os.ReadFile(entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		source.Write(data)
+	}
+	for _, symbol := range []string{"TiltCard3D", "CoverFlowDeck3D", "RenderLiquidOrb", "ColorSwatch3D", "TelemetryGauge3D"} {
+		if !strings.Contains(source.String(), symbol) {
+			t.Errorf("%s is not referenced by production uiapp sources", symbol)
+		}
+	}
 }
 
 func TestT6ShadersCompileAndRenderHeadless(t *testing.T) {
@@ -32,6 +57,60 @@ func TestT6ShadersCompileAndRenderHeadless(t *testing.T) {
 			}, 240, 140, ui.TesterOptions{Preferences: ui.Preferences{ReduceMotion: reduced}})
 			if tt == nil || tt.Image() == nil {
 				t.Fatal("headless shader frame did not render")
+			}
+		})
+	}
+}
+
+func TestT6ShaderDrawBudget(t *testing.T) {
+	cfg := testSpatialConfig("spatial_3d", "full")
+	cfg.EnableShaders = true
+	shaderDrawCount.Store(0)
+	tt := ui.NewTesterWith(func(c *ui.Context) {
+		ui.Column(c).Fill().Children(func() {
+			RenderLiquidOrb(c, 32, true, cfg)
+			TiltCard3D(c, "budget-card", cfg, TiltCardOpts{Width: 150, Height: 70, Interactive: true}, func() { ui.Text(c, "AI") })
+			ui.Box(c).Fill().Draw(func(p *ui.Painter, r ui.Rect) {
+				DrawAIStageGlow(c, p, r, .2, c.Theme().Accent, cfg)
+				DrawSpecularSheen(c, p, r, ui.Point{X: .4, Y: .5}, .2, c.Theme().Accent, cfg)
+			})
+		})
+	}, 320, 180, ui.TesterOptions{})
+	// NewTesterWith settles an initialization frame; reset immediately before
+	// the representative frame so this is a per-frame budget assertion.
+	shaderDrawCount.Store(0)
+	tt.Frame()
+	got := int(shaderDrawCount.Load())
+	t.Logf("representative AI frame shader draws: %d", got)
+	if got > 3 {
+		t.Fatalf("shader draws per frame = %d, want <= 3", got)
+	}
+}
+
+func TestT6WiredComponentsFlatFallback(t *testing.T) {
+	cases := []struct {
+		name  string
+		cfg   config.AppearanceConfig
+		prefs ui.Preferences
+	}{
+		{name: "classic", cfg: testSpatialConfig("classic", "full")},
+		{name: "animations-off", cfg: testSpatialConfig("spatial_3d", "off")},
+		{name: "reduced-motion", cfg: testSpatialConfig("spatial_3d", "full"), prefs: ui.Preferences{ReduceMotion: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tt := ui.NewTesterWith(func(c *ui.Context) {
+				cfg := tc.cfg
+				ui.Column(c).Fill().Gap(8).Children(func() {
+					TiltCard3D(c, "flat-card", cfg, TiltCardOpts{Width: 150, Height: 60, Interactive: true}, func() { ui.Text(c, "card") })
+					CoverFlowDeck3D(c, 2, 0, cfg, func(i int, active bool) { ui.Text(c, string(rune('A'+i))) })
+					RenderLiquidOrb(c, 28, true, cfg)
+					ColorSwatch3D(c, "#42a5f5", 28, cfg)
+					TelemetryGauge3D(c, "flat-gauge", .5, "Health", "50%", c.Theme().Accent, cfg)
+				})
+			}, 360, 260, ui.TesterOptions{Preferences: tc.prefs})
+			if tt == nil || tt.Image() == nil {
+				t.Fatal("flat fallback did not render an image")
 			}
 		})
 	}
