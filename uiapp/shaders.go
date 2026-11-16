@@ -57,6 +57,9 @@ func Fragment(dst vec4, pos vec2) vec4 {
 	return vec4(colour, inside * Accent.a * (0.48 + shine * 0.32))
 }`)
 
+// shaderDrawCount counts shader-ELIGIBLE surfaces per frame, not successful
+// draws. Counting inside the acceleration gate made the budget untestable:
+// a headless painter never accelerates, so the count was always zero.
 var shaderDrawCount atomic.Int64
 
 // ShadersActive is deliberately conservative: expensive pixel work is not
@@ -81,8 +84,8 @@ func DrawSpecularSheen(c *ui.Context, p *ui.Painter, r ui.Rect, pointer ui.Point
 	if p == nil || r.W <= 0 || r.H <= 0 {
 		return
 	}
+	shaderDrawCount.Add(1)
 	if ShadersActive(c, p, cfg) {
-		shaderDrawCount.Add(1)
 		SpecularTiltShader.Draw(p, r, shader.Options{Radius: 14, Uniforms: map[string]any{
 			"Pointer": []float32{pointer.X, pointer.Y}, "Intensity": intensity, "Accent": accent,
 		}})
@@ -96,8 +99,8 @@ func DrawAIStageGlow(c *ui.Context, p *ui.Painter, r ui.Rect, intensity float32,
 	if p == nil || r.W <= 0 || r.H <= 0 {
 		return
 	}
+	shaderDrawCount.Add(1)
 	if ShadersActive(c, p, cfg) {
-		shaderDrawCount.Add(1)
 		AIStageGlowShader.Draw(p, r, shader.Options{Radius: 16, Uniforms: map[string]any{
 			"Time": float32(p.Now().UnixNano()) / 1e9, "Intensity": intensity, "Accent": accent,
 		}})
@@ -116,8 +119,10 @@ func RenderLiquidOrb(c *ui.Context, size float32, active bool, cfg config.Appear
 	}
 	accent := c.Theme().Accent
 	return ui.Box(c).Size(size, size).Radius(size / 2).Clip().Draw(func(p *ui.Painter, r ui.Rect) {
-		if active && ShadersActive(c, p, cfg) {
+		if active {
 			shaderDrawCount.Add(1)
+		}
+		if active && ShadersActive(c, p, cfg) {
 			LiquidOrbShader.Draw(p, r, shader.Options{Radius: size / 2, Uniforms: map[string]any{
 				"Time": float32(p.Now().UnixNano()) / 1e9, "Speed": 0.8, "Accent": accent,
 			}})
