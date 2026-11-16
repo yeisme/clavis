@@ -2,6 +2,8 @@ package config
 
 import (
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -178,20 +180,21 @@ func TestStageIntensityRoundTrip(t *testing.T) {
 	}
 }
 
-// TestStageIntensityClampAndWarn covers values the parser accepts but that sit
-// outside [0, 1]. Decode clamps them and never errors; the validator, which can
-// only observe a value, warns about the raw one and names the applied clamp.
+// TestStageIntensityClampAndWarn drives the real load pipeline: decode keeps
+// the raw value so ValidateMain can warn about it, and ConfigStore.Reload
+// clamps the stored config afterwards. Testing the two halves separately once
+// hid a bug where decode clamped early and the warning never fired in
+// production.
 func TestStageIntensityClampAndWarn(t *testing.T) {
 	cases := []struct {
 		literal string
-		raw     float64
 		want    float64
 	}{
-		{"1.8", 1.8, 1.0},
-		{"-0.2", -0.2, 0.0},
-		{"nan", math.NaN(), 0.7},
-		{"inf", math.Inf(1), 1.0},
-		{"-inf", math.Inf(-1), 0.0},
+		{"1.8", 1.0},
+		{"-0.2", 0.0},
+		{"nan", 0.7},
+		{"inf", 1.0},
+		{"-inf", 0.0},
 	}
 	for _, tc := range cases {
 		input := "[appearance]\nstage_intensity = " + tc.literal + "\n"
@@ -199,18 +202,14 @@ func TestStageIntensityClampAndWarn(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decode stage_intensity = %s: %v", tc.literal, err)
 		}
-		got := cfg.Appearance.StageIntensity
-		if tc.want == 0.7 && math.IsNaN(tc.raw) {
-			if got != 0.7 {
-				t.Fatalf("stage_intensity = %s decoded to %v, want 0.7", tc.literal, got)
-			}
-		} else if got != tc.want {
-			t.Fatalf("stage_intensity = %s decoded to %v, want %v", tc.literal, got, tc.want)
+		// Decode must not clamp: the validator has to see the offending value.
+		if cfg.Appearance.StageIntensity == tc.want && tc.literal != "nan" &&
+			NormalizeStageIntensity(cfg.Appearance.StageIntensity) == cfg.Appearance.StageIntensity &&
+			outOfRangeLiteral(tc.literal) {
+			t.Fatalf("stage_intensity = %s was clamped during decode, so no warning can fire", tc.literal)
 		}
 
-		raw := cfg
-		raw.Appearance.StageIntensity = tc.raw
-		issues := ValidateMain(raw)
+		issues := ValidateMain(cfg)
 		warned := false
 		for _, issue := range issues {
 			if issue.KeyPath != "appearance.stage_intensity" {
@@ -232,7 +231,17 @@ func TestStageIntensityClampAndWarn(t *testing.T) {
 				t.Fatalf("stage_intensity = %s must not error, got %+v", tc.literal, issues)
 			}
 		}
+
+		// The running config is clamped even though the file keeps its value.
+		if got := NormalizeStageIntensity(cfg.Appearance.StageIntensity); got != tc.want {
+			t.Fatalf("stage_intensity = %s normalizes to %v, want %v", tc.literal, got, tc.want)
+		}
 	}
+}
+
+// outOfRangeLiteral reports whether a test literal names a value outside 0..1.
+func outOfRangeLiteral(literal string) bool {
+	return literal == "1.8" || literal == "-0.2" || literal == "inf" || literal == "-inf"
 }
 
 func TestStageIntensityBoundariesAccepted(t *testing.T) {
@@ -272,5 +281,47 @@ func TestNormalizeStageIntensity(t *testing.T) {
 	}
 	if got := NormalizeStageIntensity(1); got != 1 {
 		t.Fatalf("1 -> %v, want 1", got)
+	}
+}
+
+// TestStageIntensityWarningSurvivesTheStorePath is the end-to-end proof that an
+// out-of-range stage_intensity in a real config.toml both warns and is clamped
+// in the running config. Before the fix, decode clamped first, so the warning
+// existed only in a unit test that re-injected the raw value by hand.
+func TestStageIntensityWarningSurvivesTheStorePath(t *testing.T) {
+	dir := t.TempDir()
+	store := NewConfigStore(dir)
+	if _, err := store.LoadOrInitialize(); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	// Overwrite the generated config with an out-of-range intensity, then reload.
+	path := filepath.Join(dir, string(FileMain))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	patched := strings.Replace(string(data),
+		"stage_intensity = 0.7", "stage_intensity = 1.8", 1)
+	if patched == string(data) {
+		t.Fatal("generated config has no stage_intensity line to patch")
+	}
+	if err := os.WriteFile(path, []byte(patched), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if ok := store.Reload(); !ok {
+		t.Fatalf("reload failed: %+v", store.LastErrors())
+	}
+
+	if got := store.Current().Main.Appearance.StageIntensity; got != 1 {
+		t.Fatalf("running stage_intensity = %v, want clamped 1", got)
+	}
+	found := false
+	for _, w := range store.LastWarnings() {
+		if w.KeyPath == "appearance.stage_intensity" && strings.Contains(w.Message, "clamped to") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no stage_intensity warning surfaced, got %+v", store.LastWarnings())
 	}
 }

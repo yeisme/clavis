@@ -229,9 +229,10 @@ func decodeAppearanceConfig(tbl *toml.Table, path string) (AppearanceConfig, err
 	if f, ok, err := optionalFloat(tbl, "stage_intensity", path); err != nil {
 		return cfg, err
 	} else if ok {
-		// Clamp here so a loaded config is always in range; the validator only
-		// observes values and warns about the raw one (see ValidateMain).
-		cfg.StageIntensity = NormalizeStageIntensity(f)
+		// Keep the raw value: ValidateMain warns about an out-of-range one, and
+		// ConfigStore.Reload clamps it into [0,1] after validation. Clamping
+		// here would hide the warning from the only path that ever reads it.
+		cfg.StageIntensity = f
 	}
 	if b, ok, err := optionalBool(tbl, "oblique_rows", path); err != nil {
 		return cfg, err

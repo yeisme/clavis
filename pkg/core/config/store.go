@@ -468,6 +468,10 @@ func (s *ConfigStore) Reload() bool {
 	}
 
 	diskHashes := readTOMLFileHashes(s.dir)
+	// The validator above saw the raw stage_intensity so it could warn about an
+	// out-of-range value; the running config gets the clamped one, so no view
+	// has to re-check the range.
+	candidate.Main.Appearance.StageIntensity = NormalizeStageIntensity(candidate.Main.Appearance.StageIntensity)
 	s.mu.Lock()
 	s.current = candidate
 	s.lastErrors = nil
