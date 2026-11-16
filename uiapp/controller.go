@@ -343,7 +343,7 @@ func NewAppController(opts Options) *AppController {
 		c.resolveAPIKey,
 	)
 
-	c.refreshAPIKeySourceLocked()
+	c.refreshAPIKeySource()
 	go c.runClipboardWorker()
 	return c
 }
@@ -542,9 +542,6 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 		return nil
 	}
 	effects := c.StateMachine.Handle(ev)
-	if ev.Type == engine.EventSelectAIProfile {
-		c.refreshAPIKeySourceLocked()
-	}
 	next := c.StateMachine.State()
 	onRepaint := c.OnRepaint
 	hasSearcher := c.ClipboardSearcher != nil
@@ -576,6 +573,9 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 	}
 	c.mu.Unlock()
 
+	if ev.Type == engine.EventSelectAIProfile {
+		c.refreshAPIKeySource()
+	}
 	if cancelSearchSeq != 0 {
 		c.cancelClipboardSearch(cancelSearchSeq)
 	}
@@ -1276,13 +1276,13 @@ func (c *AppController) SelectAIProfile(id string) error {
 	if c.AIClient != nil {
 		c.AIClient.Config = updatedCfg.Main.AI
 	}
-	c.refreshAPIKeySourceLocked()
 	c.aiTestStatus = AITestIdle
 	c.aiTestMessage = ""
 	c.settingsStatus = i18n.Tf("settings.status.active_profile", profile.Name)
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
 
+	c.refreshAPIKeySource()
 	if onRepaint != nil {
 		onRepaint()
 	}
@@ -1901,6 +1901,13 @@ func (c *AppController) OpenSettings(tab SettingsTab) {
 	if onRepaint != nil {
 		onRepaint()
 	}
+	// The key may have changed outside Clavis: look again, off the main
+	// thread, where reading the keychain needs no nested event loop.
+	go func() {
+		if c.refreshAPIKeySource() && onRepaint != nil {
+			onRepaint()
+		}
+	}()
 }
 
 func (c *AppController) toggleIME() {
@@ -2311,8 +2318,8 @@ func (c *AppController) SaveAPIKey(apiKey string) error {
 		c.setSettingsStatus(i18n.Tf("settings.status.save_api_key_failed", err))
 		return err
 	}
+	c.refreshAPIKeySource()
 	c.mu.Lock()
-	c.refreshAPIKeySourceLocked()
 	c.settingsStatus = i18n.T("settings.status.api_key_saved")
 	c.uiState.apiKeyDraft = ""
 	onRepaint := c.OnRepaint
@@ -2337,8 +2344,8 @@ func (c *AppController) DeleteAPIKey() error {
 		c.setSettingsStatus(i18n.Tf("settings.status.delete_api_key_failed", err))
 		return err
 	}
+	c.refreshAPIKeySource()
 	c.mu.Lock()
-	c.refreshAPIKeySourceLocked()
 	c.settingsStatus = i18n.T("settings.status.api_key_cleared")
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
@@ -2350,24 +2357,39 @@ func (c *AppController) DeleteAPIKey() error {
 
 // APIKeyStatus returns the current masked key source (keychain / env / none) for the active AI profile.
 func (c *AppController) APIKeyStatus() secrets.APIKeySource {
+	c.refreshAPIKeySource()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.refreshAPIKeySourceLocked()
 	return c.apiKeySource
 }
 
-func (c *AppController) refreshAPIKeySourceLocked() {
-	if c.SecretStore == nil {
-		c.apiKeySource = secrets.KeySourceNone
-		return
-	}
+// refreshAPIKeySource re-resolves where the active AI profile's key comes
+// from (keychain, environment or none) and reports whether that changed.
+// Callers must not hold c.mu: the keychain is read without it. On the main
+// thread MyGo's Secrets.Get waits in a nested event loop, whose redraws
+// take c.mu; read under the lock, Settings' first frame held it while the
+// first-run guide's frame waited for it, and Clavis hung at launch. A result
+// for a profile that is no longer active is dropped.
+func (c *AppController) refreshAPIKeySource() bool {
+	c.mu.Lock()
+	store := c.SecretStore
 	profile := c.activeAIProfileLocked()
-	src, err := secrets.ResolveProfileAPIKeySource(c.SecretStore, profile)
-	if err != nil {
-		c.apiKeySource = secrets.KeySourceNone
-		return
+	c.mu.Unlock()
+
+	src := secrets.KeySourceNone
+	if store != nil {
+		if s, err := secrets.ResolveProfileAPIKeySource(store, profile); err == nil {
+			src = s
+		}
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.activeAIProfileLocked() != profile || c.apiKeySource == src {
+		return false
 	}
 	c.apiKeySource = src
+	return true
 }
 
 func (c *AppController) setSettingsStatus(msg string) {
@@ -2402,7 +2424,6 @@ func (c *AppController) UpdateMainConfig(mutate func(main *config.MainConfig)) e
 	if c.AIClient != nil {
 		c.AIClient.Config = updated.Main.AI
 	}
-	c.refreshAPIKeySourceLocked()
 	c.settingsStatus = i18n.T("settings.status.saved")
 	br := c.Bridge
 	onRepaint := c.OnRepaint
@@ -2410,6 +2431,7 @@ func (c *AppController) UpdateMainConfig(mutate func(main *config.MainConfig)) e
 	langChanged := syncAppearanceLanguage(updated)
 	c.mu.Unlock()
 
+	c.refreshAPIKeySource()
 	if br != nil {
 		br.UpdateKeymapConfig(updated.Main.Keymap)
 		br.UpdateIMEConfig(updated.Main.IME, updated.IMERules)
@@ -2675,7 +2697,6 @@ func (c *AppController) ReloadConfig() bool {
 			c.httpDoer,
 			c.resolveAPIKey,
 		)
-		c.refreshAPIKeySourceLocked()
 		c.settingsStatus = i18n.T("hud.config_reloaded")
 		br = c.Bridge
 	} else {
@@ -2687,6 +2708,9 @@ func (c *AppController) ReloadConfig() bool {
 	langChanged := syncAppearanceLanguage(cfg)
 	c.mu.Unlock()
 
+	if ok {
+		c.refreshAPIKeySource()
+	}
 	if ok && br != nil {
 		br.UpdateKeymapConfig(cfg.Main.Keymap)
 		br.UpdateIMEConfig(cfg.Main.IME, cfg.IMERules)

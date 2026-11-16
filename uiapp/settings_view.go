@@ -100,10 +100,13 @@ func (a *AppController) SettingsView(c *ui.Context) {
 	theme := resolveAppearanceTheme(c, cfg.Main.Appearance.Theme)
 	c.SetTheme(theme)
 
+	// The key source is kept current where it can change (profile switch,
+	// key saved or cleared, config saved or reloaded, Settings opened):
+	// reading the keychain here, every frame and under a.mu, hung Clavis at
+	// launch (see refreshAPIKeySource).
 	a.mu.Lock()
 	selectedTab := a.uiState.settingsTabIdx
 	statusMsg := a.settingsStatus
-	a.refreshAPIKeySourceLocked()
 	apiKeySource := a.apiKeySource
 	aiTestStatus := a.aiTestStatus
 	aiTestMsg := a.aiTestMessage
