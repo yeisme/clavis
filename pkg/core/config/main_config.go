@@ -123,6 +123,11 @@ type AppearanceConfig struct {
 	EnableShaders           bool    `json:"enableShaders"`
 	GlassClarity            float64 `json:"glassClarity"`
 	CandidateBarOrientation string  `json:"candidateBarOrientation"`
+	// StageIntensity scales the stage's yaw, pitch, row skew, parallax and
+	// specular from 0 (flat geometry, same materials) to 1 (full spatial look).
+	StageIntensity float64 `json:"stageIntensity"`
+	// ObliqueRows turns the per-row fan of the result list on or off.
+	ObliqueRows bool `json:"obliqueRows"`
 }
 
 func DefaultAppearanceConfig() AppearanceConfig {
@@ -141,6 +146,8 @@ func DefaultAppearanceConfig() AppearanceConfig {
 		EnableShaders:           true,
 		GlassClarity:            0.18,
 		CandidateBarOrientation: "horizontal",
+		StageIntensity:          0.7,
+		ObliqueRows:             true,
 	}
 }
 
@@ -219,6 +226,18 @@ func decodeAppearanceConfig(tbl *toml.Table, path string) (AppearanceConfig, err
 	} else if ok {
 		cfg.CandidateBarOrientation = s
 	}
+	if f, ok, err := optionalFloat(tbl, "stage_intensity", path); err != nil {
+		return cfg, err
+	} else if ok {
+		// Clamp here so a loaded config is always in range; the validator only
+		// observes values and warns about the raw one (see ValidateMain).
+		cfg.StageIntensity = NormalizeStageIntensity(f)
+	}
+	if b, ok, err := optionalBool(tbl, "oblique_rows", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.ObliqueRows = b
+	}
 	return cfg, nil
 }
 
@@ -238,6 +257,8 @@ func (c AppearanceConfig) toTOML() *toml.Table {
 	t.Set("enable_shaders", toml.BoolVal(c.EnableShaders))
 	t.Set("glass_clarity", toml.FloatVal(c.GlassClarity))
 	t.Set("candidate_bar_orientation", toml.StringVal(c.CandidateBarOrientation))
+	t.Set("stage_intensity", toml.FloatVal(c.StageIntensity))
+	t.Set("oblique_rows", toml.BoolVal(c.ObliqueRows))
 	return t
 }
 

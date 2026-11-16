@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/yeisme/clavis/pkg/core/i18n"
@@ -79,6 +80,27 @@ func NormalizeAnimationMode(s string) string {
 		return string("auto")
 	}
 	return t
+}
+
+// defaultStageIntensity is the stage intensity used when a configured value
+// cannot be interpreted (NaN) or when the key is absent.
+const defaultStageIntensity = 0.7
+
+// NormalizeStageIntensity clamps a configured stage_intensity into [0, 1].
+// NaN has no ordering against the endpoints, so it falls back to the default
+// 0.7; +Inf clamps to 1 and -Inf clamps to 0, the same as any finite value
+// past either end of the range.
+func NormalizeStageIntensity(v float64) float64 {
+	switch {
+	case math.IsNaN(v):
+		return defaultStageIntensity
+	case math.IsInf(v, 1), v > 1:
+		return 1
+	case math.IsInf(v, -1), v < 0:
+		return 0
+	default:
+		return v
+	}
 }
 
 func joinPath(base, key string) string {

@@ -324,6 +324,14 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 	if main.Appearance.GlassClarity < 0 || main.Appearance.GlassClarity > 1 || math.IsNaN(main.Appearance.GlassClarity) || math.IsInf(main.Appearance.GlassClarity, 0) {
 		issues = append(issues, ValidationIssue{File: file, KeyPath: "appearance.glass_clarity", Severity: SeverityError, Message: "glass_clarity must be within 0..1"})
 	}
+	// stage_intensity only scales visuals, so an out-of-range value is a
+	// warning (like an unknown animations mode), not a load-blocking error.
+	if clamped := NormalizeStageIntensity(main.Appearance.StageIntensity); clamped != main.Appearance.StageIntensity {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "appearance.stage_intensity", Severity: SeverityWarning,
+			Message: fmt.Sprintf("stage_intensity %v is outside 0..1; clamped to %v", main.Appearance.StageIntensity, clamped),
+		})
+	}
 	if main.InputEngine.Mode != "" && main.InputEngine.Mode != "inline_hook" && main.InputEngine.Mode != "native_imk" && main.InputEngine.Mode != "dual" && main.InputEngine.Mode != "off" {
 		issues = append(issues, ValidationIssue{File: file, KeyPath: "input_engine.mode", Severity: SeverityError, Message: "unsupported input engine mode"})
 	}
