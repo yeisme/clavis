@@ -92,9 +92,13 @@ func kitIconTile(c *ui.Context, t *ui.Theme, icon string, selected bool) ui.Elem
 	return tile
 }
 
-func kitSegmentedPicker(c *ui.Context, t *ui.Theme, options []string, current string) (string, bool) {
+// kitSegmentedPicker renders a segmented choice and returns the element so the
+// caller can place it in a layout slot. Returning only the value forced callers
+// to discard the element and substitute a placeholder, which is how the control
+// ended up floating outside its right-aligned slot.
+func kitSegmentedPicker(c *ui.Context, t *ui.Theme, options []string, current string) (ui.Element, string, bool) {
 	if len(options) == 0 {
-		return current, false
+		return ui.Box(c).Width(space1).Height(space1), current, false
 	}
 	selected := 0
 	for i, option := range options {
@@ -104,16 +108,21 @@ func kitSegmentedPicker(c *ui.Context, t *ui.Theme, options []string, current st
 		}
 	}
 	parts := ui.SegmentedBase(c, &selected, len(options))
-	track := parts.Track.Radius(radiusChip).Border(space1, hairline(t)).Background(tileFill(t))
-	_ = track
-	for i, option := range options {
-		segment := parts.Segment(i).Padding(space4, space8).Radius(radiusChip)
-		if i == selected {
-			segment.Background(t.Accent).TextColor(t.AccentText)
-		} else {
-			segment.TextColor(t.TextMuted)
+	// Segments are built *in* the track (see ui.SegmentedBase's contract).
+	// Building them as siblings of the track let them float outside its well,
+	// which is why the control read as loose text with one filled word.
+	track := parts.Track.Padding(space2).Radius(radiusChip).
+		Border(space1, hairline(t)).Background(t.Surface)
+	track.Children(func() {
+		for i, option := range options {
+			segment := parts.Segment(i).Padding(space4, space8).Radius(radiusChip)
+			if i == selected {
+				segment.Background(t.Accent).TextColor(t.AccentText)
+			} else {
+				segment.TextColor(t.TextMuted)
+			}
+			segment.Children(func() { ui.Text(c, option).FontSize(typeLabel).SingleLine() })
 		}
-		segment.Children(func() { ui.Text(c, option).FontSize(typeLabel).SingleLine() })
-	}
-	return options[selected], parts.Track.Changed()
+	})
+	return track, options[selected], parts.Track.Changed()
 }

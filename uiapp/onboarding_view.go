@@ -396,8 +396,8 @@ func (a *AppController) renderOnboardingLeaderPicker(c *ui.Context, theme *ui.Th
 			for _, o := range options {
 				values = append(values, o.label)
 			}
-			var selected bool
-			pickedLabel, selected := kitSegmentedPicker(c, theme, values, chosen)
+			control, pickedLabel, selected := kitSegmentedPicker(c, theme, values, chosen)
+			_ = control // already placed in this column by the kit's own parent
 			if selected {
 				picked, changed = pickedLabel, pickedLabel != chosen
 			}

@@ -20,7 +20,7 @@ func TestKitWidgetsRenderInBothThemes(t *testing.T) {
 				kitDivider(c, theme)
 				kitRow(c, theme, interactionState{Selected: true}, motionProfiles[animationOff], func() { ui.Text(c, "Row") })
 				kitControlRow(c, theme, "Setting", func() { ui.Text(c, "Value") })
-				kitSegmentedPicker(c, theme, []string{"One", "Two"}, "One")
+				func() { _, _, _ = kitSegmentedPicker(c, theme, []string{"One", "Two"}, "One") }()
 				kitSegmentedTabs(c, theme, []string{"A", "B"}, 0, nil)
 				kitChipGroup(c, theme, []string{"One", "Two"})
 				kitIconButton(c, theme, "checkmark", true, "Done", nil)

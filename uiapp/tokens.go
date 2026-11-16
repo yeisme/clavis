@@ -171,7 +171,7 @@ const (
 	cardPadX         float32 = 12
 	cardPadY         float32 = 10
 	cardGap          float32 = 10
-	railWidth        float32 = 200
+	railWidth        float32 = 216
 )
 
 // Row metrics for the Omnibox result list.

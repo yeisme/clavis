@@ -273,7 +273,7 @@ func TestDensityMetrics(t *testing.T) {
 		{"cardPadX", cardPadX, 12},
 		{"cardPadY", cardPadY, 10},
 		{"cardGap", cardGap, 10},
-		{"railWidth", railWidth, 200},
+		{"railWidth", railWidth, 216},
 	}
 	for _, c := range cases {
 		if c.got != c.want {

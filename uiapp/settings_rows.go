@@ -164,7 +164,8 @@ func settingChoiceRow(
 		}
 		if len(options) <= 4 {
 			picked := current
-			if value, ok := kitSegmentedPicker(c, theme, labels, labelsForValue(options, current)); ok {
+			control, value, ok := kitSegmentedPicker(c, theme, labels, labelsForValue(options, current))
+			if ok {
 				for _, o := range options {
 					if o.label == value {
 						picked = o.value
@@ -173,7 +174,7 @@ func settingChoiceRow(
 				}
 				chosen, changed = picked, true
 			}
-			return ui.Box(c).Width(space1).Height(space1)
+			return control.Shrink(0)
 		}
 		sel := -1
 		for i, o := range options {

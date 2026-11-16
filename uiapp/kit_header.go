@@ -47,7 +47,11 @@ func kitChipGroup(c *ui.Context, t *ui.Theme, items []string) {
 }
 
 func kitIconButton(c *ui.Context, t *ui.Theme, icon string, active bool, label string, onClick func()) {
-	button := ui.Row(c).Height(footerHeight).Padding(space4, space8).Gap(space4).
+	// A footer toggle is a compact control, not a call to action: it takes the
+	// control height rather than the footer's, and an active toggle is a tinted
+	// chip rather than a solid accent pill. A filled pill at footer height read
+	// as the panel's primary button and swallowed its neighbour.
+	button := ui.Row(c).Height(controlHeight).Padding(space4, space8).Gap(space4).
 		Radius(radiusPill).AlignItems(ui.Center).OnClick(func() {
 		if onClick != nil {
 			onClick()
@@ -55,8 +59,10 @@ func kitIconButton(c *ui.Context, t *ui.Theme, icon string, active bool, label s
 	})
 	color := t.TextMuted
 	if active {
-		button.Background(t.Accent)
-		color = t.AccentText
+		button.Background(t.Accent.Alpha(alphaSubtle)).Border(space1, t.Accent.Alpha(alphaHalf))
+		color = accentInk(t, surfaceBase(t))
+	} else {
+		button.Background(tileFill(t)).Border(space1, hairline(t))
 	}
 	button.Children(func() {
 		renderSemanticIcon(c, icon, IconSize16, color)
