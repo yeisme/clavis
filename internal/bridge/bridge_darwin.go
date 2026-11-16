@@ -248,6 +248,7 @@ var (
 	tisCopyCurrentKeyboardInputSource func() uintptr
 	tisSelectInputSource              func(source uintptr) int32
 	tisGetInputSourceProperty         func(source uintptr, key uintptr) uintptr
+	pthreadMainNP                     func() int32 // libSystem: non-zero on the main thread
 	kTISPropertyInputSourceID         uintptr
 	kTISPropertyLocalizedName         uintptr
 	kTISPropertyInputSourceLanguages  uintptr
@@ -282,6 +283,7 @@ func initDarwin() error {
 		libAppKit = openLib("/System/Library/Frameworks/AppKit.framework/AppKit")
 		libAX = openLib("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
 		libCarbon = openLib("/System/Library/Frameworks/Carbon.framework/Carbon")
+		libSystem := openLib("/usr/lib/libSystem.B.dylib")
 		if err != nil {
 			darwinInitErr = err
 			return
@@ -392,6 +394,7 @@ func initDarwin() error {
 		reg(&tisCopyCurrentKeyboardInputSource, libCarbon, "TISCopyCurrentKeyboardInputSource")
 		reg(&tisSelectInputSource, libCarbon, "TISSelectInputSource")
 		reg(&tisGetInputSourceProperty, libCarbon, "TISGetInputSourceProperty")
+		reg(&pthreadMainNP, libSystem, "pthread_main_np")
 		kTISPropertyInputSourceID = symPtr(libCarbon, "kTISPropertyInputSourceID")
 		kTISPropertyLocalizedName = symPtr(libCarbon, "kTISPropertyLocalizedName")
 		kTISPropertyInputSourceLanguages = symPtr(libCarbon, "kTISPropertyInputSourceLanguages")
@@ -1850,39 +1853,46 @@ func (b *darwinBridge) InputSources(ctx context.Context) ([]host.InputSourceInfo
 		return nil, err
 	}
 
-	list := tisCreateInputSourceList(0, false)
-	if list == 0 {
-		return nil, errors.New("darwin: TISCreateInputSourceList returned nil")
-	}
-	defer cfRelease(list)
-
-	n := cfArrayGetCount(list)
-	out := make([]host.InputSourceInfo, 0, n)
-	expectedCat := goStringFromCF(kTISCategoryKeyboardInputSource)
-
-	for i := 0; i < n; i++ {
-		src := cfArrayGetValueAtIndex(list, i)
-		if src == 0 {
-			continue
+	var out []host.InputSourceInfo
+	var err error
+	if mainErr := onMainThread(ctx, func() {
+		list := tisCreateInputSourceList(0, false)
+		if list == 0 {
+			err = errors.New("darwin: TISCreateInputSourceList returned nil")
+			return
 		}
-		if kTISPropertyInputSourceCategory != 0 && expectedCat != "" {
-			cat := goStringFromCF(tisGetInputSourceProperty(src, kTISPropertyInputSourceCategory))
-			if cat != expectedCat {
+		defer cfRelease(list)
+
+		n := cfArrayGetCount(list)
+		out = make([]host.InputSourceInfo, 0, n)
+		expectedCat := goStringFromCF(kTISCategoryKeyboardInputSource)
+
+		for i := 0; i < n; i++ {
+			src := cfArrayGetValueAtIndex(list, i)
+			if src == 0 {
 				continue
 			}
-		}
-		if kTISPropertyInputSourceIsSelect != 0 {
-			selCap := tisGetInputSourceProperty(src, kTISPropertyInputSourceIsSelect)
-			if selCap != 0 && !cfBooleanGetValue(selCap) {
-				continue
+			if kTISPropertyInputSourceCategory != 0 && expectedCat != "" {
+				cat := goStringFromCF(tisGetInputSourceProperty(src, kTISPropertyInputSourceCategory))
+				if cat != expectedCat {
+					continue
+				}
+			}
+			if kTISPropertyInputSourceIsSelect != 0 {
+				selCap := tisGetInputSourceProperty(src, kTISPropertyInputSourceIsSelect)
+				if selCap != 0 && !cfBooleanGetValue(selCap) {
+					continue
+				}
+			}
+			info := tisInputSourceToInfo(src)
+			if info.ID != "" {
+				out = append(out, info)
 			}
 		}
-		info := tisInputSourceToInfo(src)
-		if info.ID != "" {
-			out = append(out, info)
-		}
+	}); mainErr != nil {
+		return nil, mainErr
 	}
-	return out, nil
+	return out, err
 }
 
 func (b *darwinBridge) CurrentInputSource(ctx context.Context) (host.InputSourceInfo, error) {
@@ -1893,12 +1903,22 @@ func (b *darwinBridge) CurrentInputSource(ctx context.Context) (host.InputSource
 		return host.InputSourceInfo{}, err
 	}
 
-	src := tisCopyCurrentKeyboardInputSource()
-	if src == 0 {
+	var info host.InputSourceInfo
+	found := false
+	if err := onMainThread(ctx, func() {
+		src := tisCopyCurrentKeyboardInputSource()
+		if src == 0 {
+			return
+		}
+		defer cfRelease(src)
+		info, found = tisInputSourceToInfo(src), true
+	}); err != nil {
+		return host.InputSourceInfo{}, err
+	}
+	if !found {
 		return host.InputSourceInfo{}, errors.New("darwin: TISCopyCurrentKeyboardInputSource returned nil")
 	}
-	defer cfRelease(src)
-	return tisInputSourceToInfo(src), nil
+	return info, nil
 }
 
 func (b *darwinBridge) SelectInputSource(ctx context.Context, id string) error {
@@ -1926,20 +1946,26 @@ func (b *darwinBridge) SelectInputSource(ctx context.Context, id string) error {
 	}
 	defer cfRelease(filter)
 
-	list := tisCreateInputSourceList(filter, false)
-	if list == 0 || cfArrayGetCount(list) == 0 {
-		if list != 0 {
-			cfRelease(list)
+	var err error
+	if mainErr := onMainThread(ctx, func() {
+		list := tisCreateInputSourceList(filter, false)
+		if list == 0 || cfArrayGetCount(list) == 0 {
+			if list != 0 {
+				cfRelease(list)
+			}
+			err = fmt.Errorf("darwin: input source %q not found", trimmed)
+			return
 		}
-		return fmt.Errorf("darwin: input source %q not found", trimmed)
-	}
-	defer cfRelease(list)
+		defer cfRelease(list)
 
-	src := cfArrayGetValueAtIndex(list, 0)
-	if rc := tisSelectInputSource(src); rc != 0 {
-		return fmt.Errorf("darwin: TISSelectInputSource(%q) failed (%d)", trimmed, rc)
+		src := cfArrayGetValueAtIndex(list, 0)
+		if rc := tisSelectInputSource(src); rc != 0 {
+			err = fmt.Errorf("darwin: TISSelectInputSource(%q) failed (%d)", trimmed, rc)
+		}
+	}); mainErr != nil {
+		return mainErr
 	}
-	return nil
+	return err
 }
 
 // SetIMEMode switches to an ASCII-capable input source for IMEModeASCII,
@@ -2121,6 +2147,38 @@ func (b *darwinBridge) ToggleInputSource(ctx context.Context) (host.InputSourceI
 	return target, nil
 }
 
+// onMainThread runs fn on the main thread and waits for it, or for ctx to
+// end. The Text Input Sources API (TIS*) requires the main queue: on
+// current macOS a call from another thread hits _dispatch_assert_queue_fail
+// and the trap kills Clavis, as runIMEObserver's first poll did once the
+// event tap started. On the main thread, and before the app runs (tests,
+// the smoke check), fn runs at once. Elsewhere a canceled ctx stops the
+// wait, and fn is skipped if the main thread has not started it: Stop
+// cancels runIMEObserver's ctx and then waits for it on the main thread.
+// When it returns an error fn may not have run, so its results must not be
+// read. Callers must not hold a lock the main thread may wait for.
+func onMainThread(ctx context.Context, fn func()) error {
+	if !mygo.App.IsReady() || pthreadMainNP() != 0 {
+		fn()
+		return nil
+	}
+	done := make(chan struct{})
+	go mygo.RunOnMain(func() {
+		defer close(done)
+		if ctx.Err() == nil {
+			fn()
+		}
+	})
+	select {
+	case <-done:
+		return ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// tisInputSourceToInfo reads an input source's properties; main thread
+// only (onMainThread).
 func tisInputSourceToInfo(src uintptr) host.InputSourceInfo {
 	idStr := goStringFromCF(tisGetInputSourceProperty(src, kTISPropertyInputSourceID))
 	nameStr := goStringFromCF(tisGetInputSourceProperty(src, kTISPropertyLocalizedName))
