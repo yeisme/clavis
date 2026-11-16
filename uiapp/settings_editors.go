@@ -1890,7 +1890,7 @@ func (a *AppController) renderClipboardCard(c *ui.Context, theme *ui.Theme, cfg 
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.MediaCapture = v })
 		}
 		if v, changed := settingNumberRow(c, theme, i18n.T("settings.clipboard.media_quota"), "media_quota_mb",
-			i18n.T("settings.clipboard.media_quota_help"), float64(clip.MediaQuotaMB), 0, 4096, 64, "MB"); changed {
+			i18n.T("settings.clipboard.media_quota_help"), float64(clip.MediaQuotaMB), 64, 4096, 64, "MB"); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.MediaQuotaMB = int(v) })
 		}
 

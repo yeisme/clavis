@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Media blob storage for clipboard images (docs/design/media-preview.md §4–§6). Pure Go,
@@ -38,6 +39,7 @@ var (
 // MediaStore keeps <dir>/<sha256>.png blobs and <dir>/thumbs/<sha256>.png thumbnails.
 type MediaStore struct {
 	Dir string
+	mu  sync.Mutex
 }
 
 func NewMediaStore(dir string) *MediaStore { return &MediaStore{Dir: dir} }
@@ -69,6 +71,9 @@ func CheckImage(data []byte) (image.Config, string, error) {
 // SaveImage validates data, writes the blob (deduplicated by sha) and a thumbnail, and returns
 // the Media metadata for a clipboard entry. Thumbnail failure is non-fatal (ThumbPath empty).
 func (m *MediaStore) SaveImage(data []byte) (Media, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	cfg, format, err := CheckImage(data)
 	if err != nil {
 		return Media{}, err
@@ -215,6 +220,9 @@ func QuotaEvictions(items []ClipboardItem, quotaBytes int64) []string {
 // GC removes blobs/thumbnails under Dir that no item references. Only files named like
 // content-addressed blobs (64 hex chars) or our temp files are touched; nothing outside Dir is.
 func (m *MediaStore) GC(items []ClipboardItem) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	keep := map[string]bool{}
 	for _, it := range items {
 		if it.MediaPath != "" {

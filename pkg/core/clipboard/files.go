@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"image"
+	"runtime"
 	"strings"
 )
 
@@ -50,6 +51,9 @@ type FileProbe struct {
 // SaveFileList builds Media for a CF_HDROP file list and returns the searchable content
 // (file names, one per line). A single video file becomes KindVideo, anything else KindFile.
 func (m *MediaStore) SaveFileList(paths []string, probe FileProbe) (Media, string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	var clean []string
 	for _, p := range paths {
 		if p = strings.TrimSpace(p); p != "" && !strings.ContainsAny(p, "\r\n") {
@@ -80,7 +84,11 @@ func (m *MediaStore) SaveFileList(paths []string, probe FileProbe) (Media, strin
 		return Media{}, "", ErrNoFiles
 	}
 	joined := JoinFilePaths(clean)
-	sum := sha256.Sum256([]byte(strings.ToLower(joined))) // Windows paths are case-insensitive
+	hashInput := joined
+	if runtime.GOOS == "windows" {
+		hashInput = strings.ToLower(hashInput) // Windows paths are case-insensitive.
+	}
+	sum := sha256.Sum256([]byte(hashInput))
 	media := Media{Kind: KindFile, MediaPath: joined, BlobSHA: hex.EncodeToString(sum[:]), ByteSize: total}
 	if len(clean) == 1 {
 		if IsVideoPath(clean[0]) {

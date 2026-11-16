@@ -4,6 +4,7 @@ import (
 	"errors"
 	"image"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -39,10 +40,13 @@ func TestSaveFileListVideoAndFiles(t *testing.T) {
 	if _, err := os.Stat(m.ThumbPath); err != nil {
 		t.Fatal("thumbnail not written")
 	}
-	// Same paths, different case → same dedupe hash.
+	// Windows paths are case-insensitive; Unix paths are not.
 	m2, _, _ := ms.SaveFileList([]string{`c:\videos\trip.MP4`}, probe)
-	if m2.BlobSHA != m.BlobSHA {
-		t.Fatal("path case changed dedupe hash")
+	if runtime.GOOS == "windows" && m2.BlobSHA != m.BlobSHA {
+		t.Fatal("path case changed dedupe hash on Windows")
+	}
+	if runtime.GOOS != "windows" && m2.BlobSHA == m.BlobSHA {
+		t.Fatal("distinct path case unexpectedly deduplicated on Unix")
 	}
 	// Multi-file drop is KindFile even if it contains a video; missing files are tolerated.
 	f, content, err := ms.SaveFileList([]string{`C:\a.txt`, `C:\Videos\b.mp4`, `C:\missing.doc`}, probe)

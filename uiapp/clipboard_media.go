@@ -194,6 +194,9 @@ func (c *AppController) OriginalBitmap(path string) *ui.Bitmap {
 	if path == "" {
 		return nil
 	}
+	if info, err := os.Stat(path); err != nil || info.Size() > 8<<20 {
+		return nil
+	}
 	c.mu.Lock()
 	if c.originalCache == nil {
 		c.originalCache = map[string]*ui.Bitmap{}
