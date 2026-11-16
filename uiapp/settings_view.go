@@ -117,11 +117,11 @@ func (a *AppController) SettingsView(c *ui.Context) {
 
 	applyTextLocale(ui.Row(c).Fill().Background(theme.Background)).Children(func() {
 		a.renderSettingsSidebar(c, section, cfg)
-		ui.Box(c).Width(1).FillHeight().Background(theme.Border)
-		ui.Column(c).FillHeight().Grow(1).Padding(10, 14).Gap(8).Children(func() {
+		ui.Box(c).Width(space1).FillHeight().Background(hairline(theme))
+		ui.Column(c).FillHeight().Grow(1).Padding(space6, space10).Gap(space6).Children(func() {
 			a.renderSettingsPaneHeader(c, theme, section, statusMsg)
 			ui.Scroll(c).FillWidth().Grow(1).Children(func() {
-				ui.Column(c).FillWidth().Gap(10).Children(func() {
+				ui.Column(c).FillWidth().Gap(space6).Children(func() {
 					a.renderSettingsSection(c, theme, cfg, section, apiKeySource, aiTestStatus, aiTestMsg, diag)
 				})
 			})
@@ -131,24 +131,34 @@ func (a *AppController) SettingsView(c *ui.Context) {
 
 // renderSettingsSidebar draws the navigation rail of sections.
 func (a *AppController) renderSettingsSidebar(c *ui.Context, section int, cfg config.ClavisConfig) {
+	theme := resolveAppearanceTheme(c, cfg.Main.Appearance.Theme)
 	selected := settingsSectionKey(section)
-	sb := ui.Sidebar(c, &selected, func() {
-		ui.SidebarSection(c, i18n.T("settings.center"), nil, func() {
-			for _, meta := range settingsSections() {
-				item := meta
-				ui.SidebarItem(c, item.Key, SemanticIconSVG(item.Icon), item.Label).Children(func() {
-					if badge := settingsSectionBadge(item.Index, cfg); badge != "" {
-						ui.Badge(c, badge)
-					}
-				})
+	ui.Column(c).Width(railWidth).FillHeight().Padding(cardPadY, space8).Gap(space4).Children(func() {
+		ui.Text(c, i18n.T("settings.center")).FontSize(typeLabel).FontWeight(600).TextColor(theme.TextMuted).Padding(space8, space4).SingleLine()
+		for _, meta := range settingsSections() {
+			item := meta
+			active := item.Key == selected
+			row := ui.ButtonBase(c).Key("settings-rail:"+item.Key).FillWidth().Height(controlHeight).
+				Padding(space4, space8).Radius(radiusRow).Gap(space8).AlignItems(ui.Center).FocusRing(false)
+			if active {
+				row = kitInteractive(c, theme, row, interactionState{Selected: true}, motionProfiles[animationOff])
+				x, y, blur, spread, shadow := elevationShadow(theme, elev1)
+				row.Shadow(x, y, blur, spread, shadow)
 			}
-		})
-	}).Width(195).FillHeight()
-	if sb.Changed() {
-		if index, ok := settingsSectionFromKey(selected); ok {
-			a.setSettingsSection(index)
+			row.Children(func() {
+				kitIconTile(c, theme, item.Icon, active)
+				ui.Text(c, item.Label).FontSize(typeLabel).TextColor(theme.Text).SingleLine().Grow(1).MinWidth(0)
+				if badge := settingsSectionBadge(item.Index, cfg); badge != "" {
+					ui.Text(c, badge).FontSize(typeMeta).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+				}
+			})
+			if row.Clicked() {
+				if index, ok := settingsSectionFromKey(item.Key); ok {
+					a.setSettingsSection(index)
+				}
+			}
 		}
-	}
+	})
 }
 
 // settingsSectionBadge returns the short count badge of a section.
@@ -173,22 +183,16 @@ func settingsSectionBadge(index int, cfg config.ClavisConfig) string {
 // renderSettingsPaneHeader draws the section caption and the status pill.
 func (a *AppController) renderSettingsPaneHeader(c *ui.Context, theme *ui.Theme, section int, statusMsg string) {
 	meta := settingsSectionMetaFor(section)
-	ui.Row(c).FillWidth().Gap(10).AlignItems(ui.Center).Children(func() {
-		renderSemanticIcon(c, meta.Icon, 16, theme.Accent)
-		ui.Column(c).Gap(1).Grow(1).Children(func() {
-			ui.Text(c, meta.Label+" — "+meta.Hint).FontSize(13).FontWeight(600).TextColor(theme.Text).SingleLine()
+	kitHeaderBar(c).Height(space20).MinHeight(space20).Padding(space1-space1, space1-space1).Children(func() {
+		renderSemanticIcon(c, meta.Icon, IconSize16, theme.Accent)
+		ui.Column(c).Gap(space1).Grow(1).Children(func() {
+			ui.Text(c, meta.Label+" — "+meta.Hint).FontSize(typeTitle).FontWeight(600).TextColor(theme.Text).SingleLine()
 		})
 		if statusMsg != "" {
-			ui.Box(c).
-				Padding(3, 9).
-				Radius(999).
-				Background(withAlpha(theme.Accent, 0.14)).
-				Children(func() {
-					ui.Text(c, statusMsg).FontSize(11).TextColor(theme.Accent).SingleLine()
-				})
+			kitStatusPill(c, theme, statusMsg, chipAccent)
 		}
 	})
-	ui.Divider(c)
+	kitDivider(c, theme)
 }
 
 // renderSettingsSection dispatches to the renderer of the section selected.
@@ -321,7 +325,7 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 			a.ReloadConfig()
 		}
 		if statusMsg != "" {
-			ui.Text(c, statusMsg).FontSize(12).TextColor(theme.TextMuted)
+			ui.Text(c, statusMsg).FontSize(typeLabel).TextColor(theme.TextMuted)
 		}
 	})
 }
@@ -342,34 +346,36 @@ func (a *AppController) renderSettingsAISection(
 		profiles = config.DefaultAIProfiles()
 	}
 
-	settingsSectionCard(c, theme, i18n.T("settings.card.ai_profiles"), func() {
-		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, i18n.T("settings.ai.active_profile")).FontSize(11).TextColor(theme.TextMuted).SingleLine()
-			for _, prof := range profiles {
-				p := prof
-				isActive := strings.EqualFold(p.ID, activeProfile.ID)
-				pill := ui.ButtonBase(c).
-					Key("ai-prof:"+p.ID).
-					Padding(3, 10).
-					Radius(6).
-					FocusRing(false)
-				if isActive {
-					pill.Background(theme.Accent)
-				} else {
-					pill.Background(theme.Background).Border(1, theme.Border)
-				}
-				pill.Children(func() {
-					txt := ui.Text(c, p.ID).FontSize(12).SingleLine()
+	settingsEditorCard(c, theme, i18n.T("settings.card.ai_profiles"), func() {
+		settingsInsetGroup(c, theme, func() {
+			ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, i18n.T("settings.ai.active_profile")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+				for _, prof := range profiles {
+					p := prof
+					isActive := strings.EqualFold(p.ID, activeProfile.ID)
+					pill := ui.ButtonBase(c).
+						Key("ai-prof:"+p.ID).
+						Padding(space2, space10).
+						Radius(radiusChip).
+						FocusRing(false)
 					if isActive {
-						txt.TextColor(theme.AccentText).FontWeight(600)
+						pill.Background(theme.Accent)
 					} else {
-						txt.TextColor(theme.Text)
+						pill.Background(theme.Background).Border(1, theme.Border)
 					}
-				})
-				if pill.Clicked() {
-					_ = a.SelectAIProfile(p.ID)
+					pill.Children(func() {
+						txt := ui.Text(c, p.ID).FontSize(typeLabel).SingleLine()
+						if isActive {
+							txt.TextColor(theme.AccentText).FontWeight(600)
+						} else {
+							txt.TextColor(theme.Text)
+						}
+					})
+					if pill.Clicked() {
+						_ = a.SelectAIProfile(p.ID)
+					}
 				}
-			}
+			})
 		})
 
 		protoStr := string(activeProfile.Protocol)
@@ -412,7 +418,7 @@ func (a *AppController) renderAIKeychainCard(
 	testStatus AITestStatus,
 	testMsg string,
 ) {
-	settingsSectionCard(c, theme, i18n.T("settings.card.api_key"), func() {
+	settingsEditorCard(c, theme, i18n.T("settings.card.api_key"), func() {
 		keyStatusLabel := i18n.T("settings.ai.key_not_configured")
 		keyStatusColor := theme.Warning
 		switch keySource {
@@ -437,9 +443,9 @@ func (a *AppController) renderAIKeychainCard(
 		}
 
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-			ui.Text(c, i18n.T("settings.ai.key_status")).FontSize(11).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, i18n.T("settings.ai.key_status")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 			ui.Spacer(c)
-			ui.Text(c, keyStatusLabel).FontSize(11).FontWeight(600).TextColor(keyStatusColor).SingleLine()
+			ui.Text(c, keyStatusLabel).FontSize(typeMeta).FontWeight(600).TextColor(keyStatusColor).SingleLine()
 		})
 
 		a.mu.Lock()
@@ -485,27 +491,18 @@ func (a *AppController) renderAIKeychainCard(
 		})
 
 		if testMsg != "" {
-			bannerColor := theme.TextMuted
-			bannerBg := theme.Surface
-			switch testStatus {
-			case AITestSuccess:
-				bannerColor = theme.Success
-				bannerBg = withAlpha(theme.Success, 0.12)
-			case AITestError:
-				bannerColor = theme.Danger
-				bannerBg = withAlpha(theme.Danger, 0.12)
-			case AITestLoading:
-				bannerColor = theme.Accent
-				bannerBg = withAlpha(theme.Accent, 0.12)
+			if testStatus == AITestError {
+				kitErrorBanner(c, theme, testMsg)
+			} else {
+				tone := chipNeutral
+				if testStatus == AITestSuccess {
+					tone = chipSuccess
+				}
+				if testStatus == AITestLoading {
+					tone = chipAccent
+				}
+				kitStatusPill(c, theme, testMsg, tone)
 			}
-			ui.Box(c).
-				FillWidth().
-				Padding(5, 9).
-				Radius(6).
-				Background(bannerBg).
-				Children(func() {
-					ui.Text(c, testMsg).FontSize(11).TextColor(bannerColor)
-				})
 		}
 	})
 }
@@ -513,7 +510,7 @@ func (a *AppController) renderAIKeychainCard(
 // renderSettingsPermissionsSection draws permissions, diagnostics and the
 // configuration validation banners.
 func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *ui.Theme, diag DiagnosticsSnapshot) {
-	settingsSectionCard(c, theme, i18n.T("settings.card.permissions"), func() {
+	settingsEditorCard(c, theme, i18n.T("settings.card.permissions"), func() {
 		svc := c.Services()
 		renderPermRow(c, theme, i18n.T("settings.perm.accessibility"), diag.Permissions.Accessibility, func() {
 			go func() {
@@ -535,7 +532,7 @@ func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *u
 	})
 
 	ui.Grid(c).Columns(2).Gap(10).FillWidth().Children(func() {
-		settingsSectionCard(c, theme, i18n.T("settings.card.diagnostics"), func() {
+		settingsEditorCard(c, theme, i18n.T("settings.card.diagnostics"), func() {
 			secureInput := "false"
 			if v, ok := diag.Permissions.Details["secureInput"]; ok && v != "" {
 				secureInput = v
@@ -580,34 +577,16 @@ func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *u
 func renderConfigValidationCard(c *ui.Context, a *AppController, theme *ui.Theme) {
 	errs := a.ConfigStore.LastErrors()
 	warns := a.ConfigStore.LastWarnings()
-	settingsSectionCard(c, theme, i18n.T("settings.card.validation"), func() {
+	settingsEditorCard(c, theme, i18n.T("settings.card.validation"), func() {
 		if len(errs) == 0 && len(warns) == 0 {
-			ui.Text(c, i18n.T("settings.validation.ok")).FontSize(12).TextColor(theme.Success)
+			ui.Text(c, i18n.T("settings.validation.ok")).FontSize(typeLabel).TextColor(theme.Success)
 			return
 		}
-		for i, err := range errs {
-			ui.Box(c).
-				Key(fmt.Sprintf("cfg-err:%d", i)).
-				FillWidth().
-				Padding(6, 10).
-				Radius(6).
-				Background(withAlpha(theme.Danger, 0.12)).
-				Children(func() {
-					applyProseLineHeight(ui.Text(c, i18n.Tf("settings.validation.error", err.Error()))).FontSize(11).TextColor(theme.Danger)
-				})
+		for _, err := range errs {
+			kitErrorBanner(c, theme, i18n.Tf("settings.validation.error", err.Error()))
 		}
-		for i, w := range warns {
-			ui.Box(c).
-				Key(fmt.Sprintf("cfg-warn:%d", i)).
-				FillWidth().
-				Padding(6, 10).
-				Radius(6).
-				Background(withAlpha(theme.Warning, 0.12)).
-				Children(func() {
-					applyProseLineHeight(ui.Text(c, i18n.Tf("settings.validation.warning", w.File, w.KeyPath, w.Message))).
-						FontSize(11).
-						TextColor(theme.Warning)
-				})
+		for _, w := range warns {
+			kitErrorBanner(c, theme, i18n.Tf("settings.validation.warning", w.File, w.KeyPath, w.Message))
 		}
 	})
 }
@@ -619,23 +598,23 @@ func (a *AppController) renderSettingsConfigsSection(c *ui.Context, theme *ui.Th
 		dir = "~/.config/clavis"
 	}
 
-	settingsSectionCard(c, theme, i18n.T("settings.card.config_dir"), func() {
+	settingsEditorCard(c, theme, i18n.T("settings.card.config_dir"), func() {
 		ui.Row(c).FillWidth().Gap(10).AlignItems(ui.Center).Children(func() {
 			renderSemanticIcon(c, "folder", 14, theme.Accent)
-			ui.Text(c, dir).FontSize(12).TextColor(theme.Text).Grow(1)
+			ui.Text(c, dir).FontSize(typeLabel).TextColor(theme.Text).Grow(1)
 			if ui.PrimaryButton(c, i18n.T("settings.configs.open_dir")).Clicked() {
 				_ = a.OpenConfigDirectory()
 			}
 		})
 	})
 
-	settingsSectionCard(c, theme, i18n.T("settings.card.toml_files"), func() {
+	settingsEditorCard(c, theme, i18n.T("settings.card.toml_files"), func() {
 		for _, kind := range config.AllConfigFileKinds() {
 			k := kind
-			ui.Row(c).Key("cfgfile:"+string(k)).FillWidth().Padding(3, 0).AlignItems(ui.Center).Children(func() {
+			ui.Row(c).Key("cfgfile:"+string(k)).FillWidth().Padding(space2, 0).AlignItems(ui.Center).Children(func() {
 				ui.Column(c).Grow(1).Gap(1).Children(func() {
-					ui.Text(c, string(k)).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
-					ui.Text(c, configFileDescription(k)).FontSize(11).TextColor(theme.TextMuted).SingleLine()
+					ui.Text(c, string(k)).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine()
+					ui.Text(c, configFileDescription(k)).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 				})
 				if ui.Button(c, i18n.T("common.open")).Key("open:" + string(k)).Clicked() {
 					_ = a.OpenConfigFile(k)
@@ -659,9 +638,10 @@ func renderPermRow(
 		statusText = i18n.T("settings.perm.granted")
 		statusColor = theme.Success
 	}
-	ui.Row(c).Key("perm:" + label).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-		ui.Text(c, label).FontSize(13).TextColor(theme.Text).SingleLine().Grow(1)
-		ui.Text(c, statusText).FontSize(12).FontWeight(600).TextColor(statusColor).SingleLine()
+	ui.Row(c).Key("perm:" + label).FillWidth().Height(controlHeight).Gap(space8).AlignItems(ui.Center).Children(func() {
+		ui.Text(c, label).FontSize(typeBody).TextColor(theme.Text).SingleLine().Grow(1)
+		kitStatusDot(c, statusColor, false)
+		ui.Text(c, statusText).FontSize(typeLabel).FontWeight(600).TextColor(statusColor).SingleLine()
 		if ui.Button(c, i18n.T("settings.perm.prompt")).Key("prompt:"+label).Clicked() && onPrompt != nil {
 			onPrompt()
 		}
@@ -686,57 +666,48 @@ func yesNo(v string) string {
 // settingsSourceCard is a settings card naming, on the right of its title,
 // the config table or file its rows write ("[trigger]", "ime-rules.toml").
 func settingsSourceCard(c *ui.Context, theme *ui.Theme, title, source string, body func()) {
-	ui.Column(c).
-		FillWidth().
-		Padding(space10, space14).
-		Radius(radiusCard).
-		Background(theme.Surface).
-		Border(1, theme.Border).
-		Gap(space6).
-		Children(func() {
-			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, title).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Grow(1)
-				if source != "" {
-					ui.Text(c, source).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
-				}
-			})
-			ui.Divider(c)
-			body()
+	kitCard(c, theme, cardElevated, func() {
+		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, title).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Grow(1)
+			if source != "" {
+				ui.Text(c, source).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+			}
 		})
+		kitDivider(c, theme)
+		body()
+	})
 }
 
 // settingsCardDivider separates groups of rows inside a card.
 func settingsCardDivider(c *ui.Context, theme *ui.Theme) {
-	ui.Box(c).FillWidth().Height(1).Margin(space2, 0).Background(hairline(theme))
+	ui.Box(c).FillWidth().Height(space1).Margin(space2, 0).Background(hairline(theme))
 }
 
-func settingsSectionCard(c *ui.Context, theme *ui.Theme, title string, body func()) {
-	ui.Column(c).
-		FillWidth().
-		Padding(8, 10).
-		Radius(10).
-		Background(theme.Surface).
-		Border(1, theme.Border).
-		Gap(5).
-		Children(func() {
-			ui.Text(c, title).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
-			ui.Divider(c)
-			body()
-		})
+func settingsEditorCard(c *ui.Context, theme *ui.Theme, title string, body func()) {
+	kitCard(c, theme, cardElevated, func() {
+		ui.Text(c, title).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine()
+		kitDivider(c, theme)
+		body()
+	})
+}
+
+// settingsInsetGroup is the flatter tier for nested groups within an editor card.
+func settingsInsetGroup(c *ui.Context, theme *ui.Theme, body func()) {
+	kitCard(c, theme, cardInset, body)
 }
 
 func settingsKeyValuePair(c *ui.Context, theme *ui.Theme, key, val string) {
 	ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-		ui.Text(c, key).FontSize(10).TextColor(theme.TextMuted).SingleLine()
-		ui.Text(c, val).FontSize(11).FontWeight(500).TextColor(theme.Text).SingleLine().Grow(1)
+		ui.Text(c, key).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+		ui.Text(c, val).FontSize(typeMeta).FontWeight(500).TextColor(theme.Text).SingleLine().Grow(1)
 	})
 }
 
 func settingsKeyValueRow(c *ui.Context, theme *ui.Theme, key, val string) {
 	ui.Row(c).FillWidth().Gap(12).AlignItems(ui.Center).Children(func() {
-		ui.Text(c, key).FontSize(11).TextColor(theme.TextMuted).SingleLine()
+		ui.Text(c, key).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 		ui.Spacer(c)
-		ui.Text(c, val).FontSize(11).FontWeight(500).TextColor(theme.Text).SingleLine()
+		ui.Text(c, val).FontSize(typeMeta).FontWeight(500).TextColor(theme.Text).SingleLine()
 	})
 }
 
