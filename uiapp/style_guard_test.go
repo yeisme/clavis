@@ -62,8 +62,8 @@ var styleDebtBaseline = map[string]styleDebt{
 	"pill_view.go":            {1, 0, 0},
 	"prompt_composer.go":      {9, 11, 12},
 	"selection_bar_view.go":   {3, 3, 2},
-	"settings_editors.go":     {2, 13, 2},
-	"settings_view.go":        {6, 21, 8},
+	"settings_editors.go":     {0, 0, 0},
+	"settings_view.go":        {0, 0, 0},
 	"spatial3d.go":            {1, 2, 1},
 	"theme_glass.go":          {0, 2, 1},
 }

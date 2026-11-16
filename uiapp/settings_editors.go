@@ -94,8 +94,8 @@ func seSet(se *settingsEditorState, fn func(s *settingsEditorState)) {
 
 // settingsLabelled renders a muted caption above body.
 func settingsLabelled(c *ui.Context, theme *ui.Theme, label string, body func()) {
-	ui.Column(c).FillWidth().Gap(2).Children(func() {
-		ui.Text(c, label).FontSize(11).TextColor(theme.TextMuted).SingleLine()
+	ui.Column(c).FillWidth().Gap(space2).Children(func() {
+		ui.Text(c, label).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine()
 		body()
 	})
 }
@@ -120,8 +120,8 @@ func settingsInlineNumber(c *ui.Context, theme *ui.Theme, label string, value, l
 
 // settingsInlineRow renders a muted caption left of body, width wide.
 func settingsInlineRow(c *ui.Context, theme *ui.Theme, label string, width float32, body func()) {
-	ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-		ui.Text(c, label).FontSize(11).TextColor(theme.TextMuted).Width(width).SingleLine()
+	ui.Row(c).FillWidth().Height(controlHeight).Gap(space8).AlignItems(ui.Center).Children(func() {
+		ui.Text(c, label).FontSize(typeLabel).TextColor(theme.TextMuted).Width(width).SingleLine()
 		body()
 	})
 }
@@ -150,20 +150,13 @@ func settingsTextArea(c *ui.Context, label, placeholder, value string, lines int
 
 // settingsHint renders a muted line of help text.
 func settingsHint(c *ui.Context, theme *ui.Theme, text string) {
-	ui.Text(c, text).FontSize(11).TextColor(theme.TextMuted).SingleLine()
+	applyProseLineHeight(ui.Text(c, text)).FontSize(typeMeta).TextColor(theme.TextMuted)
 }
 
 // settingsBanner renders a colored note with a border of the same color.
 func settingsBanner(c *ui.Context, color ui.Color, text string) {
-	ui.Box(c).
-		FillWidth().
-		Padding(4, 8).
-		Radius(6).
-		Background(withAlpha(color, 0.12)).
-		Border(1, withAlpha(color, 0.45)).
-		Children(func() {
-			ui.Text(c, text).FontSize(11).TextColor(color).SingleLine()
-		})
+	_ = color
+	kitErrorBanner(c, c.Theme(), text)
 }
 
 // settingsDivider inserts a divider inside a card.
@@ -398,7 +391,7 @@ func (a *AppController) renderKeymapControls(c *ui.Context, theme *ui.Theme, cfg
 				summary += " (" + strings.Join(r.AppBundleIDs, ", ") + ")"
 			}
 			ui.Row(c).Key(fmt.Sprintf("remap:%d:%s", i, r.From)).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, summary).FontSize(11).TextColor(theme.TextMuted).SingleLine().Grow(1)
+				ui.Text(c, summary).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().Grow(1)
 				if ui.Button(c, i18n.T("common.delete")).Key(fmt.Sprintf("del-remap:%d", i)).Padding(space2, space10).Shrink(0).Clicked() {
 					_ = a.UpdateMainConfig(func(m *config.MainConfig) {
 						remaps := make([]config.KeyRemapRule, 0, len(m.Keymap.Remaps))
@@ -680,7 +673,7 @@ func (a *AppController) renderIMERulesCard(c *ui.Context, theme *ui.Theme, cfg c
 		settingsCardDivider(c, theme)
 		rules := cfg.IMERules.Rules
 		if len(rules) == 0 {
-			ui.Text(c, i18n.T("settings.ime.no_rules")).FontSize(12).TextColor(theme.TextMuted)
+			kitEmptyState(c, theme, "keyboard", i18n.T("settings.ime.no_rules"), "")
 			return
 		}
 		for i := len(rules) - 1; i >= 0; i-- {
@@ -737,7 +730,7 @@ func (a *AppController) renderIMERulesCard(c *ui.Context, theme *ui.Theme, cfg c
 func (a *AppController) renderAIProfileEditor(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
 	active := a.ActiveAIProfile()
 
-	settingsSectionCard(c, theme, i18n.T("settings.card.profile_config"), func() {
+	settingsEditorCard(c, theme, i18n.T("settings.card.profile_config"), func() {
 		settingsHint(c, theme, i18n.Tf("settings.ai.editing_profile", active.ID))
 		ui.Column(c).FillWidth().Gap(space4).Children(func() {
 			settingsInlineRow(c, theme, i18n.T("settings.field.name"), settingsFieldLabelWidth, func() {
@@ -806,7 +799,7 @@ func (a *AppController) renderAIProfileEditor(c *ui.Context, theme *ui.Theme, cf
 // renderAIAddProfileCard draws the form that appends a custom AI profile.
 func (a *AppController) renderAIAddProfileCard(c *ui.Context, theme *ui.Theme) {
 	se := a.settingsEditor()
-	settingsSectionCard(c, theme, i18n.T("settings.card.add_profile"), func() {
+	settingsEditorCard(c, theme, i18n.T("settings.card.add_profile"), func() {
 		draft := seGet(se, func(s *settingsEditorState) config.AIProfile { return s.aiDraftProfile })
 		if draft.ID == "" && draft.Provider == "" && draft.BaseURL == "" && draft.Model == "" {
 			draft = config.AIProfile{Protocol: config.ProtocolOpenAICompatible, Temperature: 0.2, TimeoutSeconds: 30}
@@ -1170,11 +1163,11 @@ func (a *AppController) renderLeaderSection(c *ui.Context, theme *ui.Theme, cfg 
 	}
 
 	ui.Grid(c).Columns(2).Gap(10).FillWidth().Children(func() {
-		settingsSectionCard(c, theme, i18n.Tf("settings.leader.card_title", len(cfg.Leader.Nodes)), func() {
+		settingsEditorCard(c, theme, i18n.Tf("settings.leader.card_title", len(cfg.Leader.Nodes)), func() {
 			a.renderLeaderTree(c, theme, cfg.Leader.Nodes, nil, selectedPath)
 
 			settingsDivider(c)
-			ui.Text(c, i18n.T("settings.leader.new_root")).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
+			ui.Text(c, i18n.T("settings.leader.new_root")).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine()
 			newKey := seGet(se, func(s *settingsEditorState) string { return s.leaderNewKey })
 			newLabel := seGet(se, func(s *settingsEditorState) string { return s.leaderNewLabel })
 			ui.Row(c).FillWidth().Gap(6).AlignItems(ui.End).Children(func() {
@@ -1200,7 +1193,7 @@ func (a *AppController) renderLeaderSection(c *ui.Context, theme *ui.Theme, cfg 
 			}
 		})
 
-		settingsSectionCard(c, theme, i18n.T("settings.leader.node_editor"), func() {
+		settingsEditorCard(c, theme, i18n.T("settings.leader.node_editor"), func() {
 			if len(selectedPath) == 0 {
 				settingsHint(c, theme, i18n.T("settings.leader.select_node"))
 				return
@@ -1289,7 +1282,7 @@ func (a *AppController) renderLeaderNodeEditor(
 	case config.ActionGroup:
 		settingsHint(c, theme, i18n.Tf("settings.leader.group_children", len(draft.Action.Children)))
 		settingsDivider(c)
-		ui.Text(c, i18n.T("settings.leader.new_child")).FontSize(12).FontWeight(600).TextColor(theme.Text).SingleLine()
+		ui.Text(c, i18n.T("settings.leader.new_child")).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine()
 		childKey := seGet(se, func(s *settingsEditorState) string { return s.leaderChildKey })
 		childLabel := seGet(se, func(s *settingsEditorState) string { return s.leaderChildLbl })
 		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.End).Children(func() {
@@ -1536,7 +1529,7 @@ func (a *AppController) renderSnippetsSection(c *ui.Context, theme *ui.Theme, cf
 	}
 
 	ui.Grid(c).Columns(2).Gap(10).FillWidth().Children(func() {
-		settingsSectionCard(c, theme, i18n.Tf("settings.snippets.card_title", len(items)), func() {
+		settingsEditorCard(c, theme, i18n.Tf("settings.snippets.card_title", len(items)), func() {
 			query := seGet(se, func(s *settingsEditorState) string { return s.snippetQuery })
 			search := ui.SearchField(c, &query).Label(i18n.T("omnibox.placeholder.snippets")).Placeholder(i18n.T("omnibox.placeholder.snippets")).FillWidth()
 			if search.Changed() {
@@ -1574,11 +1567,11 @@ func (a *AppController) renderSnippetsSection(c *ui.Context, theme *ui.Theme, cf
 				}
 			}
 			if matches == 0 {
-				settingsHint(c, theme, i18n.T("omnibox.empty.snippets"))
+				kitEmptyState(c, theme, "text.badge.plus", i18n.T("omnibox.empty.snippets"), "")
 			}
 		})
 
-		settingsSectionCard(c, theme, i18n.T("settings.snippets.editor"), func() {
+		settingsEditorCard(c, theme, i18n.T("settings.snippets.editor"), func() {
 			draft := seGet(se, func(s *settingsEditorState) config.SnippetItem { return s.snippetDraft })
 			settingsInlineRow(c, theme, i18n.T("settings.field.id"), settingsFieldLabelWidth, func() {
 				if v, changed := settingsTextInput(c, i18n.T("settings.snippets.id"), "my-snippet", draft.ID); changed {
@@ -1596,7 +1589,7 @@ func (a *AppController) renderSnippetsSection(c *ui.Context, theme *ui.Theme, cf
 				}
 			})
 			ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-				name := ui.Text(c, i18n.T("settings.snippets.word_boundary")).FontSize(11).TextColor(theme.TextMuted).
+				name := ui.Text(c, i18n.T("settings.snippets.word_boundary")).FontSize(typeMeta).TextColor(theme.TextMuted).
 					Width(settingsFieldLabelWidth).SingleLine()
 				wb := draft.WordBoundary
 				if ui.Switch(c, &wb).LabelledBy(name).Changed() {
@@ -1623,7 +1616,7 @@ func (a *AppController) renderSnippetsSection(c *ui.Context, theme *ui.Theme, cf
 			ui.Grid(c).Columns(3).GapX(4).GapY(3).FillWidth().Children(func() {
 				for _, chip := range snippetPlaceholders() {
 					ph := chip
-					if ui.Button(c, ph).Key("snippet-chip:" + ph).FontSize(10).Clicked() {
+					if ui.Button(c, ph).Key("snippet-chip:" + ph).FontSize(typeMicro).Clicked() {
 						seSet(se, func(s *settingsEditorState) { s.snippetDraft.Content += ph })
 					}
 				}
@@ -1636,13 +1629,13 @@ func (a *AppController) renderSnippetsSection(c *ui.Context, theme *ui.Theme, cf
 			})
 			ui.Box(c).
 				FillWidth().
-				Padding(4, 8).
-				Radius(6).
+				Padding(space4, space8).
+				Radius(radiusChip).
 				Background(theme.Background).
 				Border(1, theme.Border).
 				Children(func() {
-					ui.Text(c, i18n.T("settings.snippets.live_preview")).FontSize(10).TextColor(theme.TextMuted).SingleLine()
-					ui.Text(c, rendered.RenderedText).FontSize(12).TextColor(theme.Text)
+					ui.Text(c, i18n.T("settings.snippets.live_preview")).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+					ui.Text(c, rendered.RenderedText).FontSize(typeLabel).TextColor(theme.Text)
 				})
 
 			ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
@@ -1737,7 +1730,7 @@ func (a *AppController) renderGlossarySection(c *ui.Context, theme *ui.Theme, cf
 	}
 
 	ui.Grid(c).Columns(2).Gap(10).FillWidth().Children(func() {
-		settingsSectionCard(c, theme, i18n.Tf("settings.glossary.card_title", len(terms)), func() {
+		settingsEditorCard(c, theme, i18n.Tf("settings.glossary.card_title", len(terms)), func() {
 			ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 				if ui.PrimaryButton(c, i18n.T("settings.glossary.new_term")).Clicked() {
 					seSet(se, func(s *settingsEditorState) {
@@ -1749,6 +1742,9 @@ func (a *AppController) renderGlossarySection(c *ui.Context, theme *ui.Theme, cf
 				settingsHint(c, theme, i18n.T("settings.glossary.select_term"))
 			})
 			settingsDivider(c)
+			if len(terms) == 0 {
+				kitEmptyState(c, theme, "character.book.closed", i18n.T("settings.section.glossary"), "")
+			}
 			for _, term := range terms {
 				t := term
 				row := settingsListRow(c, theme, "glossary:"+t.Term, t.Term == selected)
@@ -1919,7 +1915,7 @@ func (a *AppController) renderClipboardCard(c *ui.Context, theme *ui.Theme, cfg 
 		for i, bundleID := range clip.ExcludedBundleIDs {
 			idx, id := i, bundleID
 			ui.Row(c).Key(fmt.Sprintf("clip-excl:%d:%s", idx, id)).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, id).FontSize(11).TextColor(theme.TextMuted).SingleLine().Grow(1)
+				ui.Text(c, id).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().Grow(1)
 				if ui.Button(c, i18n.T("settings.clipboard.remove")).Key(fmt.Sprintf("clip-excl-remove:%d", idx)).Padding(space2, space10).Shrink(0).Clicked() {
 					_ = a.UpdateMainConfig(func(m *config.MainConfig) {
 						kept := make([]string, 0, len(m.Clipboard.ExcludedBundleIDs))

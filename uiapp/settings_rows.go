@@ -35,7 +35,7 @@ func settingCaption(key, value string) string {
 // click on it toggles a switch or focuses the control, as HTML's <label
 // for> does. help, when set, shows as the name's tooltip.
 func settingRow(c *ui.Context, theme *ui.Theme, title, caption, help string, control func() ui.Element) {
-	ui.Row(c).FillWidth().Gap(space12).AlignItems(ui.Center).Padding(space2, 0).Children(func() {
+	ui.Row(c).FillWidth().Height(controlHeight).Gap(space12).AlignItems(ui.Center).Padding(space2, 0).Children(func() {
 		name := settingRowName(c, theme, title, caption, help)
 		control().LabelledBy(name)
 	})
@@ -122,21 +122,44 @@ func settingChoiceRow(
 	chosen, changed := current, false
 	settingRow(c, theme, title, settingCaption(key, current), help, func() ui.Element {
 		labels := make([]string, len(options))
-		idx := -1
 		for i, o := range options {
 			labels[i] = o.label
+		}
+		if len(options) <= 4 {
+			picked := current
+			if value, ok := kitSegmentedPicker(c, theme, labels, labelsForValue(options, current)); ok {
+				for _, o := range options {
+					if o.label == value {
+						picked = o.value
+						break
+					}
+				}
+				chosen, changed = picked, true
+			}
+			return ui.Box(c).Width(space1).Height(space1)
+		}
+		sel := -1
+		for i, o := range options {
 			if strings.EqualFold(o.value, current) {
-				idx = i
+				sel = i
 			}
 		}
-		sel := idx
 		seg := ui.Segmented(c, &sel, labels...).Shrink(0)
-		if seg.Changed() && sel >= 0 && sel < len(options) && sel != idx {
+		if seg.Changed() && sel >= 0 && sel < len(options) && sel != -1 {
 			chosen, changed = options[sel].value, true
 		}
 		return seg
 	})
 	return chosen, changed
+}
+
+func labelsForValue(options []settingOption, current string) string {
+	for _, o := range options {
+		if strings.EqualFold(o.value, current) {
+			return o.label
+		}
+	}
+	return current
 }
 
 // settingSelectRow is a named drop-down, for longer lists of options,
