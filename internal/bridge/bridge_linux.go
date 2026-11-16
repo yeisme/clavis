@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,10 +23,11 @@ type linuxBridge struct {
 	started bool
 	cancel  context.CancelFunc
 
-	pbTracker *selfPasteboardTracker
-	lastText  string
-	seq       atomic.Int64
-	triggers  *triggerRuntime
+	pbTracker   *selfPasteboardTracker
+	lastText    string
+	lastFormats string
+	seq         atomic.Int64
+	triggers    *triggerRuntime
 }
 
 func newPlatformBridge(Options) HostService {
@@ -203,6 +205,73 @@ func (b *linuxBridge) TapRecoveryCount() int64 {
 	return 0
 }
 
+// ClipboardSequence exposes the bridge-local target signature sequence. Linux has no
+// portable native sequence number through MyGo, so the sequence advances only when the
+// advertised target set or text snapshot changes.
+func (b *linuxBridge) ClipboardSequence() int64 { return b.seq.Load() }
+
+func linuxClipboardHasTextFormat(formats []string) bool {
+	for _, format := range formats {
+		switch strings.ToLower(strings.TrimSpace(format)) {
+		case "text/plain", "utf8_string", "string", "text/plain;charset=utf-8":
+			return true
+		}
+	}
+	return false
+}
+
+// linuxClipboardKind classifies advertised clipboard formats without requesting their
+// payloads. Text deliberately wins: applications commonly advertise both text and a
+// preview image, and the existing text capture behavior must remain unchanged.
+func linuxClipboardKind(formats []string, text string) clipboard.Kind {
+	textAvailable := text != ""
+	fileAvailable := false
+	imageAvailable := false
+	for _, format := range formats {
+		format = strings.ToLower(strings.TrimSpace(format))
+		switch format {
+		case "text/plain", "utf8_string", "string", "text/plain;charset=utf-8":
+			textAvailable = textAvailable || text != ""
+		case "text/uri-list", "application/x-mygo-file-list", "application/x-gnome-copied-files", "x-special/gnome-copied-files":
+			fileAvailable = true
+		default:
+			if strings.HasPrefix(format, "image/") {
+				imageAvailable = true
+			}
+		}
+	}
+	if textAvailable {
+		return clipboard.KindText
+	}
+	if fileAvailable {
+		return clipboard.KindFile
+	}
+	if imageAvailable {
+		return clipboard.KindImage
+	}
+	return ""
+}
+
+// linuxClipboardFormatSignature is stable for one advertised format set and does not
+// materialize clipboard data. Sorting makes target enumeration order irrelevant.
+func linuxClipboardFormatSignature(formats []string) string {
+	canonical := make([]string, 0, len(formats))
+	seen := make(map[string]struct{}, len(formats))
+	for _, format := range formats {
+		format = strings.ToLower(strings.TrimSpace(format))
+		if format == "" {
+			continue
+		}
+		if _, ok := seen[format]; ok {
+			continue
+		}
+		seen[format] = struct{}{}
+		canonical = append(canonical, format)
+	}
+	sort.Strings(canonical)
+	return strings.Join(canonical, "\x00")
+}
+
 func (b *linuxBridge) PollClipboardCandidate(ctx context.Context) (*clipboard.CaptureCandidate, int64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
@@ -210,21 +279,49 @@ func (b *linuxBridge) PollClipboardCandidate(ctx context.Context) (*clipboard.Ca
 	if !mygo.App.IsReady() {
 		return nil, b.seq.Load(), nil
 	}
-	text := mygo.Clipboard.ReadText()
+
+	// Formats() only asks GTK for TARGETS; unlike Read/ReadFiles/ReadFormat it does
+	// not request any representation bytes. Keep this before media enrichment so the
+	// privacy filter in the shared poller runs before the payload is read.
+	formats := mygo.Clipboard.AvailableFormats()
+	// Read text only when a text target is advertised. This preserves text priority
+	// while avoiding any representation read for file/image-only clipboard owners.
+	text := ""
+	if len(formats) == 0 || linuxClipboardHasTextFormat(formats) {
+		text = mygo.Clipboard.ReadText()
+	}
+	kind := linuxClipboardKind(formats, text)
+	formatSignature := linuxClipboardFormatSignature(formats)
 	b.mu.Lock()
-	changed := text != b.lastText
+	changed := text != b.lastText || formatSignature != b.lastFormats
 	if changed {
 		b.lastText = text
+		b.lastFormats = formatSignature
 		b.seq.Add(1)
 	}
 	seq := b.seq.Load()
 	b.mu.Unlock()
 
-	if !changed || !b.pbTracker.ShouldProcess(seq) || text == "" {
+	if !changed || !b.pbTracker.ShouldProcess(seq) {
 		return nil, seq, nil
 	}
-	return &clipboard.CaptureCandidate{
-		Content:   text,
-		Timestamp: time.Now().UTC(),
-	}, seq, nil
+	if kind == "" {
+		return nil, seq, nil
+	}
+	candidate := &clipboard.CaptureCandidate{
+		PasteboardTypes: append([]string(nil), formats...),
+		Timestamp:       time.Now().UTC(),
+	}
+	if kind == clipboard.KindText {
+		// Preserve the prior behavior exactly: empty text is not a candidate, and
+		// only text is read into Content. Media candidates intentionally carry no
+		// payload here.
+		if text == "" {
+			return nil, seq, nil
+		}
+		candidate.Content = text
+	} else {
+		candidate.Kind = kind
+	}
+	return candidate, seq, nil
 }
