@@ -201,6 +201,12 @@ func writeWorkflowPlan(w io.Writer, cfg config.ClavisConfig, id string, jsonOutp
 	if workflow == nil {
 		return fmt.Errorf("workflow %q not found", id)
 	}
+	if !workflow.Enabled {
+		return fmt.Errorf("workflow %q is disabled", id)
+	}
+	if err := validateWorkflowPlanConfig(*workflow); err != nil {
+		return err
+	}
 	model := toAutomationWorkflow(*workflow)
 	registry := actionRegistry(cfg)
 	plan, err := automation.BuildExecutionPlanWithRegistry(model, registry)
@@ -234,26 +240,86 @@ func actionRegistry(cfg config.ClavisConfig) automation.MapActionRegistry {
 	return registry
 }
 
+func validateWorkflowPlanConfig(workflow config.Workflow) error {
+	if workflow.Execution != "" && workflow.Execution != config.WorkflowExecutionSequential {
+		return fmt.Errorf("workflow %q has unsupported execution mode %q (only %q is supported)", workflow.ID, workflow.Execution, config.WorkflowExecutionSequential)
+	}
+	if workflow.Failure != "" && workflow.Failure != config.WorkflowFailureStop && workflow.Failure != config.WorkflowFailureContinue && workflow.Failure != config.WorkflowFailureAbort {
+		return fmt.Errorf("workflow %q has unsupported failure mode %q", workflow.ID, workflow.Failure)
+	}
+	switch workflow.Output {
+	case "", config.WorkflowOutputReplace, config.WorkflowOutputInsert, config.WorkflowOutputClipboard, config.WorkflowOutputNotify, config.WorkflowOutputNone:
+	default:
+		return fmt.Errorf("workflow %q has unsupported output mode %q", workflow.ID, workflow.Output)
+	}
+	stepEnabled := make(map[string]bool, len(workflow.Steps))
+	for _, step := range workflow.Steps {
+		stepEnabled[step.ID] = step.Enabled
+	}
+	for _, step := range workflow.Steps {
+		if step.Execution != "" && step.Execution != config.WorkflowExecutionSequential {
+			return fmt.Errorf("workflow %q step %q has unsupported execution mode %q (only %q is supported)", workflow.ID, step.ID, step.Execution, config.WorkflowExecutionSequential)
+		}
+		if step.Failure != "" && step.Failure != config.WorkflowFailureStop && step.Failure != config.WorkflowFailureContinue && step.Failure != config.WorkflowFailureAbort {
+			return fmt.Errorf("workflow %q step %q has unsupported failure mode %q", workflow.ID, step.ID, step.Failure)
+		}
+		switch step.Output {
+		case "", config.WorkflowOutputReplace, config.WorkflowOutputNotify, config.WorkflowOutputNone:
+		default:
+			return fmt.Errorf("workflow %q step %q has unsupported output mode %q", workflow.ID, step.ID, step.Output)
+		}
+		if step.Enabled {
+			for _, dependency := range step.DependsOn {
+				if enabled, exists := stepEnabled[dependency]; exists && !enabled {
+					return fmt.Errorf("workflow %q step %q depends on disabled step %q", workflow.ID, step.ID, dependency)
+				}
+			}
+		}
+	}
+	if issues := config.ValidateWorkflows(config.WorkflowsConfig{Workflows: []config.Workflow{workflow}}); len(issues) != 0 {
+		return fmt.Errorf("invalid workflow %q: %s", workflow.ID, formatWorkflowIssues(issues))
+	}
+	return nil
+}
+
+func formatWorkflowIssues(issues []config.ValidationIssue) string {
+	parts := make([]string, len(issues))
+	for i, issue := range issues {
+		parts[i] = issue.KeyPath + ": " + issue.Message
+	}
+	return strings.Join(parts, "; ")
+}
+
 func toAutomationWorkflow(workflow config.Workflow) automation.WorkflowDefinition {
 	result := automation.WorkflowDefinition{ID: workflow.ID, Name: workflow.Name, Description: workflow.Description}
 	for _, input := range workflow.Inputs {
 		result.Inputs = append(result.Inputs, automation.WorkflowInput{ID: input.ID, Name: input.Name, Type: input.Type, Required: input.Required, Default: input.Default})
 	}
 	for _, step := range workflow.Steps {
+		if !step.Enabled {
+			continue
+		}
 		failure := automation.FailureStop
 		if step.Failure == config.WorkflowFailureContinue {
 			failure = automation.FailureContinue
 		}
-		output := automation.OutputDiscard
+		output := automation.OutputCapture
 		switch step.Output {
-		case config.WorkflowOutputReplace, config.WorkflowOutputInsert:
+		case config.WorkflowOutputNone:
+			output = automation.OutputDiscard
+		case config.WorkflowOutputReplace:
 			output = automation.OutputReplace
 		case config.WorkflowOutputNotify:
 			output = automation.OutputNotify
-		case config.WorkflowOutputClipboard:
-			output = automation.OutputCapture
 		}
-		result.Steps = append(result.Steps, automation.WorkflowStep{ID: step.ID, ActionID: step.Action, Input: map[string]any{"input": step.Input}, DependsOn: append([]string(nil), step.DependsOn...), FailureMode: failure, OutputMode: output})
+		input := map[string]any{}
+		if step.Input != "" {
+			input["input"] = step.Input
+		}
+		if step.Prompt != "" {
+			input["prompt"] = step.Prompt
+		}
+		result.Steps = append(result.Steps, automation.WorkflowStep{ID: step.ID, ActionID: step.Action, Input: input, DependsOn: append([]string(nil), step.DependsOn...), FailureMode: failure, OutputMode: output})
 	}
 	return result
 }

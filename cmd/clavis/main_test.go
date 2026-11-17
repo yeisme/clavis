@@ -34,6 +34,7 @@ func TestRunWorkflowPlanPrintsDeterministicPlanWithoutExecuting(t *testing.T) {
 		Steps: []config.WorkflowStep{
 			{ID: "second", Action: "prepare", DependsOn: []string{"first"}, Enabled: true},
 			{ID: "first", Action: "prepare", Enabled: true},
+			{ID: "disabled", Action: "prepare", Enabled: false},
 		},
 	}}
 	if err := store.SaveComponents(cfg.Components); err != nil {
@@ -55,6 +56,13 @@ func TestRunWorkflowPlanPrintsDeterministicPlanWithoutExecuting(t *testing.T) {
 	}
 }
 
+func TestRunWorkflowPlanRejectsUnsupportedModes(t *testing.T) {
+	workflow := config.Workflow{ID: "invalid", Execution: config.WorkflowExecutionParallel}
+	if err := validateWorkflowPlanConfig(workflow); err == nil || !strings.Contains(err.Error(), "unsupported execution mode") {
+		t.Fatalf("validation error = %v", err)
+	}
+}
+
 func TestRunWorkflowPlanJSON(t *testing.T) {
 	dir := t.TempDir()
 	store := config.NewConfigStore(dir)
@@ -63,7 +71,7 @@ func TestRunWorkflowPlanJSON(t *testing.T) {
 	}
 	cfg := store.Current()
 	cfg.Components.Scripts = append(cfg.Components.Scripts, config.ScriptComponentSpec{ID: "echo", Command: "echo", Enabled: true})
-	cfg.Workflows.Workflows = []config.Workflow{{ID: "one", Steps: []config.WorkflowStep{{ID: "step", Action: "echo"}}}}
+	cfg.Workflows.Workflows = []config.Workflow{{ID: "one", Enabled: true, Steps: []config.WorkflowStep{{ID: "step", Action: "echo", Enabled: true}}}}
 	if err := store.SaveComponents(cfg.Components); err != nil {
 		t.Fatal(err)
 	}

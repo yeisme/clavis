@@ -84,6 +84,56 @@ func TestRunnerDiscardedOutputStaysInternalAndIsRedactedFromResult(t *testing.T)
 	}
 }
 
+func TestRunnerRedactsTypedCollectionsAndPreservesInternalBindings(t *testing.T) {
+	type typedRecord struct {
+		Secret string   `json:"secret"`
+		Nested []string `json:"nested"`
+	}
+	type typedPayload struct {
+		Records []typedRecord          `json:"records"`
+		Lookup  map[string]typedRecord `json:"lookup"`
+		Array   [2]string              `json:"array"`
+	}
+	secret := typedPayload{
+		Records: []typedRecord{{Secret: "typed-secret", Nested: []string{"nested-secret"}}},
+		Lookup:  map[string]typedRecord{"one": {Secret: "map-secret"}},
+		Array:   [2]string{"array-secret", "safe"},
+	}
+	var consumed any
+	provider := ProviderFunc(func(_ context.Context, invocation ActionInvocation) (ActionResult, error) {
+		if invocation.ActionID == "produce" {
+			return ActionResult{Status: ResultSucceeded, Output: secret}, nil
+		}
+		consumed = invocation.Input["whole"]
+		return ActionResult{Status: ResultSucceeded, Output: invocation.Input}, nil
+	})
+	plan := ExecutionPlan{
+		{ID: "produce", ActionID: "produce", FailureMode: FailureStop, OutputMode: OutputDiscard},
+		{ID: "consume", ActionID: "consume", FailureMode: FailureStop, OutputMode: OutputCapture,
+			Input: map[string]any{"whole": "{{step.produce.output}}"}},
+	}
+	got, err := Run(context.Background(), plan, provider, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, ok := consumed.(typedPayload)
+	if !ok || bound.Records[0].Secret != "typed-secret" || bound.Lookup["one"].Secret != "map-secret" {
+		t.Fatalf("internal typed binding was changed: %#v", consumed)
+	}
+	serialized, marshalErr := json.Marshal(got)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	for _, leaked := range []string{"typed-secret", "nested-secret", "map-secret", "array-secret"} {
+		if strings.Contains(string(serialized), leaked) {
+			t.Fatalf("typed discarded value leaked through execution result: %s", serialized)
+		}
+	}
+	if !strings.Contains(string(serialized), redactedOutput) {
+		t.Fatalf("redaction marker missing from execution result: %s", serialized)
+	}
+}
+
 func TestRunnerFailureContinueAndStopSkipUnstartedSteps(t *testing.T) {
 	var calls []string
 	provider := ProviderFunc(func(_ context.Context, invocation ActionInvocation) (ActionResult, error) {

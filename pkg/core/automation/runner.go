@@ -377,25 +377,136 @@ func redactMap(value map[string]any, discarded []any) map[string]any {
 }
 
 func redactValue(value any, discarded []any) any {
+	if value == nil {
+		return nil
+	}
 	for _, secret := range discarded {
 		if reflect.DeepEqual(value, secret) {
 			return redactedOutput
 		}
 	}
-	switch value := value.(type) {
-	case string:
-		return redactString(value, discarded)
-	case map[string]any:
-		return redactMap(value, discarded)
-	case []any:
-		redacted := make([]any, len(value))
-		for i, item := range value {
-			redacted[i] = redactValue(item, discarded)
+	return redactReflect(reflect.ValueOf(value), discarded).Interface()
+}
+
+// redactReflect walks values recursively rather than only handling the
+// untyped map/slice shapes produced by encoding/json. Providers may return
+// typed maps, arrays, slices, and JSON-compatible structs; all of them can be
+// echoed through a later invocation and must be scrubbed from the public
+// result. A replacement is allowed to change the containing value to a string
+// when the original type cannot represent the redaction marker.
+func redactReflect(value reflect.Value, discarded []any) reflect.Value {
+	if !value.IsValid() {
+		return value
+	}
+	if value.Kind() == reflect.Interface {
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
 		}
-		return redacted
+		return valueSafeValue(redactReflect(value.Elem(), discarded), value.Type())
+	}
+	if value.CanInterface() && isRedactionScalar(value.Kind()) {
+		for _, secret := range discarded {
+			if reflect.DeepEqual(value.Interface(), secret) {
+				return replacementValue(value.Type())
+			}
+		}
+	}
+	switch value.Kind() {
+	case reflect.String:
+		redacted := redactString(value.String(), discarded)
+		return reflect.ValueOf(redacted).Convert(value.Type())
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		result := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iter := value.MapRange()
+		for iter.Next() {
+			key := iter.Key()
+			item := redactReflect(iter.Value(), discarded)
+			if !item.IsValid() || !item.Type().AssignableTo(value.Type().Elem()) {
+				item = valueSafeValue(item, value.Type().Elem())
+			}
+			result.SetMapIndex(key, item)
+		}
+		return result
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		result := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for i := 0; i < value.Len(); i++ {
+			result.Index(i).Set(valueSafeValue(redactReflect(value.Index(i), discarded), value.Type().Elem()))
+		}
+		return result
+	case reflect.Array:
+		result := reflect.New(value.Type()).Elem()
+		for i := 0; i < value.Len(); i++ {
+			result.Index(i).Set(valueSafeValue(redactReflect(value.Index(i), discarded), value.Type().Elem()))
+		}
+		return result
+	case reflect.Struct:
+		result := reflect.New(value.Type()).Elem()
+		result.Set(value)
+		for i := 0; i < value.NumField(); i++ {
+			if result.Field(i).CanSet() && value.Field(i).CanInterface() {
+				result.Field(i).Set(valueSafeValue(redactReflect(value.Field(i), discarded), value.Type().Field(i).Type))
+			}
+		}
+		return result
+	case reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		result := reflect.New(value.Type().Elem())
+		result.Elem().Set(valueSafeValue(redactReflect(value.Elem(), discarded), value.Type().Elem()))
+		return result
 	default:
 		return value
 	}
+}
+
+func isRedactionScalar(kind reflect.Kind) bool {
+	switch kind {
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128, reflect.String:
+		return true
+	default:
+		return false
+	}
+}
+
+func replacementValue(typ reflect.Type) reflect.Value {
+	replacement := reflect.ValueOf(redactedOutput)
+	if replacement.Type().AssignableTo(typ) {
+		return replacement
+	}
+	if replacement.Type().ConvertibleTo(typ) {
+		return replacement.Convert(typ)
+	}
+	return reflect.Zero(typ)
+}
+
+func valueSafeValue(value reflect.Value, typ reflect.Type) reflect.Value {
+	if !value.IsValid() {
+		return reflect.Zero(typ)
+	}
+	if typ.Kind() == reflect.Interface {
+		if value.Type().AssignableTo(typ) {
+			wrapped := reflect.New(typ).Elem()
+			wrapped.Set(value)
+			return wrapped
+		}
+		return reflect.Zero(typ)
+	}
+	if value.Type().AssignableTo(typ) {
+		return value
+	}
+	if value.Type().ConvertibleTo(typ) {
+		return value.Convert(typ)
+	}
+	return reflect.Zero(typ)
 }
 
 func redactString(value string, discarded []any) string {
@@ -423,45 +534,110 @@ func redactionTokens(value any) []string {
 		seen[token] = struct{}{}
 		tokens = append(tokens, token)
 	}
-	var visit func(any)
-	visit = func(item any) {
-		if item == nil {
+	var visit func(reflect.Value)
+	visit = func(item reflect.Value) {
+		if !item.IsValid() {
 			return
 		}
-		if text, ok := item.(string); ok {
-			add(text)
-			return
-		}
-		add(fmt.Sprint(item))
-		switch item := item.(type) {
-		case map[string]any:
-			for _, nested := range item {
-				visit(nested)
+		if item.Kind() == reflect.Interface {
+			if item.IsNil() {
+				return
 			}
-		case []any:
-			for _, nested := range item {
-				visit(nested)
+			visit(item.Elem())
+			return
+		}
+		if item.Kind() == reflect.String {
+			add(item.String())
+			return
+		}
+		if item.CanInterface() {
+			add(fmt.Sprint(item.Interface()))
+		}
+		switch item.Kind() {
+		case reflect.Map:
+			if item.IsNil() {
+				return
+			}
+			iter := item.MapRange()
+			for iter.Next() {
+				visit(iter.Value())
+			}
+		case reflect.Slice, reflect.Array:
+			for i := 0; i < item.Len(); i++ {
+				visit(item.Index(i))
+			}
+		case reflect.Struct:
+			for i := 0; i < item.NumField(); i++ {
+				visit(item.Field(i))
+			}
+		case reflect.Pointer:
+			if !item.IsNil() {
+				visit(item.Elem())
 			}
 		}
 	}
-	visit(value)
+	visit(reflect.ValueOf(value))
 	return tokens
 }
 
 func cloneValue(value any) any {
-	switch value := value.(type) {
-	case map[string]any:
-		copy := make(map[string]any, len(value))
-		for key, item := range value {
-			copy[key] = cloneValue(item)
+	if value == nil {
+		return nil
+	}
+	return cloneReflect(reflect.ValueOf(value)).Interface()
+}
+
+func cloneReflect(value reflect.Value) reflect.Value {
+	if !value.IsValid() {
+		return value
+	}
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
 		}
-		return copy
-	case []any:
-		copy := make([]any, len(value))
-		for i, item := range value {
-			copy[i] = cloneValue(item)
+		return valueSafeValue(cloneReflect(value.Elem()), value.Type())
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
 		}
-		return copy
+		result := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iter := value.MapRange()
+		for iter.Next() {
+			result.SetMapIndex(iter.Key(), valueSafeValue(cloneReflect(iter.Value()), value.Type().Elem()))
+		}
+		return result
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		result := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for i := 0; i < value.Len(); i++ {
+			result.Index(i).Set(valueSafeValue(cloneReflect(value.Index(i)), value.Type().Elem()))
+		}
+		return result
+	case reflect.Array:
+		result := reflect.New(value.Type()).Elem()
+		for i := 0; i < value.Len(); i++ {
+			result.Index(i).Set(valueSafeValue(cloneReflect(value.Index(i)), value.Type().Elem()))
+		}
+		return result
+	case reflect.Struct:
+		result := reflect.New(value.Type()).Elem()
+		result.Set(value)
+		for i := 0; i < value.NumField(); i++ {
+			if result.Field(i).CanSet() && value.Field(i).CanInterface() {
+				result.Field(i).Set(valueSafeValue(cloneReflect(value.Field(i)), value.Type().Field(i).Type))
+			}
+		}
+		return result
+	case reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		result := reflect.New(value.Type().Elem())
+		result.Elem().Set(valueSafeValue(cloneReflect(value.Elem()), value.Type().Elem()))
+		return result
 	default:
 		return value
 	}
