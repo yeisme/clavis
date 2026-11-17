@@ -221,6 +221,7 @@ type EncryptedEnvelope struct {
 	Class           DataClass `json:"class"`
 	Nonce           []byte    `json:"nonce"`
 	Ciphertext      []byte    `json:"ciphertext"`
+	Signature       []byte    `json:"signature"`
 }
 
 func (e EncryptedEnvelope) aad() []byte {
@@ -245,6 +246,36 @@ func (e EncryptedEnvelope) aad() []byte {
 	addString(string(e.Class))
 	return b
 }
+func (e EncryptedEnvelope) canonical() []byte {
+	// Sign the complete envelope scope and authenticated ciphertext. Length
+	// prefixes keep identifiers unambiguous, while the digests avoid signing
+	// large payloads twice and bind both encryption context and ciphertext.
+	b := make([]byte, 0, len(envelopeDomain)+len(e.AccountID)+len(e.DeviceID)+len(e.ObjectID)+len(e.Class)+96)
+	addString := func(value string) {
+		b = binary.AppendUvarint(b, uint64(len(value)))
+		b = append(b, value...)
+	}
+	addString(envelopeDomain)
+	var version [2]byte
+	binary.BigEndian.PutUint16(version[:], e.ProtocolVersion)
+	b = append(b, version[:]...)
+	addString(e.AccountID)
+	addString(e.DeviceID)
+	addString(e.ObjectID)
+	var objectVersion [8]byte
+	binary.BigEndian.PutUint64(objectVersion[:], e.Version)
+	b = append(b, objectVersion[:]...)
+	addString(string(e.Class))
+	nonceDigest := sha256.Sum256(e.Nonce)
+	ciphertextDigest := sha256.Sum256(e.Ciphertext)
+	aadDigest := sha256.Sum256(e.aad())
+	b = append(b, nonceDigest[:]...)
+	b = append(b, ciphertextDigest[:]...)
+	return append(b, aadDigest[:]...)
+}
+func (e EncryptedEnvelope) Verify(pub ed25519.PublicKey) bool {
+	return e.ProtocolVersion == ProtocolVersion && len(e.Signature) == ed25519.SignatureSize && ed25519.Verify(pub, e.canonical(), e.Signature)
+}
 func validClass(c DataClass) bool {
 	switch c {
 	case InputMethod, LearningData, ClipboardText, Media, ApplicationCtx, SensitiveVault:
@@ -253,7 +284,7 @@ func validClass(c DataClass) bool {
 	return false
 }
 func marshalEnvelope(e EncryptedEnvelope) ([]byte, error) {
-	if e.ProtocolVersion != ProtocolVersion || e.AccountID == "" || e.DeviceID == "" || e.ObjectID == "" || e.Version == 0 || !validClass(e.Class) || len(e.Nonce) != 12 || len(e.Ciphertext) < 16 {
+	if e.ProtocolVersion != ProtocolVersion || e.AccountID == "" || e.DeviceID == "" || e.ObjectID == "" || e.Version == 0 || !validClass(e.Class) || len(e.Nonce) != 12 || len(e.Ciphertext) < 16 || len(e.Signature) != ed25519.SignatureSize {
 		return nil, errors.New("sync: invalid encrypted envelope")
 	}
 	return json.Marshal(e)
@@ -425,12 +456,22 @@ func (s *Server) Login(account string) error {
 	return nil
 }
 func (s *Server) RegisterAccount(account string) ([]byte, error) {
-	if err := s.Login(account); err != nil {
+	if strings.TrimSpace(account) == "" {
+		return nil, errors.New("sync: account id cannot be empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.credentials[account]; exists {
+		return nil, errors.New("sync: account already exists")
+	}
+	s.initAccountLocked(account)
+	var c [32]byte
+	if _, err := io.ReadFull(rand.Reader, c[:]); err != nil {
 		return nil, err
 	}
-	return s.AccountCredential(account), nil
+	s.credentials[account] = c
+	return append([]byte(nil), c[:]...), nil
 }
-func (s *Server) AccountCredential(account string) []byte { return s.credential(account) }
 func (s *Server) LoginWithCredential(account string, credential []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -440,12 +481,6 @@ func (s *Server) LoginWithCredential(account string, credential []byte) error {
 	}
 	s.initAccountLocked(account)
 	return nil
-}
-func (s *Server) credential(account string) []byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c := s.credentials[account]
-	return append([]byte(nil), c[:]...)
 }
 func (s *Server) PairDevice(account, device string, pub ed25519.PublicKey) error {
 	// The legacy entry point is retained, but unauthenticated pairing is no
@@ -543,17 +578,15 @@ func (s *Server) ConfirmTombstones(account, device string, sequence uint64) erro
 		return errors.New("sync: confirmation is ahead of server")
 	}
 	if sequence == confirmed {
-		// A watermark match is not proof of a fresh confirmation. The only
-		// legal no-op is the initial zero watermark before any tombstone exists.
-		// Once a sequence has been consumed, repeating it has no issued batch and
-		// must be rejected rather than treated as success.
-		if _, pending := s.issued[account][device]; pending {
-			return errors.New("sync: tombstone batch is not confirmed")
+		// A watermark match is a bootstrap no-op only before this account has
+		// ever issued a tombstone. Once the account sequence advances, zero is
+		// not confirmation merely because this device has not fetched yet.
+		if sequence == 0 && latest == 0 {
+			if _, pending := s.issued[account][device]; !pending {
+				return nil
+			}
 		}
-		if sequence != 0 {
-			return errors.New("sync: tombstone batch is already confirmed")
-		}
-		return nil
+		return errors.New("sync: tombstone batch is not confirmed")
 	}
 	batch, ok := s.issued[account][device]
 	if !ok || batch.from != confirmed+1 || batch.to != sequence || batch.to > latest {
@@ -584,6 +617,10 @@ func (s *Server) UploadEnvelope(account, device, object string, version uint64, 
 	defer s.mu.Unlock()
 	if e.AccountID != account || e.DeviceID != device || e.ObjectID != object || e.Version != version || e.ProtocolVersion != ProtocolVersion || !validClass(e.Class) || len(e.Nonce) != 12 || len(e.Ciphertext) < 16 {
 		return errors.New("sync: envelope does not match upload")
+	}
+	pub := s.accounts[account][device]
+	if len(pub) != ed25519.PublicKeySize || !e.Verify(pub) {
+		return errors.New("sync: invalid envelope signature")
 	}
 	if s.accounts[account][device] == nil {
 		return errors.New("sync: device is not paired")
@@ -634,6 +671,7 @@ func (s *Server) LatestSequence() uint64 { s.mu.Lock(); defer s.mu.Unlock(); ret
 
 type Client struct {
 	mu                  sync.Mutex
+	syncMu              sync.Mutex
 	server              *Server
 	accountID, deviceID string
 	credential          []byte
@@ -662,17 +700,10 @@ func NewClient(s *Server, device string) (*Client, error) {
 	return &Client{server: s, deviceID: device, privateKey: priv, cache: NewLocalCache(), plan: DefaultSyncPlan(), vault: v}, nil
 }
 func (c *Client) Login(account string) error {
+	// Login may register a new account, but deliberately cannot recover an
+	// existing account's credential from the Server object.
 	cred, err := c.server.RegisterAccount(account)
 	if err != nil {
-		// Preserve the original convenience API for another device joining an
-		// existing account while still authenticating the session with the
-		// server-issued credential.
-		cred = c.server.AccountCredential(account)
-		if len(cred) != 32 {
-			return err
-		}
-	}
-	if err := c.server.LoginWithCredential(account, cred); err != nil {
 		return err
 	}
 	return c.loginWithCredential(account, cred)
@@ -752,6 +783,11 @@ func (c *Client) Delete(object string) error {
 	return nil
 }
 func (c *Client) Sync() ([]Tombstone, CleanupReport, error) {
+	// The server records one issued tombstone batch per device. Serialize the
+	// complete fetch/apply/confirm sequence so concurrent calls cannot replace
+	// one another's issued batch.
+	c.syncMu.Lock()
+	defer c.syncMu.Unlock()
 	c.mu.Lock()
 	a, d, after := c.accountID, c.deviceID, c.watermark
 	c.mu.Unlock()
@@ -780,8 +816,10 @@ func (c *Client) Sync() ([]Tombstone, CleanupReport, error) {
 			confirm = t.Sequence
 		}
 	}
-	if err := c.server.ConfirmTombstones(a, d, confirm); err != nil {
-		return nil, CleanupReport{}, err
+	if len(ts) > 0 {
+		if err := c.server.ConfirmTombstones(a, d, confirm); err != nil {
+			return nil, CleanupReport{}, err
+		}
 	}
 	c.mu.Lock()
 	if confirm > c.watermark {
@@ -837,6 +875,7 @@ func clientEnvelope(priv ed25519.PrivateKey, a, d, o string, v uint64, class Dat
 		return e, err
 	}
 	e.Ciphertext = gcm.Seal(nil, e.Nonce, payload, e.aad())
+	e.Signature = ed25519.Sign(priv, e.canonical())
 	return e, nil
 }
 func (c *Client) PrepareRecoveryCode() (string, error) {
@@ -990,6 +1029,9 @@ func (v *Vault) Get(id string) ([]byte, error) {
 func (v *Vault) Ciphertext(id string) ([]byte, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	if !v.authorized {
+		return nil, errors.New("sync: vault authorization required")
+	}
 	raw, ok := v.objects[id]
 	if !ok {
 		return nil, errors.New("sync: secret not found")

@@ -33,13 +33,17 @@ func TestSignedDeleteAndOldDeviceSyncBeforeUpload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := one.Login("account"); err != nil {
+	credential, err := s.RegisterAccount("account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := one.LoginWithCredential("account", credential); err != nil {
 		t.Fatal(err)
 	}
 	if err := one.PairDevice(); err != nil {
 		t.Fatal(err)
 	}
-	if err := two.LoginWithCredential("account", s.AccountCredential("account")); err != nil {
+	if err := two.LoginWithCredential("account", credential); err != nil {
 		t.Fatal(err)
 	}
 	if err := two.PairDevice(); err != nil {
@@ -148,6 +152,9 @@ func TestVaultRequiresIndependentAuthorization(t *testing.T) {
 	if err := v.Put("secret", []byte("value")); err == nil {
 		t.Fatal("unauthorized vault write succeeded")
 	}
+	if _, err := v.Ciphertext("secret"); err == nil {
+		t.Fatal("unauthorized vault ciphertext read succeeded")
+	}
 	if err := v.Authorize("wrong"); err == nil {
 		t.Fatal("wrong authorization accepted")
 	}
@@ -166,6 +173,36 @@ func TestVaultRequiresIndependentAuthorization(t *testing.T) {
 	}
 	if _, err := v.Get("secret"); err == nil {
 		t.Fatal("revoked vault read succeeded")
+	}
+}
+
+func TestExistingAccountLoginRequiresExplicitCredential(t *testing.T) {
+	s := NewServer()
+	first, err := NewClient(s, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Login("acct"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewClient(s, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Login("acct"); err == nil {
+		t.Fatal("existing account Login recovered a server credential")
+	}
+	credential, err := s.RegisterAccount("new-acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.LoginWithCredential("acct", credential); err == nil {
+		t.Fatal("credential for another account was accepted")
+	}
+	// The credential returned at first-account registration is the explicit
+	// secret needed by another device; the Server never exposes it later.
+	if err := second.LoginWithCredential("acct", first.credential); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -196,13 +233,17 @@ func setupClients(t *testing.T) (*Server, *Client, *Client) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.Login("acct"); err != nil {
+	credential, err := s.RegisterAccount("acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.LoginWithCredential("acct", credential); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.PairDevice(); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.LoginWithCredential("acct", s.AccountCredential("acct")); err != nil {
+	if err := b.LoginWithCredential("acct", credential); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.PairDevice(); err != nil {
@@ -274,6 +315,41 @@ func TestCursorCannotSkipPendingTombstone(t *testing.T) {
 	}
 }
 
+func TestConfirmZeroCannotSkipPendingTombstone(t *testing.T) {
+	s, a, b := setupClients(t)
+	if err := a.Delete("object"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ConfirmTombstones("acct", "b", 0); err == nil {
+		t.Fatal("zero confirmation skipped a pending tombstone")
+	}
+	if _, _, err := b.Sync(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConcurrentSyncIsSerialized(t *testing.T) {
+	s, a, b := setupClients(t)
+	if err := a.Delete("object"); err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			_, _, err := b.Sync()
+			results <- err
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent sync failed: %v", err)
+		}
+	}
+	if b.Watermark() != s.LatestSequence() {
+		t.Fatalf("watermark = %d, want %d", b.Watermark(), s.LatestSequence())
+	}
+}
+
 func TestConfirmRequiresIssuedTombstoneBatch(t *testing.T) {
 	s, a, b := setupClients(t)
 	if err := a.Delete("object"); err != nil {
@@ -323,15 +399,16 @@ func TestRepeatedTombstoneConfirmationIsRejected(t *testing.T) {
 
 func TestPairCannotOverwriteKeyAndCredentialRequired(t *testing.T) {
 	s := NewServer()
-	if err := s.Login("acct"); err != nil {
+	credential, err := s.RegisterAccount("acct")
+	if err != nil {
 		t.Fatal(err)
 	}
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
-	if err := s.PairDeviceWithCredential("acct", "dev", key.Public().(ed25519.PublicKey), s.AccountCredential("acct")); err != nil {
+	if err := s.PairDeviceWithCredential("acct", "dev", key.Public().(ed25519.PublicKey), credential); err != nil {
 		t.Fatal(err)
 	}
 	_, other, _ := ed25519.GenerateKey(rand.Reader)
-	if err := s.PairDeviceWithCredential("acct", "dev", other.Public().(ed25519.PublicKey), s.AccountCredential("acct")); err == nil {
+	if err := s.PairDeviceWithCredential("acct", "dev", other.Public().(ed25519.PublicKey), credential); err == nil {
 		t.Fatal("device key overwritten")
 	}
 	if err := s.PairDeviceWithCredential("acct", "other", other.Public().(ed25519.PublicKey), []byte("wrong")); err == nil {
@@ -352,6 +429,22 @@ func TestEnvelopeAADUsesLengthPrefixedFields(t *testing.T) {
 	other.DeviceID = "device:object"
 	if string(ambiguous.aad()) == string(other.aad()) {
 		t.Fatal("AAD aliases fields containing a colon")
+	}
+}
+
+func TestEnvelopeSignatureRequired(t *testing.T) {
+	s, a, _ := setupClients(t)
+	e, err := clientEnvelope(a.privateKey, "acct", "a", "object", 1, InputMethod, []byte("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Signature = nil
+	if err := s.UploadEnvelope("acct", "a", "object", 1, e); err == nil {
+		t.Fatal("unsigned envelope accepted")
+	}
+	e.Signature = make([]byte, ed25519.SignatureSize)
+	if err := s.UploadEnvelope("acct", "a", "object", 1, e); err == nil {
+		t.Fatal("random envelope signature accepted")
 	}
 }
 
@@ -395,6 +488,9 @@ func TestVaultAuthorizationChangesKeyAndRevokeRotates(t *testing.T) {
 	}
 	if err := v.Revoke(); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := v.Ciphertext("id"); err == nil {
+		t.Fatal("revoked vault ciphertext read succeeded")
 	}
 	if err := v.ConfigureAuthorization("two"); err != nil {
 		t.Fatal(err)
