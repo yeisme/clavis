@@ -2329,17 +2329,6 @@ func mergeWorkflowInputs(workflowInputs map[string]any, invocation automation.Ac
 	return bindings
 }
 
-func mergeWorkflowInvocationInputs(invocation automation.ActionInvocation) map[string]any {
-	bindings := make(map[string]any, len(invocation.Input)+len(invocation.Inputs))
-	for key, value := range invocation.Input {
-		bindings[key] = value
-	}
-	for key, value := range invocation.Inputs {
-		bindings[key] = value
-	}
-	return bindings
-}
-
 func substituteWorkflowArgs(args []string, bindings map[string]any) ([]string, error) {
 	resolved := make([]string, len(args))
 	for i, arg := range args {

@@ -407,6 +407,7 @@ func validateMode(out *[]ValidationIssue, path, value string, supported map[stri
 // it without decoding are rejected rather than silently treated as capture.
 var supportedWorkflowSources = map[string]struct{}{"clipboard": {}, "selection": {}, "text": {}}
 var supportedWorkflowOutputs = map[string]struct{}{"replace": {}, "insert": {}, "clipboard": {}, "notify": {}, "none": {}}
+var supportedWorkflowStepOutputs = map[string]struct{}{"replace": {}, "notify": {}, "none": {}}
 
 // The workflow runner currently implements only stop/continue failure handling.
 // Keep the public string model forward compatible, but reject modes that would
@@ -458,7 +459,7 @@ func ValidateWorkflows(c WorkflowsConfig) []ValidationIssue {
 				stepIDs[step.ID] = j
 			}
 			validateMode(&issues, stepPath+".source", string(step.Source), supportedWorkflowSources, "source")
-			validateMode(&issues, stepPath+".output", string(step.Output), supportedWorkflowOutputs, "output")
+			validateMode(&issues, stepPath+".output", string(step.Output), supportedWorkflowStepOutputs, "step output")
 			validateMode(&issues, stepPath+".failure", string(step.Failure), supportedWorkflowFailures, "failure")
 			validateMode(&issues, stepPath+".execution", string(step.Execution), supportedWorkflowExecutions, "execution")
 		}

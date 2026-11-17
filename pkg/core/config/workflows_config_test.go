@@ -44,9 +44,6 @@ func TestWorkflowsConfigRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("workflow round trip mismatch\n got: %#v\nwant: %#v", got, want)
 	}
-	if issues := config.ValidateWorkflows(got); len(issues) != 0 {
-		t.Fatalf("round-tripped workflow should validate: %+v", issues)
-	}
 }
 
 func TestWorkflowsConfigSafeDefaults(t *testing.T) {
@@ -183,6 +180,37 @@ func TestValidateWorkflowsAcceptsOutputNone(t *testing.T) {
 	}}}
 	if issues := config.ValidateWorkflows(cfg); len(issues) != 0 {
 		t.Fatalf("intentional OutputNone should validate: %+v", issues)
+	}
+}
+
+func TestValidateWorkflowsSeparatesWorkflowAndStepOutputs(t *testing.T) {
+	for _, output := range []config.WorkflowOutput{config.WorkflowOutputInsert, config.WorkflowOutputClipboard} {
+		t.Run("workflow "+string(output), func(t *testing.T) {
+			cfg := config.WorkflowsConfig{Workflows: []config.Workflow{{
+				ID: "workflow", Output: output,
+				Steps: []config.WorkflowStep{{ID: "step", Output: config.WorkflowOutputNone}},
+			}}}
+			if issues := config.ValidateWorkflows(cfg); len(issues) != 0 {
+				t.Fatalf("workflow output %q should validate: %+v", output, issues)
+			}
+		})
+
+		t.Run("step "+string(output), func(t *testing.T) {
+			cfg := config.WorkflowsConfig{Workflows: []config.Workflow{{
+				ID: "workflow", Output: config.WorkflowOutputNone,
+				Steps: []config.WorkflowStep{{ID: "step", Output: output}},
+			}}}
+			issues := config.ValidateWorkflows(cfg)
+			issuePath := "workflows[0].steps[0].output"
+			if !workflowIssue(issues, issuePath) {
+				t.Fatalf("step output %q should be rejected at %s: %+v", output, issuePath, issues)
+			}
+			for _, issue := range issues {
+				if issue.KeyPath == issuePath && !strings.Contains(issue.Message, "unsupported workflow step output mode") {
+					t.Fatalf("unexpected step output error: %q", issue.Message)
+				}
+			}
+		})
 	}
 }
 
