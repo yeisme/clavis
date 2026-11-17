@@ -115,8 +115,8 @@ type Options struct {
 	OnConfigSaved func()
 	// OnWorkflowResult receives the provider-independent execution result after
 	// a workflow finishes. HUD events remain the default shell. The hook runs
-	// while the controller serializes workflow lifecycle changes, so it must not
-	// call CancelWorkflow, Close, or execute another workflow synchronously.
+	// after the workflow lifecycle state has been finalized and may call
+	// CancelWorkflow, Close, or execute another workflow synchronously.
 	OnWorkflowResult func(workflowID string, result automation.ExecutionResult, err error)
 }
 
@@ -2431,6 +2431,7 @@ func (c *AppController) reportWorkflow(runID, targetGen uint64, workflow config.
 	currentRun := runID == c.workflowRunID
 	c.mu.Lock()
 	closed := c.closed
+	hook := c.OnWorkflowResult
 	c.mu.Unlock()
 	if closed || !currentRun {
 		c.workflowLifecycleMu.Unlock()
@@ -2438,15 +2439,15 @@ func (c *AppController) reportWorkflow(runID, targetGen uint64, workflow config.
 	}
 	// Cancellation is intentionally silent. In particular, a canceled command
 	// must not turn Escape or shutdown into a late failure HUD.
-	if result.Canceled || errors.Is(runErr, context.Canceled) {
-		if c.workflowCancel != nil && runID == c.workflowRunID {
-			c.workflowCancel = nil
-		}
-		c.workflowLifecycleMu.Unlock()
-		return
-	}
+	canceled := result.Canceled || errors.Is(runErr, context.Canceled)
 	if c.workflowCancel != nil && runID == c.workflowRunID {
+		// Finalize the run before doing any HUD, output, or callback work. Those
+		// operations may synchronously enter the lifecycle API themselves.
 		c.workflowCancel = nil
+	}
+	c.workflowLifecycleMu.Unlock()
+	if canceled {
+		return
 	}
 	if runErr != nil {
 		c.workflowHUD(fmt.Sprintf("Workflow %s failed: %v", workflow.ID, runErr))
@@ -2463,13 +2464,9 @@ func (c *AppController) reportWorkflow(runID, targetGen uint64, workflow config.
 		c.workflowHUD(fmt.Sprintf("Workflow %s completed", workflow.ID))
 		c.applyWorkflowOutputAtTarget(workflow.Output, actionCtx, result, targetGen)
 	}
-	c.mu.Lock()
-	hook := c.OnWorkflowResult
-	c.mu.Unlock()
 	if hook != nil {
 		hook(workflow.ID, result, runErr)
 	}
-	c.workflowLifecycleMu.Unlock()
 }
 
 func (c *AppController) workflowHUD(message string) {

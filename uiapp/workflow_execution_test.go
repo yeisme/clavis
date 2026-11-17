@@ -50,6 +50,36 @@ func TestWorkflowEnterRunsConfiguredSafeActionAndReportsResult(t *testing.T) {
 	}
 }
 
+func TestWorkflowResultCallbackCanCancelWorkflow(t *testing.T) {
+	f := newInteractionFixture(t, nil)
+	cfg := f.ctrl.Config()
+	cfg.Leader.Nodes = []config.LeaderNode{{Key: "safe", Label: "Safe", Action: config.CLIAction("printf", "ok")}}
+	cfg.Workflows.Workflows = []config.Workflow{{
+		ID: "callback-cancel", Enabled: true,
+		Steps: []config.WorkflowStep{{ID: "one", Action: "safe", Enabled: true}},
+	}}
+	if err := f.ctrl.ConfigStore.SaveAll(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	f.ctrl.StateMachine.SetConfig(cfg)
+	callback := make(chan bool, 1)
+	f.ctrl.OnWorkflowResult = func(string, automation.ExecutionResult, error) {
+		// This used to deadlock because reportWorkflow held workflowLifecycleMu.
+		callback <- f.ctrl.CancelWorkflow()
+	}
+	if err := f.ctrl.ExecuteWorkflow("callback-cancel", engine.CapsuleContext{}); err != nil {
+		t.Fatalf("execute workflow: %v", err)
+	}
+	select {
+	case canceled := <-callback:
+		if canceled {
+			t.Fatal("CancelWorkflow canceled a run after the callback run was finalized")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("workflow result callback deadlocked")
+	}
+}
+
 func TestWorkflowRequiredInputFailsBeforeProviderExecution(t *testing.T) {
 	f := newInteractionFixture(t, nil)
 	cfg := f.ctrl.Config()
