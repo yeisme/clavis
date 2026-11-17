@@ -184,7 +184,11 @@ func (s *ConfigStore) SaveLeader(leaderCfg LeaderConfig) error {
 	for _, item := range cur.Snippets.Items {
 		knownSnippetIDs[item.ID] = struct{}{}
 	}
-	if err := firstErrorIssue(ValidateLeader(leaderCfg, knownSnippetIDs)); err != nil {
+	knownWorkflowIDs := make(map[string]struct{}, len(cur.Workflows.Workflows))
+	for _, workflow := range cur.Workflows.Workflows {
+		knownWorkflowIDs[workflow.ID] = struct{}{}
+	}
+	if err := firstErrorIssue(ValidateLeader(leaderCfg, knownSnippetIDs, knownWorkflowIDs)); err != nil {
 		return err
 	}
 	encoded := leaderCfg.Encode()

@@ -91,6 +91,7 @@ const (
 	ActionSnippet           LeaderActionType = "snippet"
 	ActionToggleIME         LeaderActionType = "toggle_ime"
 	ActionNormalizeGlossary LeaderActionType = "normalize_glossary"
+	ActionRunWorkflow       LeaderActionType = "run_workflow"
 )
 
 // LeaderAction is a tagged union describing the action of a LeaderNode.
@@ -105,6 +106,7 @@ type LeaderAction struct {
 	Target        string           `json:"target,omitempty"`
 	Tab           CapsuleTab       `json:"tab,omitempty"`
 	SnippetID     string           `json:"snippetId,omitempty"`
+	WorkflowID    string           `json:"workflowId,omitempty"`
 }
 
 func GroupAction(children ...LeaderNode) LeaderAction {
@@ -141,6 +143,11 @@ func ToggleIMEAction() LeaderAction {
 
 func NormalizeGlossaryAction() LeaderAction {
 	return LeaderAction{Type: ActionNormalizeGlossary}
+}
+
+// RunWorkflowAction creates an action that requests execution of a configured workflow.
+func RunWorkflowAction(id string) LeaderAction {
+	return LeaderAction{Type: ActionRunWorkflow, WorkflowID: id}
 }
 
 // LeaderNode represents one node in the recursive leader key tree.
@@ -283,6 +290,19 @@ func decodeLeaderNode(tbl *toml.Table, path string) (LeaderNode, error) {
 	case ActionNormalizeGlossary:
 		action = NormalizeGlossaryAction()
 
+	case ActionRunWorkflow:
+		workflowID, err := requiredString(tbl, "workflow_id", path)
+		if err != nil {
+			return LeaderNode{}, err
+		}
+		if strings.TrimSpace(workflowID) == "" {
+			return LeaderNode{}, &DecodingError{
+				KeyPath: joinPath(path, "workflow_id"),
+				Message: i18n.T("decode.leader.workflow.id.empty"),
+			}
+		}
+		action = RunWorkflowAction(workflowID)
+
 	default:
 		return LeaderNode{}, &DecodingError{
 			KeyPath: joinPath(path, "action"),
@@ -330,6 +350,8 @@ func (n LeaderNode) toTOML() *toml.Table {
 		t.Set("snippet_id", toml.StringVal(n.Action.SnippetID))
 	case ActionToggleIME, ActionNormalizeGlossary:
 		// no extra fields
+	case ActionRunWorkflow:
+		t.Set("workflow_id", toml.StringVal(n.Action.WorkflowID))
 	}
 	return t
 }

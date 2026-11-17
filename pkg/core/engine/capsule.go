@@ -946,6 +946,15 @@ func executeLeaderNode(
 			ProfileID:  profID,
 		}}
 
+	case config.ActionRunWorkflow:
+		if strings.TrimSpace(node.Action.WorkflowID) == "" {
+			return next, nil
+		}
+		ctxCopy := next.Context
+		clearPhaseFields(&next)
+		next.Phase = PhaseHidden
+		return next, []Effect{{Type: EffectRunWorkflow, WorkflowID: node.Action.WorkflowID, Context: &ctxCopy}, {Type: EffectClose}}
+
 	case config.ActionSwitchTab:
 		items := buildOmniboxItems(node.Action.Tab, "", next, cfg)
 		clearPhaseFields(&next)
@@ -1202,6 +1211,15 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 				Context:    &ctxCopy,
 				ProfileID:  profID,
 			}}
+
+		case config.ActionRunWorkflow:
+			if strings.TrimSpace(act.WorkflowID) == "" {
+				return next, nil
+			}
+			ctxCopy := next.Context
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{{Type: EffectRunWorkflow, WorkflowID: act.WorkflowID, Context: &ctxCopy}, {Type: EffectClose}}
 
 		case config.ActionSwitchTab:
 			items := buildOmniboxItems(act.Tab, "", next, cfg)

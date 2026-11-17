@@ -947,6 +947,7 @@ func leaderActionTypes() []string {
 		string(config.ActionCLI),
 		string(config.ActionToggleIME),
 		string(config.ActionNormalizeGlossary),
+		string(config.ActionRunWorkflow),
 	}
 }
 
@@ -1128,6 +1129,17 @@ func leaderChildKeyTaken(nodes []config.LeaderNode, parentPath []string, key str
 	return false
 }
 
+// leaderWorkflowIDs returns configured workflow IDs in declaration order.
+func leaderWorkflowIDs(cfg config.ClavisConfig) []string {
+	ids := make([]string, 0, len(cfg.Workflows.Workflows))
+	for _, workflow := range cfg.Workflows.Workflows {
+		if strings.TrimSpace(workflow.ID) != "" {
+			ids = append(ids, workflow.ID)
+		}
+	}
+	return ids
+}
+
 // defaultLeaderAction builds an action of the requested type.
 func defaultLeaderAction(kind string) config.LeaderAction {
 	switch config.LeaderActionType(kind) {
@@ -1149,6 +1161,8 @@ func defaultLeaderAction(kind string) config.LeaderAction {
 		return config.ToggleIMEAction()
 	case config.ActionNormalizeGlossary:
 		return config.NormalizeGlossaryAction()
+	case config.ActionRunWorkflow:
+		return config.RunWorkflowAction("")
 	default:
 		return config.GroupAction()
 	}
@@ -1372,6 +1386,29 @@ func (a *AppController) renderLeaderNodeEditor(
 				seSet(se, func(s *settingsEditorState) {
 					s.leaderDraft.Action = config.SwitchTabAction(config.CapsuleTab(v))
 				})
+			}
+		})
+	case config.ActionRunWorkflow:
+		settingsInlineRow(c, theme, i18n.T("settings.field.workflow_id"), settingsFieldLabelWidth, func() {
+			ids := leaderWorkflowIDs(cfg)
+			current := draft.Action.WorkflowID
+			valid := slices.Contains(ids, current)
+			if !valid {
+				if len(ids) > 0 {
+					current = ids[0]
+				} else {
+					current = ""
+				}
+			}
+			if current != draft.Action.WorkflowID {
+				seSet(se, func(s *settingsEditorState) { s.leaderDraft.Action.WorkflowID = current })
+			}
+			if len(ids) > 0 {
+				if v, changed := settingsSelect(c, ids, current); changed {
+					seSet(se, func(s *settingsEditorState) { s.leaderDraft.Action = config.RunWorkflowAction(v) })
+				}
+			} else {
+				settingsHint(c, theme, i18n.T("settings.leader.workflow_none"))
 			}
 		})
 	case config.ActionCLI:

@@ -37,7 +37,11 @@ func Validate(cfg ClavisConfig) []ValidationIssue {
 	for _, s := range cfg.Snippets.Items {
 		knownSnippetIDs[s.ID] = struct{}{}
 	}
-	issues = append(issues, ValidateLeader(cfg.Leader, knownSnippetIDs)...)
+	knownWorkflowIDs := make(map[string]struct{}, len(cfg.Workflows.Workflows))
+	for _, workflow := range cfg.Workflows.Workflows {
+		knownWorkflowIDs[workflow.ID] = struct{}{}
+	}
+	issues = append(issues, ValidateLeader(cfg.Leader, knownSnippetIDs, knownWorkflowIDs)...)
 	issues = append(issues, ValidateSnippets(cfg.Snippets)...)
 	issues = append(issues, ValidateGlossary(cfg.Glossary)...)
 	issues = append(issues, ValidateIMERules(cfg.IMERules)...)
@@ -366,14 +370,20 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 }
 
 // ValidateLeader validates LeaderConfig (leader.toml).
-// Pass nil for knownSnippetIDs to skip cross-file snippet existence warning.
-func ValidateLeader(leader LeaderConfig, knownSnippetIDs map[string]struct{}) []ValidationIssue {
+// Pass nil for knownSnippetIDs or knownWorkflowIDs to skip cross-file existence warnings.
+func ValidateLeader(leader LeaderConfig, knownSnippetIDs map[string]struct{}, workflowIDs ...map[string]struct{}) []ValidationIssue {
+	knownWorkflowIDs := make(map[string]struct{})
+	if len(workflowIDs) > 0 {
+		knownWorkflowIDs = workflowIDs[0]
+	} else {
+		knownWorkflowIDs = nil
+	}
 	var issues []ValidationIssue
-	validateLeaderLevel(leader.Nodes, "nodes", knownSnippetIDs, &issues)
+	validateLeaderLevel(leader.Nodes, "nodes", knownSnippetIDs, knownWorkflowIDs, &issues)
 	return issues
 }
 
-func validateLeaderLevel(nodes []LeaderNode, basePath string, knownSnippetIDs map[string]struct{}, issues *[]ValidationIssue) {
+func validateLeaderLevel(nodes []LeaderNode, basePath string, knownSnippetIDs, knownWorkflowIDs map[string]struct{}, issues *[]ValidationIssue) {
 	file := string(FileLeader)
 	seenKeys := make(map[string]int, len(nodes))
 
@@ -409,7 +419,7 @@ func validateLeaderLevel(nodes []LeaderNode, basePath string, knownSnippetIDs ma
 					Message: i18n.Tf("diag.leader.group.empty", node.Label),
 				})
 			} else {
-				validateLeaderLevel(node.Action.Children, nodePath+".children", knownSnippetIDs, issues)
+				validateLeaderLevel(node.Action.Children, nodePath+".children", knownSnippetIDs, knownWorkflowIDs, issues)
 			}
 		case ActionAIRewrite:
 			if strings.TrimSpace(node.Action.Mode) == "" {
@@ -465,6 +475,20 @@ func validateLeaderLevel(nodes []LeaderNode, basePath string, knownSnippetIDs ma
 					File: file, KeyPath: nodePath + ".tab", Severity: SeverityError,
 					Message: i18n.Tf("diag.leader.tab.unknown", node.Action.Tab),
 				})
+			}
+		case ActionRunWorkflow:
+			if strings.TrimSpace(node.Action.WorkflowID) == "" {
+				*issues = append(*issues, ValidationIssue{
+					File: file, KeyPath: nodePath + ".workflow_id", Severity: SeverityError,
+					Message: i18n.T("diag.leader.workflow.id.empty"),
+				})
+			} else if knownWorkflowIDs != nil {
+				if _, ok := knownWorkflowIDs[node.Action.WorkflowID]; !ok {
+					*issues = append(*issues, ValidationIssue{
+						File: file, KeyPath: nodePath + ".workflow_id", Severity: SeverityWarning,
+						Message: i18n.Tf("diag.leader.workflow.missing", node.Action.WorkflowID),
+					})
+				}
 			}
 		case ActionToggleIME, ActionNormalizeGlossary:
 			// valid without extra fields
