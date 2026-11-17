@@ -193,6 +193,12 @@ func (d DeleteInstruction) Verify(pub ed25519.PublicKey) bool {
 	return d.ProtocolVersion == ProtocolVersion && len(d.Signature) == ed25519.SignatureSize && ed25519.Verify(pub, d.canonical(), d.Signature)
 }
 
+// Sign returns a copy of the instruction signed by priv.
+func (d DeleteInstruction) Sign(priv ed25519.PrivateKey) DeleteInstruction {
+	d.Signature = ed25519.Sign(priv, d.canonical())
+	return d
+}
+
 type Tombstone struct {
 	AccountID       string    `json:"accountId"`
 	ObjectID        string    `json:"objectId"`
@@ -860,7 +866,10 @@ func (c *Client) UploadClass(class DataClass, object string, version uint64, pay
 	}
 	return c.server.UploadEnvelope(a, d, object, version, e)
 }
-func clientEnvelope(priv ed25519.PrivateKey, a, d, o string, v uint64, class DataClass, payload []byte) (EncryptedEnvelope, error) {
+
+// NewEncryptedEnvelope seals an opaque payload for an authenticated sync upload.
+// The payload is encrypted before it enters any SyncStore implementation.
+func NewEncryptedEnvelope(priv ed25519.PrivateKey, a, d, o string, v uint64, class DataClass, payload []byte) (EncryptedEnvelope, error) {
 	e := EncryptedEnvelope{ProtocolVersion: ProtocolVersion, AccountID: a, DeviceID: d, ObjectID: o, Version: v, Class: class, Nonce: make([]byte, 12)}
 	if _, err := io.ReadFull(rand.Reader, e.Nonce); err != nil {
 		return e, err
@@ -877,6 +886,10 @@ func clientEnvelope(priv ed25519.PrivateKey, a, d, o string, v uint64, class Dat
 	e.Ciphertext = gcm.Seal(nil, e.Nonce, payload, e.aad())
 	e.Signature = ed25519.Sign(priv, e.canonical())
 	return e, nil
+}
+
+func clientEnvelope(priv ed25519.PrivateKey, a, d, o string, v uint64, class DataClass, payload []byte) (EncryptedEnvelope, error) {
+	return NewEncryptedEnvelope(priv, a, d, o, v, class, payload)
 }
 func (c *Client) PrepareRecoveryCode() (string, error) {
 	b := make([]byte, 20)

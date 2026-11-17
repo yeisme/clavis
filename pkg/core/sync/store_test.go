@@ -1,11 +1,8 @@
 package sync
 
 import (
-	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"path/filepath"
-	"sync"
 	"testing"
 )
 
@@ -18,13 +15,6 @@ func TestSyncStoreContract(t *testing.T) {
 	factories := []storeFactory{
 		{name: "memory-server", open: func(t *testing.T) SyncStore {
 			s, err := NewServerStore(NewServer())
-			if err != nil {
-				t.Fatal(err)
-			}
-			return s
-		}},
-		{name: "sqlite-memory", open: func(t *testing.T) SyncStore {
-			s, err := NewSQLiteStore(context.Background(), ":memory:")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -112,128 +102,5 @@ func runStoreContract(t *testing.T, store SyncStore) {
 	}
 	if events := store.AuditForAccount("other"); len(events) != 0 {
 		t.Fatal("cross-account audit leaked")
-	}
-}
-
-func TestSQLiteStoreRestartRestoresProtocolState(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sync", "state.db")
-	store, err := NewSQLiteStore(context.Background(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	credential, err := store.RegisterAccount("acct")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	if err := store.PairDeviceWithCredential("acct", "device", priv.Public().(ed25519.PublicKey), credential); err != nil {
-		t.Fatal(err)
-	}
-	live, err := clientEnvelope(priv, "acct", "device", "live", 7, InputMethod, []byte("opaque"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.UploadEnvelope("acct", "device", "live", 7, live); err != nil {
-		t.Fatal(err)
-	}
-	d := DeleteInstruction{AccountID: "acct", ObjectID: "gone", DeviceID: "device", Version: 4, ProtocolVersion: ProtocolVersion}
-	d.Signature = ed25519.Sign(priv, d.canonical())
-	tombstone, err := store.SubmitDelete(d)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.SyncTombstones("acct", "device", 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	reopened, err := NewSQLiteStore(context.Background(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	if err := reopened.LoginWithCredential("acct", credential); err != nil {
-		t.Fatalf("credential not restored: %v", err)
-	}
-	if version, err := reopened.ObjectVersion("acct", "live"); err != nil || version != 7 {
-		t.Fatalf("live object version after restart = %d, %v", version, err)
-	}
-	if _, err := reopened.GetEnvelope("acct", "live"); err != nil {
-		t.Fatalf("live envelope after restart: %v", err)
-	}
-	if !reopened.VerifyTombstone(tombstone) {
-		t.Fatal("tombstone not restored")
-	}
-	batch, ok, err := reopened.IssuedBatch("acct", "device")
-	if err != nil || !ok || batch.To != tombstone.Sequence {
-		t.Fatalf("issued batch after restart = %+v, %v, %v", batch, ok, err)
-	}
-	if err := reopened.ConfirmTombstones("acct", "device", tombstone.Sequence); err != nil {
-		t.Fatal(err)
-	}
-	watermark, err := reopened.Watermark("acct", "device")
-	if err != nil || watermark != tombstone.Sequence {
-		t.Fatalf("restored watermark = %d, %v", watermark, err)
-	}
-}
-
-func TestSQLiteStoreRejectsPlaintextAndIsolatesAccounts(t *testing.T) {
-	store, err := NewSQLiteStore(context.Background(), ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	credA, _ := store.RegisterAccount("a")
-	credB, _ := store.RegisterAccount("b")
-	_, privA, _ := ed25519.GenerateKey(rand.Reader)
-	_, privB, _ := ed25519.GenerateKey(rand.Reader)
-	if err := store.PairDeviceWithCredential("a", "device", privA.Public().(ed25519.PublicKey), credA); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.PairDeviceWithCredential("b", "device", privB.Public().(ed25519.PublicKey), credB); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.UploadEnvelope("a", "device", "object", 1, EncryptedEnvelope{}); err == nil {
-		t.Fatal("invalid/plaintext envelope accepted")
-	}
-	if _, err := store.GetEnvelope("b", "object"); err == nil {
-		t.Fatal("cross-account object leaked")
-	}
-	if events := store.AuditForAccount("b"); len(events) != 0 {
-		t.Fatal("cross-account audit leaked")
-	}
-}
-
-func TestSQLiteStoreConcurrentAccess(t *testing.T) {
-	store, err := NewSQLiteStore(context.Background(), ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	credential, err := store.RegisterAccount("acct")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	if err := store.PairDeviceWithCredential("acct", "device", priv.Public().(ed25519.PublicKey), credential); err != nil {
-		t.Fatal(err)
-	}
-	var wg sync.WaitGroup
-	errCh := make(chan error, 20)
-	for i := range 20 {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			if _, err := store.Watermark("acct", "device"); err != nil {
-				errCh <- err
-			}
-		}(i)
-	}
-	wg.Wait()
-	close(errCh)
-	for err := range errCh {
-		t.Fatal(err)
 	}
 }

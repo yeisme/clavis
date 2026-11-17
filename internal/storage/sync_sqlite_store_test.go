@@ -1,0 +1,386 @@
+package storage
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"errors"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+
+	"github.com/egoist/mygo/plugins/sqlite"
+	coresync "github.com/yeisme/clavis/pkg/core/sync"
+)
+
+type storeFactory struct {
+	name string
+	open func(t *testing.T) coresync.SyncStore
+}
+
+func TestSQLiteSyncStoreContract(t *testing.T) {
+	factories := []storeFactory{
+		{name: "sqlite-memory", open: func(t *testing.T) coresync.SyncStore {
+			s, err := NewSQLiteSyncStore(context.Background(), ":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return s
+		}},
+	}
+	for _, factory := range factories {
+		t.Run(factory.name, func(t *testing.T) { runStoreContract(t, factory.open(t)) })
+	}
+}
+
+func runStoreContract(t *testing.T, store coresync.SyncStore) {
+	t.Helper()
+	defer store.Close()
+	credential, err := store.RegisterAccount("acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RegisterAccount("acct"); err == nil {
+		t.Fatal("duplicate account accepted")
+	}
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := priv.Public().(ed25519.PublicKey)
+	if err := store.PairDeviceWithCredential("acct", "device", pub, credential); err != nil {
+		t.Fatal(err)
+	}
+	_, other, _ := ed25519.GenerateKey(rand.Reader)
+	if err := store.PairDeviceWithCredential("acct", "device", other.Public().(ed25519.PublicKey), credential); err == nil {
+		t.Fatalf("device overwrite error = %v", err)
+	}
+	e, err := testClientEnvelope(priv, "acct", "device", "object", 1, coresync.InputMethod, []byte("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UploadEnvelope("acct", "device", "object", 1, e); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetEnvelope("acct", "object")
+	if err != nil || string(got.Ciphertext) != string(e.Ciphertext) {
+		t.Fatalf("envelope = %v, %v", got, err)
+	}
+	if err := store.UploadEnvelope("acct", "device", "object", 1, e); err == nil {
+		t.Fatal("stale upload accepted")
+	}
+
+	d := coresync.DeleteInstruction{AccountID: "acct", ObjectID: "object", DeviceID: "device", Version: 2, ProtocolVersion: coresync.ProtocolVersion}.Sign(priv)
+	tombstone, err := store.SubmitDelete(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !store.VerifyTombstone(tombstone) {
+		t.Fatal("stored tombstone did not verify")
+	}
+	e3, err := testClientEnvelope(priv, "acct", "device", "object", 3, coresync.InputMethod, []byte("resurrection"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UploadEnvelope("acct", "device", "object", 3, e3); err == nil {
+		t.Fatal("resurrection accepted")
+	}
+	batch, err := store.SyncTombstones("acct", "device", ^uint64(0))
+	if err != nil || len(batch) != 1 {
+		t.Fatalf("sync batch = %+v, %v", batch, err)
+	}
+	issued, ok, err := store.IssuedBatch("acct", "device")
+	if err != nil || !ok || issued.From != tombstone.Sequence || issued.To != tombstone.Sequence {
+		t.Fatalf("issued batch = %+v, %v, %v", issued, ok, err)
+	}
+	if err := store.ConfirmTombstones("acct", "device", tombstone.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	watermark, err := store.Watermark("acct", "device")
+	if err != nil || watermark != tombstone.Sequence {
+		t.Fatalf("watermark = %d, %v", watermark, err)
+	}
+	if err := store.ConfirmTombstones("acct", "device", tombstone.Sequence); err == nil {
+		t.Fatal("repeated confirmation accepted")
+	}
+	if events := store.AuditForAccount("acct"); len(events) != 1 || events[0].ObjectDigest == "" {
+		t.Fatalf("audit = %+v", events)
+	}
+	if events := store.AuditForAccount("other"); len(events) != 0 {
+		t.Fatal("cross-account audit leaked")
+	}
+}
+
+func TestSQLiteStoreRestartRestoresProtocolState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sync", "state.db")
+	store, err := NewSQLiteSyncStore(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := store.RegisterAccount("acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	if err := store.PairDeviceWithCredential("acct", "device", priv.Public().(ed25519.PublicKey), credential); err != nil {
+		t.Fatal(err)
+	}
+	live, err := testClientEnvelope(priv, "acct", "device", "live", 7, coresync.InputMethod, []byte("opaque"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UploadEnvelope("acct", "device", "live", 7, live); err != nil {
+		t.Fatal(err)
+	}
+	d := coresync.DeleteInstruction{AccountID: "acct", ObjectID: "gone", DeviceID: "device", Version: 4, ProtocolVersion: coresync.ProtocolVersion}.Sign(priv)
+	tombstone, err := store.SubmitDelete(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SyncTombstones("acct", "device", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := NewSQLiteSyncStore(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.LoginWithCredential("acct", credential); err != nil {
+		t.Fatalf("credential not restored: %v", err)
+	}
+	if version, err := reopened.ObjectVersion("acct", "live"); err != nil || version != 7 {
+		t.Fatalf("live object version after restart = %d, %v", version, err)
+	}
+	if _, err := reopened.GetEnvelope("acct", "live"); err != nil {
+		t.Fatalf("live envelope after restart: %v", err)
+	}
+	if !reopened.VerifyTombstone(tombstone) {
+		t.Fatal("tombstone not restored")
+	}
+	batch, ok, err := reopened.IssuedBatch("acct", "device")
+	if err != nil || !ok || batch.To != tombstone.Sequence {
+		t.Fatalf("issued batch after restart = %+v, %v, %v", batch, ok, err)
+	}
+	if err := reopened.ConfirmTombstones("acct", "device", tombstone.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	watermark, err := reopened.Watermark("acct", "device")
+	if err != nil || watermark != tombstone.Sequence {
+		t.Fatalf("restored watermark = %d, %v", watermark, err)
+	}
+}
+
+func TestSQLiteStoreRejectsPlaintextAndIsolatesAccounts(t *testing.T) {
+	store, err := NewSQLiteSyncStore(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	credA, _ := store.RegisterAccount("a")
+	credB, _ := store.RegisterAccount("b")
+	_, privA, _ := ed25519.GenerateKey(rand.Reader)
+	_, privB, _ := ed25519.GenerateKey(rand.Reader)
+	if err := store.PairDeviceWithCredential("a", "device", privA.Public().(ed25519.PublicKey), credA); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PairDeviceWithCredential("b", "device", privB.Public().(ed25519.PublicKey), credB); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UploadEnvelope("a", "device", "object", 1, coresync.EncryptedEnvelope{}); err == nil {
+		t.Fatal("invalid/plaintext envelope accepted")
+	}
+	if _, err := store.GetEnvelope("b", "object"); err == nil {
+		t.Fatal("cross-account object leaked")
+	}
+	if events := store.AuditForAccount("b"); len(events) != 0 {
+		t.Fatal("cross-account audit leaked")
+	}
+}
+
+func TestSQLiteDeletePurgesHigherVersionObjectPermanently(t *testing.T) {
+	store, err := NewSQLiteSyncStore(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	credential, err := store.RegisterAccount("acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	if err := store.PairDeviceWithCredential("acct", "device", priv.Public().(ed25519.PublicKey), credential); err != nil {
+		t.Fatal(err)
+	}
+	e, err := testClientEnvelope(priv, "acct", "device", "object", 9, coresync.InputMethod, []byte("live"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UploadEnvelope("acct", "device", "object", 9, e); err != nil {
+		t.Fatal(err)
+	}
+	d := coresync.DeleteInstruction{AccountID: "acct", ObjectID: "object", DeviceID: "device", Version: 2, ProtocolVersion: coresync.ProtocolVersion}.Sign(priv)
+	if _, err := store.SubmitDelete(d); err != nil {
+		t.Fatalf("delete below live object version rejected: %v", err)
+	}
+	if _, err := store.GetEnvelope("acct", "object"); !errors.Is(err, coresync.ErrStoreObjectMissing) {
+		t.Fatalf("object after delete = %v, want missing", err)
+	}
+	resurrection, err := testClientEnvelope(priv, "acct", "device", "object", 10, coresync.InputMethod, []byte("resurrection"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UploadEnvelope("acct", "device", "object", 10, resurrection); err == nil {
+		t.Fatal("resurrection accepted after permanent deletion")
+	}
+}
+
+func TestSQLiteCrossConnectionDeleteIsAtomic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sync", "state.db")
+	one, err := NewSQLiteSyncStore(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer one.Close()
+	credential, err := one.RegisterAccount("acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	if err := one.PairDeviceWithCredential("acct", "device", priv.Public().(ed25519.PublicKey), credential); err != nil {
+		t.Fatal(err)
+	}
+	two, err := NewSQLiteSyncStore(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer two.Close()
+	d := coresync.DeleteInstruction{AccountID: "acct", ObjectID: "same", DeviceID: "device", Version: 1, ProtocolVersion: coresync.ProtocolVersion}.Sign(priv)
+	results := make(chan error, 2)
+	go func() { _, e := one.SubmitDelete(d); results <- e }()
+	go func() { _, e := two.SubmitDelete(d); results <- e }()
+	var successes, stale int
+	for range 2 {
+		e := <-results
+		if e == nil {
+			successes++
+		} else if errors.Is(e, coresync.ErrStoreVersion) {
+			stale++
+		} else {
+			t.Fatalf("cross-connection delete error = %v", e)
+		}
+	}
+	if successes != 1 || stale != 1 {
+		t.Fatalf("delete results: successes=%d stale=%d", successes, stale)
+	}
+	if got, err := one.LatestSequence("acct"); err != nil || got != 1 {
+		t.Fatalf("sequence = %d, %v", got, err)
+	}
+	if got := one.AuditForAccount("acct"); len(got) != 1 {
+		t.Fatalf("audit rows = %d, want one", len(got))
+	}
+}
+
+func TestSQLiteExternalDBCloseDoesNotCloseOwner(t *testing.T) {
+	db, err := sqlite.Open(context.Background(), ":memory:", sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewSQLiteSyncStoreFromDB(db)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Execute(context.Background(), `SELECT 1`); err != nil {
+		t.Fatalf("external DB closed by store: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLiteFileModesProtectNewDatabaseAndSidecars(t *testing.T) {
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(parent, "new", "private")
+	path := filepath.Join(dir, "state.db")
+	store, err := NewSQLiteSyncStore(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := store.RegisterAccount("acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	if err := store.PairDeviceWithCredential("acct", "device", priv.Public().(ed25519.PublicKey), credential); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []string{dir, path} {
+		info, err := os.Stat(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o700 && file == dir {
+			t.Fatalf("directory mode = %o", got)
+		}
+		if got := info.Mode().Perm(); got != 0o600 && file == path {
+			t.Fatalf("database mode = %o", got)
+		}
+	}
+	info, err := os.Stat(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("existing parent mode changed to %o", got)
+	}
+}
+
+func TestSQLiteStoreConcurrentAccess(t *testing.T) {
+	store, err := NewSQLiteSyncStore(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	credential, err := store.RegisterAccount("acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	if err := store.PairDeviceWithCredential("acct", "device", priv.Public().(ed25519.PublicKey), credential); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errCh := make(chan error, 20)
+	for i := range 20 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if _, err := store.Watermark("acct", "device"); err != nil {
+				errCh <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
+	}
+}
+
+func testClientEnvelope(priv ed25519.PrivateKey, account, device, object string, version uint64, class coresync.DataClass, payload []byte) (coresync.EncryptedEnvelope, error) {
+	return coresync.NewEncryptedEnvelope(priv, account, device, object, version, class, payload)
+}
