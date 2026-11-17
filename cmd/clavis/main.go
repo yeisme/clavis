@@ -1,0 +1,265 @@
+// Command clavis provides a non-interactive view of the declarative Clavis
+// configuration. It deliberately only validates and plans workflows: no
+// provider, plugin, MCP, or external command is executed by this command.
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/yeisme/clavis/pkg/core/automation"
+	"github.com/yeisme/clavis/pkg/core/config"
+)
+
+// Run executes the command using args and streams output to stdout/stderr.
+// It is exported so callers and tests can use the CLI without starting a
+// process. The command grammar is:
+//
+//	clavis action list [--config-dir DIR] [--json]
+//	clavis workflow list [--config-dir DIR] [--json]
+//	clavis workflow plan WORKFLOW [--config-dir DIR] [--json]
+func Run(args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return usageError(stderr)
+	}
+	configDir, jsonOutput, commandArgs, err := parseGlobalFlags(args)
+	if err != nil {
+		return err
+	}
+	if len(commandArgs) < 2 {
+		return usageError(stderr)
+	}
+
+	store := config.NewConfigStore(configDir)
+	cfg, err := store.LoadOrInitialize()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	switch commandArgs[0] {
+	case "action":
+		if commandArgs[1] != "list" || len(commandArgs) != 2 {
+			return usageError(stderr)
+		}
+		return writeActions(stdout, cfg, jsonOutput)
+	case "workflow":
+		switch commandArgs[1] {
+		case "list":
+			if len(commandArgs) != 2 {
+				return usageError(stderr)
+			}
+			return writeWorkflows(stdout, cfg, jsonOutput)
+		case "plan":
+			if len(commandArgs) != 3 || strings.TrimSpace(commandArgs[2]) == "" {
+				return usageError(stderr)
+			}
+			return writeWorkflowPlan(stdout, cfg, commandArgs[2], jsonOutput)
+		default:
+			return usageError(stderr)
+		}
+	default:
+		return usageError(stderr)
+	}
+}
+
+func main() {
+	if err := Run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+}
+
+func parseGlobalFlags(args []string) (configDir string, jsonOutput bool, commandArgs []string, err error) {
+	configDir = defaultConfigDir()
+	// Keep parsing intentionally small and deterministic. Flags are accepted
+	// before or after the command, which is convenient for shell scripts.
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--json":
+			jsonOutput = true
+		case arg == "--config-dir":
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return "", false, nil, errors.New("--config-dir requires a directory")
+			}
+			configDir = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--config-dir="):
+			configDir = strings.TrimPrefix(arg, "--config-dir=")
+			if strings.TrimSpace(configDir) == "" {
+				return "", false, nil, errors.New("--config-dir requires a directory")
+			}
+		case arg == "-h" || arg == "--help":
+			return "", false, nil, usageError(nil)
+		default:
+			commandArgs = append(commandArgs, arg)
+		}
+	}
+	return configDir, jsonOutput, commandArgs, nil
+}
+
+func defaultConfigDir() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".config", "clavis")
+	}
+	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+		return filepath.Join(dir, "clavis")
+	}
+	return ".clavis"
+}
+
+func usageError(w io.Writer) error {
+	err := errors.New("usage: clavis [--config-dir DIR] [--json] action list | workflow list | workflow plan WORKFLOW")
+	if w != nil {
+		fmt.Fprintln(w, err)
+	}
+	return err
+}
+
+// actionRecord is a deliberately stable, command-oriented projection of the
+// provider-neutral automation descriptor.
+type actionRecord struct {
+	ID          string `json:"id"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Provider    string `json:"provider"`
+	Kind        string `json:"kind"`
+	Enabled     bool   `json:"enabled"`
+}
+
+func writeActions(w io.Writer, cfg config.ClavisConfig, jsonOutput bool) error {
+	actions := collectActions(cfg)
+	if jsonOutput {
+		return encodeJSON(w, actions)
+	}
+	for _, action := range actions {
+		if _, err := fmt.Fprintf(w, "%s\t%s\n", action.ID, action.Provider); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func collectActions(cfg config.ClavisConfig) []actionRecord {
+	registry := automation.NewRegistry()
+	var visit func([]config.LeaderNode, string)
+	visit = func(nodes []config.LeaderNode, prefix string) {
+		for _, node := range nodes {
+			id := prefix + node.Key
+			if node.Action.Type == config.ActionGroup {
+				visit(node.Action.Children, id+".")
+				continue
+			}
+			_ = registry.RegisterBuiltin(id, node.Action)
+		}
+	}
+	visit(cfg.Leader.Nodes, "leader.")
+	for _, script := range cfg.Components.Scripts {
+		_ = registry.RegisterScript(script)
+	}
+	out := make([]actionRecord, 0, len(registry.List()))
+	for _, descriptor := range registry.List() {
+		out = append(out, actionRecord{
+			ID: descriptor.ID, Name: descriptor.Name, Description: descriptor.Description,
+			Provider: descriptor.Provider, Kind: string(descriptor.Kind), Enabled: descriptor.Script == nil || descriptor.Script.Enabled,
+		})
+	}
+	return out
+}
+
+func writeWorkflows(w io.Writer, cfg config.ClavisConfig, jsonOutput bool) error {
+	workflows := append([]config.Workflow(nil), cfg.Workflows.Workflows...)
+	sort.Slice(workflows, func(i, j int) bool { return workflows[i].ID < workflows[j].ID })
+	if jsonOutput {
+		return encodeJSON(w, workflows)
+	}
+	for _, workflow := range workflows {
+		name := workflow.Name
+		if name == "" {
+			name = workflow.ID
+		}
+		if _, err := fmt.Fprintf(w, "%s\t%s\n", workflow.ID, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeWorkflowPlan(w io.Writer, cfg config.ClavisConfig, id string, jsonOutput bool) error {
+	var workflow *config.Workflow
+	for i := range cfg.Workflows.Workflows {
+		if cfg.Workflows.Workflows[i].ID == id {
+			workflow = &cfg.Workflows.Workflows[i]
+			break
+		}
+	}
+	if workflow == nil {
+		return fmt.Errorf("workflow %q not found", id)
+	}
+	model := toAutomationWorkflow(*workflow)
+	registry := actionRegistry(cfg)
+	plan, err := automation.BuildExecutionPlanWithRegistry(model, registry)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return encodeJSON(w, plan)
+	}
+	for _, step := range plan {
+		if _, err := fmt.Fprintln(w, step.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func actionRegistry(cfg config.ClavisConfig) automation.MapActionRegistry {
+	registry := make(automation.MapActionRegistry)
+	for _, action := range collectActions(cfg) {
+		registry[action.ID] = automation.ActionDescriptor{ID: action.ID, Name: action.Name, Description: action.Description, Provider: automation.ProviderType(action.Provider), Risk: automation.RiskLow}
+	}
+	// Workflow files historically name a few provider-neutral built-ins
+	// directly (for example "prompt" and "copy"). Register those names for
+	// planning without attaching any implementation to them.
+	for _, id := range []string{"prompt", "copy", "clipboard", "text", "ai_rewrite"} {
+		if _, ok := registry[id]; !ok {
+			registry[id] = automation.ActionDescriptor{ID: id, Provider: automation.ProviderBuiltin, Risk: automation.RiskLow}
+		}
+	}
+	return registry
+}
+
+func toAutomationWorkflow(workflow config.Workflow) automation.WorkflowDefinition {
+	result := automation.WorkflowDefinition{ID: workflow.ID, Name: workflow.Name, Description: workflow.Description}
+	for _, input := range workflow.Inputs {
+		result.Inputs = append(result.Inputs, automation.WorkflowInput{ID: input.ID, Name: input.Name, Type: input.Type, Required: input.Required, Default: input.Default})
+	}
+	for _, step := range workflow.Steps {
+		failure := automation.FailureStop
+		if step.Failure == config.WorkflowFailureContinue {
+			failure = automation.FailureContinue
+		}
+		output := automation.OutputDiscard
+		switch step.Output {
+		case config.WorkflowOutputReplace, config.WorkflowOutputInsert:
+			output = automation.OutputReplace
+		case config.WorkflowOutputNotify:
+			output = automation.OutputNotify
+		case config.WorkflowOutputClipboard:
+			output = automation.OutputCapture
+		}
+		result.Steps = append(result.Steps, automation.WorkflowStep{ID: step.ID, ActionID: step.Action, Input: map[string]any{"input": step.Input}, DependsOn: append([]string(nil), step.DependsOn...), FailureMode: failure, OutputMode: output})
+	}
+	return result
+}
+
+func encodeJSON(w io.Writer, value any) error {
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(value)
+}
