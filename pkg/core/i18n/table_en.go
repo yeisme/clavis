@@ -215,6 +215,7 @@ var enTable = map[string]string{
 
 	// ---- HUD notices (uiapp/controller.go) ----
 	"hud.copied":                        "Copied to clipboard",
+	"hud.pinned_written":                "Pinned and written",
 	"hud.no_active_app":                 "No active app detected",
 	"clipboard.media.image":             "Image",
 	"clipboard.media.image_dims":        "Image %d×%d",

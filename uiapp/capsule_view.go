@@ -636,7 +636,13 @@ func (a *AppController) renderOmniboxView(
 							a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
 						} else if row.RowClicked() {
 							a.SelectIndex(i)
-							a.uiState.searchHandle.RequestFocus(c)
+							// Clipboard rows have a single-click quick activation; all other
+							// rows retain the existing click-to-select behaviour.
+							if item.Kind == engine.ItemClipboardEntry {
+								a.Dispatch(engine.Event{Type: engine.EventActivateClipboardItem})
+							} else {
+								a.uiState.searchHandle.RequestFocus(c)
+							}
 						}
 						return row
 					}).FillWidth().Grow(1)

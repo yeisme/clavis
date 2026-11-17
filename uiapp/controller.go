@@ -794,6 +794,11 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 	case engine.EffectPresentCapsule:
 		c.handlePresentCapsule(state.Phase)
 
+	case engine.EffectActivateClipboardItem:
+		if eff.ClipboardActivation != nil {
+			c.activateClipboardItem(*eff.ClipboardActivation)
+		}
+
 	case engine.EffectClose:
 		c.stopHUDTimer()
 		c.maybeRestoreLockedIME()
@@ -1601,14 +1606,26 @@ func (c *AppController) runClipboardWorker() {
 	}
 }
 
-func (c *AppController) enqueueClipboardTask(fn func(ctx context.Context) error) {
+func (c *AppController) enqueueClipboardTask(fn func(ctx context.Context) error) uint64 {
+	return c.enqueueClipboardTaskWithGeneration(func(ctx context.Context, _ uint64) error {
+		return fn(ctx)
+	})
+}
+
+// enqueueClipboardTaskWithGeneration gives an operation the exact queue token
+// assigned to it. This is important for multi-step clipboard effects: reading
+// clipGen from inside a worker would accidentally accept a newer queued action.
+func (c *AppController) enqueueClipboardTaskWithGeneration(fn func(ctx context.Context, generation uint64) error) uint64 {
 	gen := c.clipGen.Add(1)
 	c.clipMu.Lock()
 	if !c.clipClosed {
-		c.clipQueue = append(c.clipQueue, clipTask{gen: gen, syncAfter: true, fn: fn})
+		c.clipQueue = append(c.clipQueue, clipTask{gen: gen, syncAfter: true, fn: func(ctx context.Context) error {
+			return fn(ctx, gen)
+		}})
 		c.clipCond.Signal()
 	}
 	c.clipMu.Unlock()
+	return gen
 }
 
 func (c *AppController) enqueueClipboardSearchTask(fn func(ctx context.Context) error) {
@@ -1671,12 +1688,21 @@ func (c *AppController) syncClipboardEntries(ctx context.Context) {
 func clipboardItemsToEntries(items []clipboard.ClipboardItem) []engine.OmniboxClipboardEntry {
 	entries := make([]engine.OmniboxClipboardEntry, len(items))
 	for i, it := range items {
+		media := engineClipboardMedia(it.Media)
+		preview := engine.ClipboardEntryPreview{
+			Summary:   it.Content,
+			Text:      it.Content,
+			ThumbPath: media.ThumbPath,
+			Decodable: !media.IsMedia() || media.ThumbPath != "" || media.Kind != "image",
+		}
+		if media.IsMedia() {
+			preview.Summary = engine.ClipboardMediaTitle(media, it.Content)
+			preview.Text = ""
+		}
 		entries[i] = engine.OmniboxClipboardEntry{
-			ID:            it.ID,
-			Content:       it.Content,
-			SourceAppName: it.SourceAppName,
-			IsPinned:      it.IsPinned,
-			Media:         engineClipboardMedia(it.Media),
+			ID: it.ID, Content: it.Content, SourceAppName: it.SourceAppName, IsPinned: it.IsPinned,
+			Media: media, Preview: preview,
+			Actions: engine.ClipboardEntryActions{CanPin: !it.IsPinned, CanUnpin: it.IsPinned, CanCopy: true, CanPaste: true, CanDelete: true},
 		}
 	}
 	return entries
@@ -1871,16 +1897,64 @@ func (c *AppController) injectWorkflowTextAsync(text string, deleteCount, cursor
 }
 
 func (c *AppController) writeClipboardText(text string) {
+func (c *AppController) writeClipboardText(text string) {
+func (c *AppController) writeClipboardText(text string) error {
 	c.mu.Lock()
 	writer := c.ClipboardWriter
 	c.mu.Unlock()
 	if writer != nil {
 		writer(text)
-		return
+		return nil
 	}
 	if mygo.App.IsReady() {
 		mygo.Clipboard.WriteText(text)
+		return nil
 	}
+	return errors.New("app not ready")
+}
+
+// activateClipboardItem executes the single-click domain contract. Pinning is
+// serialized and must succeed before write-back. A write failure deliberately
+// leaves the pin intact, while preview decoding is best-effort and falls back
+// to the row's type icon/text summary. Clipboard generation is captured at
+// dispatch time and checked before presenting a late result.
+func (c *AppController) activateClipboardItem(op engine.ClipboardActivation) {
+	if c.ClipboardStore == nil || strings.TrimSpace(op.ID) == "" {
+		return
+	}
+	pin := func(ctx context.Context) error {
+		if !op.PinBeforeWrite {
+			return nil
+		}
+		return c.ClipboardStore.Pin(ctx, op.ID, true)
+	}
+	write := func() error {
+		if op.Media != nil && op.Media.IsMedia() {
+			return writeClipboardMedia(*op.Media)
+		}
+		return c.writeClipboardText(op.Content)
+	}
+	c.enqueueClipboardTaskWithGeneration(func(ctx context.Context, taskGeneration uint64) error {
+		if err := pin(ctx); err != nil {
+			c.ShowToastOrHUD(fmt.Sprintf("clipboard pin failed: %v", err))
+			return err
+		}
+		if err := write(); err != nil {
+			// Pin succeeded and is intentionally not rolled back.
+			c.ShowToastOrHUD(fmt.Sprintf("clipboard write failed: %v", err))
+			return err
+		}
+		if !op.PresentPreview {
+			return nil
+		}
+		// Do not present a late result after a newer clipboard mutation or
+		// activation has superseded this operation.
+		if c.clipGen.Load() != taskGeneration {
+			return nil
+		}
+		c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.T("hud.pinned_written")})
+		return nil
+	})
 }
 
 // ExecuteWorkflow validates and plans a configured workflow, reports the plan via

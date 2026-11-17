@@ -216,6 +216,7 @@ var zhTable = map[string]string{
 
 	// ---- HUD 提示（uiapp/controller.go）----
 	"hud.copied":                        "已复制到剪贴板",
+	"hud.pinned_written":                "已置顶并已写入",
 	"hud.no_active_app":                 "未检测到活动应用",
 	"clipboard.media.image":             "图片",
 	"clipboard.media.image_dims":        "图片 %d×%d",

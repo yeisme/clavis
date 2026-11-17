@@ -26,14 +26,39 @@ type CapsuleContext struct {
 	ClipboardPreview string `json:"clipboardPreview,omitempty"`
 }
 
+// ClipboardEntryPreview is the safe, eagerly mappable part of an entry used by
+// list rows and the preview pane. It deliberately contains no system clipboard
+// handle: the UI can render this data without reading the pasteboard again.
+type ClipboardEntryPreview struct {
+	Summary   string `json:"summary,omitempty"`
+	Text      string `json:"text,omitempty"`
+	ThumbPath string `json:"thumbPath,omitempty"`
+	Decodable bool   `json:"decodable"`
+}
+
+// ClipboardEntryActions is the capability state advertised to the UI. Keeping
+// this alongside the entry prevents action menus from guessing capabilities
+// from a partially decoded media payload.
+type ClipboardEntryActions struct {
+	CanPin    bool `json:"canPin"`
+	CanUnpin  bool `json:"canUnpin"`
+	CanCopy   bool `json:"canCopy"`
+	CanPaste  bool `json:"canPaste"`
+	CanDelete bool `json:"canDelete"`
+}
+
 // OmniboxClipboardEntry represents a clipboard item shown in the Clipboard tab.
+// It is the complete entry mapping contract: identity, pin state, media type,
+// preview data, and available actions are all explicit.
 type OmniboxClipboardEntry struct {
 	ID            string `json:"id"`
 	Content       string `json:"content"`
 	SourceAppName string `json:"sourceAppName,omitempty"`
 	IsPinned      bool   `json:"isPinned"`
 	// Media is set for image/file/video entries (empty Kind = text).
-	Media ClipboardMedia `json:"media,omitzero"`
+	Media   ClipboardMedia        `json:"media,omitzero"`
+	Preview ClipboardEntryPreview `json:"preview,omitzero"`
+	Actions ClipboardEntryActions `json:"actions"`
 }
 
 // ClipboardMedia mirrors clipboard.Media for the engine/UI layer (engine must not import storage).
@@ -188,6 +213,7 @@ func NewInitialState() State {
 type EventType string
 
 const (
+	EventActivateClipboardItem          EventType = "activate_clipboard_item"
 	EventOpenLeader                     EventType = "open_leader"
 	EventOpenOmnibox                    EventType = "open_omnibox"
 	EventUpdateContext                  EventType = "update_context"
@@ -245,40 +271,51 @@ type Event struct {
 type EffectType string
 
 const (
-	EffectPresentCapsule     EffectType = "present_capsule"
-	EffectClose              EffectType = "close"
-	EffectRunAction          EffectType = "run_action"
-	EffectRunWorkflow        EffectType = "run_workflow"
-	EffectStartAI            EffectType = "start_ai"
-	EffectCancelAI           EffectType = "cancel_ai"
-	EffectApplyAIOutput      EffectType = "apply_ai_output"
-	EffectCopyText           EffectType = "copy_text"
-	EffectPasteClipboardItem EffectType = "paste_clipboard_item"
-	EffectPinClipboardItem   EffectType = "pin_clipboard_item"
-	EffectDeleteClipboard    EffectType = "delete_clipboard_item"
-	EffectBindAppIMERule     EffectType = "bind_app_ime_rule"
-	EffectOpenPromptComposer EffectType = "open_prompt_composer"
+	EffectPresentCapsule       EffectType = "present_capsule"
+	// EffectActivateClipboardItem is the domain-level single-click operation.
+	// Consumers execute its ordered contract: pin (when requested), write the
+	// system clipboard, then present the preview.
+	EffectActivateClipboardItem EffectType = "activate_clipboard_item"
+	EffectClose                 EffectType = "close"
+	EffectRunAction             EffectType = "run_action"
+	EffectRunWorkflow           EffectType = "run_workflow"
+	EffectStartAI               EffectType = "start_ai"
+	EffectCancelAI              EffectType = "cancel_ai"
+	EffectApplyAIOutput         EffectType = "apply_ai_output"
+	EffectCopyText              EffectType = "copy_text"
+	EffectPasteClipboardItem    EffectType = "paste_clipboard_item"
+	EffectPinClipboardItem      EffectType = "pin_clipboard_item"
+	EffectDeleteClipboard       EffectType = "delete_clipboard_item"
+	EffectBindAppIMERule        EffectType = "bind_app_ime_rule"
+	EffectOpenPromptComposer    EffectType = "open_prompt_composer"
 )
 
 // Effect describes a side effect that the host/coordinator should perform.
 type Effect struct {
-	Type             EffectType             `json:"type"`
-	Action           *config.LeaderAction   `json:"action,omitempty"`
-	WorkflowID       string                 `json:"workflowId,omitempty"`
-	Context          *CapsuleContext        `json:"context,omitempty"`
-	Mode             string                 `json:"mode,omitempty"`
-	Prompt           string                 `json:"prompt,omitempty"`
-	SourceText       string                 `json:"sourceText,omitempty"`
-	History          []ChatTurn             `json:"history,omitempty"`
-	ProfileID        string                 `json:"profileId,omitempty"`
-	Text             string                 `json:"text,omitempty"`
-	ClipboardID      string                 `json:"clipboardId,omitempty"`
-	ClipboardContent string                 `json:"clipboardContent,omitempty"`
-	ClipboardMedia   *ClipboardMedia        `json:"clipboardMedia,omitempty"`
-	IsPinned         bool                   `json:"isPinned,omitempty"`
-	IMEMode          config.IMEMode         `json:"imeMode,omitempty"`
-	PromptTemplate   *config.PromptTemplate `json:"promptTemplate,omitempty"`
-	OptimizerPreset  string                 `json:"optimizerPreset,omitempty"`
+	ClipboardActivation *ClipboardActivation `json:"clipboardActivation,omitempty"`
+}
+
+// ClipboardActivation is the portable effect contract for a single-click
+// clipboard activation. PinBeforeWrite is false for already-pinned entries;
+// those entries still get written and presented without another pin mutation.
+// ClipboardActivationStep names the ordered effects of a quick activation.
+type ClipboardActivationStep string
+
+const (
+	ClipboardStepPin     ClipboardActivationStep = "pin"
+	ClipboardStepWrite   ClipboardActivationStep = "write_system_clipboard"
+	ClipboardStepPreview ClipboardActivationStep = "present_preview"
+)
+
+type ClipboardActivation struct {
+	ID             string                    `json:"id"`
+	Content        string                    `json:"content,omitempty"`
+	Media          *ClipboardMedia           `json:"media,omitempty"`
+	Steps          []ClipboardActivationStep `json:"steps"`
+	PinBeforeWrite bool                      `json:"pinBeforeWrite"`
+	PresentPreview bool                      `json:"presentPreview"`
+	Generation     uint64                    `json:"generation,omitempty"`
+}
 }
 
 // StateMachine wraps State + ClavisConfig with a stateful Handle method.
@@ -570,6 +607,28 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 			next.SelectedIndex = state.SelectedIndex - 1
 		}
 		return next, nil
+
+	case EventActivateClipboardItem:
+		if state.Phase != PhaseOmnibox || state.SelectedIndex < 0 || state.SelectedIndex >= len(state.OmniboxItems) {
+			return next, nil
+		}
+		selected := state.OmniboxItems[state.SelectedIndex]
+		if selected.Kind != ItemClipboardEntry || strings.TrimSpace(selected.ClipboardID) == "" {
+			return next, nil
+		}
+		pinBeforeWrite := selected.KeyHint != KeyHintPinned
+		steps := []ClipboardActivationStep{ClipboardStepWrite, ClipboardStepPreview}
+		if pinBeforeWrite {
+			steps = append([]ClipboardActivationStep{ClipboardStepPin}, steps...)
+		}
+		return next, []Effect{{
+			Type: EffectActivateClipboardItem,
+			ClipboardActivation: &ClipboardActivation{
+				ID: selected.ClipboardID, Content: selected.ClipboardContent,
+				Media: selected.ClipboardMedia, Steps: steps,
+				PinBeforeWrite: pinBeforeWrite, PresentPreview: true,
+			},
+		}}
 
 	case EventConfirmSelection:
 		if state.Phase != PhaseOmnibox || state.SelectedIndex < 0 || state.SelectedIndex >= len(state.OmniboxItems) {
