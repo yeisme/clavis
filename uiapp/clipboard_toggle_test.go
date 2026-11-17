@@ -69,6 +69,29 @@ func TestClipboardShortcutI18nKeys(t *testing.T) {
 	}
 }
 
+func TestShortcutRecorderUsesRuntimeKeyNames(t *testing.T) {
+	cases := []struct {
+		key  ui.Key
+		want string
+	}{
+		{ui.KeyBackspace, "backspace"},
+		{ui.KeyDelete, "forwarddelete"},
+		{ui.KeyPageUp, "pageup"},
+		{ui.KeyPageDown, "pagedown"},
+		{ui.KeyF1, "f1"},
+		{ui.KeyF12, "f12"},
+		{ui.KeyMinus, "minus"},
+		{ui.KeySemicolon, "semicolon"},
+		{ui.KeySlash, "slash"},
+	}
+	for _, tc := range cases {
+		got, ok := shortcutFromKey(tc.key, ui.Cmd|ui.Shift)
+		if !ok || got != "command+shift+"+tc.want {
+			t.Errorf("shortcutFromKey(%v) = %q, %v; want command+shift+%s", tc.key, got, ok, tc.want)
+		}
+	}
+}
+
 func TestSettingsCenter_ClipboardShortcutRecorder(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
 	tt := ui.NewTester(ctrl.SettingsView, 960, 640)

@@ -287,15 +287,6 @@ func (r *triggerRouter) HandleKeyDownWithIME(
 		}}, false
 	}
 
-	// Cursor navigation, Enter, Escape, Tab, and ForwardDelete break contiguous typing -> reset snippet buffer.
-	if isSnippetContextResetKey(key) {
-		return []host.TriggerEvent{{
-			Kind:        host.TriggerSnippetReset,
-			Key:         key,
-			TimestampMs: nowMs,
-		}}, false
-	}
-
 	// During active IME preedit/composition, raw keystrokes belong to the IME candidate buffer rather than committed text.
 	if imeComposing {
 		return []host.TriggerEvent{{
@@ -305,11 +296,23 @@ func (r *triggerRouter) HandleKeyDownWithIME(
 		}}, false
 	}
 
+	// Backspace rewinds the snippet buffer; keep it ahead of the general
+	// context-reset check because NormalizeShortcutKey accepts delete as its
+	// compatibility alias.
 	if isBackspace {
 		return []host.TriggerEvent{{
 			Kind:        host.TriggerSnippetBack,
 			Key:         "backspace",
 			Modifiers:   append([]string(nil), modifiers...),
+			TimestampMs: nowMs,
+		}}, false
+	}
+
+	// Cursor navigation, Enter, Escape, Tab, and ForwardDelete break contiguous typing -> reset snippet buffer.
+	if isSnippetContextResetKey(key) {
+		return []host.TriggerEvent{{
+			Kind:        host.TriggerSnippetReset,
+			Key:         key,
 			TimestampMs: nowMs,
 		}}, false
 	}
@@ -332,7 +335,7 @@ func isSnippetContextResetKey(key string) bool {
 	case "left", "right", "up", "down",
 		"home", "end", "pageup", "pagedown",
 		"return", "escape", "tab",
-		"delete", "forwarddelete":
+		"backspace", "delete", "forwarddelete":
 		return true
 	default:
 		return false

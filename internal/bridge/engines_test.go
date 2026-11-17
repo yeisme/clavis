@@ -135,6 +135,19 @@ func TestHotkeyMatcher(t *testing.T) {
 		t.Fatal("expected control+option+p to match ctrl+alt+p")
 	}
 
+	// The settings recorder historically emitted delete for Backspace. Keep
+	// that persisted spelling compatible with the physical Backspace event,
+	// while preserving forwarddelete as a distinct key.
+	for _, raw := range []string{"command+delete", "command+backspace"} {
+		hk, err := ParseHotkey(raw)
+		if err != nil || hk.Key != "backspace" || !hk.Matches("delete", []string{"command"}) {
+			t.Fatalf("%s should match the Backspace/delete alias: %+v, %v", raw, hk, err)
+		}
+	}
+	if hk, err := ParseHotkey("command+forwarddelete"); err != nil || hk.Key != "forwarddelete" || hk.Matches("delete", []string{"command"}) {
+		t.Fatalf("forwarddelete must remain distinct: %+v, %v", hk, err)
+	}
+
 	for _, bad := range []string{"", "option+", "+space", "option+command", "option+a+b"} {
 		if _, err := ParseHotkey(bad); err == nil {
 			t.Fatalf("expected ParseHotkey(%q) to fail", bad)

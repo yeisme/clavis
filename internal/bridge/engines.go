@@ -432,8 +432,15 @@ func NormalizeShortcutKey(raw string) string {
 		return "slash"
 	case "backslash", `\`:
 		return "backslash"
-	case "tab", "backspace", "delete", "forwarddelete",
-		"left", "right", "up", "down", "home", "end", "pageup", "pagedown",
+	case "tab":
+		return "tab"
+	case "backspace", "delete":
+		// "delete" is the recorder/runtime alias for the physical
+		// backspace key. Forward delete remains distinct.
+		return "backspace"
+	case "forwarddelete":
+		return "forwarddelete"
+	case "left", "right", "up", "down", "home", "end", "pageup", "pagedown",
 		"f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12":
 		return s
 	}
