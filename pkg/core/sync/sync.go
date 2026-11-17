@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -225,7 +224,26 @@ type EncryptedEnvelope struct {
 }
 
 func (e EncryptedEnvelope) aad() []byte {
-	return []byte(fmt.Sprintf("%s:%d:%s:%s:%s:%d:%s", envelopeDomain, e.ProtocolVersion, e.AccountID, e.DeviceID, e.ObjectID, e.Version, e.Class))
+	// Encode variable-length fields with their lengths rather than separators.
+	// This makes the representation unambiguous even when an identifier contains
+	// a colon (or any other delimiter-looking byte).
+	b := make([]byte, 0, len(envelopeDomain)+len(e.AccountID)+len(e.DeviceID)+len(e.ObjectID)+len(e.Class)+32)
+	addString := func(value string) {
+		b = binary.AppendUvarint(b, uint64(len(value)))
+		b = append(b, value...)
+	}
+	addString(envelopeDomain)
+	var version [2]byte
+	binary.BigEndian.PutUint16(version[:], e.ProtocolVersion)
+	b = append(b, version[:]...)
+	addString(e.AccountID)
+	addString(e.DeviceID)
+	addString(e.ObjectID)
+	var objectVersion [8]byte
+	binary.BigEndian.PutUint64(objectVersion[:], e.Version)
+	b = append(b, objectVersion[:]...)
+	addString(string(e.Class))
+	return b
 }
 func validClass(c DataClass) bool {
 	switch c {
@@ -340,6 +358,11 @@ func artifactContains(a LocalArtifact, ids map[string]struct{}) bool {
 }
 
 // Server stores only encrypted payloads and deletion metadata.
+type tombstoneBatch struct {
+	from uint64
+	to   uint64
+}
+
 type Server struct {
 	mu               sync.Mutex
 	accounts         map[string]map[string]ed25519.PublicKey
@@ -349,13 +372,14 @@ type Server struct {
 	objects          map[string]map[string][]byte
 	versions         map[string]map[string]uint64
 	watermarks       map[string]map[string]uint64
-	pending          map[string]map[string]uint64
+	issued           map[string]map[string]tombstoneBatch
+	tombstoneLog     map[string]map[uint64]Tombstone
 	sequence         uint64
 	audit            []AuditEvent
 }
 
 func NewServer() *Server {
-	return &Server{accounts: map[string]map[string]ed25519.PublicKey{}, credentials: map[string][32]byte{}, accountSequences: map[string]uint64{}, tombstones: map[string]map[string]Tombstone{}, objects: map[string]map[string][]byte{}, versions: map[string]map[string]uint64{}, watermarks: map[string]map[string]uint64{}, pending: map[string]map[string]uint64{}}
+	return &Server{accounts: map[string]map[string]ed25519.PublicKey{}, credentials: map[string][32]byte{}, accountSequences: map[string]uint64{}, tombstones: map[string]map[string]Tombstone{}, tombstoneLog: map[string]map[uint64]Tombstone{}, objects: map[string]map[string][]byte{}, versions: map[string]map[string]uint64{}, watermarks: map[string]map[string]uint64{}, issued: map[string]map[string]tombstoneBatch{}}
 }
 func (s *Server) initAccountLocked(a string) {
 	if s.accounts[a] == nil {
@@ -373,8 +397,11 @@ func (s *Server) initAccountLocked(a string) {
 	if s.watermarks[a] == nil {
 		s.watermarks[a] = map[string]uint64{}
 	}
-	if s.pending[a] == nil {
-		s.pending[a] = map[string]uint64{}
+	if s.issued[a] == nil {
+		s.issued[a] = map[string]tombstoneBatch{}
+	}
+	if s.tombstoneLog[a] == nil {
+		s.tombstoneLog[a] = map[uint64]Tombstone{}
 	}
 }
 
@@ -468,14 +495,17 @@ func (s *Server) SubmitDelete(d DeleteInstruction) (Tombstone, error) {
 	s.accountSequences[d.AccountID]++
 	t := Tombstone{AccountID: d.AccountID, ObjectID: d.ObjectID, DeviceID: d.DeviceID, Version: d.Version, Sequence: s.accountSequences[d.AccountID], IssuedAt: d.IssuedAt, DeletedAt: time.Now().UTC(), ProtocolVersion: ProtocolVersion, Signature: append([]byte(nil), d.Signature...)}
 	s.tombstones[d.AccountID][d.ObjectID] = t
+	s.tombstoneLog[d.AccountID][t.Sequence] = t
 	delete(s.objects[d.AccountID], d.ObjectID)
 	digest := sha256.Sum256([]byte(d.ObjectID))
 	s.audit = append(s.audit, AuditEvent{AccountID: d.AccountID, ObjectDigest: hex.EncodeToString(digest[:]), DeviceID: d.DeviceID, At: t.DeletedAt, Action: "delete"})
 	return t, nil
 }
 
-// SyncTombstones ignores afterSequence. Only ConfirmTombstones advances the
-// server-side confirmation watermark, so a client cannot skip a tombstone.
+// SyncTombstones ignores afterSequence for compatibility with the original
+// API. The server uses the device's confirmed watermark as the authoritative
+// cursor and records exactly the contiguous batch it returned. Only that
+// recorded batch may subsequently be confirmed.
 func (s *Server) SyncTombstones(account, device string, after uint64) ([]Tombstone, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -483,15 +513,18 @@ func (s *Server) SyncTombstones(account, device string, after uint64) ([]Tombsto
 		return nil, errors.New("sync: device is not paired")
 	}
 	confirmed := s.watermarks[account][device]
-	out := []Tombstone{}
-	for _, t := range s.tombstones[account] {
-		if t.Sequence > confirmed {
-			out = append(out, t)
+	out := make([]Tombstone, 0)
+	for sequence := confirmed + 1; sequence <= s.accountSequences[account]; sequence++ {
+		t, ok := s.tombstoneLog[account][sequence]
+		if !ok {
+			return nil, errors.New("sync: tombstone sequence is not contiguous")
 		}
+		out = append(out, t)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Sequence < out[j].Sequence })
 	if len(out) > 0 {
-		s.pending[account][device] = out[len(out)-1].Sequence
+		s.issued[account][device] = tombstoneBatch{from: out[0].Sequence, to: out[len(out)-1].Sequence}
+	} else {
+		delete(s.issued[account], device)
 	}
 	return out, nil
 }
@@ -505,22 +538,22 @@ func (s *Server) ConfirmTombstones(account, device string, sequence uint64) erro
 	if sequence < confirmed {
 		return errors.New("sync: confirmation moved backwards")
 	}
-	pending := s.pending[account][device]
-	required := confirmed
-	for _, t := range s.tombstones[account] {
-		if t.Sequence > required {
-			required = t.Sequence
-		}
+	latest := s.accountSequences[account]
+	if sequence > latest {
+		return errors.New("sync: confirmation is ahead of server")
 	}
-	if required > confirmed {
-		if pending != required || sequence != required {
-			return errors.New("sync: tombstones are not fully confirmed")
+	if sequence == confirmed {
+		if _, pending := s.issued[account][device]; pending {
+			return errors.New("sync: tombstone batch is not confirmed")
 		}
-	} else if sequence > s.accountSequences[account] {
-		sequence = s.accountSequences[account]
+		return nil
+	}
+	batch, ok := s.issued[account][device]
+	if !ok || batch.from != confirmed+1 || batch.to != sequence || batch.to > latest {
+		return errors.New("sync: confirmation does not match issued tombstone batch")
 	}
 	s.watermarks[account][device] = sequence
-	delete(s.pending[account], device)
+	delete(s.issued[account], device)
 	return nil
 }
 func (s *Server) VerifyTombstone(t Tombstone) bool {

@@ -274,6 +274,26 @@ func TestCursorCannotSkipPendingTombstone(t *testing.T) {
 	}
 }
 
+func TestConfirmRequiresIssuedTombstoneBatch(t *testing.T) {
+	s, a, b := setupClients(t)
+	if err := a.Delete("object"); err != nil {
+		t.Fatal(err)
+	}
+	latest := s.LatestSequence()
+	if err := s.ConfirmTombstones("acct", "b", latest); err == nil {
+		t.Fatal("confirmation without SyncTombstones succeeded")
+	}
+	if err := b.Upload("new", 1, []byte("new")); err == nil {
+		t.Fatal("upload succeeded after forged confirmation")
+	}
+	if _, _, err := b.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Upload("new", 1, []byte("new")); err != nil {
+		t.Fatalf("upload after normal tombstone sync failed: %v", err)
+	}
+}
+
 func TestPairCannotOverwriteKeyAndCredentialRequired(t *testing.T) {
 	s := NewServer()
 	if err := s.Login("acct"); err != nil {
@@ -289,6 +309,22 @@ func TestPairCannotOverwriteKeyAndCredentialRequired(t *testing.T) {
 	}
 	if err := s.PairDeviceWithCredential("acct", "other", other.Public().(ed25519.PublicKey), []byte("wrong")); err == nil {
 		t.Fatal("invalid credential paired device")
+	}
+}
+
+func TestEnvelopeAADUsesLengthPrefixedFields(t *testing.T) {
+	base := EncryptedEnvelope{ProtocolVersion: ProtocolVersion, AccountID: "acct", DeviceID: "device", ObjectID: "object", Version: 1, Class: InputMethod}
+	if got, want := string(base.aad()), string(base.aad()); got != want {
+		t.Fatalf("AAD is not stable: %q != %q", got, want)
+	}
+	ambiguous := base
+	ambiguous.AccountID = "acct:device"
+	ambiguous.DeviceID = "object"
+	other := base
+	other.AccountID = "acct"
+	other.DeviceID = "device:object"
+	if string(ambiguous.aad()) == string(other.aad()) {
+		t.Fatal("AAD aliases fields containing a colon")
 	}
 }
 
