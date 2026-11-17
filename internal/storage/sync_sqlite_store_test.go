@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -447,6 +448,44 @@ func TestSQLiteHistoricalSameObjectTombstonesAcrossRestart(t *testing.T) {
 	}
 	if watermark, err := store.Watermark("acct", "device"); err != nil || watermark != secondTombstone.Sequence {
 		t.Fatalf("final watermark = %d, %v", watermark, err)
+	}
+}
+
+func TestDatabasePathLockRecoversStaleOwnerMetadata(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db")
+	lockPath := path + ".clavis-lock"
+	if err := os.Mkdir(lockPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// This models SIGKILL: metadata remains, but no descriptor owns the OS lock.
+	if err := os.WriteFile(filepath.Join(lockPath, "owner"), []byte(`{"pid":999999,"nonce":"old","started_at_unix_ns":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireDatabasePathLock(path)
+	if err != nil {
+		t.Fatalf("stale lock was not recovered: %v", err)
+	}
+	if err := releaseDatabasePathLock(lock); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("lock directory remains after release: %v", err)
+	}
+}
+
+func TestDatabasePathLockRejectsActiveOwner(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db")
+	first, err := acquireDatabasePathLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = releaseDatabasePathLock(first) }()
+	// Bypass the same-process registry to model a second process. The kernel
+	// lock, rather than PID/metadata, is authoritative for liveness.
+	if _, err := acquireDatabaseOSLock(first.ownerPath); !errors.Is(err, errDatabaseLockBusy) && !strings.Contains(err.Error(), "locked") {
+		t.Fatalf("active lock was not rejected: %v", err)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -60,10 +61,20 @@ var databaseOpenMu stdsync.Mutex
 var pathLocks = make(map[string]*databasePathLock)
 
 type databasePathLock struct {
-	key  string
-	path string
-	info os.FileInfo
-	refs int
+	key       string
+	path      string
+	info      os.FileInfo
+	osLock    *databaseOSLock
+	nonce     string
+	ownerPath string
+	ownerInfo os.FileInfo
+	refs      int
+}
+
+type databaseLockMetadata struct {
+	PID             int    `json:"pid"`
+	Nonce           string `json:"nonce"`
+	StartedAtUnixNS int64  `json:"started_at_unix_ns"`
 }
 
 func acquireDatabasePathLock(path string) (*databasePathLock, error) {
@@ -75,23 +86,95 @@ func acquireDatabasePathLock(path string) (*databasePathLock, error) {
 	}
 	lockPath := path + ".clavis-lock"
 	if err := os.Mkdir(lockPath, 0o700); err != nil {
-		if os.IsExist(err) {
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("create database lock %s: %w", lockPath, err)
+		}
+		// The directory is deliberately not removed based on age or a PID
+		// guess. Its owner file is only advisory; the OS lock below is the
+		// authority. A crashed owner releases that lock, allowing us to reuse
+		// the existing directory without ever taking an active owner's lock.
+		if err := validateDatabaseLockDirectory(lockPath); err != nil {
+			return nil, fmt.Errorf("inspect database lock %s: %w", lockPath, err)
+		}
+	}
+	ownerPath := filepath.Join(lockPath, "owner")
+	if ownerInfo, ownerErr := os.Lstat(ownerPath); ownerErr == nil {
+		if ownerInfo.Mode()&os.ModeSymlink != 0 || !ownerInfo.Mode().IsRegular() || ownerInfo.Mode().Perm() != 0o600 {
+			return nil, fmt.Errorf("database lock owner %s is not a private regular file", ownerPath)
+		}
+	} else if !os.IsNotExist(ownerErr) {
+		return nil, fmt.Errorf("inspect database lock owner %s: %w", ownerPath, ownerErr)
+	}
+	osLock, err := acquireDatabaseOSLock(ownerPath)
+	if err != nil {
+		if errors.Is(err, errDatabaseLockBusy) {
 			return nil, fmt.Errorf("database is locked by another process (%s)", lockPath)
 		}
-		return nil, fmt.Errorf("create database lock %s: %w", lockPath, err)
+		return nil, fmt.Errorf("lock database owner %s: %w", ownerPath, err)
 	}
 	info, err := os.Lstat(lockPath)
 	if err != nil {
-		_ = os.Remove(lockPath)
+		_ = releaseDatabaseOSLock(osLock)
 		return nil, fmt.Errorf("stat database lock %s: %w", lockPath, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
-		_ = os.Remove(lockPath)
+		_ = releaseDatabaseOSLock(osLock)
 		return nil, fmt.Errorf("database lock %s is not a private 0700 directory", lockPath)
 	}
-	lock := &databasePathLock{key: path, path: lockPath, info: info, refs: 1}
+	nonceBytes := make([]byte, 16)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		_ = releaseDatabaseOSLock(osLock)
+		return nil, fmt.Errorf("generate database lock nonce: %w", err)
+	}
+	nonce := hex.EncodeToString(nonceBytes)
+	metadata := databaseLockMetadata{PID: os.Getpid(), Nonce: nonce, StartedAtUnixNS: time.Now().UnixNano()}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		_ = releaseDatabaseOSLock(osLock)
+		return nil, fmt.Errorf("encode database lock owner: %w", err)
+	}
+	if err := writeDatabaseLockOwner(ownerPath, encoded); err != nil {
+		_ = releaseDatabaseOSLock(osLock)
+		return nil, fmt.Errorf("write database lock owner %s: %w", ownerPath, err)
+	}
+	ownerInfo, err := os.Lstat(ownerPath)
+	if err != nil {
+		_ = releaseDatabaseOSLock(osLock)
+		return nil, fmt.Errorf("stat database lock owner %s: %w", ownerPath, err)
+	}
+	if ownerInfo.Mode()&os.ModeSymlink != 0 || !ownerInfo.Mode().IsRegular() || ownerInfo.Mode().Perm() != 0o600 {
+		_ = releaseDatabaseOSLock(osLock)
+		return nil, fmt.Errorf("database lock owner %s is not a private regular file", ownerPath)
+	}
+	lock := &databasePathLock{key: path, path: lockPath, info: info, osLock: osLock, nonce: nonce, ownerPath: ownerPath, ownerInfo: ownerInfo, refs: 1}
 	pathLocks[path] = lock
 	return lock, nil
+}
+
+func validateDatabaseLockDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		return fmt.Errorf("not a private 0700 directory")
+	}
+	return nil
+}
+
+func writeDatabaseLockOwner(path string, data []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if err := file.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		return err
+	}
+	return file.Sync()
 }
 
 func validateDatabasePathLock(lock *databasePathLock) error {
@@ -104,6 +187,13 @@ func validateDatabasePathLock(lock *databasePathLock) error {
 	}
 	if current.Mode()&os.ModeSymlink != 0 || !current.IsDir() || !os.SameFile(lock.info, current) {
 		return fmt.Errorf("database lock %s identity changed", lock.path)
+	}
+	owner, err := os.Lstat(lock.ownerPath)
+	if err != nil {
+		return fmt.Errorf("inspect database lock owner %s: %w", lock.ownerPath, err)
+	}
+	if owner.Mode()&os.ModeSymlink != 0 || !owner.Mode().IsRegular() || !os.SameFile(lock.ownerInfo, owner) {
+		return fmt.Errorf("database lock owner %s identity changed", lock.ownerPath)
 	}
 	return nil
 }
@@ -124,18 +214,47 @@ func releaseDatabasePathLock(lock *databasePathLock) error {
 	delete(pathLocks, lock.key)
 	current, err := os.Lstat(lock.path)
 	if err != nil {
+		unlockErr := releaseDatabaseOSLock(lock.osLock)
 		if os.IsNotExist(err) {
-			return nil
+			return unlockErr
 		}
-		return fmt.Errorf("inspect database lock %s: %w", lock.path, err)
+		return errors.Join(fmt.Errorf("inspect database lock %s: %w", lock.path, err), unlockErr)
 	}
 	if !os.SameFile(lock.info, current) {
-		return fmt.Errorf("database lock %s changed; refusing to remove replacement", lock.path)
+		unlockErr := releaseDatabaseOSLock(lock.osLock)
+		return errors.Join(fmt.Errorf("database lock %s changed; refusing to remove replacement", lock.path), unlockErr)
 	}
-	if err := os.Remove(lock.path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove database lock %s: %w", lock.path, err)
+	// Quarantine the directory while the OS lock is still held. Without this
+	// rename, a contender could acquire the owner file between unlock and
+	// Remove(lock.path), and the old owner could then delete the new owner's
+	// directory. A failed quarantine is safe: unlock and leave stale metadata
+	// for the next opener to recover.
+	quarantine := lock.path + ".release-" + lock.nonce
+	if err := os.Rename(lock.path, quarantine); err != nil {
+		unlockErr := releaseDatabaseOSLock(lock.osLock)
+		return errors.Join(fmt.Errorf("quarantine database lock %s: %w", lock.path, err), unlockErr)
 	}
-	return nil
+	var result error
+	ownerPath := filepath.Join(quarantine, "owner")
+	owner, ownerErr := os.Lstat(ownerPath)
+	if ownerErr == nil {
+		if !os.SameFile(lock.ownerInfo, owner) {
+			result = fmt.Errorf("database lock owner %s changed; refusing to remove replacement", ownerPath)
+		} else if err := os.Remove(ownerPath); err != nil && !os.IsNotExist(err) {
+			result = fmt.Errorf("remove database lock owner %s: %w", ownerPath, err)
+		}
+	} else if !os.IsNotExist(ownerErr) {
+		result = fmt.Errorf("inspect database lock owner %s: %w", ownerPath, ownerErr)
+	}
+	if err := releaseDatabaseOSLock(lock.osLock); err != nil {
+		result = errors.Join(result, fmt.Errorf("release database lock %s: %w", lock.path, err))
+	}
+	if result == nil {
+		if err := os.Remove(quarantine); err != nil && !os.IsNotExist(err) {
+			result = fmt.Errorf("remove quarantined database lock %s: %w", quarantine, err)
+		}
+	}
+	return result
 }
 
 // SQLiteStore is retained as a package-local compatibility name for callers
