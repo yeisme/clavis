@@ -58,6 +58,9 @@ type settingsEditorState struct {
 	workflowDraft      config.Workflow
 	workflowStepIndex  int
 	workflowError      string
+	// workflowConfirmDelete gates the destructive Delete Workflow action: the
+	// first click only asks, and Cancel leaves the stored config untouched.
+	workflowConfirmDelete bool
 
 	// AI profile editor.
 	aiDraftProfile config.AIProfile

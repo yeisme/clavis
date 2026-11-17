@@ -1,6 +1,7 @@
 package uiapp
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -167,6 +168,7 @@ func (a *AppController) syncWorkflowSelection(se *settingsEditorState, workflows
 				s.workflowOriginalID = ""
 				s.workflowLoaded = false
 				s.workflowStepIndex = -1
+				s.workflowConfirmDelete = false
 			})
 			return
 		}
@@ -191,6 +193,7 @@ func (a *AppController) syncWorkflowSelection(se *settingsEditorState, workflows
 			s.workflowLoaded = false
 			s.workflowStepIndex = -1
 			s.workflowDraft = config.Workflow{}
+			s.workflowConfirmDelete = false
 		})
 		return
 	}
@@ -218,6 +221,7 @@ func (a *AppController) newWorkflowDraft() {
 		s.workflowDraft = draft
 		s.workflowStepIndex = -1
 		s.workflowError = ""
+		s.workflowConfirmDelete = false
 	})
 }
 
@@ -233,6 +237,7 @@ func (a *AppController) selectWorkflowDraft(item config.Workflow) {
 		s.workflowDraft = draft
 		s.workflowStepIndex = firstWorkflowStepIndex(draft.Steps)
 		s.workflowError = ""
+		s.workflowConfirmDelete = false
 	})
 }
 
@@ -257,6 +262,26 @@ func (a *AppController) saveWorkflowsConfig(workflowsCfg config.WorkflowsConfig)
 	return nil
 }
 
+// validateWorkflowStepActions rejects drafts whose steps could not run. It
+// asks the same executable action registry the controller plans with (leader
+// CLI nodes and enabled scripts), so an empty or misspelled action ID fails in
+// the editor with an inline message instead of persisting a workflow that can
+// only fail at execution time.
+func (a *AppController) validateWorkflowStepActions(workflow config.Workflow) error {
+	registry := a.workflowActionRegistry(a.ConfigStore.Current())
+	for i, step := range workflow.Steps {
+		title := workflowStepTitle(step, i)
+		actionID := strings.TrimSpace(step.Action)
+		if actionID == "" {
+			return errors.New(i18n.Tf("settings.workflows.err_action", title))
+		}
+		if _, ok := registry.GetAction(actionID); !ok {
+			return errors.New(i18n.Tf("settings.workflows.unknown_action", title, actionID))
+		}
+	}
+	return nil
+}
+
 // saveWorkflowDraft persists the drafted workflow. A validation error is shown
 // in the editor and leaves the last valid config untouched.
 func (a *AppController) saveWorkflowDraft() {
@@ -264,6 +289,12 @@ func (a *AppController) saveWorkflowDraft() {
 	draft := normalizeWorkflow(seGet(se, func(s *settingsEditorState) config.Workflow { return s.workflowDraft }))
 	if draft.ID == "" {
 		msg := i18n.T("settings.workflows.err_id_required")
+		seSet(se, func(s *settingsEditorState) { s.workflowError = msg })
+		a.setSettingsStatus(msg)
+		return
+	}
+	if err := a.validateWorkflowStepActions(draft); err != nil {
+		msg := err.Error()
 		seSet(se, func(s *settingsEditorState) { s.workflowError = msg })
 		a.setSettingsStatus(msg)
 		return
@@ -298,7 +329,30 @@ func (a *AppController) saveWorkflowDraft() {
 		s.workflowOriginalID = draft.ID
 		s.workflowDraft = stored
 		s.workflowLoaded = true
+		s.workflowConfirmDelete = false
 	})
+}
+
+// requestDeleteWorkflow arms the inline confirmation instead of deleting the
+// stored workflow immediately.
+func (a *AppController) requestDeleteWorkflow() {
+	se := a.settingsEditor()
+	if seGet(se, func(s *settingsEditorState) bool { return s.workflowIsNew }) {
+		return
+	}
+	if seGet(se, func(s *settingsEditorState) string { return s.workflowSelected }) == "" {
+		return
+	}
+	seSet(se, func(s *settingsEditorState) {
+		s.workflowConfirmDelete = true
+		s.workflowError = ""
+	})
+}
+
+// cancelDeleteWorkflow closes the confirmation without touching the store.
+func (a *AppController) cancelDeleteWorkflow() {
+	se := a.settingsEditor()
+	seSet(se, func(s *settingsEditorState) { s.workflowConfirmDelete = false })
 }
 
 // deleteWorkflowDraft removes the selected stored workflow.
@@ -334,6 +388,7 @@ func (a *AppController) deleteWorkflowDraft() {
 		s.workflowLoaded = false
 		s.workflowStepIndex = -1
 		s.workflowDraft = config.Workflow{}
+		s.workflowConfirmDelete = false
 	})
 }
 
@@ -545,15 +600,32 @@ func (a *AppController) renderWorkflowEditor(c *ui.Context, theme *ui.Theme) {
 		kitErrorBanner(c, theme, msg)
 	}
 
+	confirming := seGet(se, func(s *settingsEditorState) bool { return s.workflowConfirmDelete })
+	if confirming {
+		target := seGet(se, func(s *settingsEditorState) string { return s.workflowSelected })
+		if target == "" {
+			target = draft.ID
+		}
+		kitErrorBanner(c, theme, i18n.Tf("settings.workflows.delete_confirm", target))
+		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
+			if ui.Button(c, i18n.T("settings.workflows.confirm_delete")).Clicked() {
+				a.deleteWorkflowDraft()
+			}
+			if ui.Button(c, i18n.T("settings.workflows.delete_cancel")).Clicked() {
+				a.cancelDeleteWorkflow()
+			}
+		})
+	}
+
 	settingsDivider(c)
 	ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 		if ui.PrimaryButton(c, i18n.T("settings.workflows.save")).Clicked() {
 			a.saveWorkflowDraft()
 		}
-		if ui.Button(c, i18n.T("settings.workflows.delete")).
+		if !confirming && ui.Button(c, i18n.T("settings.workflows.delete")).
 			Disabled(seGet(se, func(s *settingsEditorState) bool { return s.workflowIsNew })).
 			Clicked() {
-			a.deleteWorkflowDraft()
+			a.requestDeleteWorkflow()
 		}
 	})
 }

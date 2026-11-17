@@ -246,10 +246,13 @@ func settingSelectRow(
 }
 
 // settingsListRow is one row of a master list (Leader tree, snippets,
-// glossary): a button, the chosen row tinted as the Omnibox's is.
+// glossary, workflows): a button, the chosen row tinted as the Omnibox's is.
+// The row keeps its natural keyboard focus ring so a keyboard user can see
+// which row Enter would activate; selection stays a fill, focus stays a ring,
+// so a focused row that is not chosen still reads as focused.
 func settingsListRow(c *ui.Context, theme *ui.Theme, key string, selected bool) ui.Element {
 	row := ui.ButtonBase(c).Key(key).FillWidth().Padding(space4, space8).Radius(radiusChip).
-		Gap(space8).AlignItems(ui.Center).FocusRing(false)
+		Gap(space8).AlignItems(ui.Center).FocusRing(true).FocusRingColor(kitFocusRing(theme))
 	if selected {
 		row.Background(selectionFill(theme)).Border(1, selectionEdge(theme))
 	} else {

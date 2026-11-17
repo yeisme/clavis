@@ -146,9 +146,13 @@ func TestValidateWorkflowAdapterRejectsUnsupportedModes(t *testing.T) {
 		{"workflow execution", func(w *config.Workflow) { w.Execution = "parallel" }, "unsupported execution mode"},
 		{"workflow failure", func(w *config.Workflow) { w.Failure = config.WorkflowFailureNotify }, "unsupported failure mode"},
 		{"workflow output", func(w *config.Workflow) { w.Output = "unknown" }, "unsupported output mode"},
+		{"workflow discard output", func(w *config.Workflow) { w.Output = config.WorkflowOutput("discard") }, "unsupported output mode"},
+		{"workflow prompt source", func(w *config.Workflow) { w.Source = config.WorkflowSourcePrompt }, "unsupported source"},
 		{"step execution", func(w *config.Workflow) { w.Steps[0].Execution = "parallel" }, "unsupported execution mode"},
 		{"step failure", func(w *config.Workflow) { w.Steps[0].Failure = config.WorkflowFailureNotify }, "unsupported failure mode"},
 		{"step output", func(w *config.Workflow) { w.Steps[0].Output = config.WorkflowOutputInsert }, "unsupported output mode"},
+		{"step discard output", func(w *config.Workflow) { w.Steps[0].Output = config.WorkflowOutput("discard") }, "unsupported output mode"},
+		{"step prompt source", func(w *config.Workflow) { w.Steps[0].Source = config.WorkflowSourcePrompt }, "unsupported source"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -177,6 +181,37 @@ func TestValidateWorkflowAdapterAcceptsRunnerSupportedModes(t *testing.T) {
 	if err := validateWorkflowAdapter(workflow); err != nil {
 		t.Fatalf("validateWorkflowAdapter returned error: %v", err)
 	}
+	workflow.Output = config.WorkflowOutputNone
+	workflow.Steps[0].Output = config.WorkflowOutputNone
+	if err := validateWorkflowAdapter(workflow); err != nil {
+		t.Fatalf("intentional OutputNone should be runner compatible: %v", err)
+	}
+}
+
+// TestDecodeLegacyDiscardOutputIsRuntimeCompatible proves the compatibility
+// path for the legacy output = "discard" literal: decoding folds it into the
+// canonical none value the runner applies, so a legacy file still validates and
+// plans instead of silently capturing output.
+func TestDecodeLegacyDiscardOutputIsRuntimeCompatible(t *testing.T) {
+	decoded, err := config.DecodeWorkflowsConfig(`[[workflows]]
+id = "legacy"
+output = "discard"
+[[workflows.steps]]
+id = "one"
+output = "discard"
+`)
+	if err != nil {
+		t.Fatalf("decode legacy workflow: %v", err)
+	}
+	if got := decoded.Workflows[0].Output; got != config.WorkflowOutputNone {
+		t.Fatalf("workflow output = %q, want none", got)
+	}
+	if got := decoded.Workflows[0].Steps[0].Output; got != config.WorkflowOutputNone {
+		t.Fatalf("step output = %q, want none", got)
+	}
+	if err := validateWorkflowAdapter(decoded.Workflows[0]); err != nil {
+		t.Fatalf("decoded legacy discard output should be runner compatible: %v", err)
+	}
 }
 
 func TestApplyWorkflowOutputIgnoresDiscardedStepOutput(t *testing.T) {
@@ -190,5 +225,24 @@ func TestApplyWorkflowOutputIgnoresDiscardedStepOutput(t *testing.T) {
 	})
 	if clipboard != "" {
 		t.Fatalf("discarded output reached clipboard: %q", clipboard)
+	}
+}
+
+// TestValidateWorkflowStepActionsUsesControllerRegistry checks the save-path
+// gate consults the same executable registry the controller plans with.
+func TestValidateWorkflowStepActionsUsesControllerRegistry(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	seedWorkflowScripts(t, ctrl, "echo")
+	workflow := config.Workflow{ID: "flow", Steps: []config.WorkflowStep{{ID: "run"}}}
+	if err := ctrl.validateWorkflowStepActions(workflow); err == nil || !strings.Contains(err.Error(), "action ID") {
+		t.Fatalf("empty action error = %v, want an inline action-ID error", err)
+	}
+	workflow.Steps[0].Action = "script.missing"
+	if err := ctrl.validateWorkflowStepActions(workflow); err == nil || !strings.Contains(err.Error(), "not available to workflows") {
+		t.Fatalf("unknown action error = %v, want a registry lookup error", err)
+	}
+	workflow.Steps[0].Action = "script.echo"
+	if err := ctrl.validateWorkflowStepActions(workflow); err != nil {
+		t.Fatalf("registered action rejected: %v", err)
 	}
 }

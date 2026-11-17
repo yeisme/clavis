@@ -158,6 +158,17 @@ func (i WorkflowInput) toTOML() *toml.Table {
 	return t
 }
 
+// canonicalWorkflowOutput folds the legacy "discard" spelling into the
+// canonical WorkflowOutputNone value. The runner implements discard semantics
+// as "none" (step output is not published), so decoding the old literal here
+// keeps legacy files executable while the persisted model stays canonical.
+func canonicalWorkflowOutput(value WorkflowOutput) WorkflowOutput {
+	if string(value) == "discard" {
+		return WorkflowOutputNone
+	}
+	return value
+}
+
 func decodeWorkflowStep(t *toml.Table, path string) (WorkflowStep, error) {
 	id, err := requiredString(t, "id", path)
 	if err != nil {
@@ -183,7 +194,7 @@ func decodeWorkflowStep(t *toml.Table, path string) (WorkflowStep, error) {
 	if value, ok, e := optionalString(t, "output", path); e != nil {
 		return WorkflowStep{}, e
 	} else if ok {
-		step.Output = WorkflowOutput(value)
+		step.Output = canonicalWorkflowOutput(WorkflowOutput(value))
 	}
 	if value, ok, e := optionalString(t, "failure", path); e != nil {
 		return WorkflowStep{}, e
@@ -255,7 +266,7 @@ func decodeWorkflow(t *toml.Table, path string) (Workflow, error) {
 	if value, ok, e := optionalString(t, "output", path); e != nil {
 		return Workflow{}, e
 	} else if ok {
-		workflow.Output = WorkflowOutput(value)
+		workflow.Output = canonicalWorkflowOutput(WorkflowOutput(value))
 	}
 	if value, ok, e := optionalString(t, "failure", path); e != nil {
 		return Workflow{}, e
@@ -365,7 +376,11 @@ func (c WorkflowsConfig) Encode() string {
 
 var workflowIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 
-func validateWorkflowID(id string) bool { return workflowIDPattern.MatchString(strings.TrimSpace(id)) }
+// validateWorkflowID requires the canonical spelling: the pattern is matched
+// against the raw value, so an ID with surrounding whitespace is rejected
+// instead of silently normalized. Duplicate and dependency identity compare
+// the same canonical strings.
+func validateWorkflowID(id string) bool { return workflowIDPattern.MatchString(id) }
 
 func appendWorkflowIssue(out *[]ValidationIssue, path, message string) {
 	*out = append(*out, ValidationIssue{File: string(FileWorkflows), KeyPath: path, Severity: SeverityError, Message: message})
@@ -386,8 +401,12 @@ func validateMode(out *[]ValidationIssue, path, value string, supported map[stri
 	appendWorkflowIssue(out, path, fmt.Sprintf("unsupported workflow %s mode %q (supported: %s)", label, value, strings.Join(supportedModes, ", ")))
 }
 
-var supportedWorkflowSources = map[string]struct{}{"clipboard": {}, "selection": {}, "text": {}, "prompt": {}}
-var supportedWorkflowOutputs = map[string]struct{}{"replace": {}, "insert": {}, "clipboard": {}, "notify": {}, "none": {}, "discard": {}}
+// The controller cannot source prompt text, so "prompt" stays decodable for
+// forward compatibility but validation rejects it. The legacy "discard" output
+// literal is normalized to "none" at decode time; in-memory callers that pass
+// it without decoding are rejected rather than silently treated as capture.
+var supportedWorkflowSources = map[string]struct{}{"clipboard": {}, "selection": {}, "text": {}}
+var supportedWorkflowOutputs = map[string]struct{}{"replace": {}, "insert": {}, "clipboard": {}, "notify": {}, "none": {}}
 
 // The workflow runner currently implements only stop/continue failure handling.
 // Keep the public string model forward compatible, but reject modes that would

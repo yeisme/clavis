@@ -528,6 +528,22 @@ func workflowByID(ctrl *AppController, id string) (config.Workflow, bool) {
 	return config.Workflow{}, false
 }
 
+// seedWorkflowScripts registers enabled script components so the workflow
+// action registry exposes script.<id> actions to the editor's save path.
+func seedWorkflowScripts(t *testing.T, ctrl *AppController, ids ...string) {
+	t.Helper()
+	components := ctrl.Config().Components
+	scripts := make([]config.ScriptComponentSpec, len(components.Scripts), len(components.Scripts)+len(ids))
+	copy(scripts, components.Scripts)
+	for _, id := range ids {
+		scripts = append(scripts, config.ScriptComponentSpec{ID: id, Title: id, Command: "printf", Enabled: true})
+	}
+	components.Scripts = scripts
+	if err := ctrl.ConfigStore.SaveComponents(components); err != nil {
+		t.Fatalf("seed workflow scripts: %v", err)
+	}
+}
+
 // focusByTab presses Tab until the element labelled label holds the focus, so
 // a test can drive a section by keyboard alone.
 func focusByTab(t *testing.T, tt *ui.Tester, label string, limit int) bool {
@@ -725,6 +741,7 @@ func TestSettingsCenter_WorkflowInvalidConfigRejected(t *testing.T) {
 // persists them with Save Workflow.
 func TestSettingsCenter_WorkflowStepEditing(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
+	seedWorkflowScripts(t, ctrl, "echo", "upper")
 	tt := ui.NewTester(ctrl.SettingsView, 1200, 1800)
 	tt.Frame()
 	openSettingsSection(t, tt, i18n.T("settings.section.workflows"))
@@ -866,5 +883,162 @@ func TestSettingsCenter_WorkflowPreviewOmitsSensitiveValues(t *testing.T) {
 		if tt.HasText(secret) {
 			t.Fatalf("preview leaked %q, texts: %v", secret, tt.Texts())
 		}
+	}
+}
+
+// TestSettingsCenter_WorkflowStepActionValidation checks that Save Workflow
+// refuses an empty or unregistered step action, and that the message is inline
+// while the stored config and workflows.toml stay untouched.
+func TestSettingsCenter_WorkflowStepActionValidation(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	seedWorkflowScripts(t, ctrl, "echo")
+	tt := ui.NewTester(ctrl.SettingsView, 1200, 1800)
+	tt.Frame()
+	openSettingsSection(t, tt, i18n.T("settings.section.workflows"))
+
+	click := func(label string) {
+		t.Helper()
+		if err := tt.Click(label); err != nil {
+			t.Fatalf("click %q: %v", label, err)
+		}
+		tt.Frame()
+	}
+	click(i18n.T("settings.workflows.new_workflow"))
+	click(i18n.T("settings.workflows.id"))
+	tt.Type("flow")
+	tt.Frame()
+	click(i18n.T("settings.workflows.save"))
+	if wf, ok := workflowByID(ctrl, "flow"); !ok {
+		t.Fatalf("workflow missing after the initial save: %+v", ctrl.Config().Workflows.Workflows)
+	} else if len(wf.Steps) != 0 {
+		t.Fatalf("unexpected steps after the initial save: %+v", wf.Steps)
+	}
+	beforeBody := readConfigFile(t, ctrl, config.FileWorkflows)
+
+	click(i18n.T("settings.workflows.add_step"))
+	click(i18n.T("settings.workflows.step_id"))
+	tt.Type("run")
+	tt.Frame()
+	click(i18n.T("settings.workflows.save"))
+	stepTitle := "run"
+	if want := i18n.Tf("settings.workflows.err_action", stepTitle); !tt.HasText(want) {
+		t.Fatalf("expected %q for an empty action; got %v", want, tt.Texts())
+	}
+	if wf, _ := workflowByID(ctrl, "flow"); len(wf.Steps) != 0 {
+		t.Fatalf("empty action reached the store: %+v", wf.Steps)
+	}
+	if body := readConfigFile(t, ctrl, config.FileWorkflows); body != beforeBody {
+		t.Fatalf("workflows.toml changed after an empty action:\n%s", body)
+	}
+
+	click(i18n.T("settings.workflows.step_action"))
+	tt.Type("script.missing")
+	tt.Frame()
+	click(i18n.T("settings.workflows.save"))
+	if want := i18n.Tf("settings.workflows.unknown_action", stepTitle, "script.missing"); !tt.HasText(want) {
+		t.Fatalf("expected %q for an unknown action; got %v", want, tt.Texts())
+	}
+	if wf, _ := workflowByID(ctrl, "flow"); len(wf.Steps) != 0 {
+		t.Fatalf("unknown action reached the store: %+v", wf.Steps)
+	}
+	if body := readConfigFile(t, ctrl, config.FileWorkflows); body != beforeBody {
+		t.Fatalf("workflows.toml changed after an unknown action:\n%s", body)
+	}
+
+	// A registered action passes and is persisted with the workflow.
+	click(i18n.T("settings.workflows.step_action"))
+	tt.Key(ui.Cmd, ui.KeyA)
+	tt.Type("script.echo")
+	tt.Frame()
+	click(i18n.T("settings.workflows.save"))
+	wf, _ := workflowByID(ctrl, "flow")
+	if len(wf.Steps) != 1 || wf.Steps[0].Action != "script.echo" {
+		t.Fatalf("steps after a valid save = %+v, want script.echo", wf.Steps)
+	}
+	if body := readConfigFile(t, ctrl, config.FileWorkflows); !strings.Contains(body, `action = "script.echo"`) {
+		t.Fatalf("workflows.toml missing the registered action:\n%s", body)
+	}
+}
+
+// TestSettingsCenter_WorkflowDeleteConfirmation checks the destructive action
+// asks first: Cancel leaves the stored workflow and file intact, and the
+// explicit confirm deletes it.
+func TestSettingsCenter_WorkflowDeleteConfirmation(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	if err := ctrl.ConfigStore.SaveWorkflows(config.WorkflowsConfig{Workflows: []config.Workflow{{
+		ID: "alpha", Name: "Alpha", Enabled: true,
+	}}}); err != nil {
+		t.Fatalf("seed workflows: %v", err)
+	}
+	beforeBody := readConfigFile(t, ctrl, config.FileWorkflows)
+
+	tt := ui.NewTester(ctrl.SettingsView, 1200, 1600)
+	tt.Frame()
+	openSettingsSection(t, tt, i18n.T("settings.section.workflows"))
+	if err := tt.Click(i18n.T("settings.workflows.delete")); err != nil {
+		t.Fatalf("click Delete Workflow: %v", err)
+	}
+	tt.Frame()
+	confirmText := i18n.Tf("settings.workflows.delete_confirm", "alpha")
+	if !tt.HasText(confirmText) {
+		t.Fatalf("expected delete confirmation %q; got %v", confirmText, tt.Texts())
+	}
+	if _, ok := workflowByID(ctrl, "alpha"); !ok {
+		t.Fatal("workflow deleted before the confirmation")
+	}
+	if body := readConfigFile(t, ctrl, config.FileWorkflows); body != beforeBody {
+		t.Fatalf("workflows.toml changed before the confirmation:\n%s", body)
+	}
+
+	if err := tt.Click(i18n.T("settings.workflows.delete_cancel")); err != nil {
+		t.Fatalf("click Cancel: %v", err)
+	}
+	tt.Frame()
+	if tt.HasText(confirmText) {
+		t.Fatalf("confirmation still shown after Cancel: %v", tt.Texts())
+	}
+	if _, ok := workflowByID(ctrl, "alpha"); !ok {
+		t.Fatal("Cancel deleted the workflow")
+	}
+
+	if err := tt.Click(i18n.T("settings.workflows.delete")); err != nil {
+		t.Fatalf("click Delete Workflow again: %v", err)
+	}
+	tt.Frame()
+	if err := tt.Click(i18n.T("settings.workflows.confirm_delete")); err != nil {
+		t.Fatalf("click Confirm Delete: %v", err)
+	}
+	tt.Frame()
+	if _, ok := workflowByID(ctrl, "alpha"); ok {
+		t.Fatalf("workflow still stored after confirm: %+v", ctrl.Config().Workflows.Workflows)
+	}
+	if body := readConfigFile(t, ctrl, config.FileWorkflows); strings.Contains(body, "alpha") {
+		t.Fatalf("workflows.toml still holds the confirmed delete:\n%s", body)
+	}
+}
+
+// TestSettingsCenter_WorkflowKeyboardRowActivation extends the keyboard flow to
+// the master list: Tab reaches a workflow row and Enter loads it into the
+// editor, the same activation a pointer click performs.
+func TestSettingsCenter_WorkflowKeyboardRowActivation(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	if err := ctrl.ConfigStore.SaveWorkflows(config.WorkflowsConfig{Workflows: []config.Workflow{
+		{ID: "alpha", Name: "First Flow", Enabled: true},
+		{ID: "beta", Name: "Second Flow", Enabled: true},
+	}}); err != nil {
+		t.Fatalf("seed workflows: %v", err)
+	}
+	tt := ui.NewTester(ctrl.SettingsView, 1200, 1600)
+	tt.Frame()
+	openSettingsSection(t, tt, i18n.T("settings.section.workflows"))
+
+	if !focusByTab(t, tt, "Second Flow", 60) {
+		t.Fatalf("Tab never reached the beta workflow row, texts: %v", tt.Texts())
+	}
+	tt.Key(0, ui.KeyEnter)
+	tt.Frame()
+	tt.Frame()
+	if got := seGet(ctrl.settingsEditor(), func(s *settingsEditorState) string { return s.workflowSelected }); got != "beta" {
+		t.Fatalf("Enter on the beta row selected %q, want beta", got)
 	}
 }

@@ -95,6 +95,97 @@ func TestValidateWorkflowsIDsModesDependenciesAndCycles(t *testing.T) {
 	}
 }
 
+func TestValidateWorkflowsCanonicalIDsRejectWhitespace(t *testing.T) {
+	cfg := config.WorkflowsConfig{Workflows: []config.Workflow{{
+		ID:     " padded ",
+		Inputs: []config.WorkflowInput{{ID: " tone "}},
+		Steps: []config.WorkflowStep{
+			{ID: " lead"},
+			{ID: "trail "},
+			{ID: "ok", DependsOn: []string{" lead"}},
+		},
+	}}}
+	issues := config.ValidateWorkflows(cfg)
+	for _, keyPath := range []string{
+		"workflows[0].id",
+		"workflows[0].inputs[0].id",
+		"workflows[0].steps[0].id",
+		"workflows[0].steps[1].id",
+		"workflows[0].steps[2].depends_on[0]",
+	} {
+		if !workflowIssue(issues, keyPath) {
+			t.Errorf("expected canonical-id issue at %s; got %+v", keyPath, issues)
+		}
+	}
+}
+
+func TestValidateWorkflowsRejectsPromptSource(t *testing.T) {
+	cfg := config.WorkflowsConfig{Workflows: []config.Workflow{{
+		ID: "prompt-flow", Source: config.WorkflowSourcePrompt,
+		Steps: []config.WorkflowStep{{ID: "ask", Source: config.WorkflowSourcePrompt}},
+	}}}
+	issues := config.ValidateWorkflows(cfg)
+	for _, keyPath := range []string{"workflows[0].source", "workflows[0].steps[0].source"} {
+		if !workflowIssue(issues, keyPath) {
+			t.Errorf("expected prompt-source issue at %s; got %+v", keyPath, issues)
+		}
+	}
+	for _, issue := range issues {
+		if strings.Contains(issue.KeyPath, ".source") && !strings.Contains(issue.Message, `unsupported workflow source mode "prompt"`) {
+			t.Errorf("unexpected prompt-source message at %s: %q", issue.KeyPath, issue.Message)
+		}
+	}
+}
+
+func TestDecodeWorkflowsConfigNormalizesLegacyDiscardOutput(t *testing.T) {
+	decoded, err := config.DecodeWorkflowsConfig(`[[workflows]]
+id = "legacy"
+output = "discard"
+[[workflows.steps]]
+id = "one"
+output = "discard"
+`)
+	if err != nil {
+		t.Fatalf("decode legacy discard output: %v", err)
+	}
+	if got := decoded.Workflows[0].Output; got != config.WorkflowOutputNone {
+		t.Fatalf("workflow output = %q, want %q", got, config.WorkflowOutputNone)
+	}
+	if got := decoded.Workflows[0].Steps[0].Output; got != config.WorkflowOutputNone {
+		t.Fatalf("step output = %q, want %q", got, config.WorkflowOutputNone)
+	}
+	if issues := config.ValidateWorkflows(decoded); len(issues) != 0 {
+		t.Fatalf("normalized legacy workflow should validate: %+v", issues)
+	}
+	encoded := decoded.Encode()
+	if strings.Contains(encoded, `output = "discard"`) || !strings.Contains(encoded, `output = "none"`) {
+		t.Fatalf("legacy discard output was not re-encoded as none:\n%s", encoded)
+	}
+}
+
+func TestValidateWorkflowsRejectsRuntimeIncompatibleDiscardLiteral(t *testing.T) {
+	cfg := config.WorkflowsConfig{Workflows: []config.Workflow{{
+		ID: "in-memory", Output: config.WorkflowOutput("discard"),
+		Steps: []config.WorkflowStep{{ID: "one", Output: config.WorkflowOutput("discard")}},
+	}}}
+	issues := config.ValidateWorkflows(cfg)
+	for _, keyPath := range []string{"workflows[0].output", "workflows[0].steps[0].output"} {
+		if !workflowIssue(issues, keyPath) {
+			t.Errorf("expected unnormalized discard issue at %s; got %+v", keyPath, issues)
+		}
+	}
+}
+
+func TestValidateWorkflowsAcceptsOutputNone(t *testing.T) {
+	cfg := config.WorkflowsConfig{Workflows: []config.Workflow{{
+		ID: "quiet", Output: config.WorkflowOutputDiscard,
+		Steps: []config.WorkflowStep{{ID: "one", Output: config.WorkflowOutputNone}},
+	}}}
+	if issues := config.ValidateWorkflows(cfg); len(issues) != 0 {
+		t.Fatalf("intentional OutputNone should validate: %+v", issues)
+	}
+}
+
 func TestValidateWorkflowsRejectsUnsupportedRuntimeModes(t *testing.T) {
 	workflow := config.WorkflowsConfig{Workflows: []config.Workflow{{
 		ID: "unsupported", Failure: config.WorkflowFailureNotify, Execution: config.WorkflowExecutionParallel,

@@ -2055,7 +2055,7 @@ func validateWorkflowAdapter(workflow config.Workflow) error {
 	default:
 		return fmt.Errorf("workflow %q has unsupported output mode %q", workflow.ID, workflow.Output)
 	}
-	if workflow.Source != "" && workflow.Source != config.WorkflowSourceClipboard && workflow.Source != config.WorkflowSourceSelection && workflow.Source != config.WorkflowSourceText && workflow.Source != config.WorkflowSourcePrompt {
+	if workflow.Source != "" && workflow.Source != config.WorkflowSourceClipboard && workflow.Source != config.WorkflowSourceSelection && workflow.Source != config.WorkflowSourceText {
 		return fmt.Errorf("workflow %q has unsupported source %q", workflow.ID, workflow.Source)
 	}
 
