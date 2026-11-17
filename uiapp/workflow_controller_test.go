@@ -54,3 +54,42 @@ func TestWorkflowProviderInvokesCLIWithoutShellInterpolation(t *testing.T) {
 		t.Skip("printf is unavailable")
 	}
 }
+
+func TestWorkflowProviderBindsInputAndStepOutputToCLIAndScript(t *testing.T) {
+	cli := config.CLIAction("printf", "%s|%s", "{{input}}", "{{stepOutput}}")
+	provider := workflowProvider{
+		actions: map[string]workflowAction{
+			"cli":    {leader: &cli},
+			"script": {script: &config.ScriptComponentSpec{Command: "printf", Args: []string{"%s|%s", "{{input}}", "{{stepOutput}}"}, Enabled: true}},
+		},
+	}
+	invocation := automation.ActionInvocation{
+		ActionID: "cli",
+		Input:    map[string]any{"input": "prompt-value"},
+		Inputs:   map[string]any{"stepOutput": "previous-step-output"},
+	}
+	result, err := provider.Invoke(context.Background(), invocation)
+	if err != nil || result.Status != automation.ResultSucceeded || result.Output != "prompt-value|previous-step-output" {
+		t.Fatalf("CLI invoke = %#v, %v", result, err)
+	}
+
+	invocation.ActionID = "script"
+	result, err = provider.Invoke(context.Background(), invocation)
+	if err != nil || result.Status != automation.ResultSucceeded || result.Output != "prompt-value|previous-step-output" {
+		t.Fatalf("script invoke = %#v, %v", result, err)
+	}
+}
+
+func TestApplyWorkflowOutputIgnoresDiscardedStepOutput(t *testing.T) {
+	var clipboard string
+	controller := &AppController{ClipboardWriter: func(value string) { clipboard = value }}
+	controller.applyWorkflowOutput(config.WorkflowOutputClipboard, engine.CapsuleContext{}, automation.ExecutionResult{
+		Steps: []automation.StepResult{{
+			StepID: "secret", Result: automation.ActionResult{Status: automation.ResultSucceeded, Output: "secret-value"},
+		}},
+		Outputs: map[string]any{},
+	})
+	if clipboard != "" {
+		t.Fatalf("discarded output reached clipboard: %q", clipboard)
+	}
+}

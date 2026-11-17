@@ -2,11 +2,14 @@ package uiapp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -1981,18 +1984,99 @@ func (p workflowProvider) Invoke(ctx context.Context, invocation automation.Acti
 	if !ok {
 		return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultFailed, Error: "action is not available"}, nil
 	}
+	bindings := mergeWorkflowInvocationInputs(invocation)
 	if action.script != nil {
 		if !action.script.Enabled {
 			return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultSkipped, Error: "script is disabled"}, nil
 		}
-		result, err := actions.ExecuteScriptComponent(ctx, *action.script, p.actionCtx)
+		// Substitute into each argv element rather than a shell command. This keeps
+		// input and previous-step output observable without changing command safety.
+		spec := *action.script
+		spec.Args = substituteWorkflowArgs(spec.Args, bindings)
+		result, err := actions.ExecuteScriptComponent(ctx, spec, p.actionCtx)
 		return cliActionResult(result, err), nil
 	}
 	if action.leader == nil || action.leader.Type != config.ActionCLI {
 		return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultFailed, Error: "workflow action is not a CLI or script action"}, nil
 	}
-	return p.invokeCLI(ctx, action.leader.Command, action.leader.Args, 0)
+	return p.invokeCLI(ctx, action.leader.Command, substituteWorkflowArgs(action.leader.Args, bindings), 0)
 }
+
+func mergeWorkflowInvocationInputs(invocation automation.ActionInvocation) map[string]any {
+	bindings := make(map[string]any, len(invocation.Input)+len(invocation.Inputs))
+	for key, value := range invocation.Input {
+		bindings[key] = value
+	}
+	for key, value := range invocation.Inputs {
+		bindings[key] = value
+	}
+	return bindings
+}
+
+func substituteWorkflowArgs(args []string, bindings map[string]any) []string {
+	resolved := make([]string, len(args))
+	for i, arg := range args {
+		resolved[i] = substituteWorkflowArg(arg, bindings)
+	}
+	return resolved
+}
+
+func substituteWorkflowArg(arg string, bindings map[string]any) string {
+	return workflowTemplatePattern.ReplaceAllStringFunc(arg, func(match string) string {
+		expression := strings.TrimSpace(match[2 : len(match)-2])
+		value, ok := resolveWorkflowBinding(expression, bindings)
+		if !ok {
+			return match
+		}
+		if encoded, ok := value.(map[string]any); ok {
+			data, err := json.Marshal(encoded)
+			if err == nil {
+				return string(data)
+			}
+		}
+		valueType := reflect.TypeOf(value)
+		if valueType != nil && (valueType.Kind() == reflect.Map || valueType.Kind() == reflect.Slice || valueType.Kind() == reflect.Array) {
+			if data, err := json.Marshal(value); err == nil {
+				return string(data)
+			}
+		}
+		return fmt.Sprint(value)
+	})
+}
+
+func resolveWorkflowBinding(expression string, bindings map[string]any) (any, bool) {
+	parts := strings.Split(expression, ".")
+	if len(parts) == 0 {
+		return nil, false
+	}
+	if value, ok := bindings[parts[0]]; ok {
+		for _, part := range parts[1:] {
+			var found bool
+			value, found = lookupWorkflowBinding(value, part)
+			if !found {
+				return nil, false
+			}
+		}
+		return value, true
+	}
+	// {{input}} and {{inputs}} are useful for providers that receive a map
+	// without a named field. A named input field still wins when present.
+	if (expression == "input" || expression == "inputs") && len(bindings) > 0 {
+		return bindings, true
+	}
+	return nil, false
+}
+
+func lookupWorkflowBinding(value any, key string) (any, bool) {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	item, found := object[key]
+	return item, found
+}
+
+var workflowTemplatePattern = regexp.MustCompile(`\{\{[^{}]+\}\}`)
 
 func (p workflowProvider) invokeCLI(ctx context.Context, command string, args []string, timeout time.Duration) (automation.ActionResult, error) {
 	executor := actions.NewCLIExecutor()
@@ -2061,8 +2145,14 @@ func (c *AppController) applyWorkflowOutput(mode config.WorkflowOutput, actionCt
 	}
 	var output any
 	for _, step := range result.Steps {
-		if step.Result.Status == automation.ResultSucceeded {
-			output = step.Result.Output
+		if step.Result.Status != automation.ResultSucceeded {
+			continue
+		}
+		// ExecutionResult.Outputs is deliberately limited to non-discarded step
+		// outputs. Never fall back to StepResult.Result.Output here: it may contain
+		// a secret from an OutputDiscard step.
+		if value, ok := result.Outputs[step.StepID]; ok {
+			output = value
 		}
 	}
 	text := strings.TrimSpace(fmt.Sprint(output))
