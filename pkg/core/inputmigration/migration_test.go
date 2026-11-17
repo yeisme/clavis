@@ -26,6 +26,56 @@ func windowsCaps() DeviceCapabilities {
 	return DeviceCapabilities{OS: "windows", Arch: "amd64", KeyboardLayout: "00000409", InputSourceIDs: []string{"0x04090409"}, NativeTSF: true, Permissions: map[string]PermissionState{"uiaccess": PermissionDenied}, Display: DisplayInfo{Width: 1920, Height: 1080, Scale: 1}}
 }
 
+func TestCanonicalPlatformNamesSelectNativeBackends(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		caps    DeviceCapabilities
+		backend string
+	}{
+		{"windows-with-whitespace", func() DeviceCapabilities {
+			caps := windowsCaps()
+			caps.OS = "  windows  "
+			return caps
+		}(), "native-tsf"},
+		{"macos-with-whitespace", func() DeviceCapabilities {
+			caps := macCaps()
+			caps.OS = "  macOS  "
+			return caps
+		}(), "native-imk"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.caps.Validate(); err != nil {
+				t.Fatalf("canonical platform should validate: %v", err)
+			}
+			preview, err := GenerateOverlay(baseline(), tc.caps, tc.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if preview.Overlay.Backend != tc.backend {
+				t.Fatalf("platform %q selected backend %q, want %q", tc.caps.OS, preview.Overlay.Backend, tc.backend)
+			}
+			if err := preview.Overlay.Validate(); err != nil {
+				t.Fatalf("generated overlay failed validation: %v", err)
+			}
+		})
+	}
+}
+
+func TestCanonicalPlatformNamesRejectUnknownAndEmpty(t *testing.T) {
+	for _, os := range []string{"", "   ", "plan9", "  plan9  "} {
+		t.Run("os-"+strings.ReplaceAll(os, " ", "_")+"", func(t *testing.T) {
+			caps := windowsCaps()
+			caps.OS = os
+			if err := caps.Validate(); err == nil {
+				t.Fatalf("invalid platform %q was accepted", os)
+			}
+			if _, err := GenerateOverlay(baseline(), caps, "device"); err == nil {
+				t.Fatalf("invalid platform %q reached generation", os)
+			}
+		})
+	}
+}
+
 func TestPlatformOverlaysAndExplainableDiffs(t *testing.T) {
 	b := baseline()
 	for _, tc := range []struct {

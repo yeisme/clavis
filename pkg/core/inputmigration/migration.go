@@ -257,13 +257,23 @@ func defaultOverlayMetadata() map[string]FieldMetadata {
 	}
 }
 
-func validOS(os string) bool {
+// canonicalOS accepts the platform spellings used by callers and returns the
+// spelling used by migration decisions. Surrounding whitespace is tolerated,
+// and macOS is represented by the Go/runtime spelling darwin. An empty result
+// means the platform is unknown or empty.
+func canonicalOS(os string) string {
 	switch strings.ToLower(strings.TrimSpace(os)) {
-	case "windows", "darwin", "macos", "linux":
-		return true
+	case "windows":
+		return "windows"
+	case "darwin", "macos":
+		return "darwin"
+	case "linux":
+		return "linux"
+	default:
+		return ""
 	}
-	return false
 }
+
 func validScheme(s string) bool {
 	switch s {
 	case "quanpin", "xiaohe", "ziranma", "microsoft", "sogou", "pinyin_plus":
@@ -347,7 +357,10 @@ func validateAppRule(r AppRule) error {
 	return nil
 }
 func (c DeviceCapabilities) Validate() error {
-	if !validOS(c.OS) {
+	// Policy: leading/trailing whitespace is accepted for compatibility, but
+	// callers must use canonicalOS for all platform-dependent decisions. This
+	// value receiver deliberately does not mutate the caller's capabilities.
+	if canonicalOS(c.OS) == "" {
 		return fmt.Errorf("inputmigration: invalid platform %q", c.OS)
 	}
 	if strings.TrimSpace(c.Arch) == "" || strings.TrimSpace(c.KeyboardLayout) == "" {
@@ -644,6 +657,11 @@ func GenerateOverlay(b PersonalBaseline, target DeviceCapabilities, deviceID str
 	if err := target.Validate(); err != nil {
 		return Preview{}, err
 	}
+	// Validation accepts harmless surrounding whitespace for compatibility, but
+	// generation uses and retains one canonical spelling for every platform
+	// decision. This prevents a valid value such as " windows " from falling
+	// through backend selection.
+	target.OS = canonicalOS(target.OS)
 	if strings.TrimSpace(deviceID) == "" {
 		return Preview{}, errors.New("inputmigration: device id is required")
 	}
@@ -711,11 +729,10 @@ func GenerateOverlay(b PersonalBaseline, target DeviceCapabilities, deviceID str
 	return p, nil
 }
 func normalizeOS(os string) string {
-	os = strings.ToLower(strings.TrimSpace(os))
-	if os == "macos" {
-		return "darwin"
+	if canonical := canonicalOS(os); canonical != "" {
+		return canonical
 	}
-	return os
+	return strings.ToLower(strings.TrimSpace(os))
 }
 func safePathSegment(v string) string {
 	if v == "" {
@@ -724,11 +741,15 @@ func safePathSegment(v string) string {
 	return digest(v)[:16]
 }
 func backendFor(c DeviceCapabilities) string {
-	if strings.EqualFold(c.OS, "windows") && c.NativeTSF {
-		return "native-tsf"
-	}
-	if (strings.EqualFold(c.OS, "darwin") || strings.EqualFold(c.OS, "macos")) && c.NativeIMK {
-		return "native-imk"
+	switch canonicalOS(c.OS) {
+	case "windows":
+		if c.NativeTSF {
+			return "native-tsf"
+		}
+	case "darwin":
+		if c.NativeIMK {
+			return "native-imk"
+		}
 	}
 	if c.HookCapability {
 		return "hook"
