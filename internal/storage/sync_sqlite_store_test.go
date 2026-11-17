@@ -237,6 +237,38 @@ func TestSQLiteDeletePurgesHigherVersionObjectPermanently(t *testing.T) {
 	if err := store.UploadEnvelope("acct", "device", "object", 10, resurrection); err == nil {
 		t.Fatal("resurrection accepted after permanent deletion")
 	}
+	if version, err := store.ObjectVersion("acct", "object"); err != nil || version != 9 {
+		t.Fatalf("deletion boundary = %d, %v; want 9", version, err)
+	}
+	path := filepath.Join(t.TempDir(), "sync", "state.db")
+	fileStore, err := NewSQLiteSyncStore(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, err := fileStore.RegisterAccount("acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fileStore.PairDeviceWithCredential("acct", "device", priv.Public().(ed25519.PublicKey), cred); err != nil {
+		t.Fatal(err)
+	}
+	if err := fileStore.UploadEnvelope("acct", "device", "object", 9, e); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fileStore.SubmitDelete(coresync.DeleteInstruction{AccountID: "acct", ObjectID: "object", DeviceID: "device", Version: 2, ProtocolVersion: coresync.ProtocolVersion}.Sign(priv)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fileStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewSQLiteSyncStore(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if version, err := restarted.ObjectVersion("acct", "object"); err != nil || version != 9 {
+		t.Fatalf("restarted deletion boundary = %d, %v; want 9", version, err)
+	}
 }
 
 func TestSQLiteCrossConnectionDeleteIsAtomic(t *testing.T) {
@@ -303,6 +335,55 @@ func TestSQLiteExternalDBCloseDoesNotCloseOwner(t *testing.T) {
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSQLiteRejectsRelativeAndSymlinkDatabasePaths(t *testing.T) {
+	t.Run("relative", func(t *testing.T) {
+		if _, err := NewSQLiteSyncStore(context.Background(), "state.db"); err == nil {
+			t.Fatal("relative database path accepted")
+		}
+	})
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		t.Run("symlink"+suffix, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "state.db")
+			target := filepath.Join(dir, "target"+suffix)
+			if err := os.WriteFile(target, []byte("not a database"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, path+suffix); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := NewSQLiteSyncStore(context.Background(), path); err == nil {
+				t.Fatal("symlink database component accepted")
+			}
+		})
+	}
+}
+
+func TestSQLiteCloseReleasesConnectionWhenProtectionFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := NewSQLiteSyncStore(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := path + "-wal"
+	target := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(target, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// SQLite may create sidecars lazily; replacing an existing sidecar with a
+	// symlink gives Close a deterministic permission-repair failure.
+	_ = os.Remove(link)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err == nil {
+		t.Fatal("Close unexpectedly succeeded despite symlink sidecar")
+	}
+	if _, err := store.db.Execute(context.Background(), `SELECT 1`); !errors.Is(err, sqlite.ErrClosed) {
+		t.Fatalf("connection remains usable after failed Close: %v", err)
 	}
 }
 

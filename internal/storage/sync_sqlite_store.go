@@ -53,11 +53,16 @@ func NewSQLiteSyncStore(ctx context.Context, dbPath string) (*SQLiteSyncStore, e
 	}
 	file := dbPath != ":memory:"
 	if file {
-		dir := filepath.Dir(dbPath)
-		if dir != "." {
-			if err := mkdirPrivate(dir); err != nil {
-				return nil, fmt.Errorf("sync: create database directory: %w", err)
-			}
+		var err error
+		dbPath, err = secureDatabasePath(dbPath)
+		if err != nil {
+			return nil, fmt.Errorf("sync: unsafe database path: %w", err)
+		}
+		if err := mkdirPrivate(filepath.Dir(dbPath)); err != nil {
+			return nil, fmt.Errorf("sync: create database directory: %w", err)
+		}
+		if err := rejectDatabaseSymlinks(dbPath); err != nil {
+			return nil, fmt.Errorf("sync: unsafe database path: %w", err)
 		}
 	}
 	db, err := sqlite.Open(ctx, dbPath, sqlite.OpenOptions{BusyTimeout: 5 * time.Second})
@@ -108,6 +113,8 @@ func (s *SQLiteSyncStore) initSchema(ctx context.Context, wal bool) error {
 		// deletes. sync_current_tombstones is the permanent object boundary.
 		`CREATE TABLE IF NOT EXISTS sync_tombstones (account_id TEXT NOT NULL, object_id TEXT NOT NULL, device_id TEXT NOT NULL, version INTEGER NOT NULL, sequence INTEGER NOT NULL, issued_at_ns INTEGER NOT NULL, deleted_at_ns INTEGER NOT NULL, protocol_version INTEGER NOT NULL, signature BLOB NOT NULL, PRIMARY KEY(account_id, sequence), FOREIGN KEY(account_id) REFERENCES sync_accounts(account_id))`,
 		`CREATE TABLE IF NOT EXISTS sync_current_tombstones (account_id TEXT NOT NULL, object_id TEXT NOT NULL, device_id TEXT NOT NULL, version INTEGER NOT NULL, sequence INTEGER NOT NULL, issued_at_ns INTEGER NOT NULL, deleted_at_ns INTEGER NOT NULL, protocol_version INTEGER NOT NULL, signature BLOB NOT NULL, PRIMARY KEY(account_id, object_id), UNIQUE(account_id, sequence), FOREIGN KEY(account_id) REFERENCES sync_accounts(account_id))`,
+		`CREATE TABLE IF NOT EXISTS sync_object_boundaries (account_id TEXT NOT NULL, object_id TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY(account_id, object_id), FOREIGN KEY(account_id) REFERENCES sync_accounts(account_id))`,
+		`INSERT INTO sync_object_boundaries(account_id,object_id,version) SELECT account_id,object_id,version FROM sync_current_tombstones WHERE 1 ON CONFLICT(account_id,object_id) DO UPDATE SET version=MAX(version,excluded.version)`,
 		`CREATE INDEX IF NOT EXISTS idx_sync_tombstones_cursor ON sync_tombstones(account_id, sequence)`,
 		`CREATE INDEX IF NOT EXISTS idx_sync_tombstones_object ON sync_tombstones(account_id, object_id, sequence)`,
 		`CREATE TABLE IF NOT EXISTS sync_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL, object_digest TEXT NOT NULL, device_id TEXT NOT NULL, at_ns INTEGER NOT NULL, action TEXT NOT NULL, FOREIGN KEY(account_id) REFERENCES sync_accounts(account_id))`,
@@ -181,35 +188,100 @@ func (s *SQLiteSyncStore) Close() error {
 	if s == nil || s.db == nil || !s.ownsDB {
 		return nil
 	}
+	var protectErr error
 	if s.path != "" {
-		if err := protectDatabaseFiles(s.path); err != nil {
-			return err
-		}
+		protectErr = protectDatabaseFiles(s.path)
 	}
-	return s.db.Close()
+	// Always release the connection even when a permission repair failed. An
+	// externally supplied DB is deliberately excluded above.
+	closeErr := s.db.Close()
+	return errors.Join(protectErr, closeErr)
 }
 
+func secureDatabasePath(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		return "", errors.New("relative database paths are rejected; use an absolute path")
+	}
+	if path == ":memory:" || strings.ContainsRune(path, 0) {
+		return "", errors.New("invalid database path")
+	}
+	return filepath.Clean(path), nil
+}
+
+// mkdirPrivate creates only missing components. Existing parent permissions are
+// intentionally never changed; every component is checked with Lstat so a
+// symlink cannot redirect the database into an unrelated directory.
 func mkdirPrivate(dir string) error {
-	info, err := os.Stat(dir)
-	if os.IsNotExist(err) {
-		return os.MkdirAll(dir, 0o700)
+	dir = filepath.Clean(dir)
+	missing := make([]string, 0)
+	for current := dir; ; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("%s is a symlink", current)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("%s is not a directory", current)
+			}
+			break
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			return fmt.Errorf("cannot resolve parent of %s", current)
+		}
 	}
-	if err != nil {
-		return err
+	for i := len(missing) - 1; i >= 0; i-- {
+		if err := os.Mkdir(missing[i], 0o700); err != nil && !os.IsExist(err) {
+			return err
+		}
+		info, err := os.Lstat(missing[i])
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("%s is not a private directory", missing[i])
+		}
 	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", dir)
+	return nil
+}
+
+func rejectDatabaseSymlinks(path string) error {
+	for _, name := range []string{path, path + "-wal", path + "-shm"} {
+		info, err := os.Lstat(name)
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symlink", name)
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	return nil
 }
 
 func protectDatabaseFiles(path string) error {
+	if err := rejectDatabaseSymlinks(path); err != nil {
+		return err
+	}
+	var errs []error
 	for _, name := range []string{path, path + "-wal", path + "-shm"} {
-		if err := os.Chmod(name, 0o600); err != nil && !os.IsNotExist(err) {
-			return err
+		info, err := os.Lstat(name)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			errs = append(errs, fmt.Errorf("%s is not a regular file", name))
+			continue
+		}
+		if err := os.Chmod(name, 0o600); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (s *SQLiteSyncStore) secureOwnedFiles() error {
@@ -337,13 +409,13 @@ func (s *SQLiteSyncStore) UploadEnvelope(account, device, object string, version
 	results, err := s.db.Transaction(context.Background(), []sqlite.Statement{
 		{SQL: `UPDATE sync_objects SET version=?, envelope=?
 			WHERE account_id=? AND object_id=? AND version<?
-			  AND NOT EXISTS (SELECT 1 FROM sync_current_tombstones WHERE account_id=? AND object_id=?)
+			  AND NOT EXISTS (SELECT 1 FROM sync_object_boundaries WHERE account_id=? AND object_id=?)
 			  AND EXISTS (SELECT 1 FROM sync_accounts a JOIN sync_devices d ON d.account_id=a.account_id
 			              WHERE a.account_id=? AND d.device_id=? AND d.watermark >= a.sequence)`, Args: []any{version, encoded, account, object, version, account, object, account, device}},
 		{SQL: `INSERT INTO sync_objects(account_id,object_id,version,envelope)
 			SELECT ?,?,?,?
 			WHERE NOT EXISTS (SELECT 1 FROM sync_objects WHERE account_id=? AND object_id=?)
-			  AND NOT EXISTS (SELECT 1 FROM sync_current_tombstones WHERE account_id=? AND object_id=?)
+			  AND NOT EXISTS (SELECT 1 FROM sync_object_boundaries WHERE account_id=? AND object_id=?)
 			  AND EXISTS (SELECT 1 FROM sync_accounts a JOIN sync_devices d ON d.account_id=a.account_id
 			              WHERE a.account_id=? AND d.device_id=? AND d.watermark >= a.sequence)`, Args: []any{account, object, version, encoded, account, object, account, object, account, device}},
 	})
@@ -399,7 +471,7 @@ func (s *SQLiteSyncStore) ObjectVersion(account, object string) (uint64, error) 
 		return 0, err
 	}
 	if len(rows.Values) == 0 {
-		rows, err = s.db.Query(context.Background(), `SELECT version FROM sync_current_tombstones WHERE account_id=? AND object_id=?`, account, object)
+		rows, err = s.db.Query(context.Background(), `SELECT version FROM sync_object_boundaries WHERE account_id=? AND object_id=?`, account, object)
 	}
 	if err != nil || len(rows.Values) == 0 {
 		return 0, coresync.ErrStoreObjectMissing
@@ -435,6 +507,7 @@ func (s *SQLiteSyncStore) SubmitDelete(d coresync.DeleteInstruction) (coresync.T
 		// SQLite's statement batch API commits successful no-op statements, so a
 		// NOT NULL violation is used as the transaction-level guard.
 		{SQL: `UPDATE sync_accounts SET sequence=NULL WHERE account_id=? AND sequence<>?`, Args: []any{d.AccountID, sequence}},
+		{SQL: `INSERT INTO sync_object_boundaries(account_id,object_id,version) VALUES(?,?,MAX(?,COALESCE((SELECT version FROM sync_objects WHERE account_id=? AND object_id=?),0))) ON CONFLICT(account_id,object_id) DO UPDATE SET version=MAX(sync_object_boundaries.version,excluded.version)`, Args: []any{d.AccountID, d.ObjectID, d.Version, d.AccountID, d.ObjectID}},
 		{SQL: `INSERT INTO sync_tombstones(account_id,object_id,device_id,version,sequence,issued_at_ns,deleted_at_ns,protocol_version,signature) VALUES(?,?,?,?,?,?,?,?,?)`, Args: []any{t.AccountID, t.ObjectID, t.DeviceID, t.Version, t.Sequence, t.IssuedAt.UTC().UnixNano(), t.DeletedAt.UnixNano(), t.ProtocolVersion, t.Signature}},
 		{SQL: `INSERT INTO sync_current_tombstones(account_id,object_id,device_id,version,sequence,issued_at_ns,deleted_at_ns,protocol_version,signature) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id,object_id) DO UPDATE SET device_id=excluded.device_id,version=excluded.version,sequence=excluded.sequence,issued_at_ns=excluded.issued_at_ns,deleted_at_ns=excluded.deleted_at_ns,protocol_version=excluded.protocol_version,signature=excluded.signature WHERE excluded.version > sync_current_tombstones.version`, Args: []any{t.AccountID, t.ObjectID, t.DeviceID, t.Version, t.Sequence, t.IssuedAt.UTC().UnixNano(), t.DeletedAt.UnixNano(), t.ProtocolVersion, t.Signature}},
 		{SQL: `DELETE FROM sync_objects WHERE account_id=? AND object_id=?`, Args: []any{d.AccountID, d.ObjectID}},
