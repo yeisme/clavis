@@ -119,6 +119,40 @@ func firstErrorIssue(issues []ValidationIssue) error {
 	return nil
 }
 
+// validateWorkflowReferenceTransition rejects a workflows.toml edit when
+// the resulting configuration would retain or create a dangling Leader
+// workflow reference. Reloads still preserve already-dangling references as
+// warnings, so users can repair them; a save is the point at which we refuse
+// to persist that broken state again.
+func validateWorkflowReferenceTransition(leader LeaderConfig, next WorkflowsConfig) error {
+	nextIDs := make(map[string]struct{}, len(next.Workflows))
+	for _, workflow := range next.Workflows {
+		nextIDs[workflow.ID] = struct{}{}
+	}
+	var brokenID string
+	var brokenPath string
+	var visit func([]LeaderNode, string)
+	visit = func(nodes []LeaderNode, basePath string) {
+		for i, node := range nodes {
+			path := fmt.Sprintf("%s[%d]", basePath, i)
+			switch node.Action.Type {
+			case ActionRunWorkflow:
+				id := node.Action.WorkflowID
+				if _, remainsValid := nextIDs[id]; !remainsValid && brokenID == "" {
+					brokenID, brokenPath = id, path+".workflow_id"
+				}
+			case ActionGroup:
+				visit(node.Action.Children, path+".children")
+			}
+		}
+	}
+	visit(leader.Nodes, "nodes")
+	if brokenID != "" {
+		return fmt.Errorf("cannot save workflows: Leader action %s references workflow %q; rename or delete the workflow only after updating that reference", brokenPath, brokenID)
+	}
+	return nil
+}
+
 func collectWarningIssues(issues []ValidationIssue) []ValidationIssue {
 	var warnings []ValidationIssue
 	for _, issue := range issues {
@@ -291,6 +325,14 @@ func (s *ConfigStore) SaveComponents(cfg ComponentsConfig) error {
 // SaveWorkflows validates workflowsCfg, atomically writes workflows.toml, and updates Current().Workflows.
 func (s *ConfigStore) SaveWorkflows(workflowsCfg WorkflowsConfig) error {
 	if err := firstErrorIssue(ValidateWorkflows(workflowsCfg)); err != nil {
+		return err
+	}
+	// Existing leader references may already be dangling (for example after a
+	// hand-edited config or a load from an older version). Preserve that state
+	// as a warning, but do not let a workflow edit create a new dangling
+	// reference or leave a newly renamed/deleted target dangling.
+	cur := s.Current()
+	if err := validateWorkflowReferenceTransition(cur.Leader, workflowsCfg); err != nil {
 		return err
 	}
 	encoded := workflowsCfg.Encode()
