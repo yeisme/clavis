@@ -213,7 +213,13 @@ func (s *ConfigStore) SaveMain(mainCfg MainConfig) error {
 
 // SaveLeader validates leaderCfg (including cross-file snippet references), atomically writes leader.toml, and updates Current().Leader.
 func (s *ConfigStore) SaveLeader(leaderCfg LeaderConfig) error {
-	cur := s.Current()
+	// Keep the cross-file snapshot, persistence, and in-memory transition
+	// together. Otherwise a concurrent workflow save can change the set of
+	// known IDs between validation and the write.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cur := s.current
 	knownSnippetIDs := make(map[string]struct{}, len(cur.Snippets.Items))
 	for _, item := range cur.Snippets.Items {
 		knownSnippetIDs[item.ID] = struct{}{}
@@ -230,13 +236,11 @@ func (s *ConfigStore) SaveLeader(leaderCfg LeaderConfig) error {
 		return err
 	}
 	sum := sha256.Sum256([]byte(encoded))
-	s.mu.Lock()
 	s.ensureSavedDigestsLocked()
 	s.current.Leader = leaderCfg
 	s.lastErrors = nil
 	s.lastWarnings = collectWarningIssues(Validate(s.current))
 	s.savedDigests[string(FileLeader)] = sum
-	s.mu.Unlock()
 	return nil
 }
 
@@ -324,6 +328,11 @@ func (s *ConfigStore) SaveComponents(cfg ComponentsConfig) error {
 
 // SaveWorkflows validates workflowsCfg, atomically writes workflows.toml, and updates Current().Workflows.
 func (s *ConfigStore) SaveWorkflows(workflowsCfg WorkflowsConfig) error {
+	// Validate and persist against one locked snapshot. This prevents a
+	// concurrent SaveLeader from changing the references after this guard runs.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if err := firstErrorIssue(ValidateWorkflows(workflowsCfg)); err != nil {
 		return err
 	}
@@ -331,8 +340,7 @@ func (s *ConfigStore) SaveWorkflows(workflowsCfg WorkflowsConfig) error {
 	// hand-edited config or a load from an older version). Preserve that state
 	// as a warning, but do not let a workflow edit create a new dangling
 	// reference or leave a newly renamed/deleted target dangling.
-	cur := s.Current()
-	if err := validateWorkflowReferenceTransition(cur.Leader, workflowsCfg); err != nil {
+	if err := validateWorkflowReferenceTransition(s.current.Leader, workflowsCfg); err != nil {
 		return err
 	}
 	encoded := workflowsCfg.Encode()
@@ -340,13 +348,11 @@ func (s *ConfigStore) SaveWorkflows(workflowsCfg WorkflowsConfig) error {
 		return err
 	}
 	sum := sha256.Sum256([]byte(encoded))
-	s.mu.Lock()
 	s.ensureSavedDigestsLocked()
 	s.current.Workflows = workflowsCfg
 	s.lastErrors = nil
 	s.lastWarnings = collectWarningIssues(Validate(s.current))
 	s.savedDigests[string(FileWorkflows)] = sum
-	s.mu.Unlock()
 	return nil
 }
 
@@ -371,8 +377,16 @@ func (s *ConfigStore) SaveIMERules(imeRulesCfg IMERulesConfig) error {
 
 // SaveAll validates the full ClavisConfig before atomically persisting every TOML file.
 func (s *ConfigStore) SaveAll(cfg ClavisConfig) error {
+	// SaveAll is a cross-file transition too; use the same guard and hold the
+	// store lock through validation and all atomic writes.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	issues := Validate(cfg)
 	if err := firstErrorIssue(issues); err != nil {
+		return err
+	}
+	if err := validateWorkflowReferenceTransition(cfg.Leader, cfg.Workflows); err != nil {
 		return err
 	}
 	files := []struct {
@@ -396,13 +410,11 @@ func (s *ConfigStore) SaveAll(cfg ClavisConfig) error {
 		sums[string(f.kind)] = sha256.Sum256([]byte(f.content))
 	}
 	warnings := collectWarningIssues(issues)
-	s.mu.Lock()
 	s.ensureSavedDigestsLocked()
 	s.current = cfg
 	s.lastErrors = nil
 	s.lastWarnings = warnings
 	maps.Copy(s.savedDigests, sums)
-	s.mu.Unlock()
 	return nil
 }
 

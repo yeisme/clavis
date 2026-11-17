@@ -83,6 +83,24 @@ func TestConfigStoreWorkflowEditRejectsRetainingDanglingLeaderWarning(t *testing
 	}
 }
 
+func TestConfigStoreSaveAllRejectsDanglingLeaderWorkflowReference(t *testing.T) {
+	dir := t.TempDir()
+	store := config.NewConfigStore(dir)
+	cfg, err := store.LoadOrInitialize()
+	if err != nil {
+		t.Fatalf("LoadOrInitialize: %v", err)
+	}
+	cfg.Leader = config.LeaderConfig{Nodes: []config.LeaderNode{{
+		Key: "r", Label: "Run", Action: config.RunWorkflowAction("missing"),
+	}}}
+	if err := store.SaveAll(cfg); err == nil || !strings.Contains(err.Error(), "references workflow") {
+		t.Fatalf("SaveAll dangling reference error = %v, want a clear reference error", err)
+	}
+	if got := store.Current().Leader.Nodes[0].Action.Type; got != config.ActionGroup {
+		t.Fatalf("rejected SaveAll changed current leader: action type %q", got)
+	}
+}
+
 func TestValidateLeaderWorkflowReference(t *testing.T) {
 	leader := config.LeaderConfig{Nodes: []config.LeaderNode{{Key: "r", Label: "Run", Action: config.RunWorkflowAction("missing")}}}
 	issues := config.ValidateLeader(leader, nil, map[string]struct{}{"known": {}})
