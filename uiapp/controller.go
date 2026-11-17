@@ -2205,12 +2205,25 @@ func workflowContextInputs(source config.WorkflowSource, actionCtx engine.Capsul
 	return values
 }
 
-var workflowStepSourceInputPattern = regexp.MustCompile(`[^a-zA-Z0-9_]+`)
-
+// workflowStepSourceInputID returns an internal input key for a step's source
+// text. Step IDs allow both hyphens and underscores, so replacing punctuation
+// with underscores is not injective (for example, a-b and a_b collide). Encode
+// every byte outside the unambiguous alphanumeric set as a fixed-width hex
+// escape; the resulting key is deterministic, valid for template lookup, and
+// preserves a one-to-one mapping from valid step IDs without exposing values.
 func workflowStepSourceInputID(step config.WorkflowStep) string {
 	id := strings.TrimSpace(step.ID)
-	id = workflowStepSourceInputPattern.ReplaceAllString(id, "_")
-	return "__workflow_step_" + id + "_text"
+	var encoded strings.Builder
+	encoded.Grow(len(id))
+	for i := 0; i < len(id); i++ {
+		ch := id[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') {
+			encoded.WriteByte(ch)
+			continue
+		}
+		fmt.Fprintf(&encoded, "_x%02x_", ch)
+	}
+	return "__workflow_step_" + encoded.String() + "_text"
 }
 
 func normalizeWorkflowTemplates(value string, workflow config.Workflow, step config.WorkflowStep) string {

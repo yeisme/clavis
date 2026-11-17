@@ -99,6 +99,57 @@ func TestWorkflowSourceMapsToDistinctCapsuleValues(t *testing.T) {
 	}
 }
 
+func TestWorkflowStepSourceInputIDsAreInjective(t *testing.T) {
+	ids := []string{"normal", "with_underscore", "a-b", "a_b", "a_x5f_b"}
+	keys := make(map[string]string, len(ids))
+	for _, id := range ids {
+		key := workflowStepSourceInputID(config.WorkflowStep{ID: id})
+		if previous, exists := keys[key]; exists {
+			t.Fatalf("step IDs %q and %q share internal source key %q", previous, id, key)
+		}
+		keys[key] = id
+	}
+	if got := keys[workflowStepSourceInputID(config.WorkflowStep{ID: "normal"})]; got != "normal" {
+		t.Fatalf("normal step ID was not recorded in key map: %q", got)
+	}
+	if got := workflowStepSourceInputID(config.WorkflowStep{ID: "normal"}); got != "__workflow_step_normal_text" {
+		t.Fatalf("normal step source key = %q", got)
+	}
+	if got := workflowStepSourceInputID(config.WorkflowStep{ID: "a-b"}); got == workflowStepSourceInputID(config.WorkflowStep{ID: "a_b"}) {
+		t.Fatalf("colliding step IDs produced the same source key: %q", got)
+	}
+}
+
+func TestWorkflowStepSourceBindingsResolveCollidingIDs(t *testing.T) {
+	workflow := config.Workflow{
+		ID: "source-bindings",
+		Steps: []config.WorkflowStep{
+			{ID: "a-b", Action: "first", Enabled: true, Source: config.WorkflowSourceSelection},
+			{ID: "a_b", Action: "second", Enabled: true, Source: config.WorkflowSourceClipboard},
+		},
+	}
+	definition := workflowDefinition(workflow)
+	inputs, err := workflowInputs(workflow, engine.CapsuleContext{SelectedText: "selected-value", ClipboardPreview: "clipboard-value"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := automation.BuildExecutionPlan(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bound []string
+	provider := automation.ProviderFunc(func(_ context.Context, invocation automation.ActionInvocation) (automation.ActionResult, error) {
+		bound = append(bound, invocation.Input["text"].(string))
+		return automation.ActionResult{Status: automation.ResultSucceeded, Output: invocation.Input["text"]}, nil
+	})
+	if _, err := automation.Run(context.Background(), plan, provider, inputs); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(bound, "|"), "selected-value|clipboard-value"; got != want {
+		t.Fatalf("source bindings = %q, want %q", got, want)
+	}
+}
+
 func TestWorkflowProviderBindsInputAndStepOutputToCLIAndScript(t *testing.T) {
 	cli := config.CLIAction("printf", "%s|%s", "{{input}}", "{{stepOutput}}")
 	provider := workflowProvider{
