@@ -21,6 +21,7 @@ import (
 	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/pkg/core/actions"
 	"github.com/yeisme/clavis/pkg/core/ai"
+	"github.com/yeisme/clavis/pkg/core/automation"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
@@ -109,6 +110,9 @@ type Options struct {
 	// controller (trigger keys, input engine, clipboard filter): its config
 	// watcher skips Clavis's own writes.
 	OnConfigSaved func()
+	// OnWorkflowResult receives the provider-independent execution result after
+	// a workflow finishes. HUD events remain the default shell.
+	OnWorkflowResult func(workflowID string, result automation.ExecutionResult, err error)
 }
 
 type clipTask struct {
@@ -185,6 +189,7 @@ type AppController struct {
 	OnRecordItemUse       func(itemID string)
 	OnRecordPromptVersion func(promptID, trigger, rawDraft, finalOutput, preset string)
 	OnConfigSaved         func()
+	OnWorkflowResult      func(workflowID string, result automation.ExecutionResult, err error)
 
 	// Decoded application icon bitmap cache
 	iconMu        sync.Mutex
@@ -332,6 +337,7 @@ func NewAppController(opts Options) *AppController {
 		OnRecordItemUse:       opts.OnRecordItemUse,
 		OnRecordPromptVersion: opts.OnRecordPromptVersion,
 		OnConfigSaved:         opts.OnConfigSaved,
+		OnWorkflowResult:      opts.OnWorkflowResult,
 		appIconCache:          make(map[string]*ui.Bitmap),
 		thumbCache:            make(map[string]*ui.Bitmap),
 		originalCache:         make(map[string]*ui.Bitmap),
@@ -1783,6 +1789,284 @@ func (c *AppController) writeClipboardText(text string) {
 	}
 	if mygo.App.IsReady() {
 		mygo.Clipboard.WriteText(text)
+	}
+}
+
+// ExecuteWorkflow validates and plans a configured workflow, reports the plan via
+// the normal HUD event, and starts its provider-independent runner in the
+// background. Only actions already represented by the safe CLI/script adapters
+// are exposed to workflows; workflow strings are never passed through a shell.
+func (c *AppController) ExecuteWorkflow(workflowID string, actionCtx engine.CapsuleContext) error {
+	return c.executeWorkflowContext(context.Background(), workflowID, actionCtx)
+}
+
+// RunWorkflow is an explicit-context alias for ExecuteWorkflow. It is useful to
+// callers which use Run as the vocabulary for other asynchronous controller work.
+func (c *AppController) RunWorkflow(ctx context.Context, workflowID string, actionCtx engine.CapsuleContext) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return c.executeWorkflowContext(ctx, workflowID, actionCtx)
+}
+
+type workflowAction struct {
+	leader *config.LeaderAction
+	script *config.ScriptComponentSpec
+}
+
+type workflowActionRegistry struct {
+	actions     map[string]workflowAction
+	descriptors automation.MapActionRegistry
+}
+
+func (r workflowActionRegistry) GetAction(id string) (automation.ActionDescriptor, bool) {
+	d, ok := r.descriptors[id]
+	return d, ok
+}
+
+func (c *AppController) executeWorkflowContext(parent context.Context, workflowID string, actionCtx engine.CapsuleContext) error {
+	workflowID = strings.TrimSpace(workflowID)
+	if workflowID == "" {
+		return errors.New("workflow ID cannot be empty")
+	}
+	cfg := c.ConfigStore.Current()
+	var workflow config.Workflow
+	found := false
+	for _, candidate := range cfg.Workflows.Workflows {
+		if candidate.ID == workflowID {
+			workflow = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("workflow %q not found", workflowID)
+	}
+	if !workflow.Enabled {
+		return fmt.Errorf("workflow %q is disabled", workflowID)
+	}
+
+	registry := c.workflowActionRegistry(cfg)
+	definition := workflowDefinition(workflow)
+	plan, err := automation.BuildExecutionPlanWithRegistry(definition, registry)
+	if err != nil {
+		c.workflowHUD(fmt.Sprintf("Workflow %s failed to plan: %v", workflowID, err))
+		return err
+	}
+	c.workflowHUD(fmt.Sprintf("Workflow %s planned (%d steps)", workflowID, len(plan)))
+
+	inputs := workflowInputs(workflow, actionCtx)
+	actionCtxCopy := actionCtx
+	go func() {
+		provider := workflowProvider{controller: c, actions: registry.actions, actionCtx: actionCtxCopy}
+		result, runErr := automation.NewRunner(provider).Run(parent, plan, inputs)
+		c.reportWorkflow(workflow, actionCtxCopy, result, runErr)
+	}()
+	return nil
+}
+
+func (c *AppController) workflowActionRegistry(cfg config.ClavisConfig) workflowActionRegistry {
+	registry := workflowActionRegistry{
+		actions:     make(map[string]workflowAction),
+		descriptors: make(automation.MapActionRegistry),
+	}
+	register := func(id string, action workflowAction, provider automation.ProviderType, name string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, exists := registry.actions[id]; exists {
+			return
+		}
+		registry.actions[id] = action
+		registry.descriptors[id] = automation.ActionDescriptor{ID: id, Name: name, Provider: provider, Risk: automation.RiskMedium}
+	}
+	var visit func([]config.LeaderNode, string)
+	visit = func(nodes []config.LeaderNode, prefix string) {
+		for _, node := range nodes {
+			id := strings.TrimSpace(prefix + node.Key)
+			if node.Action.Type == config.ActionGroup {
+				visit(node.Action.Children, id+".")
+				continue
+			}
+			action := node.Action
+			if action.Type != config.ActionCLI {
+				continue
+			}
+			register(id, workflowAction{leader: &action}, automation.ProviderCLI, node.Label)
+			// Short IDs are convenient in workflows and are only aliases when they
+			// cannot shadow another action.
+			register(strings.TrimPrefix(id, "leader."), workflowAction{leader: &action}, automation.ProviderCLI, node.Label)
+		}
+	}
+	visit(cfg.Leader.Nodes, "leader.")
+	for i := range cfg.Components.Scripts {
+		script := cfg.Components.Scripts[i]
+		action := workflowAction{script: &script}
+		register(script.ID, action, automation.ProviderScript, script.Title)
+		register("script."+script.ID, action, automation.ProviderScript, script.Title)
+	}
+	return registry
+}
+
+func workflowDefinition(workflow config.Workflow) automation.WorkflowDefinition {
+	definition := automation.WorkflowDefinition{ID: workflow.ID, Name: workflow.Name, Description: workflow.Description}
+	for _, input := range workflow.Inputs {
+		definition.Inputs = append(definition.Inputs, automation.WorkflowInput{ID: input.ID, Name: input.Name, Type: input.Type, Required: input.Required, Default: input.Default})
+	}
+	for _, step := range workflow.Steps {
+		if !step.Enabled {
+			continue
+		}
+		failure := automation.FailureStop
+		if step.Failure == config.WorkflowFailureContinue || step.Failure == config.WorkflowFailureNotify {
+			failure = automation.FailureContinue
+		}
+		output := automation.OutputCapture
+		switch step.Output {
+		case config.WorkflowOutputNone:
+			output = automation.OutputDiscard
+		case config.WorkflowOutputReplace:
+			output = automation.OutputReplace
+		case config.WorkflowOutputNotify:
+			output = automation.OutputNotify
+		}
+		input := map[string]any{}
+		if step.Input != "" {
+			input["input"] = step.Input
+		}
+		if step.Prompt != "" {
+			input["prompt"] = step.Prompt
+		}
+		definition.Steps = append(definition.Steps, automation.WorkflowStep{ID: step.ID, ActionID: step.Action, Input: input, DependsOn: append([]string(nil), step.DependsOn...), FailureMode: failure, OutputMode: output})
+	}
+	return definition
+}
+
+func workflowInputs(workflow config.Workflow, actionCtx engine.CapsuleContext) map[string]any {
+	values := map[string]any{
+		"selection": actionCtx.SelectedText, "selected_text": actionCtx.SelectedText,
+		"clipboard": actionCtx.ClipboardPreview, "clipboard_text": actionCtx.ClipboardPreview,
+		"text": actionCtx.SelectedText, "prompt": actionCtx.SelectedText,
+		"app": actionCtx.AppName, "app_name": actionCtx.AppName, "bundle_id": actionCtx.BundleID,
+		"url": actionCtx.ActiveURL, "window_title": actionCtx.WindowTitle,
+	}
+	for _, input := range workflow.Inputs {
+		if _, ok := values[input.ID]; !ok {
+			values[input.ID] = input.Default
+		}
+	}
+	return values
+}
+
+type workflowProvider struct {
+	controller *AppController
+	actions    map[string]workflowAction
+	actionCtx  engine.CapsuleContext
+}
+
+func (p workflowProvider) Invoke(ctx context.Context, invocation automation.ActionInvocation) (automation.ActionResult, error) {
+	action, ok := p.actions[invocation.ActionID]
+	if !ok {
+		return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultFailed, Error: "action is not available"}, nil
+	}
+	if action.script != nil {
+		if !action.script.Enabled {
+			return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultSkipped, Error: "script is disabled"}, nil
+		}
+		result, err := actions.ExecuteScriptComponent(ctx, *action.script, p.actionCtx)
+		return cliActionResult(result, err), nil
+	}
+	if action.leader == nil || action.leader.Type != config.ActionCLI {
+		return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultFailed, Error: "workflow action is not a CLI or script action"}, nil
+	}
+	return p.invokeCLI(ctx, action.leader.Command, action.leader.Args, 0)
+}
+
+func (p workflowProvider) invokeCLI(ctx context.Context, command string, args []string, timeout time.Duration) (automation.ActionResult, error) {
+	executor := actions.NewCLIExecutor()
+	if p.controller != nil {
+		p.controller.mu.Lock()
+		executor = p.controller.CLIExecutor
+		p.controller.mu.Unlock()
+	}
+	result, err := executor.Execute(ctx, command, args, p.actionCtx, timeout)
+	return cliActionResult(result, err), nil
+}
+
+func cliActionResult(result actions.CLIExecutionResult, err error) automation.ActionResult {
+	output := result.Stdout
+	if output == "" {
+		output = result.Stderr
+	}
+	actionResult := automation.ActionResult{Status: automation.ResultSucceeded, Output: output, Metadata: map[string]any{"exitCode": result.ExitCode, "stderr": result.Stderr, "timedOut": result.TimedOut}}
+	if err != nil {
+		actionResult.Status = automation.ResultFailed
+		actionResult.Error = err.Error()
+		return actionResult
+	}
+	if result.TimedOut || result.ExitCode != 0 {
+		actionResult.Status = automation.ResultFailed
+		if result.TimedOut {
+			actionResult.Error = "command timed out"
+		} else {
+			actionResult.Error = fmt.Sprintf("command exited with code %d", result.ExitCode)
+		}
+	}
+	return actionResult
+}
+
+func (c *AppController) reportWorkflow(workflow config.Workflow, actionCtx engine.CapsuleContext, result automation.ExecutionResult, runErr error) {
+	if runErr != nil {
+		c.workflowHUD(fmt.Sprintf("Workflow %s failed: %v", workflow.ID, runErr))
+	} else if result.Stopped {
+		message := "workflow failed"
+		for _, step := range result.Steps {
+			if step.Result.Status == automation.ResultFailed {
+				message = fmt.Sprintf("step %s failed: %s", step.StepID, step.Result.Error)
+				break
+			}
+		}
+		c.workflowHUD(fmt.Sprintf("Workflow %s %s", workflow.ID, message))
+	} else {
+		c.workflowHUD(fmt.Sprintf("Workflow %s completed", workflow.ID))
+		c.applyWorkflowOutput(workflow.Output, actionCtx, result)
+	}
+	c.mu.Lock()
+	hook := c.OnWorkflowResult
+	c.mu.Unlock()
+	if hook != nil {
+		hook(workflow.ID, result, runErr)
+	}
+}
+
+func (c *AppController) workflowHUD(message string) {
+	c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: message})
+}
+
+func (c *AppController) applyWorkflowOutput(mode config.WorkflowOutput, actionCtx engine.CapsuleContext, result automation.ExecutionResult) {
+	if mode == config.WorkflowOutputNone || mode == config.WorkflowOutputDiscard {
+		return
+	}
+	var output any
+	for _, step := range result.Steps {
+		if step.Result.Status == automation.ResultSucceeded {
+			output = step.Result.Output
+		}
+	}
+	text := strings.TrimSpace(fmt.Sprint(output))
+	if text == "" {
+		return
+	}
+	switch mode {
+	case config.WorkflowOutputReplace:
+		c.injectTextAsync(text, len([]rune(actionCtx.SelectedText)), 0)
+	case config.WorkflowOutputInsert:
+		c.injectTextAsync(text, 0, 0)
+	case config.WorkflowOutputClipboard:
+		c.writeClipboardText(text)
+	case config.WorkflowOutputNotify:
+		c.workflowHUD(text)
 	}
 }
 
