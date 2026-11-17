@@ -61,6 +61,43 @@ func TestValidateWorkflowReportsAllStructuralIssues(t *testing.T) {
 	}
 }
 
+func TestValidateWorkflowRejectsAbortAndDigitLeadingIdentifiers(t *testing.T) {
+	workflow := WorkflowDefinition{
+		ID:     "1workflow",
+		Inputs: []WorkflowInput{{ID: "2input"}},
+		Steps:  []WorkflowStep{{ID: "3step", ActionID: "4action", FailureMode: FailureMode("abort"), OutputMode: OutputCapture}},
+	}
+	issues := ValidateWorkflow(workflow, nil)
+	for _, code := range []string{"invalid_id", "invalid_reference", "invalid_failure_mode"} {
+		found := false
+		for _, issue := range issues {
+			if issue.Code == code {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing issue code %q in %#v", code, issues)
+		}
+	}
+}
+
+func TestValidateWorkflowAllowsActionReferenceDotsButNotDigitLeading(t *testing.T) {
+	workflow := validWorkflow()
+	workflow.Steps[0].ActionID = "script.echo"
+	if issues := ValidateWorkflow(workflow, nil); len(issues) != 0 {
+		t.Fatalf("dotted action reference should validate, got %#v", issues)
+	}
+	workflow.Steps[0].ActionID = "1script.echo"
+	issues := ValidateWorkflow(workflow, nil)
+	for _, issue := range issues {
+		if issue.Code == "invalid_reference" {
+			return
+		}
+	}
+	t.Fatalf("digit-leading action reference was accepted: %#v", issues)
+}
+
 func TestValidateWorkflowAcceptsActionAlias(t *testing.T) {
 	workflow := validWorkflow()
 	workflow.Steps[0].Action = workflow.Steps[0].ActionID

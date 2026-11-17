@@ -1140,6 +1140,16 @@ func leaderWorkflowIDs(cfg config.ClavisConfig) []string {
 	return ids
 }
 
+// leaderWorkflowOptions keeps a stale selected ID visible so the editor can
+// report it as invalid instead of silently changing the saved action.
+func leaderWorkflowOptions(ids []string, current string) ([]string, bool) {
+	valid := slices.Contains(ids, current)
+	if !valid && current != "" {
+		return append([]string{current}, ids...), false
+	}
+	return ids, valid
+}
+
 // defaultLeaderAction builds an action of the requested type.
 func defaultLeaderAction(kind string) config.LeaderAction {
 	switch config.LeaderActionType(kind) {
@@ -1392,23 +1402,22 @@ func (a *AppController) renderLeaderNodeEditor(
 		settingsInlineRow(c, theme, i18n.T("settings.field.workflow_id"), settingsFieldLabelWidth, func() {
 			ids := leaderWorkflowIDs(cfg)
 			current := draft.Action.WorkflowID
-			valid := slices.Contains(ids, current)
-			if !valid {
-				if len(ids) > 0 {
-					current = ids[0]
-				} else {
-					current = ""
-				}
-			}
-			if current != draft.Action.WorkflowID {
+			options, valid := leaderWorkflowOptions(ids, current)
+			if current == "" && len(ids) > 0 {
+				current = ids[0]
+				valid = true
+				options = ids
 				seSet(se, func(s *settingsEditorState) { s.leaderDraft.Action.WorkflowID = current })
 			}
 			if len(ids) > 0 {
-				if v, changed := settingsSelect(c, ids, current); changed {
+				if v, changed := settingsSelect(c, options, current); changed {
 					seSet(se, func(s *settingsEditorState) { s.leaderDraft.Action = config.RunWorkflowAction(v) })
 				}
 			} else {
 				settingsHint(c, theme, i18n.T("settings.leader.workflow_none"))
+			}
+			if !valid && current != "" {
+				settingsBanner(c, theme.Danger, fmt.Sprintf("Workflow %q is invalid or no longer exists.", current))
 			}
 		})
 	case config.ActionCLI:

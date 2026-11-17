@@ -160,6 +160,30 @@ output = "discard"
 	}
 }
 
+func TestValidateWorkflowsRejectsAbortFailureAndDigitLeadingIDs(t *testing.T) {
+	cfg := config.WorkflowsConfig{Workflows: []config.Workflow{{
+		ID: "1workflow", Failure: config.WorkflowFailureMode("abort"),
+		Inputs: []config.WorkflowInput{{ID: "2input"}},
+		Steps:  []config.WorkflowStep{{ID: "3step", Failure: config.WorkflowFailureMode("abort")}},
+	}}}
+	issues := config.ValidateWorkflows(cfg)
+	for _, path := range []string{"workflows[0].id", "workflows[0].inputs[0].id", "workflows[0].steps[0].id", "workflows[0].failure", "workflows[0].steps[0].failure"} {
+		if !workflowIssue(issues, path) {
+			t.Errorf("expected validation issue at %s; got %+v", path, issues)
+		}
+	}
+}
+
+func TestValidateWorkflowsAllowsASCIIIdentifierPunctuation(t *testing.T) {
+	cfg := config.WorkflowsConfig{Workflows: []config.Workflow{{
+		ID: "workflow_1-2", Inputs: []config.WorkflowInput{{ID: "input_1-2"}},
+		Steps: []config.WorkflowStep{{ID: "step_1-2"}},
+	}}}
+	if issues := config.ValidateWorkflows(cfg); len(issues) != 0 {
+		t.Fatalf("expected valid identifiers, got %+v", issues)
+	}
+}
+
 func TestValidateWorkflowsRejectsRuntimeIncompatibleDiscardLiteral(t *testing.T) {
 	cfg := config.WorkflowsConfig{Workflows: []config.Workflow{{
 		ID: "in-memory", Output: config.WorkflowOutput("discard"),

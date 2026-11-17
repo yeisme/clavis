@@ -264,7 +264,7 @@ func validateWorkflowPlanConfig(workflow config.Workflow) error {
 	if workflow.Execution != "" && workflow.Execution != config.WorkflowExecutionSequential {
 		return fmt.Errorf("workflow %q has unsupported execution mode %q (only %q is supported)", workflow.ID, workflow.Execution, config.WorkflowExecutionSequential)
 	}
-	if workflow.Failure != "" && workflow.Failure != config.WorkflowFailureStop && workflow.Failure != config.WorkflowFailureContinue && workflow.Failure != config.WorkflowFailureAbort {
+	if workflow.Failure != "" && workflow.Failure != config.WorkflowFailureStop && workflow.Failure != config.WorkflowFailureContinue {
 		return fmt.Errorf("workflow %q has unsupported failure mode %q", workflow.ID, workflow.Failure)
 	}
 	if workflow.Source == config.WorkflowSourcePrompt {
@@ -286,7 +286,7 @@ func validateWorkflowPlanConfig(workflow config.Workflow) error {
 		if step.Execution != "" && step.Execution != config.WorkflowExecutionSequential {
 			return fmt.Errorf("workflow %q step %q has unsupported execution mode %q (only %q is supported)", workflow.ID, step.ID, step.Execution, config.WorkflowExecutionSequential)
 		}
-		if step.Failure != "" && step.Failure != config.WorkflowFailureStop && step.Failure != config.WorkflowFailureContinue && step.Failure != config.WorkflowFailureAbort {
+		if step.Failure != "" && step.Failure != config.WorkflowFailureStop && step.Failure != config.WorkflowFailureContinue {
 			return fmt.Errorf("workflow %q step %q has unsupported failure mode %q", workflow.ID, step.ID, step.Failure)
 		}
 		if step.Source == config.WorkflowSourcePrompt {

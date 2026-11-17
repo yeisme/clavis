@@ -7,7 +7,8 @@ import (
 	"strings"
 )
 
-var identifierPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]*$`)
+var identifierPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
+var actionReferencePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]*$`)
 
 // ValidationIssue identifies one invalid part of a workflow. Path is a stable
 // JSON-like location suitable for displaying to a user or logging.
@@ -73,7 +74,7 @@ func ValidateWorkflow(workflow WorkflowDefinition, registry ActionRegistry) []Va
 		if conflict {
 			issues = append(issues, ValidationIssue{Path: stepPath, Code: "conflicting_action_id", Message: "actionId and action must name the same action"})
 		}
-		if !isValidID(actionID) {
+		if !isValidActionReference(actionID) {
 			issues = append(issues, ValidationIssue{Path: stepPath + ".actionId", Code: "invalid_reference", Message: "action reference is required"})
 		} else if registry != nil {
 			if _, ok := lookupAction(registry, actionID); !ok {
@@ -124,8 +125,8 @@ func ValidateWorkflowE(workflow WorkflowDefinition, registry ActionRegistry) err
 }
 
 // IsValidID reports whether id is a non-empty, stable workflow identifier.
-// IDs start with a letter and may contain letters, digits, underscores, dots,
-// and hyphens.
+// IDs start with an ASCII letter and may contain ASCII letters, digits,
+// underscores, and hyphens.
 func IsValidID(id string) bool {
 	return identifierPattern.MatchString(id)
 }
@@ -134,6 +135,8 @@ func IsValidID(id string) bool {
 func ValidateID(id string) bool { return IsValidID(id) }
 
 func isValidID(id string) bool { return IsValidID(id) }
+
+func isValidActionReference(id string) bool { return actionReferencePattern.MatchString(id) }
 
 func isFailureMode(mode FailureMode) bool {
 	return mode == FailureStop || mode == FailureContinue

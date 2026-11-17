@@ -374,7 +374,7 @@ func (c WorkflowsConfig) Encode() string {
 	return toml.Encode(root)
 }
 
-var workflowIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
+var workflowIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
 
 // validateWorkflowID requires the canonical spelling: the pattern is matched
 // against the raw value, so an ID with surrounding whitespace is rejected
@@ -412,7 +412,7 @@ var supportedWorkflowStepOutputs = map[string]struct{}{"replace": {}, "notify": 
 // The workflow runner currently implements only stop/continue failure handling.
 // Keep the public string model forward compatible, but reject modes that would
 // otherwise be silently treated as stop or continue.
-var supportedWorkflowFailures = map[string]struct{}{"stop": {}, "continue": {}, "abort": {}}
+var supportedWorkflowFailures = map[string]struct{}{"stop": {}, "continue": {}}
 
 // Plans and runners execute steps serially. Parallel/concurrent values remain
 // decodable for compatibility, but validation rejects them until implemented.

@@ -270,6 +270,9 @@ func (a *AppController) saveWorkflowsConfig(workflowsCfg config.WorkflowsConfig)
 func (a *AppController) validateWorkflowStepActions(workflow config.Workflow) error {
 	registry := a.workflowActionRegistry(a.ConfigStore.Current())
 	for i, step := range workflow.Steps {
+		if !step.Enabled {
+			continue
+		}
 		title := workflowStepTitle(step, i)
 		actionID := strings.TrimSpace(step.Action)
 		if actionID == "" {

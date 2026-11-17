@@ -77,6 +77,11 @@ func TestRunWorkflowPlanRejectsUnsupportedModes(t *testing.T) {
 	if err := validateWorkflowPlanConfig(workflow); err == nil || !strings.Contains(err.Error(), "unsupported execution mode") {
 		t.Fatalf("validation error = %v", err)
 	}
+	workflow.Execution = ""
+	workflow.Failure = config.WorkflowFailureMode("abort")
+	if err := validateWorkflowPlanConfig(workflow); err == nil || !strings.Contains(err.Error(), "unsupported failure mode") {
+		t.Fatalf("abort validation error = %v", err)
+	}
 }
 
 func TestRunWorkflowPlanJSON(t *testing.T) {

@@ -145,11 +145,13 @@ func TestValidateWorkflowAdapterRejectsUnsupportedModes(t *testing.T) {
 	}{
 		{"workflow execution", func(w *config.Workflow) { w.Execution = "parallel" }, "unsupported execution mode"},
 		{"workflow failure", func(w *config.Workflow) { w.Failure = config.WorkflowFailureNotify }, "unsupported failure mode"},
+		{"workflow abort", func(w *config.Workflow) { w.Failure = config.WorkflowFailureMode("abort") }, "unsupported failure mode"},
 		{"workflow output", func(w *config.Workflow) { w.Output = "unknown" }, "unsupported output mode"},
 		{"workflow discard output", func(w *config.Workflow) { w.Output = config.WorkflowOutput("discard") }, "unsupported output mode"},
 		{"workflow prompt source", func(w *config.Workflow) { w.Source = config.WorkflowSourcePrompt }, "unsupported source"},
 		{"step execution", func(w *config.Workflow) { w.Steps[0].Execution = "parallel" }, "unsupported execution mode"},
 		{"step failure", func(w *config.Workflow) { w.Steps[0].Failure = config.WorkflowFailureNotify }, "unsupported failure mode"},
+		{"step abort", func(w *config.Workflow) { w.Steps[0].Failure = config.WorkflowFailureMode("abort") }, "unsupported failure mode"},
 		{"step output", func(w *config.Workflow) { w.Steps[0].Output = config.WorkflowOutputInsert }, "unsupported output mode"},
 		{"step discard output", func(w *config.Workflow) { w.Steps[0].Output = config.WorkflowOutput("discard") }, "unsupported output mode"},
 		{"step prompt source", func(w *config.Workflow) { w.Steps[0].Source = config.WorkflowSourcePrompt }, "unsupported source"},
@@ -230,10 +232,18 @@ func TestApplyWorkflowOutputIgnoresDiscardedStepOutput(t *testing.T) {
 
 // TestValidateWorkflowStepActionsUsesControllerRegistry checks the save-path
 // gate consults the same executable registry the controller plans with.
+func TestValidateWorkflowStepActionsSkipsDisabledSteps(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	workflow := config.Workflow{ID: "flow", Steps: []config.WorkflowStep{{ID: "disabled", Action: "missing", Enabled: false}}}
+	if err := ctrl.validateWorkflowStepActions(workflow); err != nil {
+		t.Fatalf("disabled step should not require an action: %v", err)
+	}
+}
+
 func TestValidateWorkflowStepActionsUsesControllerRegistry(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
 	seedWorkflowScripts(t, ctrl, "echo")
-	workflow := config.Workflow{ID: "flow", Steps: []config.WorkflowStep{{ID: "run"}}}
+	workflow := config.Workflow{ID: "flow", Steps: []config.WorkflowStep{{ID: "run", Enabled: true}}}
 	if err := ctrl.validateWorkflowStepActions(workflow); err == nil || !strings.Contains(err.Error(), "action ID") {
 		t.Fatalf("empty action error = %v, want an inline action-ID error", err)
 	}

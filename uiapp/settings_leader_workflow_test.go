@@ -16,6 +16,13 @@ func TestLeaderWorkflowIDsAreStableAndExcludeBlankIDs(t *testing.T) {
 	}
 }
 
+func TestLeaderWorkflowOptionsPreserveMissingID(t *testing.T) {
+	options, valid := leaderWorkflowOptions([]string{"daily", "weekly"}, "missing")
+	if valid || !reflect.DeepEqual(options, []string{"missing", "daily", "weekly"}) {
+		t.Fatalf("options=%v valid=%v, want stale ID preserved and invalid", options, valid)
+	}
+}
+
 func TestExecuteWorkflowRejectsMissingAndDisabledRuntimeWorkflows(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
 	if err := ctrl.ExecuteWorkflow("missing", engine.CapsuleContext{}); err == nil {
