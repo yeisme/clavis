@@ -625,8 +625,20 @@ func (s *Server) ConfirmTombstones(account, device string, sequence uint64) erro
 func (s *Server) VerifyTombstone(t Tombstone) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	stored, ok := s.tombstones[t.AccountID][t.ObjectID]
-	return ok && stored.Sequence == t.Sequence && stored.Version == t.Version && stored.DeviceID == t.DeviceID && t.AccountID != "" && t.ObjectID != "" && t.Version != 0 && t.Sequence != 0 && t.Sequence <= s.accountSequences[t.AccountID] && t.Verify(s.accounts[t.AccountID][t.DeviceID])
+	// Verify against the append-only log rather than the current object index.
+	// The current index intentionally contains only the latest tombstone for an
+	// object, while a device may still need to acknowledge an older batch.
+	stored, ok := s.tombstoneLog[t.AccountID][t.Sequence]
+	if !ok || t.AccountID == "" || t.ObjectID == "" || t.Version == 0 || t.Sequence == 0 {
+		return false
+	}
+	return stored.AccountID == t.AccountID &&
+		stored.ObjectID == t.ObjectID &&
+		stored.Sequence == t.Sequence &&
+		stored.Version == t.Version &&
+		stored.DeviceID == t.DeviceID &&
+		hmac.Equal(stored.Signature, t.Signature) &&
+		t.Verify(s.accounts[t.AccountID][t.DeviceID])
 }
 
 // Upload accepts only a JSON EncryptedEnvelope. The legacy signature remains,

@@ -764,12 +764,19 @@ func (s *SQLiteSyncStore) ConfirmTombstones(account, device string, sequence uin
 func (s *SQLiteSyncStore) VerifyTombstone(t coresync.Tombstone) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.Query(context.Background(), `SELECT device_id,version,sequence FROM sync_current_tombstones WHERE account_id=? AND object_id=?`, t.AccountID, t.ObjectID)
+	if t.AccountID == "" || t.ObjectID == "" || t.Version == 0 || t.Sequence == 0 {
+		return false
+	}
+	// The current tombstone index is only the latest object boundary. A device
+	// can still be acknowledging an older issued batch, so validation must use
+	// the append-only sequence log instead.
+	rows, err := s.db.Query(context.Background(), `SELECT object_id,device_id,version,signature FROM sync_tombstones WHERE account_id=? AND sequence=?`, t.AccountID, t.Sequence)
 	if err != nil || len(rows.Values) == 0 {
 		return false
 	}
 	r := rows.Values[0]
-	if syncStr(r, 0) != t.DeviceID || uint64(syncInt64val(r, 1)) != t.Version || uint64(syncInt64val(r, 2)) != t.Sequence || t.Sequence == 0 {
+	storedSignature, ok := blob(r, 3)
+	if !ok || syncStr(r, 0) != t.ObjectID || syncStr(r, 1) != t.DeviceID || uint64(syncInt64val(r, 2)) != t.Version || !hmac.Equal(storedSignature, t.Signature) {
 		return false
 	}
 	pub, err := s.deviceKeyLocked(t.AccountID, t.DeviceID)

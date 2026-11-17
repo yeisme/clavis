@@ -277,6 +277,54 @@ func TestDeleteIsPermanentAtAnyHigherVersion(t *testing.T) {
 	}
 }
 
+func TestClientSyncVerifiesHistoricalTombstonesForRepeatedObjectDelete(t *testing.T) {
+	s, a, b := setupClients(t)
+	if err := a.Delete("object"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.SyncTombstones("acct", "b", 0)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first issued batch = %+v, %v", first, err)
+	}
+	firstTombstone := first[0]
+	if !s.VerifyTombstone(firstTombstone) {
+		t.Fatal("first tombstone did not verify before replacement")
+	}
+
+	if err := a.Delete("object"); err != nil {
+		t.Fatal(err)
+	}
+	if s.VerifyTombstone(firstTombstone) == false {
+		t.Fatal("historical tombstone rejected after newer object delete")
+	}
+	if _, _, err := b.Sync(); err != nil {
+		t.Fatalf("client failed to sync historical tombstone: %v", err)
+	}
+	if got := b.Watermark(); got != firstTombstone.Sequence {
+		t.Fatalf("watermark after historical batch = %d, want %d", got, firstTombstone.Sequence)
+	}
+
+	second, err := s.SyncTombstones("acct", "b", firstTombstone.Sequence)
+	if err != nil || len(second) != 1 {
+		t.Fatalf("second issued batch = %+v, %v", second, err)
+	}
+	if second[0].ObjectID != firstTombstone.ObjectID || second[0].Sequence <= firstTombstone.Sequence {
+		t.Fatalf("second tombstone = %+v, want newer delete for same object", second[0])
+	}
+	if !s.VerifyTombstone(second[0]) {
+		t.Fatal("new tombstone did not verify")
+	}
+	if _, _, err := b.Sync(); err != nil {
+		t.Fatalf("client failed to sync new tombstone: %v", err)
+	}
+	if got := b.Watermark(); got != second[0].Sequence {
+		t.Fatalf("watermark after new batch = %d, want %d", got, second[0].Sequence)
+	}
+	if s.VerifyTombstone(firstTombstone) == false {
+		t.Fatal("historical tombstone disappeared after confirmation")
+	}
+}
+
 func TestStaleDeleteStillPurgesLocalCopies(t *testing.T) {
 	_, a, b := setupClients(t)
 	b.Cache().PutCleartext("object", []byte("clear"))

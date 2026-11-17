@@ -376,6 +376,75 @@ func TestSQLiteIssuedTombstoneBatchSurvivesNewDeleteAcrossStores(t *testing.T) {
 	}
 }
 
+func TestSQLiteHistoricalSameObjectTombstonesAcrossRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sync", "state.db")
+	store, err := NewSQLiteSyncStore(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := store.RegisterAccount("acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PairDeviceWithCredential("acct", "device", priv.Public().(ed25519.PublicKey), credential); err != nil {
+		t.Fatal(err)
+	}
+	first := coresync.DeleteInstruction{AccountID: "acct", ObjectID: "same-object", DeviceID: "device", Version: 1, ProtocolVersion: coresync.ProtocolVersion}.Sign(priv)
+	firstTombstone, err := store.SubmitDelete(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := store.SyncTombstones("acct", "device", 0)
+	if err != nil || len(batch) != 1 || batch[0].Sequence != firstTombstone.Sequence {
+		t.Fatalf("first batch = %+v, %v", batch, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = NewSQLiteSyncStore(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := coresync.DeleteInstruction{AccountID: "acct", ObjectID: "same-object", DeviceID: "device", Version: 2, ProtocolVersion: coresync.ProtocolVersion}.Sign(priv)
+	secondTombstone, err := store.SubmitDelete(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !store.VerifyTombstone(firstTombstone) {
+		t.Fatal("historical tombstone rejected after newer same-object delete")
+	}
+	if err := store.ConfirmTombstones("acct", "device", firstTombstone.Sequence); err != nil {
+		t.Fatalf("confirm historical tombstone: %v", err)
+	}
+	batch, err = store.SyncTombstones("acct", "device", firstTombstone.Sequence)
+	if err != nil || len(batch) != 1 || batch[0].Sequence != secondTombstone.Sequence {
+		t.Fatalf("second batch = %+v, %v", batch, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = NewSQLiteSyncStore(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if !store.VerifyTombstone(secondTombstone) {
+		t.Fatal("new tombstone did not verify after restart")
+	}
+	if err := store.ConfirmTombstones("acct", "device", secondTombstone.Sequence); err != nil {
+		t.Fatalf("confirm new tombstone: %v", err)
+	}
+	if watermark, err := store.Watermark("acct", "device"); err != nil || watermark != secondTombstone.Sequence {
+		t.Fatalf("final watermark = %d, %v", watermark, err)
+	}
+}
+
 func TestSQLiteExternalDBCloseDoesNotCloseOwner(t *testing.T) {
 	db, err := sqlite.Open(context.Background(), ":memory:", sqlite.OpenOptions{})
 	if err != nil {

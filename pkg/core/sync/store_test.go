@@ -26,6 +26,56 @@ func TestSyncStoreContract(t *testing.T) {
 	}
 }
 
+func TestServerStoreVerifiesHistoricalSameObjectTombstones(t *testing.T) {
+	store, err := NewServerStore(NewServer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	credential, err := store.RegisterAccount("acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PairDeviceWithCredential("acct", "device", priv.Public().(ed25519.PublicKey), credential); err != nil {
+		t.Fatal(err)
+	}
+	deleteAt := func(version uint64) Tombstone {
+		t.Helper()
+		d := DeleteInstruction{AccountID: "acct", ObjectID: "same-object", DeviceID: "device", Version: version, ProtocolVersion: ProtocolVersion}.Sign(priv)
+		tombstone, err := store.SubmitDelete(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tombstone
+	}
+	first := deleteAt(1)
+	batch, err := store.SyncTombstones("acct", "device", 0)
+	if err != nil || len(batch) != 1 || batch[0].Sequence != first.Sequence {
+		t.Fatalf("first batch = %+v, %v", batch, err)
+	}
+	second := deleteAt(2)
+	if !store.VerifyTombstone(first) {
+		t.Fatal("historical tombstone rejected after newer same-object delete")
+	}
+	if err := store.ConfirmTombstones("acct", "device", first.Sequence); err != nil {
+		t.Fatalf("confirm historical tombstone: %v", err)
+	}
+	batch, err = store.SyncTombstones("acct", "device", first.Sequence)
+	if err != nil || len(batch) != 1 || batch[0].Sequence != second.Sequence {
+		t.Fatalf("second batch = %+v, %v", batch, err)
+	}
+	if !store.VerifyTombstone(second) {
+		t.Fatal("new tombstone did not verify")
+	}
+	if err := store.ConfirmTombstones("acct", "device", second.Sequence); err != nil {
+		t.Fatalf("confirm new tombstone: %v", err)
+	}
+}
+
 func runStoreContract(t *testing.T, store SyncStore) {
 	t.Helper()
 	defer store.Close()
