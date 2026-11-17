@@ -370,6 +370,63 @@ func TestConfirmRequiresIssuedTombstoneBatch(t *testing.T) {
 	}
 }
 
+func TestIssuedTombstoneBatchSurvivesNewDeleteAcrossServerStores(t *testing.T) {
+	server := NewServer()
+	first, err := NewServerStore(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewServerStore(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := first.RegisterAccount("acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.PairDeviceWithCredential("acct", "device", priv.Public().(ed25519.PublicKey), credential); err != nil {
+		t.Fatal(err)
+	}
+	deleteTombstone := func(object string) Tombstone {
+		t.Helper()
+		instruction := DeleteInstruction{AccountID: "acct", ObjectID: object, DeviceID: "device", Version: 1, ProtocolVersion: ProtocolVersion}
+		instruction.Signature = ed25519.Sign(priv, instruction.canonical())
+		tombstone, err := first.SubmitDelete(instruction)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tombstone
+	}
+	firstTombstone := deleteTombstone("first")
+	firstBatch, err := first.SyncTombstones("acct", "device", 0)
+	if err != nil || len(firstBatch) != 1 || firstBatch[0].Sequence != firstTombstone.Sequence {
+		t.Fatalf("first batch = %+v, %v", firstBatch, err)
+	}
+	secondTombstone := deleteTombstone("second")
+	retriedBatch, err := second.SyncTombstones("acct", "device", 0)
+	if err != nil || len(retriedBatch) != 1 || retriedBatch[0].Sequence != firstTombstone.Sequence {
+		t.Fatalf("pending batch was replaced: %+v, %v", retriedBatch, err)
+	}
+	if err := second.ConfirmTombstones("acct", "device", firstTombstone.Sequence); err != nil {
+		t.Fatalf("confirm old batch: %v", err)
+	}
+	watermark, err := first.Watermark("acct", "device")
+	if err != nil || watermark != firstTombstone.Sequence {
+		t.Fatalf("watermark after old confirmation = %d, %v", watermark, err)
+	}
+	nextBatch, err := first.SyncTombstones("acct", "device", 0)
+	if err != nil || len(nextBatch) != 1 || nextBatch[0].Sequence != secondTombstone.Sequence {
+		t.Fatalf("next batch = %+v, %v", nextBatch, err)
+	}
+	if err := second.ConfirmTombstones("acct", "device", secondTombstone.Sequence); err != nil {
+		t.Fatalf("confirm next batch: %v", err)
+	}
+}
+
 func TestRepeatedTombstoneConfirmationIsRejected(t *testing.T) {
 	s, a, b := setupClients(t)
 	if err := a.Delete("object"); err != nil {

@@ -546,12 +546,17 @@ func (s *Server) SubmitDelete(d DeleteInstruction) (Tombstone, error) {
 // SyncTombstones ignores afterSequence for compatibility with the original
 // API. The server uses the device's confirmed watermark as the authoritative
 // cursor and records exactly the contiguous batch it returned. Only that
-// recorded batch may subsequently be confirmed.
+// recorded batch may subsequently be confirmed. While a batch is pending,
+// repeated calls return that same batch rather than replacing it with a newer
+// range.
 func (s *Server) SyncTombstones(account, device string, after uint64) ([]Tombstone, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.accounts[account][device] == nil {
 		return nil, errors.New("sync: device is not paired")
+	}
+	if batch, pending := s.issued[account][device]; pending {
+		return s.tombstoneBatchLocked(account, batch)
 	}
 	confirmed := s.watermarks[account][device]
 	out := make([]Tombstone, 0)
@@ -566,6 +571,21 @@ func (s *Server) SyncTombstones(account, device string, after uint64) ([]Tombsto
 		s.issued[account][device] = tombstoneBatch{from: out[0].Sequence, to: out[len(out)-1].Sequence}
 	} else {
 		delete(s.issued[account], device)
+	}
+	return out, nil
+}
+
+func (s *Server) tombstoneBatchLocked(account string, batch tombstoneBatch) ([]Tombstone, error) {
+	if batch.from == 0 || batch.to < batch.from {
+		return nil, ErrStoreBatch
+	}
+	out := make([]Tombstone, 0, batch.to-batch.from+1)
+	for sequence := batch.from; sequence <= batch.to; sequence++ {
+		t, ok := s.tombstoneLog[account][sequence]
+		if !ok {
+			return nil, errors.New("sync: tombstone sequence is not contiguous")
+		}
+		out = append(out, t)
 	}
 	return out, nil
 }

@@ -651,11 +651,19 @@ func (s *SQLiteSyncStore) SyncTombstones(account, device string, _ uint64) (out 
 	// Read the candidate batch first, then publish exactly that range in a
 	// transaction whose predicates re-check both cursors. A concurrent SQLite
 	// connection therefore cannot publish a range for a stale watermark.
-	rows, err := s.db.Query(context.Background(), `SELECT d.watermark,a.sequence FROM sync_devices d JOIN sync_accounts a ON a.account_id=d.account_id WHERE d.account_id=? AND d.device_id=?`, account, device)
+	rows, err := s.db.Query(context.Background(), `SELECT d.watermark,a.sequence,d.issued,d.issued_from,d.issued_to FROM sync_devices d JOIN sync_accounts a ON a.account_id=d.account_id WHERE d.account_id=? AND d.device_id=?`, account, device)
 	if err != nil || len(rows.Values) == 0 {
 		return nil, coresync.ErrStoreDeviceMissing
 	}
-	from, latest := uint64(syncInt64val(rows.Values[0], 0)), uint64(syncInt64val(rows.Values[0], 1))
+	row := rows.Values[0]
+	from, latest := uint64(syncInt64val(row, 0)), uint64(syncInt64val(row, 1))
+	if syncInt64val(row, 2) != 0 {
+		issuedFrom, issuedTo := uint64(syncInt64val(row, 3)), uint64(syncInt64val(row, 4))
+		if issuedFrom != from+1 || issuedTo < issuedFrom {
+			return nil, coresync.ErrStoreBatch
+		}
+		return s.loadTombstoneRangeLocked(account, issuedFrom, issuedTo)
+	}
 	rows, err = s.db.Query(context.Background(), `SELECT object_id,device_id,version,sequence,issued_at_ns,deleted_at_ns,protocol_version,signature FROM sync_tombstones WHERE account_id=? AND sequence>? AND sequence<=? ORDER BY sequence`, account, from, latest)
 	if err != nil {
 		return nil, err
@@ -672,12 +680,42 @@ func (s *SQLiteSyncStore) SyncTombstones(account, device string, _ uint64) (out 
 	if len(out) > 0 {
 		issuedFrom, issuedTo = int64(out[0].Sequence), int64(out[len(out)-1].Sequence)
 	}
-	results, err := s.db.Transaction(context.Background(), []sqlite.Statement{{SQL: `UPDATE sync_devices SET issued=?,issued_from=?,issued_to=? WHERE account_id=? AND device_id=? AND watermark=? AND EXISTS (SELECT 1 FROM sync_accounts WHERE account_id=? AND sequence=?)`, Args: []any{syncBoolInt(len(out) > 0), issuedFrom, issuedTo, account, device, from, account, latest}}})
+	results, err := s.db.Transaction(context.Background(), []sqlite.Statement{{SQL: `UPDATE sync_devices SET issued=?,issued_from=?,issued_to=? WHERE account_id=? AND device_id=? AND watermark=? AND issued=0 AND EXISTS (SELECT 1 FROM sync_accounts WHERE account_id=? AND sequence=?)`, Args: []any{syncBoolInt(len(out) > 0), issuedFrom, issuedTo, account, device, from, account, latest}}})
 	if err != nil {
 		return nil, err
 	}
 	if len(results) == 0 || results[0].Changes != 1 {
-		return nil, errors.New("sync: tombstone cursor changed during sync")
+		// Another store instance may have published the same candidate batch
+		// between our read and conditional update. Return that durable batch so
+		// its confirmation remains valid; never expose the unrecorded candidate.
+		pending, queryErr := s.db.Query(context.Background(), `SELECT watermark,issued,issued_from,issued_to FROM sync_devices WHERE account_id=? AND device_id=?`, account, device)
+		if queryErr == nil && len(pending.Values) > 0 && syncInt64val(pending.Values[0], 1) != 0 {
+			pendingRow := pending.Values[0]
+			pendingFrom, pendingTo := uint64(syncInt64val(pendingRow, 2)), uint64(syncInt64val(pendingRow, 3))
+			if pendingFrom == uint64(syncInt64val(pendingRow, 0))+1 && pendingTo >= pendingFrom {
+				return s.loadTombstoneRangeLocked(account, pendingFrom, pendingTo)
+			}
+		}
+		return nil, coresync.ErrStoreBatch
+	}
+	return out, nil
+}
+
+func (s *SQLiteSyncStore) loadTombstoneRangeLocked(account string, from, to uint64) ([]coresync.Tombstone, error) {
+	rows, err := s.db.Query(context.Background(), `SELECT object_id,device_id,version,sequence,issued_at_ns,deleted_at_ns,protocol_version,signature FROM sync_tombstones WHERE account_id=? AND sequence>=? AND sequence<=? ORDER BY sequence`, account, from, to)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]coresync.Tombstone, 0, len(rows.Values))
+	for _, r := range rows.Values {
+		t := rowTombstone(account, r)
+		if t.Sequence != from+uint64(len(out)) {
+			return nil, errors.New("sync: tombstone sequence is not contiguous")
+		}
+		out = append(out, t)
+	}
+	if len(out) == 0 || out[len(out)-1].Sequence != to {
+		return nil, errors.New("sync: tombstone sequence is not contiguous")
 	}
 	return out, nil
 }
