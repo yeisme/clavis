@@ -107,7 +107,7 @@ On first launch, Clavis automatically creates `~/.config/clavis/` with default T
 
 | File | Purpose |
 | --- | --- |
-| `config.toml` | `[trigger]`, `[appearance]` (`language`, `animations`, `show_preview_pane`), `[ai]` + `[[ai.profiles]]` (`deepseek` default, `ollama`, `claude`, `gemini`), `[clipboard]`, `[ime]` (`lock_ascii_on_leader`, `show_floating_pill`, `switch_delay_ms`), and `[keymap]` + `[[keymap.remaps]]` settings. Raw API keys (`api_key`) are rejected—store keys in the OS credential store via **Settings → AI & Keychain** or the profile's `api_key_env_var` (`DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`). An OpenAI-compatible profile may set `reasoning_effort` (e.g. `"low"`) to cap a reasoning model's thinking before the first token. |
+| `config.toml` | `[trigger]`, `[appearance]` (`language`, `animations`, `show_preview_pane`, `visual_preset`, `stage_intensity`, `oblique_rows`, `glass_clarity`), `[ai]` + `[[ai.profiles]]` (`deepseek` default, `ollama`, `claude`, `gemini`), `[clipboard]`, `[ime]` (`lock_ascii_on_leader`, `show_floating_pill`, `switch_delay_ms`), and `[keymap]` + `[[keymap.remaps]]` settings. Raw API keys (`api_key`) are rejected—store keys in the OS credential store via **Settings → AI & Keychain** or the profile's `api_key_env_var` (`DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`). An OpenAI-compatible profile may set `reasoning_effort` (e.g. `"low"`) to cap a reasoning model's thinking before the first token. |
 | `leader.toml` | Recursive `[[nodes]]` key tree supporting `group`, `ai_rewrite`, `window`, `cli`, `open_app`, `switch_tab`, `snippet`, `toggle_ime`, and `normalize_glossary`. Editable visually under **Settings → Leader Tree**. |
 | `snippets.toml` | `[[snippets]]` inline expansion triggers, content templates, `word_boundary`, and optional `app_bundle_ids` / `process_names` scoping. Editable visually under **Settings → Snippets**. |
 | `glossary.toml` | `[[terms]]` canonical terms, `aliases`, `hint`, and `category` used for AI prompt injection and local `normalize_glossary` replacement. Editable visually under **Settings → Glossary & Clipboard**. |
@@ -123,9 +123,15 @@ language = "auto"       # auto follows macOS/Windows/Linux UI language
 # language = "zh-CN"    # force Simplified Chinese
 # language = "en"       # force English
 animations = "auto"     # auto | full | reduced | off
+
+# Spatial look (see docs/design/visual-language.md)
+visual_preset = "spatial_3d"  # classic | liquid_glass | spatial_3d
+stage_intensity = 0.7         # 0 flattens the geometry, keeps the materials; 1 is full
+oblique_rows = true           # fan each result row; false keeps every row parallel
+glass_clarity = 0.18          # 0..1, how much the vibrancy shows through
 ```
 
-`auto` language uses the system preference; `auto` animation mode respects the platform Reduce Motion preference. `full` enables capsule scale/fade, staggered results, HUD slide/fade, AI cursor pulse, error shake and snippet flash. `reduced` keeps subtle opacity/color changes and removes spatial motion; `off` jumps to settled frames. The setting is hot-reloadable and does not rewrite older config files until the user explicitly saves.
+`auto` language uses the system preference; `auto` animation mode respects the platform Reduce Motion preference. `full` enables capsule scale/fade, staggered results, HUD slide/fade, AI cursor pulse, error shake and snippet flash. `reduced` keeps subtle opacity/color changes and removes spatial motion; `off` jumps to settled frames. The setting is hot-reloadable and does not rewrite older config files until the user explicitly saves. `visual_preset` picks the flat `classic` look, planar `liquid_glass`, or the default `spatial_3d` stage; `stage_intensity` scales its yaw/pitch/row-skew/parallax/specular, and `oblique_rows` toggles the fan of the result list independently. All four are live in **Settings → General → Appearance**, and the design contract — token scale, elevation, the gate matrix, accessibility fallbacks and the 3-shader budget — lives in [`docs/design/visual-language.md`](docs/design/visual-language.md).
 
 `auto` 会跟随 macOS/Windows/Linux 的系统语言；动画 `auto` 会尊重系统“减少动态效果”。`full` 启用胶囊缩放淡入、列表交错、HUD 滑入淡出、AI 光标脉冲、错误抖动与片段高亮；`reduced` 保留轻微透明度/颜色变化并移除位移动画；`off` 直接显示最终状态。
 
