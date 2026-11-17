@@ -3,6 +3,7 @@ module github.com/yeisme/clavis
 go 1.27.4
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/ebitengine/purego v0.11.1
 	github.com/egoist/mygo v0.9.0
 	golang.org/x/sys v0.48.0
