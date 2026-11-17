@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 
@@ -275,15 +276,33 @@ func normalizedRuleMode(r AppRule) (string, error) {
 		return "", fmt.Errorf("inputmigration: unknown app rule scheme %q", r.Scheme)
 	}
 	mode := strings.TrimSpace(r.Mode)
-	if mode == "" && r.Action != "" {
+	if r.Action != "" {
 		// Compatibility conversion for the old portable action representation.
+		// Action is still validated when Mode is present: accepting Mode while
+		// ignoring a conflicting or malformed legacy Action would bypass the
+		// rule contract.
+		actionMode := ""
 		if strings.HasPrefix(r.Action, "scheme:") {
-			if !validScheme(strings.TrimPrefix(r.Action, "scheme:")) {
+			actionScheme := strings.TrimPrefix(r.Action, "scheme:")
+			if !validScheme(actionScheme) {
 				return "", fmt.Errorf("inputmigration: unknown app rule scheme %q", r.Action)
 			}
-			return "native", nil
+			if r.Scheme != "" && r.Scheme != actionScheme {
+				return "", errors.New("inputmigration: app rule action and scheme conflict")
+			}
+			actionMode = "native"
+		} else {
+			switch r.Action {
+			case "ascii", "native", "keep":
+				actionMode = r.Action
+			default:
+				return "", fmt.Errorf("inputmigration: unknown app rule action %q", r.Action)
+			}
 		}
-		mode = r.Action
+		if mode != "" && mode != actionMode {
+			return "", errors.New("inputmigration: app rule action and mode conflict")
+		}
+		mode = actionMode
 	}
 	switch mode {
 	case "ascii", "native", "keep":
@@ -350,8 +369,8 @@ func (c DeviceCapabilities) Validate() error {
 			return errors.New("inputmigration: invalid permission")
 		}
 	}
-	if c.Display.Width < 0 || c.Display.Height < 0 || c.Display.Scale < 0 {
-		return errors.New("inputmigration: invalid display")
+	if err := validateDisplay(c.Display); err != nil {
+		return err
 	}
 	return nil
 }
@@ -425,6 +444,13 @@ func validDigest(v string) bool {
 	_, err := hex.DecodeString(v)
 	return err == nil
 }
+func validateDisplay(d DisplayInfo) error {
+	if d.Width < 0 || d.Height < 0 || math.IsNaN(d.Scale) || math.IsInf(d.Scale, 0) || d.Scale <= 0 {
+		return errors.New("inputmigration: invalid display")
+	}
+	return nil
+}
+
 func validateMetadata(m map[string]FieldMetadata) error {
 	if m == nil || len(m) > maxMetadataSize {
 		return errors.New("inputmigration: missing field metadata")
@@ -449,7 +475,16 @@ func (o DeviceOverlay) Validate() error {
 	if strings.TrimSpace(o.KeyboardLayout) == "" || strings.TrimSpace(o.InputSourceID) == "" || strings.TrimSpace(o.Backend) == "" {
 		return errors.New("inputmigration: incomplete overlay")
 	}
-	if o.Backend != "native-imk" && o.Backend != "native-tsf" && o.Backend != "hook" && o.Backend != "deferred" {
+	switch o.Backend {
+	case "native-imk", "native-tsf", "deferred":
+		if o.HookEnabled {
+			return errors.New("inputmigration: hook cannot be enabled for non-hook backend")
+		}
+	case "hook":
+		if !o.HookEnabled {
+			return errors.New("inputmigration: hook backend requires hook enabled")
+		}
+	default:
 		return errors.New("inputmigration: invalid overlay backend")
 	}
 	if len(o.InputSourceIDs) == 0 || len(o.InputSourceIDs) > maxCollectionSize || len(o.Shortcuts) > maxCollectionSize || len(o.AppRules) > maxCollectionSize || len(o.DeferredRules) > maxCollectionSize {
@@ -485,6 +520,9 @@ func (o DeviceOverlay) Validate() error {
 				return errors.New("inputmigration: app rule input source is not available")
 			}
 		}
+	}
+	if err := validateDisplay(o.Display); err != nil {
+		return err
 	}
 	if len(o.Permissions) > maxMetadataSize {
 		return errors.New("inputmigration: too many overlay permissions")

@@ -1,6 +1,7 @@
 package inputmigration
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -193,6 +194,132 @@ func TestOverlayValidationRejectsUnsafeCrossDeviceRules(t *testing.T) {
 		t.Fatal("overlay accepted too many permissions")
 	}
 }
+func TestOverlayBackendAndDisplayValidation(t *testing.T) {
+	validCases := []struct {
+		name    string
+		caps    DeviceCapabilities
+		backend string
+	}{
+		{"native-imk", macCaps(), "native-imk"},
+		{"native-tsf", windowsCaps(), "native-tsf"},
+		{"hook", func() DeviceCapabilities {
+			caps := windowsCaps()
+			caps.NativeTSF, caps.HookCapability = false, true
+			return caps
+		}(), "hook"},
+		{"deferred", func() DeviceCapabilities {
+			caps := windowsCaps()
+			caps.NativeTSF, caps.HookCapability = false, false
+			return caps
+		}(), "deferred"},
+	}
+	for _, tc := range validCases {
+		t.Run("valid-"+tc.name, func(t *testing.T) {
+			p, err := GenerateOverlay(baseline(), tc.caps, "device")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.Overlay.Backend != tc.backend || p.Overlay.HookEnabled != (tc.backend == "hook") {
+				t.Fatalf("overlay backend contract not derived from capabilities: %+v", p.Overlay)
+			}
+			if err := p.Overlay.Validate(); err != nil {
+				t.Fatalf("generated overlay invalid: %v", err)
+			}
+		})
+	}
+
+	invalidCases := []struct {
+		name        string
+		backend     string
+		hookEnabled bool
+	}{
+		{"native-imk-with-hook", "native-imk", true},
+		{"native-tsf-with-hook", "native-tsf", true},
+		{"deferred-with-hook", "deferred", true},
+		{"hook-without-hook", "hook", false},
+	}
+	for _, tc := range invalidCases {
+		t.Run("invalid-"+tc.name, func(t *testing.T) {
+			p, err := GenerateOverlay(baseline(), windowsCaps(), "device")
+			if err != nil {
+				t.Fatal(err)
+			}
+			bad := p.Overlay
+			bad.Backend = tc.backend
+			bad.HookEnabled = tc.hookEnabled
+			if err := bad.Validate(); err == nil {
+				t.Fatal("invalid hook/backend combination accepted")
+			}
+		})
+	}
+
+	displayCases := []struct {
+		name    string
+		display DisplayInfo
+	}{
+		{"negative-width", DisplayInfo{Width: -1, Height: 1, Scale: 1}},
+		{"negative-height", DisplayInfo{Width: 1, Height: -1, Scale: 1}},
+		{"zero-scale", DisplayInfo{Width: 1, Height: 1, Scale: 0}},
+		{"negative-scale", DisplayInfo{Width: 1, Height: 1, Scale: -1}},
+		{"nan-scale", DisplayInfo{Width: 1, Height: 1, Scale: math.NaN()}},
+		{"positive-infinity-scale", DisplayInfo{Width: 1, Height: 1, Scale: math.Inf(1)}},
+		{"negative-infinity-scale", DisplayInfo{Width: 1, Height: 1, Scale: math.Inf(-1)}},
+	}
+	for _, tc := range displayCases {
+		t.Run("capabilities-"+tc.name, func(t *testing.T) {
+			caps := windowsCaps()
+			caps.Display = tc.display
+			if err := caps.Validate(); err == nil {
+				t.Fatal("invalid display accepted by capabilities")
+			}
+		})
+		t.Run("overlay-"+tc.name, func(t *testing.T) {
+			p, err := GenerateOverlay(baseline(), windowsCaps(), "device")
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.Overlay.Display = tc.display
+			if err := p.Overlay.Validate(); err == nil {
+				t.Fatal("invalid display accepted by overlay")
+			}
+		})
+	}
+	valid := windowsCaps()
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid display rejected: %v", err)
+	}
+}
+
+func TestAppRuleActionAndModeValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		action  string
+		mode    string
+		scheme  string
+		wantErr bool
+	}{
+		{"legacy-scheme", "scheme:quanpin", "", "", false},
+		{"legacy-scheme-with-native-mode", "scheme:quanpin", "native", "quanpin", false},
+		{"matching-action-and-mode", "native", "native", "", false},
+		{"matching-ascii-action-and-mode", "ascii", "ascii", "", false},
+		{"matching-keep-action-and-mode", "keep", "keep", "", false},
+		{"conflicting-action-and-mode", "ascii", "native", "", true},
+		{"conflicting-legacy-scheme-and-mode", "scheme:quanpin", "ascii", "", true},
+		{"conflicting-legacy-scheme-and-scheme", "scheme:quanpin", "native", "xiaohe", true},
+		{"invalid-action-with-mode", "not-a-mode", "native", "", true},
+		{"invalid-legacy-scheme", "scheme:not-a-scheme", "native", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := baseline()
+			b.AppRules[0].Action, b.AppRules[0].Mode, b.AppRules[0].Scheme = tc.action, tc.mode, tc.scheme
+			if err := b.Validate(); (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() error=%v, wantErr=%v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestMergeKeepsNewerBaselineWithoutTouchingDeviceState(t *testing.T) {
 	source, target := baseline(), baseline()
 	source.FieldRevisions["scheme"] = 5
