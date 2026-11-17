@@ -148,9 +148,11 @@ type WorkflowStep struct {
 
 // WorkflowDefinition is a declarative, serializable workflow.
 type WorkflowDefinition struct {
-	ID          string          `json:"id"`
-	Name        string          `json:"name,omitempty"`
-	Description string          `json:"description,omitempty"`
+	ID          string `json:"id"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	// FailureMode is the policy inherited by steps without an explicit policy.
+	FailureMode FailureMode     `json:"failureMode,omitempty"`
 	Inputs      []WorkflowInput `json:"inputs,omitempty"`
 	Steps       []WorkflowStep  `json:"steps"`
 }

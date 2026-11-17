@@ -107,3 +107,12 @@ func TestRunWorkflowPlanJSON(t *testing.T) {
 		t.Fatalf("unexpected plan JSON: %s", stdout.String())
 	}
 }
+
+func TestToAutomationWorkflowInheritsWorkflowFailurePolicy(t *testing.T) {
+	workflow := config.Workflow{ID: "continue", Failure: config.WorkflowFailureContinue, Steps: []config.WorkflowStep{{ID: "first", Action: "run", Enabled: true}}}
+	definition := toAutomationWorkflow(workflow)
+	plan, err := automation.BuildExecutionPlan(definition)
+	if err != nil || definition.FailureMode != automation.FailureContinue || len(plan) != 1 || plan[0].FailureMode != automation.FailureContinue {
+		t.Fatalf("definition=%+v plan=%+v err=%v", definition, plan, err)
+	}
+}

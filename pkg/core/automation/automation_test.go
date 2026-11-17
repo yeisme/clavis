@@ -1,7 +1,9 @@
 package automation
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -133,6 +135,38 @@ func TestBuildExecutionPlanIsStableSerialTopologicalOrder(t *testing.T) {
 	})
 	if err != nil || !reflect.DeepEqual(plan, second) {
 		t.Fatalf("plan is not deterministic: first=%v/%v second=%v/%v", plan, err, second, err)
+	}
+}
+
+func TestBuildExecutionPlanInheritsWorkflowFailureMode(t *testing.T) {
+	plan, err := BuildExecutionPlan(WorkflowDefinition{
+		ID: "continue-workflow", FailureMode: FailureContinue,
+		Steps: []WorkflowStep{{ID: "first", ActionID: "first", OutputMode: OutputCapture}, {ID: "second", ActionID: "second", OutputMode: OutputCapture}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan[0].FailureMode != FailureContinue || plan[1].FailureMode != FailureContinue {
+		t.Fatalf("failure modes = %q, %q; want inherited continue", plan[0].FailureMode, plan[1].FailureMode)
+	}
+
+	calls := 0
+	provider := ProviderFunc(func(_ context.Context, invocation ActionInvocation) (ActionResult, error) {
+		calls++
+		if invocation.ActionID == "first" {
+			return ActionResult{}, errors.New("boom")
+		}
+		return ActionResult{Status: ResultSucceeded}, nil
+	})
+	result, err := Run(context.Background(), plan, provider, nil)
+	if err != nil || calls != 2 || result.Stopped {
+		t.Fatalf("inherited continue policy result=%+v err=%v calls=%d", result, err, calls)
+	}
+}
+
+func TestBuildExecutionPlanRejectsWorkflowAbortFailureMode(t *testing.T) {
+	if _, err := BuildExecutionPlan(WorkflowDefinition{ID: "invalid", FailureMode: FailureMode("abort")}); err == nil || !strings.Contains(err.Error(), "failureMode") {
+		t.Fatalf("abort failure mode error = %v", err)
 	}
 }
 

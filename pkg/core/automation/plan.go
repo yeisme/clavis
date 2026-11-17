@@ -37,6 +37,17 @@ func (b ExecutionPlanBuilder) Build(workflow WorkflowDefinition) (ExecutionPlan,
 }
 
 func buildExecutionPlan(workflow WorkflowDefinition, registry ActionRegistry) (ExecutionPlan, error) {
+	if workflow.FailureMode == "" {
+		workflow.FailureMode = FailureStop
+	}
+	if workflow.FailureMode != FailureStop && workflow.FailureMode != FailureContinue {
+		return nil, &ValidationError{Issues: []ValidationIssue{{Path: "failureMode", Code: "invalid_failure_mode", Message: "must be stop or continue"}}}
+	}
+	for stepIndex := range workflow.Steps {
+		if workflow.Steps[stepIndex].FailureMode == "" {
+			workflow.Steps[stepIndex].FailureMode = workflow.FailureMode
+		}
+	}
 	issues := ValidateWorkflow(workflow, registry)
 	if registry == nil {
 		// A registry is optional for structural planning; no action can be

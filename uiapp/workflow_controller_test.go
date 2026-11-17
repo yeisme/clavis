@@ -256,3 +256,12 @@ func TestValidateWorkflowStepActionsUsesControllerRegistry(t *testing.T) {
 		t.Fatalf("registered action rejected: %v", err)
 	}
 }
+
+func TestWorkflowDefinitionInheritsWorkflowFailurePolicy(t *testing.T) {
+	workflow := config.Workflow{ID: "continue", Failure: config.WorkflowFailureContinue, Steps: []config.WorkflowStep{{ID: "first", Action: "run", Enabled: true}}}
+	definition := workflowDefinition(workflow)
+	plan, err := automation.BuildExecutionPlan(definition)
+	if err != nil || definition.FailureMode != automation.FailureContinue || len(plan) != 1 || plan[0].FailureMode != automation.FailureContinue {
+		t.Fatalf("definition=%+v plan=%+v err=%v", definition, plan, err)
+	}
+}

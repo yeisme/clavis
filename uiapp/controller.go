@@ -2090,8 +2090,15 @@ func validateWorkflowAdapter(workflow config.Workflow) error {
 	return nil
 }
 
+func workflowFailureMode(mode config.WorkflowFailureMode) automation.FailureMode {
+	if mode == config.WorkflowFailureContinue {
+		return automation.FailureContinue
+	}
+	return automation.FailureStop
+}
+
 func workflowDefinition(workflow config.Workflow) automation.WorkflowDefinition {
-	definition := automation.WorkflowDefinition{ID: workflow.ID, Name: workflow.Name, Description: workflow.Description}
+	definition := automation.WorkflowDefinition{ID: workflow.ID, Name: workflow.Name, Description: workflow.Description, FailureMode: workflowFailureMode(workflow.Failure)}
 	for _, input := range workflow.Inputs {
 		definition.Inputs = append(definition.Inputs, automation.WorkflowInput{ID: input.ID, Name: input.Name, Type: input.Type, Required: input.Required, Default: input.Default})
 	}
@@ -2099,9 +2106,11 @@ func workflowDefinition(workflow config.Workflow) automation.WorkflowDefinition 
 		if !step.Enabled {
 			continue
 		}
-		failure := automation.FailureStop
-		if step.Failure == config.WorkflowFailureContinue || step.Failure == config.WorkflowFailureNotify {
+		failure := automation.FailureMode("")
+		if step.Failure == config.WorkflowFailureContinue {
 			failure = automation.FailureContinue
+		} else if step.Failure != "" && step.Failure != config.DefaultWorkflowFailure {
+			failure = workflowFailureMode(step.Failure)
 		}
 		output := automation.OutputCapture
 		switch step.Output {

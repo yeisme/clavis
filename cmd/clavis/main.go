@@ -322,8 +322,15 @@ func formatWorkflowIssues(issues []config.ValidationIssue) string {
 	return strings.Join(parts, "; ")
 }
 
+func workflowFailureMode(mode config.WorkflowFailureMode) automation.FailureMode {
+	if mode == config.WorkflowFailureContinue {
+		return automation.FailureContinue
+	}
+	return automation.FailureStop
+}
+
 func toAutomationWorkflow(workflow config.Workflow) automation.WorkflowDefinition {
-	result := automation.WorkflowDefinition{ID: workflow.ID, Name: workflow.Name, Description: workflow.Description}
+	result := automation.WorkflowDefinition{ID: workflow.ID, Name: workflow.Name, Description: workflow.Description, FailureMode: workflowFailureMode(workflow.Failure)}
 	for _, input := range workflow.Inputs {
 		result.Inputs = append(result.Inputs, automation.WorkflowInput{ID: input.ID, Name: input.Name, Type: input.Type, Required: input.Required, Default: input.Default})
 	}
@@ -331,9 +338,11 @@ func toAutomationWorkflow(workflow config.Workflow) automation.WorkflowDefinitio
 		if !step.Enabled {
 			continue
 		}
-		failure := automation.FailureStop
+		failure := automation.FailureMode("")
 		if step.Failure == config.WorkflowFailureContinue {
 			failure = automation.FailureContinue
+		} else if step.Failure != "" && step.Failure != config.DefaultWorkflowFailure {
+			failure = workflowFailureMode(step.Failure)
 		}
 		output := automation.OutputCapture
 		switch step.Output {
