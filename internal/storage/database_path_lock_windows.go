@@ -15,6 +15,8 @@ type databaseOSLock struct {
 
 var errDatabaseLockBusy = errors.New("database lock is held by another process")
 
+func databaseLockRenameMayFailWithOpenHandle() bool { return true }
+
 func acquireDatabaseOSLock(path string) (*databaseOSLock, error) {
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {

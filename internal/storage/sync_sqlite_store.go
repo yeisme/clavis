@@ -224,21 +224,45 @@ func releaseDatabasePathLock(lock *databasePathLock) error {
 		unlockErr := releaseDatabaseOSLock(lock.osLock)
 		return errors.Join(fmt.Errorf("database lock %s changed; refusing to remove replacement", lock.path), unlockErr)
 	}
+	owner, ownerErr := os.Lstat(lock.ownerPath)
+	if ownerErr != nil || owner.Mode()&os.ModeSymlink != 0 || !owner.Mode().IsRegular() || !os.SameFile(lock.ownerInfo, owner) {
+		unlockErr := releaseDatabaseOSLock(lock.osLock)
+		if ownerErr == nil {
+			ownerErr = fmt.Errorf("database lock owner %s identity changed", lock.ownerPath)
+		}
+		return errors.Join(fmt.Errorf("inspect database lock owner %s: %w", lock.ownerPath, ownerErr), unlockErr)
+	}
 	// Quarantine the directory while the OS lock is still held. Without this
 	// rename, a contender could acquire the owner file between unlock and
 	// Remove(lock.path), and the old owner could then delete the new owner's
 	// directory. A failed quarantine is safe: unlock and leave stale metadata
 	// for the next opener to recover.
 	quarantine := lock.path + ".release-" + lock.nonce
+	if databaseLockRenameMayFailWithOpenHandle() {
+		// Windows denies renaming a directory containing an open handle. The
+		// lock is still authoritative there; close it only after removing our
+		// owner metadata, then remove the directory while no contender can
+		// acquire the handle in this process.
+		if err := os.Remove(lock.ownerPath); err != nil && !os.IsNotExist(err) {
+			unlockErr := releaseDatabaseOSLock(lock.osLock)
+			return errors.Join(fmt.Errorf("remove database lock owner %s: %w", lock.ownerPath, err), unlockErr)
+		}
+		unlockErr := releaseDatabaseOSLock(lock.osLock)
+		removeErr := os.Remove(lock.path)
+		if removeErr != nil && !os.IsNotExist(removeErr) {
+			return errors.Join(unlockErr, fmt.Errorf("remove database lock %s: %w", lock.path, removeErr))
+		}
+		return unlockErr
+	}
 	if err := os.Rename(lock.path, quarantine); err != nil {
 		unlockErr := releaseDatabaseOSLock(lock.osLock)
 		return errors.Join(fmt.Errorf("quarantine database lock %s: %w", lock.path, err), unlockErr)
 	}
 	var result error
 	ownerPath := filepath.Join(quarantine, "owner")
-	owner, ownerErr := os.Lstat(ownerPath)
+	quarantinedOwner, ownerErr := os.Lstat(ownerPath)
 	if ownerErr == nil {
-		if !os.SameFile(lock.ownerInfo, owner) {
+		if !os.SameFile(lock.ownerInfo, quarantinedOwner) {
 			result = fmt.Errorf("database lock owner %s changed; refusing to remove replacement", ownerPath)
 		} else if err := os.Remove(ownerPath); err != nil && !os.IsNotExist(err) {
 			result = fmt.Errorf("remove database lock owner %s: %w", ownerPath, err)
