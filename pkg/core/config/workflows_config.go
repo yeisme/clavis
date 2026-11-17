@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/yeisme/clavis/pkg/core/toml"
@@ -374,15 +375,28 @@ func validateMode(out *[]ValidationIssue, path, value string, supported map[stri
 	if value == "" {
 		return
 	}
-	if _, ok := supported[value]; !ok {
-		appendWorkflowIssue(out, path, "invalid workflow "+label+" mode")
+	if _, ok := supported[value]; ok {
+		return
 	}
+	supportedModes := make([]string, 0, len(supported))
+	for mode := range supported {
+		supportedModes = append(supportedModes, mode)
+	}
+	sort.Strings(supportedModes)
+	appendWorkflowIssue(out, path, fmt.Sprintf("unsupported workflow %s mode %q (supported: %s)", label, value, strings.Join(supportedModes, ", ")))
 }
 
 var supportedWorkflowSources = map[string]struct{}{"clipboard": {}, "selection": {}, "text": {}, "prompt": {}}
 var supportedWorkflowOutputs = map[string]struct{}{"replace": {}, "insert": {}, "clipboard": {}, "notify": {}, "none": {}, "discard": {}}
-var supportedWorkflowFailures = map[string]struct{}{"stop": {}, "continue": {}, "notify": {}, "abort": {}, "retry": {}}
-var supportedWorkflowExecutions = map[string]struct{}{"sequential": {}, "parallel": {}, "concurrent": {}}
+
+// The workflow runner currently implements only stop/continue failure handling.
+// Keep the public string model forward compatible, but reject modes that would
+// otherwise be silently treated as stop or continue.
+var supportedWorkflowFailures = map[string]struct{}{"stop": {}, "continue": {}, "abort": {}}
+
+// Plans and runners execute steps serially. Parallel/concurrent values remain
+// decodable for compatibility, but validation rejects them until implemented.
+var supportedWorkflowExecutions = map[string]struct{}{"sequential": {}}
 
 // ValidateWorkflows validates IDs, modes, dependencies, and the dependency DAG.
 func ValidateWorkflows(c WorkflowsConfig) []ValidationIssue {
@@ -440,12 +454,16 @@ func validateWorkflowDependencies(issues *[]ValidationIssue, workflowPath string
 		stepPath := fmt.Sprintf("%s.steps[%d]", workflowPath, i)
 		for j, dependency := range step.DependsOn {
 			dependencyPath := fmt.Sprintf("%s.depends_on[%d]", stepPath, j)
-			if _, ok := stepIDs[dependency]; !ok {
+			dependencyIndex, ok := stepIDs[dependency]
+			if !ok {
 				appendWorkflowIssue(issues, dependencyPath, "workflow step dependency does not exist")
 				continue
 			}
 			if dependency == step.ID {
 				appendWorkflowIssue(issues, dependencyPath, "workflow step cannot depend on itself")
+			}
+			if step.Enabled && !steps[dependencyIndex].Enabled {
+				appendWorkflowIssue(issues, dependencyPath, fmt.Sprintf("enabled workflow step %q depends on disabled workflow step %q", step.ID, dependency))
 			}
 			adjacency[step.ID] = append(adjacency[step.ID], dependency)
 		}

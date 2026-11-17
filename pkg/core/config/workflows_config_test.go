@@ -29,7 +29,7 @@ func TestWorkflowsConfigRoundTrip(t *testing.T) {
 				Failure: config.WorkflowFailureStop, Execution: config.WorkflowExecutionSequential},
 			{ID: "copy", Name: "Copy", Action: "copy", DependsOn: []string{"draft"}, Enabled: false,
 				Source: config.WorkflowSourceSelection, Output: config.WorkflowOutputClipboard,
-				Failure: config.WorkflowFailureContinue, Execution: config.WorkflowExecutionParallel},
+				Failure: config.WorkflowFailureContinue, Execution: config.WorkflowExecutionSequential},
 		},
 	}}}
 
@@ -91,6 +91,46 @@ func TestValidateWorkflowsIDsModesDependenciesAndCycles(t *testing.T) {
 	} {
 		if !workflowIssue(issues, keyPath) {
 			t.Errorf("expected validation issue at %s; got %+v", keyPath, issues)
+		}
+	}
+}
+
+func TestValidateWorkflowsRejectsUnsupportedRuntimeModes(t *testing.T) {
+	workflow := config.WorkflowsConfig{Workflows: []config.Workflow{{
+		ID: "unsupported", Failure: config.WorkflowFailureNotify, Execution: config.WorkflowExecutionParallel,
+		Steps: []config.WorkflowStep{{ID: "step", Action: "noop", Failure: "retry", Execution: "concurrent"}},
+	}}}
+	issues := config.ValidateWorkflows(workflow)
+	for _, keyPath := range []string{
+		"workflows[0].failure", "workflows[0].execution",
+		"workflows[0].steps[0].failure", "workflows[0].steps[0].execution",
+	} {
+		if !workflowIssue(issues, keyPath) {
+			t.Errorf("expected unsupported runtime mode at %s; got %+v", keyPath, issues)
+		}
+	}
+	for _, issue := range issues {
+		if issue.KeyPath == "workflows[0].failure" && !strings.Contains(issue.Message, `unsupported workflow failure mode "notify"`) {
+			t.Fatalf("unexpected failure mode message: %q", issue.Message)
+		}
+	}
+}
+
+func TestValidateWorkflowsRejectsEnabledDependencyOnDisabledStep(t *testing.T) {
+	workflow := config.WorkflowsConfig{Workflows: []config.Workflow{{
+		ID: "disabled-dependency",
+		Steps: []config.WorkflowStep{
+			{ID: "disabled", Enabled: false},
+			{ID: "enabled", Enabled: true, DependsOn: []string{"disabled"}},
+		},
+	}}}
+	issues := config.ValidateWorkflows(workflow)
+	if !workflowIssue(issues, "workflows[0].steps[1].depends_on[0]") {
+		t.Fatalf("expected disabled dependency validation issue; got %+v", issues)
+	}
+	for _, issue := range issues {
+		if issue.KeyPath == "workflows[0].steps[1].depends_on[0]" && issue.Message != `enabled workflow step "enabled" depends on disabled workflow step "disabled"` {
+			t.Fatalf("unexpected disabled dependency message: %q", issue.Message)
 		}
 	}
 }
