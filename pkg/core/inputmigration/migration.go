@@ -312,6 +312,21 @@ func validateShortcut(r ShortcutRule) error {
 	}
 	return nil
 }
+
+func validateAppRule(r AppRule) error {
+	if strings.TrimSpace(r.ID) == "" || len(r.ID) > maxMetadataSize || len(r.InputSourceID) > maxMetadataSize || len(r.Action) > maxMetadataSize || len(r.Mode) > maxMetadataSize || len(r.Scheme) > maxMetadataSize || len(r.Apps) > maxCollectionSize {
+		return errors.New("inputmigration: invalid app rule")
+	}
+	if _, err := normalizedRuleMode(r); err != nil {
+		return err
+	}
+	for _, a := range r.Apps {
+		if err := validateApp(a); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 func (c DeviceCapabilities) Validate() error {
 	if !validOS(c.OS) {
 		return fmt.Errorf("inputmigration: invalid platform %q", c.OS)
@@ -394,16 +409,8 @@ func (b PersonalBaseline) Validate() error {
 		}
 	}
 	for _, r := range b.AppRules {
-		if r.ID == "" || len(r.ID) > maxMetadataSize || len(r.InputSourceID) > maxMetadataSize {
-			return errors.New("inputmigration: invalid app rule")
-		}
-		if _, err := normalizedRuleMode(r); err != nil {
+		if err := validateAppRule(r); err != nil {
 			return err
-		}
-		for _, a := range r.Apps {
-			if err := validateApp(a); err != nil {
-				return err
-			}
 		}
 	}
 	if b.SourceDevice != nil {
@@ -442,16 +449,27 @@ func (o DeviceOverlay) Validate() error {
 	if strings.TrimSpace(o.KeyboardLayout) == "" || strings.TrimSpace(o.InputSourceID) == "" || strings.TrimSpace(o.Backend) == "" {
 		return errors.New("inputmigration: incomplete overlay")
 	}
+	if o.Backend != "native-imk" && o.Backend != "native-tsf" && o.Backend != "hook" && o.Backend != "deferred" {
+		return errors.New("inputmigration: invalid overlay backend")
+	}
 	if len(o.InputSourceIDs) == 0 || len(o.InputSourceIDs) > maxCollectionSize || len(o.Shortcuts) > maxCollectionSize || len(o.AppRules) > maxCollectionSize || len(o.DeferredRules) > maxCollectionSize {
 		return errors.New("inputmigration: overlay collection too large or empty")
 	}
 	if err := validateMetadata(o.FieldMetadata); err != nil {
 		return err
 	}
+	if len(o.AccountID) > maxMetadataSize || len(o.DeviceID) > maxMetadataSize || len(o.KeyboardLayout) > maxMetadataSize || len(o.InputSourceID) > maxMetadataSize {
+		return errors.New("inputmigration: overlay metadata too long")
+	}
+	inputSources := make(map[string]struct{}, len(o.InputSourceIDs))
 	for _, id := range o.InputSourceIDs {
 		if strings.TrimSpace(id) == "" || len(id) > maxMetadataSize {
 			return errors.New("inputmigration: invalid overlay input source")
 		}
+		inputSources[id] = struct{}{}
+	}
+	if _, ok := inputSources[o.InputSourceID]; !ok {
+		return errors.New("inputmigration: selected input source is not available")
 	}
 	for _, r := range o.Shortcuts {
 		if err := validateShortcut(r); err != nil {
@@ -459,26 +477,26 @@ func (o DeviceOverlay) Validate() error {
 		}
 	}
 	for _, r := range o.AppRules {
-		if r.ID == "" {
-			return errors.New("inputmigration: invalid overlay app rule")
-		}
-		if _, err := normalizedRuleMode(r); err != nil {
+		if err := validateAppRule(r); err != nil {
 			return err
 		}
-		for _, a := range r.Apps {
-			if err := validateApp(a); err != nil {
-				return err
+		if r.InputSourceID != "" {
+			if _, ok := inputSources[r.InputSourceID]; !ok {
+				return errors.New("inputmigration: app rule input source is not available")
 			}
 		}
 	}
-	for _, r := range o.DeferredRules {
-		if r.RuleID == "" || (r.State != "deferred" && r.State != "unsupported") || r.Reason == "" {
-			return errors.New("inputmigration: invalid deferred rule")
-		}
+	if len(o.Permissions) > maxMetadataSize {
+		return errors.New("inputmigration: too many overlay permissions")
 	}
 	for key, p := range o.Permissions {
 		if key == "" || len(key) > maxMetadataSize || (p != PermissionGranted && p != PermissionDenied && p != PermissionUnknown) {
 			return errors.New("inputmigration: invalid overlay permission")
+		}
+	}
+	for _, r := range o.DeferredRules {
+		if strings.TrimSpace(r.RuleID) == "" || len(r.RuleID) > maxMetadataSize || strings.TrimSpace(r.Reason) == "" || len(r.Reason) > maxMetadataSize || (r.State != "deferred" && r.State != "unsupported") {
+			return errors.New("inputmigration: invalid deferred rule")
 		}
 	}
 	return nil
@@ -596,7 +614,18 @@ func GenerateOverlay(b PersonalBaseline, target DeviceCapabilities, deviceID str
 	o.Permissions, o.Display = copyPermissions(target.Permissions), target.Display
 	o.Backend = backendFor(target)
 	o.HookEnabled = target.HookCapability && o.Backend == "hook"
-	o.Shortcuts, o.AppRules = cloneShortcuts(b.Shortcuts), cloneAppRules(b.AppRules)
+	o.Shortcuts = cloneShortcuts(b.Shortcuts)
+	for _, r := range b.AppRules {
+		if r.InputSourceID != "" && !containsString(target.InputSourceIDs, r.InputSourceID) {
+			o.DeferredRules = append(o.DeferredRules, DeferredRule{
+				RuleID: r.ID,
+				State:  "unsupported",
+				Reason: "target lacks input source " + safeSummary(r.InputSourceID),
+			})
+			continue
+		}
+		o.AppRules = append(o.AppRules, cloneAppRules([]AppRule{r})...)
+	}
 	for _, r := range o.Shortcuts {
 		if r.RequiresHook && !target.HookCapability {
 			o.DeferredRules = append(o.DeferredRules, DeferredRule{RuleID: r.Chord, State: "unsupported", Reason: "target lacks hook capability"})
@@ -635,7 +664,11 @@ func GenerateOverlay(b PersonalBaseline, target DeviceCapabilities, deviceID str
 		add("/display", CategoryDisplay, fmt.Sprintf("%dx%d", b.SourceDevice.Display.Width, b.SourceDevice.Display.Height), fmt.Sprintf("%dx%d", target.Display.Width, target.Display.Height), "display")
 	}
 	for _, r := range o.DeferredRules {
-		add("/shortcuts/"+safePathSegment(r.RuleID), CategoryAppRule, "supported", r.State, "app-rule")
+		path := "/shortcuts/" + safePathSegment(r.RuleID)
+		if strings.HasPrefix(r.Reason, "target lacks input source") {
+			path = "/app-rules/" + safePathSegment(r.RuleID)
+		}
+		add(path, CategoryAppRule, "supported", r.State, r.Reason)
 	}
 	return p, nil
 }
@@ -701,6 +734,15 @@ func copyPermissions(in map[string]PermissionState) map[string]PermissionState {
 	}
 	return out
 }
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func sameStringSet(a, b []string) bool {
 	x, y := append([]string(nil), a...), append([]string(nil), b...)
 	sort.Strings(x)

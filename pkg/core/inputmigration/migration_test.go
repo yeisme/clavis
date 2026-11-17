@@ -99,6 +99,100 @@ func TestUnsupportedRulesAreDeferredAndPreviewIsRedacted(t *testing.T) {
 		t.Fatal("unexpected context")
 	}
 }
+
+func TestAppRuleInputSourcesAreCapabilityAware(t *testing.T) {
+	macWithExtra := macCaps()
+	macWithExtra.InputSourceIDs = append(macWithExtra.InputSourceIDs, "com.apple.inputmethod.Kotoeri")
+	windowsWithMacSource := windowsCaps()
+	windowsWithMacSource.InputSourceIDs = append(windowsWithMacSource.InputSourceIDs, macCaps().InputSourceIDs[0])
+	cases := []struct {
+		name         string
+		caps         DeviceCapabilities
+		ruleSource   string
+		wantRules    int
+		wantDeferred int
+	}{
+		{"macos-present", macCaps(), macCaps().InputSourceIDs[0], 1, 0},
+		{"macos-extra-source", macWithExtra, macCaps().InputSourceIDs[0], 1, 0},
+		{"windows-missing", windowsCaps(), macCaps().InputSourceIDs[0], 0, 1},
+		{"windows-present", windowsWithMacSource, macCaps().InputSourceIDs[0], 1, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := baseline()
+			b.AppRules[0].InputSourceID = tc.ruleSource
+			p, err := GenerateOverlay(b, tc.caps, "device")
+			if err != nil {
+				t.Fatal(err)
+			}
+			appDeferred := 0
+			for _, deferred := range p.Overlay.DeferredRules {
+				if deferred.RuleID == b.AppRules[0].ID {
+					appDeferred++
+				}
+			}
+			if len(p.Overlay.AppRules) != tc.wantRules || appDeferred != tc.wantDeferred {
+				t.Fatalf("app rule was not capability-aware: %+v", p.Overlay)
+			}
+			if tc.wantDeferred == 1 {
+				rule := p.Overlay.DeferredRules[0]
+				if rule.RuleID != b.AppRules[0].ID || rule.State != "unsupported" || !strings.Contains(rule.Reason, "input source") {
+					t.Fatalf("missing auditable deferral: %+v", rule)
+				}
+				foundDiff := false
+				for _, diff := range p.Diffs {
+					if strings.Contains(diff.Path, "/app-rules/") {
+						foundDiff = true
+						break
+					}
+				}
+				if !foundDiff {
+					t.Fatalf("missing app-rule preview diff: %+v", p.Diffs)
+				}
+			}
+		})
+	}
+}
+
+func TestOverlayValidationRejectsUnsafeCrossDeviceRules(t *testing.T) {
+	p, err := GenerateOverlay(baseline(), windowsCaps(), "device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := p.Overlay
+	bad.InputSourceID = "not-installed"
+	if err := bad.Validate(); err == nil {
+		t.Fatal("overlay accepted unavailable selected input source")
+	}
+	bad = p.Overlay
+	bad.Backend = "made-up"
+	if err := bad.Validate(); err == nil {
+		t.Fatal("overlay accepted unknown backend")
+	}
+	bad = p.Overlay
+	bad.DeferredRules = []DeferredRule{{RuleID: strings.Repeat("r", maxMetadataSize+1), State: "deferred", Reason: "explain"}}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("overlay accepted oversized deferred rule")
+	}
+	bad = p.Overlay
+	bad.AppRules = []AppRule{{ID: strings.Repeat("r", maxMetadataSize+1), InputSourceID: bad.InputSourceID, Mode: "keep"}}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("overlay accepted oversized app rule id")
+	}
+	bad = p.Overlay
+	bad.AppRules = []AppRule{{ID: "rule", InputSourceID: bad.InputSourceID, Action: strings.Repeat("a", maxMetadataSize+1)}}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("overlay accepted oversized app rule field")
+	}
+	bad = p.Overlay
+	bad.Permissions = make(map[string]PermissionState, maxMetadataSize+1)
+	for i := 0; i <= maxMetadataSize; i++ {
+		bad.Permissions["permission-"+string(rune('a'+i%26))+string(rune(i/26))] = PermissionGranted
+	}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("overlay accepted too many permissions")
+	}
+}
 func TestMergeKeepsNewerBaselineWithoutTouchingDeviceState(t *testing.T) {
 	source, target := baseline(), baseline()
 	source.FieldRevisions["scheme"] = 5
