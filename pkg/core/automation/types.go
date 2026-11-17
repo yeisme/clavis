@@ -139,6 +139,11 @@ type WorkflowStep struct {
 	DependsOn   []string       `json:"dependsOn,omitempty"`
 	FailureMode FailureMode    `json:"failureMode"`
 	OutputMode  OutputMode     `json:"outputMode"`
+	// RequiredInputs is populated by plan builders from WorkflowDefinition.Inputs.
+	// Keeping the declaration on each step preserves the historical slice-shaped
+	// ExecutionPlan API while allowing the runner to enforce it independently of
+	// any UI adapter.
+	RequiredInputs []string `json:"requiredInputs,omitempty"`
 }
 
 // WorkflowDefinition is a declarative, serializable workflow.

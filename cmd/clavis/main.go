@@ -226,15 +226,35 @@ func writeWorkflowPlan(w io.Writer, cfg config.ClavisConfig, id string, jsonOutp
 
 func actionRegistry(cfg config.ClavisConfig) automation.MapActionRegistry {
 	registry := make(automation.MapActionRegistry)
-	for _, action := range collectActions(cfg) {
-		registry[action.ID] = automation.ActionDescriptor{ID: action.ID, Name: action.Name, Description: action.Description, Provider: automation.ProviderType(action.Provider), Risk: automation.RiskLow}
+	var visit func([]config.LeaderNode, string)
+	visit = func(nodes []config.LeaderNode, prefix string) {
+		for _, node := range nodes {
+			id := strings.TrimSpace(prefix + node.Key)
+			if node.Action.Type == config.ActionGroup {
+				visit(node.Action.Children, id+".")
+				continue
+			}
+			// CLI is the only executable leader action supported by the workflow
+			// runtime. Do not let planning advertise prompt/UI-only actions.
+			if node.Action.Type != config.ActionCLI || strings.TrimSpace(node.Action.Command) == "" {
+				continue
+			}
+			registry[id] = automation.ActionDescriptor{ID: id, Name: node.Label, Provider: automation.ProviderCLI, Risk: automation.RiskLow}
+			short := strings.TrimPrefix(id, "leader.")
+			if _, exists := registry[short]; !exists {
+				registry[short] = automation.ActionDescriptor{ID: short, Name: node.Label, Provider: automation.ProviderCLI, Risk: automation.RiskLow}
+			}
+		}
 	}
-	// Workflow files historically name a few provider-neutral built-ins
-	// directly (for example "prompt" and "copy"). Register those names for
-	// planning without attaching any implementation to them.
-	for _, id := range []string{"prompt", "copy", "clipboard", "text", "ai_rewrite"} {
-		if _, ok := registry[id]; !ok {
-			registry[id] = automation.ActionDescriptor{ID: id, Provider: automation.ProviderBuiltin, Risk: automation.RiskLow}
+	visit(cfg.Leader.Nodes, "leader.")
+	for _, script := range cfg.Components.Scripts {
+		if !script.Enabled || strings.TrimSpace(script.Command) == "" {
+			continue
+		}
+		for _, id := range []string{script.ID, "script." + script.ID} {
+			if strings.TrimSpace(id) != "" {
+				registry[id] = automation.ActionDescriptor{ID: id, Name: script.Title, Provider: automation.ProviderScript, Risk: automation.RiskLow}
+			}
 		}
 	}
 	return registry
@@ -246,6 +266,12 @@ func validateWorkflowPlanConfig(workflow config.Workflow) error {
 	}
 	if workflow.Failure != "" && workflow.Failure != config.WorkflowFailureStop && workflow.Failure != config.WorkflowFailureContinue && workflow.Failure != config.WorkflowFailureAbort {
 		return fmt.Errorf("workflow %q has unsupported failure mode %q", workflow.ID, workflow.Failure)
+	}
+	if workflow.Source == config.WorkflowSourcePrompt {
+		return fmt.Errorf("workflow %q uses unsupported prompt source: CLI workflow planning requires explicit input", workflow.ID)
+	}
+	if workflow.Source != "" && workflow.Source != config.WorkflowSourceClipboard && workflow.Source != config.WorkflowSourceSelection && workflow.Source != config.WorkflowSourceText {
+		return fmt.Errorf("workflow %q has unsupported source %q", workflow.ID, workflow.Source)
 	}
 	switch workflow.Output {
 	case "", config.WorkflowOutputReplace, config.WorkflowOutputInsert, config.WorkflowOutputClipboard, config.WorkflowOutputNotify, config.WorkflowOutputNone:
@@ -262,6 +288,12 @@ func validateWorkflowPlanConfig(workflow config.Workflow) error {
 		}
 		if step.Failure != "" && step.Failure != config.WorkflowFailureStop && step.Failure != config.WorkflowFailureContinue && step.Failure != config.WorkflowFailureAbort {
 			return fmt.Errorf("workflow %q step %q has unsupported failure mode %q", workflow.ID, step.ID, step.Failure)
+		}
+		if step.Source == config.WorkflowSourcePrompt {
+			return fmt.Errorf("workflow %q step %q uses unsupported prompt source: CLI workflow planning requires explicit input", workflow.ID, step.ID)
+		}
+		if step.Source != "" && step.Source != config.WorkflowSourceClipboard && step.Source != config.WorkflowSourceSelection && step.Source != config.WorkflowSourceText {
+			return fmt.Errorf("workflow %q step %q has unsupported source %q", workflow.ID, step.ID, step.Source)
 		}
 		switch step.Output {
 		case "", config.WorkflowOutputReplace, config.WorkflowOutputNotify, config.WorkflowOutputNone:

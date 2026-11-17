@@ -113,7 +113,17 @@ func (r *Runner) run(ctx context.Context, plan ExecutionPlan, inputs map[string]
 		if rawInput == nil {
 			rawInput = step.Inputs
 		}
-		boundInput, err := bindValue(rawInput, inputs, internalOutputs)
+		var err error
+		for _, required := range step.RequiredInputs {
+			if isEmptyWorkflowInput(inputs[required]) {
+				err = fmt.Errorf("required workflow input %q is missing", required)
+				break
+			}
+		}
+		var boundInput any
+		if err == nil {
+			boundInput, err = bindValue(rawInput, inputs, internalOutputs)
+		}
 		invocation := ActionInvocation{ActionID: actionID, Input: asMap(boundInput)}
 		if step.Inputs != nil {
 			invocation.Inputs = invocation.Input
@@ -201,6 +211,16 @@ func appendSkipped(result *ExecutionResult, steps []WorkflowStep, cause error) {
 			Result:     ActionResult{ActionID: actionID, Status: ResultSkipped, Error: errorText},
 		})
 	}
+}
+
+func isEmptyWorkflowInput(value any) bool {
+	if value == nil {
+		return true
+	}
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text) == ""
+	}
+	return false
 }
 
 func asMap(value any) map[string]any {
@@ -398,6 +418,12 @@ func redactReflect(value reflect.Value, discarded []any) reflect.Value {
 	if !value.IsValid() {
 		return value
 	}
+	// Check the complete value before walking it. This matters for typed
+	// numbers, []byte, arrays, and structs: their elements cannot be replaced
+	// with the marker without either leaking the value or changing its type.
+	if value.CanInterface() && matchesRedactionAtom(value.Interface(), discarded) {
+		return replacementValue(value.Type())
+	}
 	if value.Kind() == reflect.Interface {
 		if value.IsNil() {
 			return reflect.Zero(value.Type())
@@ -422,7 +448,8 @@ func redactReflect(value reflect.Value, discarded []any) reflect.Value {
 		result := reflect.MakeMapWithSize(value.Type(), value.Len())
 		iter := value.MapRange()
 		for iter.Next() {
-			key := iter.Key()
+			key := redactReflect(iter.Key(), discarded)
+			key = valueSafeValue(key, value.Type().Key())
 			item := redactReflect(iter.Value(), discarded)
 			if !item.IsValid() || !item.Type().AssignableTo(value.Type().Elem()) {
 				item = valueSafeValue(item, value.Type().Elem())
@@ -518,6 +545,73 @@ func redactString(value string, discarded []any) string {
 	return value
 }
 
+func matchesRedactionAtom(value any, discarded []any) bool {
+	for _, secret := range discarded {
+		var matched bool
+		visitRedactionAtoms(secret, func(atom any) {
+			if reflect.DeepEqual(value, atom) {
+				matched = true
+			}
+		})
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+// visitRedactionAtoms collects exact values for typed scalar/byte values. It
+// deliberately does not stringify numbers: substring replacement of a short
+// value such as 1 would corrupt unrelated values such as 100.
+func visitRedactionAtoms(value any, visit func(any)) {
+	var walk func(reflect.Value)
+	walk = func(item reflect.Value) {
+		if !item.IsValid() {
+			return
+		}
+		if item.Kind() == reflect.Interface {
+			if !item.IsNil() {
+				walk(item.Elem())
+			}
+			return
+		}
+		if item.CanInterface() && isRedactionScalar(item.Kind()) {
+			visit(item.Interface())
+			return
+		}
+		if item.Kind() == reflect.Slice && item.Type().Elem().Kind() == reflect.Uint8 {
+			if item.CanInterface() {
+				visit(item.Interface())
+			}
+			return
+		}
+		switch item.Kind() {
+		case reflect.Map:
+			if item.IsNil() {
+				return
+			}
+			iter := item.MapRange()
+			for iter.Next() {
+				walk(iter.Key())
+				walk(iter.Value())
+			}
+		case reflect.Slice, reflect.Array:
+			for i := 0; i < item.Len(); i++ {
+				walk(item.Index(i))
+			}
+		case reflect.Struct:
+			for i := 0; i < item.NumField(); i++ {
+				walk(item.Field(i))
+			}
+		case reflect.Pointer:
+			if !item.IsNil() {
+				walk(item.Elem())
+			}
+		}
+	}
+	walk(reflect.ValueOf(value))
+}
+
 func redactionTokens(value any) []string {
 	if value == nil {
 		return nil
@@ -525,7 +619,10 @@ func redactionTokens(value any) []string {
 	seen := make(map[string]struct{})
 	var tokens []string
 	add := func(token string) {
-		if token == "" {
+		// Numeric and byte values are redacted by exact DeepEqual checks. Never
+		// turn them into substring tokens ("1" would corrupt "100"). Short
+		// strings are likewise too ambiguous to safely redact in free-form text.
+		if len([]rune(token)) < 4 {
 			return
 		}
 		if _, ok := seen[token]; ok {
@@ -550,8 +647,14 @@ func redactionTokens(value any) []string {
 			add(item.String())
 			return
 		}
-		if item.CanInterface() {
-			add(fmt.Sprint(item.Interface()))
+		// []byte is a common typed output for encoded secrets. It is safe to
+		// use its textual form only when it is long enough to be unambiguous;
+		// individual numeric bytes must never become redaction tokens.
+		if item.Kind() == reflect.Slice && item.Type().Elem().Kind() == reflect.Uint8 && !item.IsNil() {
+			if item.CanInterface() {
+				add(string(item.Bytes()))
+			}
+			return
 		}
 		switch item.Kind() {
 		case reflect.Map:
@@ -560,6 +663,9 @@ func redactionTokens(value any) []string {
 			}
 			iter := item.MapRange()
 			for iter.Next() {
+				// Keys can carry discarded identifiers too; numeric keys are
+				// intentionally ignored by add to avoid substring corruption.
+				visit(iter.Key())
 				visit(iter.Value())
 			}
 		case reflect.Slice, reflect.Array:

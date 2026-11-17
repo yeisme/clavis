@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yeisme/clavis/pkg/core/automation"
 	"github.com/yeisme/clavis/pkg/core/config"
 )
 
@@ -53,6 +54,21 @@ func TestRunWorkflowPlanPrintsDeterministicPlanWithoutExecuting(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "workflows.toml")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunWorkflowPlanRejectsPromptSourceAndDisabledScript(t *testing.T) {
+	cfg := config.ClavisConfig{
+		Components: config.ComponentsConfig{Scripts: []config.ScriptComponentSpec{{ID: "disabled", Command: "echo", Enabled: false}}},
+		Workflows:  config.WorkflowsConfig{Workflows: []config.Workflow{{ID: "prompt", Enabled: true, Source: config.WorkflowSourcePrompt, Steps: []config.WorkflowStep{{ID: "step", Action: "disabled", Enabled: true}}}}},
+	}
+	if err := validateWorkflowPlanConfig(cfg.Workflows.Workflows[0]); err == nil || !strings.Contains(err.Error(), "prompt source") {
+		t.Fatalf("prompt source validation error = %v", err)
+	}
+	cfg.Workflows.Workflows[0].Source = config.WorkflowSourceClipboard
+	plan, err := automation.BuildExecutionPlanWithRegistry(toAutomationWorkflow(cfg.Workflows.Workflows[0]), actionRegistry(cfg))
+	if err == nil || !strings.Contains(err.Error(), "not registered") || plan != nil {
+		t.Fatalf("disabled script planning error = %v plan=%v", err, plan)
 	}
 }
 

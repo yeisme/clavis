@@ -1859,6 +1859,13 @@ func (c *AppController) injectWorkflowTextAsync(text string, deleteCount, cursor
 		if beforeInject != nil {
 			beforeInject(ctx)
 		}
+		// BeforeInject may synchronously open UI or otherwise allow the user to
+		// change the foreground application. Take a second identity snapshot
+		// immediately before writing, and refuse the injection if it changed.
+		snapshot, err = br.SnapshotContext(ctx)
+		if err != nil || !workflowTargetMatchesSnapshot(target, snapshot) {
+			return
+		}
 		_ = br.InjectText(ctx, text, deleteCount, cursorBackOffset)
 	}()
 }
@@ -2007,7 +2014,7 @@ func (c *AppController) workflowActionRegistry(cfg config.ClavisConfig) workflow
 				continue
 			}
 			action := node.Action
-			if action.Type != config.ActionCLI {
+			if action.Type != config.ActionCLI || strings.TrimSpace(action.Command) == "" {
 				continue
 			}
 			register(id, workflowAction{leader: &action}, automation.ProviderCLI, node.Label)
@@ -2019,6 +2026,12 @@ func (c *AppController) workflowActionRegistry(cfg config.ClavisConfig) workflow
 	visit(cfg.Leader.Nodes, "leader.")
 	for i := range cfg.Components.Scripts {
 		script := cfg.Components.Scripts[i]
+		// Disabled and malformed scripts are not executable actions. Omitting
+		// them at planning time prevents a skipped provider result from being
+		// mistaken for successful workflow completion.
+		if !script.Enabled || strings.TrimSpace(script.Command) == "" {
+			continue
+		}
 		action := workflowAction{script: &script}
 		register(script.ID, action, automation.ProviderScript, script.Title)
 		register("script."+script.ID, action, automation.ProviderScript, script.Title)
@@ -2042,6 +2055,9 @@ func validateWorkflowAdapter(workflow config.Workflow) error {
 	default:
 		return fmt.Errorf("workflow %q has unsupported output mode %q", workflow.ID, workflow.Output)
 	}
+	if workflow.Source != "" && workflow.Source != config.WorkflowSourceClipboard && workflow.Source != config.WorkflowSourceSelection && workflow.Source != config.WorkflowSourceText && workflow.Source != config.WorkflowSourcePrompt {
+		return fmt.Errorf("workflow %q has unsupported source %q", workflow.ID, workflow.Source)
+	}
 
 	stepEnabled := make(map[string]bool, len(workflow.Steps))
 	for _, step := range workflow.Steps {
@@ -2053,6 +2069,9 @@ func validateWorkflowAdapter(workflow config.Workflow) error {
 		}
 		if step.Failure != "" && step.Failure != config.WorkflowFailureStop && step.Failure != config.WorkflowFailureContinue && step.Failure != config.WorkflowFailureAbort {
 			return fmt.Errorf("workflow %q step %q has unsupported failure mode %q", workflow.ID, step.ID, step.Failure)
+		}
+		if step.Source != "" && step.Source != config.WorkflowSourceClipboard && step.Source != config.WorkflowSourceSelection && step.Source != config.WorkflowSourceText {
+			return fmt.Errorf("workflow %q step %q has unsupported source %q", workflow.ID, step.ID, step.Source)
 		}
 		switch step.Output {
 		case "", config.WorkflowOutputReplace, config.WorkflowOutputNotify, config.WorkflowOutputNone:
@@ -2270,7 +2289,10 @@ func (p workflowProvider) Invoke(ctx context.Context, invocation automation.Acti
 	}
 	if action.script != nil {
 		if !action.script.Enabled {
-			return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultSkipped, Error: "script is disabled"}, nil
+			return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultFailed, Error: "script is disabled and cannot complete workflow"}, nil
+		}
+		if strings.TrimSpace(action.script.Command) == "" {
+			return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultFailed, Error: "script command is empty"}, nil
 		}
 		// Substitute into each argv element rather than a shell command. This keeps
 		// input and previous-step output observable without changing command safety.

@@ -49,6 +49,17 @@ func buildExecutionPlan(workflow WorkflowDefinition, registry ActionRegistry) (E
 		}
 		issues = filtered
 	}
+	for _, input := range workflow.Inputs {
+		if !input.Required || !isEmptyWorkflowInput(input.Default) {
+			continue
+		}
+		// The runner receives values at execution time, but the requirement is
+		// carried by the executable plan so non-UI callers cannot accidentally
+		// bypass it.
+		for stepIndex := range workflow.Steps {
+			workflow.Steps[stepIndex].RequiredInputs = append(workflow.Steps[stepIndex].RequiredInputs, input.ID)
+		}
+	}
 	if len(issues) != 0 {
 		return nil, &ValidationError{Issues: issues}
 	}

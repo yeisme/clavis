@@ -217,6 +217,29 @@ func TestWorkflowOutputDoesNotInjectAfterForegroundAppSwitch(t *testing.T) {
 	}
 }
 
+func TestWorkflowOutputDoesNotInjectAfterBeforeInjectChangesForegroundTarget(t *testing.T) {
+	f := newInteractionFixture(t, nil)
+	result := automation.ExecutionResult{
+		Steps:   []automation.StepResult{{StepID: "one", Result: automation.ActionResult{Status: automation.ResultSucceeded, Output: "replacement"}}},
+		Outputs: map[string]any{"one": "replacement"},
+	}
+	target := engine.CapsuleContext{AppName: "TextEdit", BundleID: "com.apple.TextEdit"}
+	f.ctrl.BeforeInject = func(context.Context) {
+		f.bridge.mu.Lock()
+		f.bridge.snapshot.AppName = "Safari"
+		f.bridge.snapshot.BundleID = "com.apple.Safari"
+		f.bridge.mu.Unlock()
+	}
+	f.ctrl.applyWorkflowOutputAtTarget(config.WorkflowOutputReplace, target, result, 0)
+	time.Sleep(50 * time.Millisecond)
+	f.bridge.mu.Lock()
+	injected := len(f.bridge.injected)
+	f.bridge.mu.Unlock()
+	if injected != 0 {
+		t.Fatalf("workflow output crossed foreground app switch after BeforeInject: %+v", f.bridge.injected)
+	}
+}
+
 func TestWorkflowOutputDoesNotInjectIntoStaleForegroundTarget(t *testing.T) {
 	f := newInteractionFixture(t, nil)
 	result := automation.ExecutionResult{
