@@ -29,8 +29,8 @@ func TestSettingsRailSelectsEverySection(t *testing.T) {
 	tt.Frame()
 
 	sections := settingsSections()
-	if len(sections) != 8 {
-		t.Fatalf("settings exposes %d sections, want the documented 8", len(sections))
+	if len(sections) != 9 {
+		t.Fatalf("settings exposes %d sections, want the documented 9", len(sections))
 	}
 	// Guard the assertion below: if HasText matched anything, every check would
 	// pass vacuously.

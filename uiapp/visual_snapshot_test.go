@@ -242,6 +242,25 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, m
 	shoot("10b-settings-ime-full", f.ctrl.SettingsView, 960, 1500, 1.5, nil)
 	// The window's minimum size: two narrow columns.
 	shoot("10c-settings-ime-min", f.ctrl.SettingsView, 760, 500, 1.5, nil)
+	// A declared workflow so the Workflows editor snapshot shows its fields
+	// rather than the empty state.
+	if err := f.ctrl.ConfigStore.SaveWorkflows(config.WorkflowsConfig{Workflows: []config.Workflow{{
+		ID:          "summarize-selection",
+		Name:        "Summarize Selection",
+		Description: "Rewrite the selection into bullet points.",
+		Enabled:     true,
+		Source:      config.WorkflowSourceSelection,
+		Output:      config.WorkflowOutputReplace,
+		Failure:     config.WorkflowFailureStop,
+		Execution:   config.WorkflowExecutionSequential,
+		Steps: []config.WorkflowStep{{
+			ID: "draft", Name: "Draft", Action: "script.echo", Input: "text",
+			Enabled: true, Source: config.WorkflowSourceSelection, Output: config.WorkflowOutputReplace,
+			Failure: config.WorkflowFailureStop, Execution: config.WorkflowExecutionSequential,
+		}},
+	}}}); err != nil {
+		t.Fatalf("seed workflows: %v", err)
+	}
 	for _, sec := range []struct {
 		name  string
 		index int
@@ -252,6 +271,7 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, m
 		{"14-settings-snippets", settingsSectionSnippets},
 		{"15-settings-ai", settingsSectionAI},
 		{"17-settings-configs", settingsSectionConfigs},
+		{"19-settings-workflows", settingsSectionWorkflows},
 	} {
 		f.ctrl.setSettingsSection(sec.index)
 		shoot(sec.name, f.ctrl.SettingsView, 960, 900, 1.5, nil)

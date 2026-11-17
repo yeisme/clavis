@@ -9,6 +9,7 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
 // readConfigFile returns the on-disk contents of one TOML config file.
@@ -512,5 +513,358 @@ func TestSettingsCenter_ClipboardMediaControlsPersist(t *testing.T) {
 	tt.Frame()
 	if got := ctrl.Config().Main.Clipboard.MediaQuotaMB; got < 0 {
 		t.Fatalf("media quota = %d, want non-negative", got)
+	}
+}
+
+// ---- Workflows editor ----
+
+// workflowByID returns the stored workflow with id.
+func workflowByID(ctrl *AppController, id string) (config.Workflow, bool) {
+	for _, wf := range ctrl.Config().Workflows.Workflows {
+		if wf.ID == id {
+			return wf, true
+		}
+	}
+	return config.Workflow{}, false
+}
+
+// focusByTab presses Tab until the element labelled label holds the focus, so
+// a test can drive a section by keyboard alone.
+func focusByTab(t *testing.T, tt *ui.Tester, label string, limit int) bool {
+	t.Helper()
+	for i := 0; i < limit; i++ {
+		if tt.Focused(label) {
+			return true
+		}
+		tt.Key(0, ui.KeyTab)
+		tt.Frame()
+	}
+	return tt.Focused(label)
+}
+
+// TestSettingsCenter_WorkflowsNavigation opens the Workflows section from the
+// rail and checks the empty state, then selects the same section by keyboard.
+func TestSettingsCenter_WorkflowsNavigation(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	tt := ui.NewTester(ctrl.SettingsView, 960, 640)
+	tt.Frame()
+
+	openSettingsSection(t, tt, i18n.T("settings.section.workflows"))
+	if got := settingsSectionIndex(ctrl); got != settingsSectionWorkflows {
+		t.Fatalf("rail selected section %d, want %d", got, settingsSectionWorkflows)
+	}
+	if !tt.HasText(i18n.T("settings.section.workflows.hint")) {
+		t.Fatalf("workflow pane header missing its hint, got %v", tt.Texts())
+	}
+	if !tt.HasText(i18n.T("settings.workflows.empty")) {
+		t.Fatalf("expected the empty workflow state, got %v", tt.Texts())
+	}
+	if !tt.HasText(i18n.T("settings.workflows.new_workflow")) {
+		t.Fatalf("expected the New Workflow action, got %v", tt.Texts())
+	}
+
+	// Keyboard navigation: Tab reaches the rail entry and Enter selects it.
+	ctrl.setSettingsSection(settingsSectionConfigs)
+	tt = ui.NewTester(ctrl.SettingsView, 960, 640)
+	tt.Frame()
+	if !focusByTab(t, tt, i18n.T("settings.section.workflows"), 40) {
+		t.Fatal("Tab never reached the Workflows rail entry")
+	}
+	tt.Key(0, ui.KeyEnter)
+	tt.Frame()
+	tt.Frame()
+	if got := settingsSectionIndex(ctrl); got != settingsSectionWorkflows {
+		t.Fatalf("Enter on the Workflows rail entry selected %d, want %d", got, settingsSectionWorkflows)
+	}
+	// Tab on to New Workflow and start a draft with Enter.
+	if !focusByTab(t, tt, i18n.T("settings.workflows.new_workflow"), 40) {
+		t.Fatalf("Tab never reached New Workflow, got focus on %v", tt.Texts())
+	}
+	tt.Key(0, ui.KeyEnter)
+	tt.Frame()
+	tt.Frame()
+	if !tt.HasText(i18n.T("settings.workflows.enabled")) {
+		t.Fatalf("Enter on New Workflow did not open a draft, got %v", tt.Texts())
+	}
+}
+
+// TestSettingsCenter_WorkflowSaveRoundTrip creates a workflow through the
+// editor and checks both the live config and the reloaded workflows.toml.
+func TestSettingsCenter_WorkflowSaveRoundTrip(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	tt := ui.NewTester(ctrl.SettingsView, 1200, 1600)
+	tt.Frame()
+	openSettingsSection(t, tt, i18n.T("settings.section.workflows"))
+
+	if err := tt.Click(i18n.T("settings.workflows.new_workflow")); err != nil {
+		t.Fatalf("click New Workflow: %v", err)
+	}
+	tt.Frame()
+	for _, field := range []struct{ label, value string }{
+		{i18n.T("settings.workflows.id"), "summarize-selection"},
+		{i18n.T("settings.workflows.name"), "Summarize Selection"},
+		{i18n.T("settings.workflows.description"), "Rewrites the selection with the rewrite action."},
+	} {
+		if err := tt.Click(field.label); err != nil {
+			t.Fatalf("click %s: %v", field.label, err)
+		}
+		tt.Type(field.value)
+		tt.Frame()
+	}
+	// The workflow output offers Insert, which the decoder stores verbatim.
+	if err := tt.Click(i18n.T("settings.workflows.out.insert")); err != nil {
+		t.Fatalf("click Insert output: %v", err)
+	}
+	tt.Frame()
+	if err := tt.Click(i18n.T("settings.workflows.save")); err != nil {
+		t.Fatalf("click Save Workflow: %v", err)
+	}
+	tt.Frame()
+
+	wf, ok := workflowByID(ctrl, "summarize-selection")
+	if !ok {
+		t.Fatalf("workflow missing after save: %+v", ctrl.Config().Workflows.Workflows)
+	}
+	if wf.Name != "Summarize Selection" || wf.Description != "Rewrites the selection with the rewrite action." {
+		t.Fatalf("saved workflow = %+v", wf)
+	}
+	if !wf.Enabled || wf.Source != config.WorkflowSourceClipboard || wf.Output != config.WorkflowOutputInsert ||
+		wf.Failure != config.WorkflowFailureStop || wf.Execution != config.WorkflowExecutionSequential {
+		t.Fatalf("saved modes = enabled=%v source=%q output=%q failure=%q execution=%q",
+			wf.Enabled, wf.Source, wf.Output, wf.Failure, wf.Execution)
+	}
+	body := readConfigFile(t, ctrl, config.FileWorkflows)
+	for _, want := range []string{`id = "summarize-selection"`, `name = "Summarize Selection"`, `output = "insert"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("workflows.toml missing %s:\n%s", want, body)
+		}
+	}
+
+	reloaded, err := config.DecodeWorkflowsConfig(body)
+	if err != nil {
+		t.Fatalf("decode workflows.toml: %v", err)
+	}
+	if len(reloaded.Workflows) != 1 || reloaded.Workflows[0].ID != wf.ID ||
+		reloaded.Workflows[0].Output != wf.Output || reloaded.Workflows[0].Name != wf.Name {
+		t.Fatalf("reloaded workflows = %+v, want %+v", reloaded.Workflows, wf)
+	}
+}
+
+// TestSettingsCenter_WorkflowInvalidConfigRejected saves an invalid draft and
+// checks the error surfaces while the last valid config and file stay intact.
+func TestSettingsCenter_WorkflowInvalidConfigRejected(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	if err := ctrl.ConfigStore.SaveWorkflows(config.WorkflowsConfig{Workflows: []config.Workflow{{
+		ID:        "alpha",
+		Name:      "Alpha",
+		Enabled:   true,
+		Source:    config.WorkflowSourceClipboard,
+		Output:    config.WorkflowOutputReplace,
+		Failure:   config.WorkflowFailureStop,
+		Execution: config.WorkflowExecutionSequential,
+	}}}); err != nil {
+		t.Fatalf("seed workflows: %v", err)
+	}
+	beforeBody := readConfigFile(t, ctrl, config.FileWorkflows)
+
+	tt := ui.NewTester(ctrl.SettingsView, 1200, 1600)
+	tt.Frame()
+	openSettingsSection(t, tt, i18n.T("settings.section.workflows"))
+	if !tt.HasText("Alpha") {
+		t.Fatalf("stored workflow not shown, got %v", tt.Texts())
+	}
+
+	// A duplicate ID is rejected by ConfigStore.SaveWorkflows.
+	if err := tt.Click(i18n.T("settings.workflows.new_workflow")); err != nil {
+		t.Fatalf("click New Workflow: %v", err)
+	}
+	tt.Frame()
+	if err := tt.Click(i18n.T("settings.workflows.id")); err != nil {
+		t.Fatalf("click Workflow ID: %v", err)
+	}
+	tt.Type("alpha")
+	tt.Frame()
+	if err := tt.Click(i18n.T("settings.workflows.save")); err != nil {
+		t.Fatalf("click Save Workflow: %v", err)
+	}
+	tt.Frame()
+
+	if !tt.HasText("duplicate workflow id") {
+		t.Fatalf("expected the duplicate id error to show, got %v", tt.Texts())
+	}
+	if got := len(ctrl.Config().Workflows.Workflows); got != 1 {
+		t.Fatalf("workflows = %d after a rejected save, want 1", got)
+	}
+	if wf, ok := workflowByID(ctrl, "alpha"); !ok || wf.Name != "Alpha" {
+		t.Fatalf("last valid config overwritten: %+v", ctrl.Config().Workflows.Workflows)
+	}
+	if after := readConfigFile(t, ctrl, config.FileWorkflows); after != beforeBody {
+		t.Fatalf("workflows.toml changed after a rejected save:\n%s", after)
+	}
+
+	// An identifier that breaks the ID grammar is rejected as well.
+	if err := tt.Click(i18n.T("settings.workflows.id")); err != nil {
+		t.Fatalf("click Workflow ID for invalid id: %v", err)
+	}
+	tt.Key(ui.Cmd, ui.KeyA)
+	tt.Type("bad id!")
+	tt.Frame()
+	if err := tt.Click(i18n.T("settings.workflows.save")); err != nil {
+		t.Fatalf("click Save Workflow for invalid id: %v", err)
+	}
+	tt.Frame()
+	if !tt.HasText("workflow id must be a non-empty identifier") {
+		t.Fatalf("expected the invalid id error to show, got %v", tt.Texts())
+	}
+	if got := len(ctrl.Config().Workflows.Workflows); got != 1 {
+		t.Fatalf("workflows = %d after a rejected invalid id, want 1", got)
+	}
+}
+
+// TestSettingsCenter_WorkflowStepEditing drafts steps, edits their fields, and
+// persists them with Save Workflow.
+func TestSettingsCenter_WorkflowStepEditing(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	tt := ui.NewTester(ctrl.SettingsView, 1200, 1800)
+	tt.Frame()
+	openSettingsSection(t, tt, i18n.T("settings.section.workflows"))
+
+	click := func(label string) {
+		t.Helper()
+		if err := tt.Click(label); err != nil {
+			t.Fatalf("click %q: %v", label, err)
+		}
+		tt.Frame()
+	}
+	typeInto := func(label, value string) {
+		t.Helper()
+		click(label)
+		tt.Type(value)
+		tt.Frame()
+	}
+
+	click(i18n.T("settings.workflows.new_workflow"))
+	typeInto(i18n.T("settings.workflows.id"), "flow")
+	click(i18n.T("settings.workflows.save"))
+	wf, ok := workflowByID(ctrl, "flow")
+	if !ok || len(wf.Steps) != 0 {
+		t.Fatalf("saved workflow = %+v, want flow without steps", wf)
+	}
+
+	// Add a step and edit its fields; the draft stays out of the store.
+	click(i18n.T("settings.workflows.add_step"))
+	if !tt.HasText(i18n.T("settings.workflows.step_editor")) {
+		t.Fatalf("Add Step did not open the step editor, got %v", tt.Texts())
+	}
+	typeInto(i18n.T("settings.workflows.step_id"), "step-a")
+	typeInto(i18n.T("settings.workflows.step_name"), "Echo")
+	typeInto(i18n.T("settings.workflows.step_action"), "script.echo")
+	typeInto(i18n.T("settings.workflows.step_input"), "text")
+	if wf, _ := workflowByID(ctrl, "flow"); len(wf.Steps) != 0 {
+		t.Fatalf("step draft reached the store before Save Workflow: %+v", wf.Steps)
+	}
+	click(i18n.T("settings.workflows.save"))
+
+	wf, _ = workflowByID(ctrl, "flow")
+	if len(wf.Steps) != 1 {
+		t.Fatalf("steps = %d after save, want 1", len(wf.Steps))
+	}
+	step := wf.Steps[0]
+	if step.ID != "step-a" || step.Name != "Echo" || step.Action != "script.echo" || step.Input != "text" {
+		t.Fatalf("saved step = %+v", step)
+	}
+	if !step.Enabled || step.Source != config.WorkflowSourceClipboard || step.Output != config.WorkflowOutputReplace ||
+		step.Failure != config.WorkflowFailureStop || step.Execution != config.WorkflowExecutionSequential {
+		t.Fatalf("saved step modes = %+v", step)
+	}
+	body := readConfigFile(t, ctrl, config.FileWorkflows)
+	for _, want := range []string{`id = "step-a"`, `action = "script.echo"`, `input = "text"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("workflows.toml missing %s:\n%s", want, body)
+		}
+	}
+
+	// Add a second step, depend on the first, then disable it and save.
+	click(i18n.T("settings.workflows.add_step"))
+	typeInto(i18n.T("settings.workflows.step_id"), "step-b")
+	typeInto(i18n.T("settings.workflows.step_action"), "script.upper")
+	typeInto(i18n.T("settings.workflows.step_depends_on"), "step-a")
+	click(i18n.T("settings.workflows.step_enabled"))
+	click(i18n.T("settings.workflows.save"))
+
+	wf, _ = workflowByID(ctrl, "flow")
+	if len(wf.Steps) != 2 {
+		t.Fatalf("steps = %d after adding step-b, want 2", len(wf.Steps))
+	}
+	second := wf.Steps[1]
+	if second.ID != "step-b" || second.Enabled {
+		t.Fatalf("step-b = %+v, want disabled step-b", second)
+	}
+	if len(second.DependsOn) != 1 || second.DependsOn[0] != "step-a" {
+		t.Fatalf("step-b depends_on = %v, want [step-a]", second.DependsOn)
+	}
+	body = readConfigFile(t, ctrl, config.FileWorkflows)
+	if !strings.Contains(body, `depends_on = ["step-a"]`) {
+		t.Fatalf("workflows.toml does not persist depends_on:\n%s", body)
+	}
+	if !strings.Contains(body, "enabled = false") {
+		t.Fatalf("workflows.toml does not persist the disabled step:\n%s", body)
+	}
+
+	// Delete the selected step and save again.
+	click(i18n.T("settings.workflows.step_delete"))
+	if wf, _ := workflowByID(ctrl, "flow"); len(wf.Steps) != 2 {
+		t.Fatalf("Delete Step reached the store before Save Workflow: %+v", wf.Steps)
+	}
+	click(i18n.T("settings.workflows.save"))
+
+	wf, _ = workflowByID(ctrl, "flow")
+	if len(wf.Steps) != 1 || wf.Steps[0].ID != "step-a" {
+		t.Fatalf("steps after delete = %+v, want only step-a", wf.Steps)
+	}
+	if body := readConfigFile(t, ctrl, config.FileWorkflows); strings.Contains(body, "step-b") {
+		t.Fatalf("workflows.toml still holds the deleted step:\n%s", body)
+	}
+}
+
+// TestSettingsCenter_WorkflowPreviewOmitsSensitiveValues checks the preview
+// never shows a step command or prompt, which may carry secrets.
+func TestSettingsCenter_WorkflowPreviewOmitsSensitiveValues(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	if err := ctrl.ConfigStore.SaveWorkflows(config.WorkflowsConfig{Workflows: []config.Workflow{{
+		ID:        "guarded",
+		Name:      "Guarded Workflow",
+		Enabled:   true,
+		Source:    config.WorkflowSourceSelection,
+		Output:    config.WorkflowOutputReplace,
+		Failure:   config.WorkflowFailureStop,
+		Execution: config.WorkflowExecutionSequential,
+		Steps: []config.WorkflowStep{{
+			ID:        "run",
+			Action:    "script.run",
+			Command:   "curl --token super-secret-token",
+			Prompt:    "super-secret-prompt",
+			Enabled:   true,
+			Source:    config.WorkflowSourceSelection,
+			Output:    config.WorkflowOutputReplace,
+			Failure:   config.WorkflowFailureStop,
+			Execution: config.WorkflowExecutionSequential,
+		}},
+	}}}); err != nil {
+		t.Fatalf("seed workflows: %v", err)
+	}
+
+	tt := ui.NewTester(ctrl.SettingsView, 1200, 1800)
+	tt.Frame()
+	openSettingsSection(t, tt, i18n.T("settings.section.workflows"))
+	tt.Frame()
+
+	if !tt.HasText(i18n.Tf("settings.workflows.preview_summary", 1, 1)) {
+		t.Fatalf("expected the non-sensitive preview summary, got %v", tt.Texts())
+	}
+	for _, secret := range []string{"super-secret-token", "super-secret-prompt"} {
+		if tt.HasText(secret) {
+			t.Fatalf("preview leaked %q, texts: %v", secret, tt.Texts())
+		}
 	}
 }

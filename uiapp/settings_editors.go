@@ -49,6 +49,16 @@ type settingsEditorState struct {
 	glossaryIsNew    bool
 	glossaryDraft    config.GlossaryTerm
 
+	// workflows master-detail editor. The draft is always a deep clone of the
+	// stored workflow, so editing it never mutates the last valid config.
+	workflowSelected   string // stored ID of the edited workflow
+	workflowOriginalID string // ID to replace on save (draft.ID may differ)
+	workflowIsNew      bool
+	workflowLoaded     bool
+	workflowDraft      config.Workflow
+	workflowStepIndex  int
+	workflowError      string
+
 	// AI profile editor.
 	aiDraftProfile config.AIProfile
 

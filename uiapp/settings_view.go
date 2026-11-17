@@ -26,6 +26,7 @@ const (
 	settingsSectionLeader      = 5
 	settingsSectionSnippets    = 6
 	settingsSectionGlossary    = 7
+	settingsSectionWorkflows   = 8
 )
 
 // settingsSectionMeta describes one navigation rail entry.
@@ -46,6 +47,7 @@ func settingsSections() []settingsSectionMeta {
 		{settingsSectionLeader, "leader", i18n.T("settings.section.leader"), "command", i18n.T("settings.section.leader.hint"), SettingsTabGeneral},
 		{settingsSectionSnippets, "snippets", i18n.T("omnibox.tab.snippets"), "text.badge.plus", i18n.T("settings.section.snippets.hint"), SettingsTabGeneral},
 		{settingsSectionGlossary, "glossary", i18n.T("settings.section.glossary"), "character.book.closed", i18n.T("settings.section.glossary.hint"), SettingsTabGeneral},
+		{settingsSectionWorkflows, "workflows", i18n.T("settings.section.workflows"), "wand.and.stars", i18n.T("settings.section.workflows.hint"), SettingsTabGeneral},
 		{settingsSectionAI, "ai", i18n.T("settings.section.ai"), "sparkles", i18n.T("settings.section.ai.hint"), SettingsTabAI},
 		{settingsSectionPermissions, "permissions", i18n.T("settings.section.permissions"), "gearshape", i18n.T("settings.section.permissions.hint"), SettingsTabPermissions},
 		{settingsSectionConfigs, "configs", i18n.T("settings.section.configs"), "folder", i18n.T("settings.section.configs.hint"), SettingsTabConfigs},
@@ -172,6 +174,8 @@ func settingsSectionBadge(index int, cfg config.ClavisConfig) string {
 		return fmt.Sprintf("%d", len(cfg.Snippets.Items))
 	case settingsSectionGlossary:
 		return fmt.Sprintf("%d", len(cfg.Glossary.Terms))
+	case settingsSectionWorkflows:
+		return fmt.Sprintf("%d", len(cfg.Workflows.Workflows))
 	case settingsSectionAI:
 		return fmt.Sprintf("%d", len(cfg.Main.AI.Profiles))
 	case settingsSectionConfigs:
@@ -219,6 +223,8 @@ func (a *AppController) renderSettingsSection(
 		a.renderSnippetsSection(c, theme, cfg)
 	case settingsSectionGlossary:
 		a.renderGlossarySection(c, theme, cfg)
+	case settingsSectionWorkflows:
+		a.renderWorkflowsSection(c, theme, cfg)
 	case settingsSectionAI:
 		a.renderSettingsAISection(c, theme, cfg, apiKeySource, aiTestStatus, aiTestMsg)
 	case settingsSectionPermissions:
@@ -769,6 +775,8 @@ func configFileDescription(kind config.ConfigFileKind) string {
 		return i18n.T("settings.configs.desc.glossary")
 	case config.FileIMERules:
 		return i18n.T("settings.configs.desc.ime_rules")
+	case config.FileWorkflows:
+		return i18n.T("settings.configs.desc.workflows")
 	default:
 		return ""
 	}
