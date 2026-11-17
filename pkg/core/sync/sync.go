@@ -637,6 +637,7 @@ func (s *Server) VerifyTombstone(t Tombstone) bool {
 		stored.Sequence == t.Sequence &&
 		stored.Version == t.Version &&
 		stored.DeviceID == t.DeviceID &&
+		stored.DeletedAt.UTC().UnixNano() == t.DeletedAt.UTC().UnixNano() &&
 		hmac.Equal(stored.Signature, t.Signature) &&
 		t.Verify(s.accounts[t.AccountID][t.DeviceID])
 }

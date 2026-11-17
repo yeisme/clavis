@@ -53,6 +53,7 @@ func NewSQLiteSyncStore(ctx context.Context, dbPath string) (*SQLiteSyncStore, e
 		return nil, fmt.Errorf("%w: database path is empty", coresync.ErrStoreInvalidArgument)
 	}
 	file := dbPath != ":memory:"
+	var expectedDatabaseFile os.FileInfo
 	if file {
 		var err error
 		dbPath, err = secureDatabasePath(dbPath)
@@ -62,8 +63,21 @@ func NewSQLiteSyncStore(ctx context.Context, dbPath string) (*SQLiteSyncStore, e
 		if err := mkdirPrivate(filepath.Dir(dbPath)); err != nil {
 			return nil, fmt.Errorf("sync: create database directory: %w", err)
 		}
+		// mygo/sqlite does not expose openat or an opened-file handle. Refuse
+		// creation through the pathname: callers must provision a regular,
+		// non-symlink database first, then we validate its identity again after
+		// sqlite.Open. This closes the create-via-attacker-controlled-path case;
+		// a pathname replacement during Open is detected and the connection is
+		// closed rather than silently accepted.
+		if err := ensureDatabaseFile(dbPath); err != nil {
+			return nil, fmt.Errorf("sync: provision database file: %w", err)
+		}
 		if err := rejectDatabaseFiles(dbPath); err != nil {
 			return nil, fmt.Errorf("sync: unsafe database path: %w", err)
+		}
+		expectedDatabaseFile, err = os.Stat(dbPath)
+		if err != nil {
+			return nil, fmt.Errorf("sync: stat database file: %w", err)
 		}
 	}
 	db, err := sqlite.Open(ctx, dbPath, sqlite.OpenOptions{BusyTimeout: 5 * time.Second})
@@ -73,6 +87,10 @@ func NewSQLiteSyncStore(ctx context.Context, dbPath string) (*SQLiteSyncStore, e
 	s := &SQLiteSyncStore{db: db, ownsDB: true}
 	if file {
 		s.path = dbPath
+		if err := verifyOpenedDatabaseFile(dbPath, expectedDatabaseFile); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("sync: database path changed while opening: %w", err)
+		}
 	}
 	if err := s.initSchema(ctx, file); err != nil {
 		_ = db.Close()
@@ -306,11 +324,59 @@ func rejectDatabaseFiles(path string) error {
 			if !info.Mode().IsRegular() {
 				return fmt.Errorf("%s is not a regular file", name)
 			}
+			if info.Mode().Perm()&0o022 != 0 {
+				return fmt.Errorf("%s is group/world-writable (mode %o)", name, info.Mode().Perm())
+			}
 			continue
 		}
 		if !os.IsNotExist(err) {
 			return err
 		}
+	}
+	return nil
+}
+
+// ensureDatabaseFile makes pathname creation explicit before sqlite.Open.
+// The sqlite wrapper has no openat/fd API, so the constructor never lets it
+// create a database through an unchecked pathname. A pre-open identity check
+// and a post-open identity check ensure a replacement can only cause a
+// rejected open, never schema initialization on the replacement.
+func ensureDatabaseFile(path string) error {
+	info, err := os.Lstat(path)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("%s is not a regular non-symlink file", path)
+		}
+		return nil
+	}
+	if !os.IsNotExist(err) {
+		return err
+	}
+	return fmt.Errorf("%s does not exist; provision a regular database file before opening", path)
+}
+
+func verifyOpenedDatabaseFile(path string, expected os.FileInfo) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular non-symlink file", path)
+	}
+	if expected != nil && !os.SameFile(expected, info) {
+		return fmt.Errorf("%s changed during sqlite open", path)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(info, opened) {
+		return fmt.Errorf("%s changed during sqlite open", path)
 	}
 	return nil
 }
@@ -770,13 +836,13 @@ func (s *SQLiteSyncStore) VerifyTombstone(t coresync.Tombstone) bool {
 	// The current tombstone index is only the latest object boundary. A device
 	// can still be acknowledging an older issued batch, so validation must use
 	// the append-only sequence log instead.
-	rows, err := s.db.Query(context.Background(), `SELECT object_id,device_id,version,signature FROM sync_tombstones WHERE account_id=? AND sequence=?`, t.AccountID, t.Sequence)
+	rows, err := s.db.Query(context.Background(), `SELECT object_id,device_id,version,deleted_at_ns,signature FROM sync_tombstones WHERE account_id=? AND sequence=?`, t.AccountID, t.Sequence)
 	if err != nil || len(rows.Values) == 0 {
 		return false
 	}
 	r := rows.Values[0]
-	storedSignature, ok := blob(r, 3)
-	if !ok || syncStr(r, 0) != t.ObjectID || syncStr(r, 1) != t.DeviceID || uint64(syncInt64val(r, 2)) != t.Version || !hmac.Equal(storedSignature, t.Signature) {
+	storedSignature, ok := blob(r, 4)
+	if !ok || syncStr(r, 0) != t.ObjectID || syncStr(r, 1) != t.DeviceID || uint64(syncInt64val(r, 2)) != t.Version || syncInt64val(r, 3) != t.DeletedAt.UTC().UnixNano() || !hmac.Equal(storedSignature, t.Signature) {
 		return false
 	}
 	pub, err := s.deviceKeyLocked(t.AccountID, t.DeviceID)

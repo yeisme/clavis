@@ -80,6 +80,11 @@ func runStoreContract(t *testing.T, store coresync.SyncStore) {
 	if !store.VerifyTombstone(tombstone) {
 		t.Fatal("stored tombstone did not verify")
 	}
+	tampered := tombstone
+	tampered.DeletedAt = tampered.DeletedAt.Add(1)
+	if store.VerifyTombstone(tampered) {
+		t.Fatal("tombstone with tampered DeletedAt accepted")
+	}
 	e3, err := testClientEnvelope(priv, "acct", "device", "object", 3, coresync.InputMethod, []byte("resurrection"))
 	if err != nil {
 		t.Fatal(err)
@@ -114,7 +119,7 @@ func runStoreContract(t *testing.T, store coresync.SyncStore) {
 }
 
 func TestSQLiteStoreRestartRestoresProtocolState(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sync", "state.db")
+	path := provisionSQLiteTestPath(t)
 	store, err := NewSQLiteSyncStore(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +246,7 @@ func TestSQLiteDeletePurgesHigherVersionObjectPermanently(t *testing.T) {
 	if version, err := store.ObjectVersion("acct", "object"); err != nil || version != 9 {
 		t.Fatalf("deletion boundary = %d, %v; want 9", version, err)
 	}
-	path := filepath.Join(t.TempDir(), "sync", "state.db")
+	path := provisionSQLiteTestPath(t)
 	fileStore, err := NewSQLiteSyncStore(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -273,7 +278,7 @@ func TestSQLiteDeletePurgesHigherVersionObjectPermanently(t *testing.T) {
 }
 
 func TestSQLiteCrossConnectionDeleteIsAtomic(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sync", "state.db")
+	path := provisionSQLiteTestPath(t)
 	one, err := NewSQLiteSyncStore(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -319,7 +324,7 @@ func TestSQLiteCrossConnectionDeleteIsAtomic(t *testing.T) {
 }
 
 func TestSQLiteIssuedTombstoneBatchSurvivesNewDeleteAcrossStores(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sync", "state.db")
+	path := provisionSQLiteTestPath(t)
 	first, err := NewSQLiteSyncStore(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -377,7 +382,7 @@ func TestSQLiteIssuedTombstoneBatchSurvivesNewDeleteAcrossStores(t *testing.T) {
 }
 
 func TestSQLiteHistoricalSameObjectTombstonesAcrossRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sync", "state.db")
+	path := provisionSQLiteTestPath(t)
 	store, err := NewSQLiteSyncStore(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -467,6 +472,16 @@ func TestSQLiteExternalDBCloseDoesNotCloseOwner(t *testing.T) {
 }
 
 func TestSQLiteRejectsRelativeAndSymlinkDatabasePaths(t *testing.T) {
+	t.Run("missing target", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "state.db")
+		if _, err := NewSQLiteSyncStore(context.Background(), path); err == nil {
+			t.Fatal("missing database file accepted")
+		}
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("missing database file was created: %v", err)
+		}
+	})
 	t.Run("relative", func(t *testing.T) {
 		if _, err := NewSQLiteSyncStore(context.Background(), "state.db"); err == nil {
 			t.Fatal("relative database path accepted")
@@ -491,7 +506,7 @@ func TestSQLiteRejectsRelativeAndSymlinkDatabasePaths(t *testing.T) {
 }
 
 func TestSQLiteCloseRejectsReplacedRegularSidecar(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.db")
+	path := provisionSQLiteTestPath(t)
 	store, err := NewSQLiteSyncStore(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -515,6 +530,19 @@ func TestSQLiteCloseRejectsReplacedRegularSidecar(t *testing.T) {
 	}
 }
 
+func provisionSQLiteTestPath(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "sync")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "state.db")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func mustFileMode(t *testing.T, path string) os.FileMode {
 	t.Helper()
 	info, err := os.Stat(path)
@@ -525,7 +553,7 @@ func mustFileMode(t *testing.T, path string) os.FileMode {
 }
 
 func TestSQLiteCloseReleasesConnectionWhenProtectionFails(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.db")
+	path := provisionSQLiteTestPath(t)
 	store, err := NewSQLiteSyncStore(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -600,6 +628,12 @@ func TestSQLiteFileModesProtectNewDatabaseAndSidecars(t *testing.T) {
 	}
 	dir := filepath.Join(parent, "new", "private")
 	path := filepath.Join(dir, "state.db")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	store, err := NewSQLiteSyncStore(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)

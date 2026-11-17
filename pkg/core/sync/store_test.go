@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"testing"
+	"time"
 )
 
 type storeFactory struct {
@@ -60,6 +61,11 @@ func TestServerStoreVerifiesHistoricalSameObjectTombstones(t *testing.T) {
 	second := deleteAt(2)
 	if !store.VerifyTombstone(first) {
 		t.Fatal("historical tombstone rejected after newer same-object delete")
+	}
+	tampered := first
+	tampered.DeletedAt = tampered.DeletedAt.Add(time.Nanosecond)
+	if store.VerifyTombstone(tampered) {
+		t.Fatal("tombstone with tampered DeletedAt accepted")
 	}
 	if err := store.ConfirmTombstones("acct", "device", first.Sequence); err != nil {
 		t.Fatalf("confirm historical tombstone: %v", err)
