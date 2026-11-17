@@ -29,6 +29,113 @@ type SQLiteSyncStore struct {
 	mu     stdsync.RWMutex
 	ownsDB bool
 	path   string
+
+	// databaseFile is the identity observed after sqlite.Open. mygo/sqlite
+	// deliberately does not expose the descriptor it opened, so every later
+	// pathname operation must first prove that this identity is still named by
+	// path. sidecarFiles records identities once they exist; a replaced
+	// sidecar is never chmodded through its new pathname.
+	databaseFile os.FileInfo
+	sidecarFiles map[string]os.FileInfo
+	pathLock     *databasePathLock
+	closeOnce    stdsync.Once
+	closeErr     error
+}
+
+// databasePathMu protects the in-process lock registry. databaseOpenMu below
+// serializes the pathname check/open/check sequence; the registry lock itself
+// is separate so Close can release a lease without holding the open mutex.
+var databasePathMu stdsync.Mutex
+
+// databaseOpenMu is package-wide: two store instances opening paths must not
+// race one another through check-open-check. It is not an OS lock and does not
+// claim to protect a private directory from a hostile same-UID process.
+var databaseOpenMu stdsync.Mutex
+
+// pathLocks is an OS-backed lock directory registry. The directory is held
+// for the lifetime of every store using the path, so another process cannot
+// pass the pathname checks while this process may still use the database.
+// Same-process users share one lease, which preserves SQLite's supported
+// multi-connection behavior without weakening the cross-process exclusion.
+var pathLocks = make(map[string]*databasePathLock)
+
+type databasePathLock struct {
+	key  string
+	path string
+	info os.FileInfo
+	refs int
+}
+
+func acquireDatabasePathLock(path string) (*databasePathLock, error) {
+	databasePathMu.Lock()
+	defer databasePathMu.Unlock()
+	if existing := pathLocks[path]; existing != nil {
+		existing.refs++
+		return existing, nil
+	}
+	lockPath := path + ".clavis-lock"
+	if err := os.Mkdir(lockPath, 0o700); err != nil {
+		if os.IsExist(err) {
+			return nil, fmt.Errorf("database is locked by another process (%s)", lockPath)
+		}
+		return nil, fmt.Errorf("create database lock %s: %w", lockPath, err)
+	}
+	info, err := os.Lstat(lockPath)
+	if err != nil {
+		_ = os.Remove(lockPath)
+		return nil, fmt.Errorf("stat database lock %s: %w", lockPath, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		_ = os.Remove(lockPath)
+		return nil, fmt.Errorf("database lock %s is not a private 0700 directory", lockPath)
+	}
+	lock := &databasePathLock{key: path, path: lockPath, info: info, refs: 1}
+	pathLocks[path] = lock
+	return lock, nil
+}
+
+func validateDatabasePathLock(lock *databasePathLock) error {
+	if lock == nil {
+		return nil
+	}
+	current, err := os.Lstat(lock.path)
+	if err != nil {
+		return fmt.Errorf("inspect database lock %s: %w", lock.path, err)
+	}
+	if current.Mode()&os.ModeSymlink != 0 || !current.IsDir() || !os.SameFile(lock.info, current) {
+		return fmt.Errorf("database lock %s identity changed", lock.path)
+	}
+	return nil
+}
+
+func releaseDatabasePathLock(lock *databasePathLock) error {
+	if lock == nil {
+		return nil
+	}
+	databasePathMu.Lock()
+	defer databasePathMu.Unlock()
+	if lock.refs <= 0 {
+		return nil
+	}
+	lock.refs--
+	if lock.refs > 0 {
+		return nil
+	}
+	delete(pathLocks, lock.key)
+	current, err := os.Lstat(lock.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect database lock %s: %w", lock.path, err)
+	}
+	if !os.SameFile(lock.info, current) {
+		return fmt.Errorf("database lock %s changed; refusing to remove replacement", lock.path)
+	}
+	if err := os.Remove(lock.path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove database lock %s: %w", lock.path, err)
+	}
+	return nil
 }
 
 // SQLiteStore is retained as a package-local compatibility name for callers
@@ -38,14 +145,21 @@ type SQLiteStore = SQLiteSyncStore
 var _ coresync.SyncStore = (*SQLiteSyncStore)(nil)
 
 // NewSQLiteSyncStore opens dbPath (or :memory:) and initializes the sync schema.
-// A file-backed store is created with a private directory and file mode.
+// File-backed stores require an already-provisioned regular database in a
+// non-symlink directory that is not group/world-writable. Because mygo/sqlite
+// exposes only pathname Open (not openat or the opened fd), this constructor
+// intentionally rejects missing files and holds an owner-only .clavis-lock
+// directory for the store lifetime. This is the security boundary: callers
+// must keep the database and its parent components in that private directory;
+// pathname replacement by a hostile actor outside that boundary is not made
+// atomic by this API and is rejected when observed.
 // NewSQLiteStore is the migration-compatible constructor name. SQLite-backed
 // storage intentionally lives in internal/storage rather than pkg/core/sync.
 func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteSyncStore, error) {
 	return NewSQLiteSyncStore(ctx, dbPath)
 }
 
-func NewSQLiteSyncStore(ctx context.Context, dbPath string) (*SQLiteSyncStore, error) {
+func NewSQLiteSyncStore(ctx context.Context, dbPath string) (store *SQLiteSyncStore, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -53,7 +167,23 @@ func NewSQLiteSyncStore(ctx context.Context, dbPath string) (*SQLiteSyncStore, e
 		return nil, fmt.Errorf("%w: database path is empty", coresync.ErrStoreInvalidArgument)
 	}
 	file := dbPath != ":memory:"
+	if file {
+		// This package mutex covers the whole pathname check/open/check
+		// sequence. The OS lock acquired below remains held for the store's
+		// lifetime and excludes another process from the same private path.
+		databaseOpenMu.Lock()
+		defer databaseOpenMu.Unlock()
+	}
+	var pathLock *databasePathLock
+	defer func() {
+		if pathLock != nil {
+			if releaseErr := releaseDatabasePathLock(pathLock); releaseErr != nil {
+				err = errors.Join(err, fmt.Errorf("sync: release database path lock: %w", releaseErr))
+			}
+		}
+	}()
 	var expectedDatabaseFile os.FileInfo
+	expectedSidecars := make(map[string]os.FileInfo)
 	if file {
 		var err error
 		dbPath, err = secureDatabasePath(dbPath)
@@ -63,12 +193,19 @@ func NewSQLiteSyncStore(ctx context.Context, dbPath string) (*SQLiteSyncStore, e
 		if err := mkdirPrivate(filepath.Dir(dbPath)); err != nil {
 			return nil, fmt.Errorf("sync: create database directory: %w", err)
 		}
-		// mygo/sqlite does not expose openat or an opened-file handle. Refuse
-		// creation through the pathname: callers must provision a regular,
-		// non-symlink database first, then we validate its identity again after
-		// sqlite.Open. This closes the create-via-attacker-controlled-path case;
-		// a pathname replacement during Open is detected and the connection is
-		// closed rather than silently accepted.
+		if err := validatePrivateStoreDirectory(filepath.Dir(dbPath)); err != nil {
+			return nil, fmt.Errorf("sync: database directory is not private: %w", err)
+		}
+		pathLock, err = acquireDatabasePathLock(dbPath)
+		if err != nil {
+			return nil, fmt.Errorf("sync: lock database path: %w", err)
+		}
+		// The sqlite wrapper has no openat or opened-file handle. Therefore a
+		// file-backed store must be provisioned already inside the checked,
+		// owner-only directory; this constructor never asks SQLite to create a
+		// file at an unchecked pathname. Existing parents and database files
+		// that cannot be proven regular, non-symlink, and non-writable are
+		// rejected rather than repaired.
 		if err := ensureDatabaseFile(dbPath); err != nil {
 			return nil, fmt.Errorf("sync: provision database file: %w", err)
 		}
@@ -79,15 +216,19 @@ func NewSQLiteSyncStore(ctx context.Context, dbPath string) (*SQLiteSyncStore, e
 		if err != nil {
 			return nil, fmt.Errorf("sync: stat database file: %w", err)
 		}
+		expectedSidecars, err = snapshotSidecarFiles(dbPath)
+		if err != nil {
+			return nil, fmt.Errorf("sync: snapshot database sidecars: %w", err)
+		}
 	}
 	db, err := sqlite.Open(ctx, dbPath, sqlite.OpenOptions{BusyTimeout: 5 * time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("sync: open sqlite store: %w", err)
 	}
-	s := &SQLiteSyncStore{db: db, ownsDB: true}
+	s := &SQLiteSyncStore{db: db, ownsDB: true, pathLock: pathLock}
 	if file {
 		s.path = dbPath
-		if err := verifyOpenedDatabaseFile(dbPath, expectedDatabaseFile); err != nil {
+		if err := verifyOpenedDatabaseFiles(dbPath, expectedDatabaseFile, expectedSidecars); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("sync: database path changed while opening: %w", err)
 		}
@@ -97,11 +238,15 @@ func NewSQLiteSyncStore(ctx context.Context, dbPath string) (*SQLiteSyncStore, e
 		return nil, err
 	}
 	if file {
-		if err := protectDatabaseFiles(dbPath); err != nil {
+		sidecars, err := protectDatabaseFiles(dbPath, expectedDatabaseFile, expectedSidecars)
+		if err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("sync: protect database files: %w", err)
 		}
+		s.databaseFile = expectedDatabaseFile
+		s.sidecarFiles = sidecars
 	}
+	pathLock = nil
 	return s, nil
 }
 
@@ -210,14 +355,19 @@ func (s *SQLiteSyncStore) Close() error {
 	if s == nil || s.db == nil || !s.ownsDB {
 		return nil
 	}
-	var protectErr error
-	if s.path != "" {
-		protectErr = protectDatabaseFiles(s.path)
-	}
-	// Always release the connection even when a permission repair failed. An
-	// externally supplied DB is deliberately excluded above.
-	closeErr := s.db.Close()
-	return errors.Join(protectErr, closeErr)
+	s.closeOnce.Do(func() {
+		var protectErr error
+		if s.path != "" {
+			// If the pathname no longer denotes the opened identity, do not
+			// chmod whatever now occupies it. Closing the connection remains
+			// safe and the identity error is deliberately returned.
+			protectErr = s.secureOwnedFiles()
+		}
+		closeErr := s.db.Close()
+		lockErr := releaseDatabasePathLock(s.pathLock)
+		s.closeErr = errors.Join(protectErr, closeErr, lockErr)
+	})
+	return s.closeErr
 }
 
 func secureDatabasePath(path string) (string, error) {
@@ -308,6 +458,24 @@ func validatePrivateDirectory(dir string) error {
 	}
 }
 
+// validatePrivateStoreDirectory adds the dedicated-store boundary to the
+// ancestor checks above. The immediate database directory must be exactly
+// owner-only (0700); broader ancestors are acceptable only when they are not
+// writable by group or other users.
+func validatePrivateStoreDirectory(dir string) error {
+	info, err := os.Lstat(filepath.Clean(dir))
+	if err != nil {
+		return err
+	}
+	if err := validateDatabaseDirectory(dir, info); err != nil {
+		return err
+	}
+	if info.Mode().Perm() != 0o700 {
+		return fmt.Errorf("%s must have mode 0700 (got %o)", dir, info.Mode().Perm())
+	}
+	return nil
+}
+
 // rejectDatabaseFiles performs the pre-open path checks. protectDatabaseFiles
 // repeats them after SQLite has opened the database because path checks alone
 // cannot establish a safe file identity across an intervening rename.
@@ -355,104 +523,137 @@ func ensureDatabaseFile(path string) error {
 	return fmt.Errorf("%s does not exist; provision a regular database file before opening", path)
 }
 
-func verifyOpenedDatabaseFile(path string, expected os.FileInfo) error {
+func snapshotSidecarFiles(path string) (map[string]os.FileInfo, error) {
+	out := make(map[string]os.FileInfo)
+	for _, name := range []string{path + "-wal", path + "-shm"} {
+		info, err := os.Lstat(name)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("%s is not a regular non-symlink file", name)
+		}
+		out[name] = info
+	}
+	return out, nil
+}
+
+func verifyOpenedDatabaseFiles(path string, expected os.FileInfo, expectedSidecars map[string]os.FileInfo) error {
+	if err := rejectDatabaseFiles(path); err != nil {
+		return err
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular non-symlink file", path)
-	}
 	if expected != nil && !os.SameFile(expected, info) {
 		return fmt.Errorf("%s changed during sqlite open", path)
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil {
-		return err
-	}
-	if !os.SameFile(info, opened) {
-		return fmt.Errorf("%s changed during sqlite open", path)
+	for name, want := range expectedSidecars {
+		got, err := os.Lstat(name)
+		if err != nil {
+			return fmt.Errorf("%s changed during sqlite open: %w", name, err)
+		}
+		if !os.SameFile(want, got) {
+			return fmt.Errorf("%s changed during sqlite open", name)
+		}
 	}
 	return nil
 }
 
-func protectDatabaseFiles(path string) error {
+func protectDatabaseFiles(path string, expected os.FileInfo, expectedSidecars map[string]os.FileInfo) (map[string]os.FileInfo, error) {
 	if err := rejectDatabaseFiles(path); err != nil {
-		return err
+		return nil, err
+	}
+	_, err := protectDatabaseFile(path, true, expected)
+	if err != nil {
+		// Never continue to sidecars after the database pathname identity
+		// failed. A replaced database means the entire pathname set is
+		// untrusted, and continuing could chmod a newly redirected sidecar.
+		return nil, err
 	}
 	var errs []error
-	if err := protectDatabaseFile(path, true); err != nil {
-		errs = append(errs, err)
-	}
+	currentSidecars := make(map[string]os.FileInfo)
 	for _, name := range []string{path + "-wal", path + "-shm"} {
-		if err := protectDatabaseFile(name, false); err != nil {
+		info, err := protectDatabaseFile(name, false, expectedSidecars[name])
+		if err != nil {
 			errs = append(errs, err)
+		} else if info != nil {
+			currentSidecars[name] = info
 		}
 	}
-	return errors.Join(errs...)
+	return currentSidecars, errors.Join(errs...)
 }
 
 // protectDatabaseFile opens the file before changing its mode. Chmod is then
-// performed through the opened descriptor, not the pathname. If a pathname is
-// replaced between Lstat and Open, SameFile detects the replacement and the
-// descriptor is closed without changing the (possibly external) target.
-func protectDatabaseFile(name string, required bool) error {
+// performed through the opened descriptor, not the pathname. An expected
+// identity is required for an already-known file, preventing a replaced
+// pathname from redirecting permission repair to an external file.
+func protectDatabaseFile(name string, required bool, expected os.FileInfo) (os.FileInfo, error) {
 	info, err := os.Lstat(name)
 	if os.IsNotExist(err) {
-		if required {
-			return fmt.Errorf("%s disappeared while protecting it", name)
+		if required || expected != nil {
+			return nil, fmt.Errorf("%s disappeared or changed while protecting it", name)
 		}
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return fmt.Errorf("inspect %s: %w", name, err)
+		return nil, fmt.Errorf("inspect %s: %w", name, err)
+	}
+	if expected != nil && !os.SameFile(expected, info) {
+		return nil, fmt.Errorf("%s identity changed; refusing permission repair", name)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s is a symlink", name)
+		return nil, fmt.Errorf("%s is a symlink", name)
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", name)
+		return nil, fmt.Errorf("%s is not a regular file", name)
 	}
 	file, err := os.Open(name)
 	if err != nil {
-		return fmt.Errorf("open %s for protection: %w", name, err)
+		return nil, fmt.Errorf("open %s for protection: %w", name, err)
 	}
 	defer file.Close()
 	opened, err := file.Stat()
 	if err != nil {
-		return fmt.Errorf("stat opened %s: %w", name, err)
+		return nil, fmt.Errorf("stat opened %s: %w", name, err)
 	}
 	if !os.SameFile(info, opened) {
-		return fmt.Errorf("%s changed while protecting it", name)
-	}
-	if !opened.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", name)
+		return nil, fmt.Errorf("%s changed while protecting it", name)
 	}
 	if err := file.Chmod(0o600); err != nil {
-		return fmt.Errorf("chmod %s: %w", name, err)
+		return nil, fmt.Errorf("chmod %s: %w", name, err)
 	}
-	// A replacement after Open is safe for the descriptor-based chmod, but it
-	// is still a security failure for this operation and must be surfaced.
 	current, err := os.Lstat(name)
 	if err != nil {
-		return fmt.Errorf("recheck %s after protection: %w", name, err)
+		return nil, fmt.Errorf("recheck %s after protection: %w", name, err)
 	}
 	if current.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, current) {
-		return fmt.Errorf("%s changed during protection", name)
+		return nil, fmt.Errorf("%s changed during protection", name)
 	}
-	return nil
+	return current, nil
 }
 
 func (s *SQLiteSyncStore) secureOwnedFiles() error {
 	if s == nil || !s.ownsDB || s.path == "" {
 		return nil
 	}
-	return protectDatabaseFiles(s.path)
+	// Business methods call this from defers and may run concurrently. Keep
+	// the identity snapshot and its refresh under the store mutex; SQLite
+	// itself serializes the SQL operation separately.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := validateDatabasePathLock(s.pathLock); err != nil {
+		return err
+	}
+	sidecars, err := protectDatabaseFiles(s.path, s.databaseFile, s.sidecarFiles)
+	if sidecars != nil {
+		s.sidecarFiles = sidecars
+	}
+	return err
 }
 
 func validID(v string) bool { return strings.TrimSpace(v) != "" }

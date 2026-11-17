@@ -552,6 +552,33 @@ func mustFileMode(t *testing.T, path string) os.FileMode {
 	return info.Mode().Perm()
 }
 
+func TestSQLiteCloseReturnsIdentityErrorWithoutChmoddingReplacement(t *testing.T) {
+	path := provisionSQLiteTestPath(t)
+	store, err := NewSQLiteSyncStore(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(t.TempDir(), "replacement")
+	if err := os.WriteFile(replacement, []byte("replacement"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err == nil {
+		t.Fatal("Close unexpectedly accepted replaced database pathname")
+	}
+	if got := mustFileMode(t, path); got != 0o644 {
+		t.Fatalf("replacement mode = %o, want 644; replacement was chmodded", got)
+	}
+	if _, err := store.db.Execute(context.Background(), `SELECT 1`); !errors.Is(err, sqlite.ErrClosed) {
+		t.Fatalf("connection remains usable after identity failure: %v", err)
+	}
+}
+
 func TestSQLiteCloseReleasesConnectionWhenProtectionFails(t *testing.T) {
 	path := provisionSQLiteTestPath(t)
 	store, err := NewSQLiteSyncStore(context.Background(), path)
