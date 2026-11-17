@@ -43,6 +43,7 @@ func Validate(cfg ClavisConfig) []ValidationIssue {
 	issues = append(issues, ValidateIMERules(cfg.IMERules)...)
 	issues = append(issues, ValidatePrompts(cfg.Prompts)...)
 	issues = append(issues, ValidateComponents(cfg.Components)...)
+	issues = append(issues, ValidateWorkflows(cfg.Workflows)...)
 	return issues
 }
 

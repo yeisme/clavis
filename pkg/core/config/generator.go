@@ -72,6 +72,8 @@ default_input_source_id = "`+WindowsDefaultInputSourceID+`"`, 1)
 		return DefaultPromptsConfig().Encode()
 	case FileComponents:
 		return DefaultComponentsConfig().Encode()
+	case FileWorkflows:
+		return DefaultWorkflowsConfig().Encode()
 	default:
 		return ""
 	}

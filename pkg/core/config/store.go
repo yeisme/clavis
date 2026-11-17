@@ -284,6 +284,26 @@ func (s *ConfigStore) SaveComponents(cfg ComponentsConfig) error {
 	return nil
 }
 
+// SaveWorkflows validates workflowsCfg, atomically writes workflows.toml, and updates Current().Workflows.
+func (s *ConfigStore) SaveWorkflows(workflowsCfg WorkflowsConfig) error {
+	if err := firstErrorIssue(ValidateWorkflows(workflowsCfg)); err != nil {
+		return err
+	}
+	encoded := workflowsCfg.Encode()
+	if err := atomicWriteConfigFile(s.dir, FileWorkflows, encoded); err != nil {
+		return err
+	}
+	sum := sha256.Sum256([]byte(encoded))
+	s.mu.Lock()
+	s.ensureSavedDigestsLocked()
+	s.current.Workflows = workflowsCfg
+	s.lastErrors = nil
+	s.lastWarnings = collectWarningIssues(Validate(s.current))
+	s.savedDigests[string(FileWorkflows)] = sum
+	s.mu.Unlock()
+	return nil
+}
+
 func (s *ConfigStore) SaveIMERules(imeRulesCfg IMERulesConfig) error {
 	if err := firstErrorIssue(ValidateIMERules(imeRulesCfg)); err != nil {
 		return err
@@ -303,7 +323,7 @@ func (s *ConfigStore) SaveIMERules(imeRulesCfg IMERulesConfig) error {
 	return nil
 }
 
-// SaveAll validates the full ClavisConfig across all 5 files before atomically persisting every TOML file.
+// SaveAll validates the full ClavisConfig before atomically persisting every TOML file.
 func (s *ConfigStore) SaveAll(cfg ClavisConfig) error {
 	issues := Validate(cfg)
 	if err := firstErrorIssue(issues); err != nil {
@@ -320,6 +340,7 @@ func (s *ConfigStore) SaveAll(cfg ClavisConfig) error {
 		{FileIMERules, cfg.IMERules.Encode()},
 		{FilePrompts, cfg.Prompts.Encode()},
 		{FileComponents, cfg.Components.Encode()},
+		{FileWorkflows, cfg.Workflows.Encode()},
 	}
 	sums := make(map[string][32]byte, len(files))
 	for _, f := range files {
@@ -405,6 +426,13 @@ func (s *ConfigStore) Reload() bool {
 	imeRulesCfg, ok5 := loadConfigFile(s.dir, FileIMERules, DecodeIMERulesConfig, &errs)
 	promptsCfg, ok6 := loadConfigFile(s.dir, FilePrompts, DecodePromptsConfig, &errs)
 	componentsCfg, ok7 := loadConfigFile(s.dir, FileComponents, DecodeComponentsConfig, &errs)
+	workflowsCfg := DefaultWorkflowsConfig()
+	ok8 := true
+	if _, err := os.Stat(filepath.Join(s.dir, string(FileWorkflows))); err == nil {
+		workflowsCfg, ok8 = loadConfigFile(s.dir, FileWorkflows, DecodeWorkflowsConfig, &errs)
+	} else if !os.IsNotExist(err) {
+		_, ok8 = loadConfigFile(s.dir, FileWorkflows, DecodeWorkflowsConfig, &errs)
+	}
 	if ok6 {
 		var mergeErr error
 		promptsCfg, mergeErr = mergePromptMarkdown(promptsCfg, s.dir)
@@ -420,7 +448,7 @@ func (s *ConfigStore) Reload() bool {
 		}
 	}
 
-	if len(errs) > 0 || !ok || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 || !ok7 {
+	if len(errs) > 0 || !ok || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 || !ok7 || !ok8 {
 		s.mu.Lock()
 		s.lastErrors = errs
 		s.mu.Unlock()
@@ -435,6 +463,7 @@ func (s *ConfigStore) Reload() bool {
 		IMERules:   imeRulesCfg,
 		Prompts:    promptsCfg,
 		Components: componentsCfg,
+		Workflows:  workflowsCfg,
 	}
 
 	// Speak the language of the config being validated so its diagnostics

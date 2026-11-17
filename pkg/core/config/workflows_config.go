@@ -8,10 +8,6 @@ import (
 	"github.com/yeisme/clavis/pkg/core/toml"
 )
 
-// FileWorkflows is the file name used by the workflow configuration. It is
-// intentionally defined here until workflows are wired into ConfigStore.
-const FileWorkflows ConfigFileKind = "workflows.toml"
-
 // The mode types are strings on purpose: this keeps the public configuration
 // model forward compatible while ValidateWorkflows rejects values the current
 // runner cannot execute.
@@ -275,25 +271,29 @@ func decodeWorkflow(t *toml.Table, path string) (Workflow, error) {
 	if e != nil {
 		return Workflow{}, e
 	}
-	workflow.Inputs = make([]WorkflowInput, 0, len(inputs))
-	for i, input := range inputs {
-		value, e := decodeWorkflowInput(input, fmt.Sprintf("%s.inputs[%d]", path, i))
-		if e != nil {
-			return Workflow{}, e
+	if len(inputs) > 0 {
+		workflow.Inputs = make([]WorkflowInput, 0, len(inputs))
+		for i, input := range inputs {
+			value, e := decodeWorkflowInput(input, fmt.Sprintf("%s.inputs[%d]", path, i))
+			if e != nil {
+				return Workflow{}, e
+			}
+			workflow.Inputs = append(workflow.Inputs, value)
 		}
-		workflow.Inputs = append(workflow.Inputs, value)
 	}
 	steps, _, e := optionalTableArray(t, "steps", path)
 	if e != nil {
 		return Workflow{}, e
 	}
-	workflow.Steps = make([]WorkflowStep, 0, len(steps))
-	for i, step := range steps {
-		value, e := decodeWorkflowStep(step, fmt.Sprintf("%s.steps[%d]", path, i))
-		if e != nil {
-			return Workflow{}, e
+	if len(steps) > 0 {
+		workflow.Steps = make([]WorkflowStep, 0, len(steps))
+		for i, step := range steps {
+			value, e := decodeWorkflowStep(step, fmt.Sprintf("%s.steps[%d]", path, i))
+			if e != nil {
+				return Workflow{}, e
+			}
+			workflow.Steps = append(workflow.Steps, value)
 		}
-		workflow.Steps = append(workflow.Steps, value)
 	}
 	return workflow, nil
 }
@@ -336,6 +336,9 @@ func WorkflowsConfigFromTOML(t *toml.Table) (WorkflowsConfig, error) {
 	items, _, err := optionalTableArray(t, "workflows", "")
 	if err != nil {
 		return cfg, err
+	}
+	if len(items) == 0 {
+		return cfg, nil
 	}
 	cfg.Workflows = make([]Workflow, 0, len(items))
 	for i, item := range items {

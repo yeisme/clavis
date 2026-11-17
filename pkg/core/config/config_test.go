@@ -20,8 +20,8 @@ func TestDefaultGeneratorIdempotencyAndValidity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateIfMissing failed: %v", err)
 	}
-	if len(created1) != 7 {
-		t.Fatalf("expected 7 created files, got %d: %v", len(created1), created1)
+	if len(created1) != 8 {
+		t.Fatalf("expected 8 created files, got %d: %v", len(created1), created1)
 	}
 
 	// Modify config.toml to verify subsequent generation preserves user edits
@@ -77,8 +77,12 @@ func TestDefaultGeneratorIdempotencyAndValidity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode components: %v", err)
 	}
+	workflows, err := config.DecodeWorkflowsConfig(config.DefaultContent(config.FileWorkflows))
+	if err != nil {
+		t.Fatalf("decode workflows: %v", err)
+	}
 
-	parsed := config.ClavisConfig{Main: m, Leader: l, Snippets: s, Glossary: g, IMERules: ime, Prompts: prompts, Components: components}
+	parsed := config.ClavisConfig{Main: m, Leader: l, Snippets: s, Glossary: g, IMERules: ime, Prompts: prompts, Components: components, Workflows: workflows}
 	if !reflect.DeepEqual(parsed, config.DefaultConfig()) {
 		t.Fatalf("parsed default TOML does not match DefaultConfig()\nparsed: %+v\ndefault: %+v", parsed, config.DefaultConfig())
 	}
@@ -645,11 +649,43 @@ preferred_mode = "ascii"
 	if err := store.SaveAll(fullCfg); err != nil {
 		t.Fatalf("SaveAll failed: %v", err)
 	}
-	if store.Current().Main.Appearance.CapsuleWidth != 720 || len(store.SavedDigests()) != 7 {
+	if store.Current().Main.Appearance.CapsuleWidth != 720 || len(store.SavedDigests()) != 8 {
 		t.Fatalf("unexpected state after SaveAll: width=%v digests=%d", store.Current().Main.Appearance.CapsuleWidth, len(store.SavedDigests()))
 	}
 	if !store.Reload() {
 		t.Fatalf("Reload after all Save* calls failed: %+v", store.LastErrors())
+	}
+
+	workflowCfg := config.WorkflowsConfig{Workflows: []config.Workflow{{
+		ID: "daily", Name: "Daily", Enabled: true,
+		Source: config.WorkflowSourceClipboard, Output: config.WorkflowOutputReplace,
+		Failure: config.WorkflowFailureStop, Execution: config.WorkflowExecutionSequential,
+	}}}
+	if err := store.SaveWorkflows(workflowCfg); err != nil {
+		t.Fatalf("SaveWorkflows failed: %v", err)
+	}
+	if got := store.Current().Workflows; !reflect.DeepEqual(got, workflowCfg) {
+		t.Fatalf("SaveWorkflows did not update current: got %#v want %#v", got, workflowCfg)
+	}
+	if !store.Reload() || !reflect.DeepEqual(store.Current().Workflows, workflowCfg) {
+		t.Fatalf("Reload did not preserve workflows: errors=%+v current=%#v", store.LastErrors(), store.Current().Workflows)
+	}
+}
+
+func TestConfigStoreReloadSupportsLegacyMissingWorkflowsFile(t *testing.T) {
+	dir := t.TempDir()
+	store := config.NewConfigStore(dir)
+	if _, err := store.LoadOrInitialize(); err != nil {
+		t.Fatalf("LoadOrInitialize failed: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, string(config.FileWorkflows))); err != nil {
+		t.Fatalf("remove workflows.toml: %v", err)
+	}
+	if !store.Reload() {
+		t.Fatalf("legacy config without workflows.toml should reload: %+v", store.LastErrors())
+	}
+	if !reflect.DeepEqual(store.Current().Workflows, config.DefaultWorkflowsConfig()) {
+		t.Fatalf("missing workflows file should use defaults: %#v", store.Current().Workflows)
 	}
 }
 

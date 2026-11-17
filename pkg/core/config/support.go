@@ -20,6 +20,7 @@ const (
 	FileIMERules   ConfigFileKind = "ime-rules.toml"
 	FilePrompts    ConfigFileKind = "prompts.toml"
 	FileComponents ConfigFileKind = "components.toml"
+	FileWorkflows  ConfigFileKind = "workflows.toml"
 )
 
 // AllConfigFileKinds returns all config file kinds in deterministic order.
@@ -32,6 +33,7 @@ func AllConfigFileKinds() []ConfigFileKind {
 		FileIMERules,
 		FilePrompts,
 		FileComponents,
+		FileWorkflows,
 	}
 }
 
@@ -57,6 +59,7 @@ type ClavisConfig struct {
 	IMERules   IMERulesConfig   `json:"imeRules"`
 	Prompts    PromptsConfig    `json:"prompts"`
 	Components ComponentsConfig `json:"components"`
+	Workflows  WorkflowsConfig  `json:"workflows"`
 }
 
 // DefaultConfig returns the complete default ClavisConfig.
@@ -69,6 +72,7 @@ func DefaultConfig() ClavisConfig {
 		IMERules:   DefaultIMERulesConfig(),
 		Prompts:    DefaultPromptsConfig(),
 		Components: DefaultComponentsConfig(),
+		Workflows:  DefaultWorkflowsConfig(),
 	}
 }
 
