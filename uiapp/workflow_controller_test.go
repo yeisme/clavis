@@ -55,6 +55,18 @@ func TestWorkflowProviderInvokesCLIWithoutShellInterpolation(t *testing.T) {
 	}
 }
 
+func TestWorkflowProviderRejectsUnresolvedTemplates(t *testing.T) {
+	cli := config.CLIAction("printf", "%s", "{{missing.value}}")
+	provider := workflowProvider{actions: map[string]workflowAction{"cli": {leader: &cli}}}
+	result, err := provider.Invoke(context.Background(), automation.ActionInvocation{ActionID: "cli"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != automation.ResultFailed || !strings.Contains(result.Error, "unresolved template") {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestWorkflowProviderBindsInputAndStepOutputToCLIAndScript(t *testing.T) {
 	cli := config.CLIAction("printf", "%s|%s", "{{input}}", "{{stepOutput}}")
 	provider := workflowProvider{

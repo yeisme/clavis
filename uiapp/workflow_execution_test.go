@@ -50,6 +50,24 @@ func TestWorkflowEnterRunsConfiguredSafeActionAndReportsResult(t *testing.T) {
 	}
 }
 
+func TestWorkflowRequiredInputFailsBeforeProviderExecution(t *testing.T) {
+	f := newInteractionFixture(t, nil)
+	cfg := f.ctrl.Config()
+	cfg.Leader.Nodes = []config.LeaderNode{{Key: "safe", Label: "Safe", Action: config.CLIAction("printf", "provider-ran")}}
+	cfg.Workflows.Workflows = []config.Workflow{{
+		ID: "required", Enabled: true,
+		Inputs: []config.WorkflowInput{{ID: "token", Required: true}},
+		Steps:  []config.WorkflowStep{{ID: "one", Action: "safe", Enabled: true}},
+	}}
+	if err := f.ctrl.ConfigStore.SaveAll(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	f.ctrl.StateMachine.SetConfig(cfg)
+	if err := f.ctrl.ExecuteWorkflow("required", engine.CapsuleContext{}); err == nil || !strings.Contains(err.Error(), "required workflow input") {
+		t.Fatalf("ExecuteWorkflow error = %v", err)
+	}
+}
+
 func TestWorkflowContextCancellationReportsCanceledResult(t *testing.T) {
 	f := newInteractionFixture(t, nil)
 	cfg := f.ctrl.Config()

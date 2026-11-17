@@ -73,7 +73,7 @@ func Run(ctx context.Context, plan ExecutionPlan, provider Provider, inputs map[
 	return NewRunner(provider).Run(ctx, plan, inputs)
 }
 
-func (r *Runner) run(ctx context.Context, plan ExecutionPlan, inputs map[string]any) (ExecutionResult, error) {
+func (r *Runner) run(ctx context.Context, plan ExecutionPlan, inputs map[string]any) (result ExecutionResult, runErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -81,7 +81,7 @@ func (r *Runner) run(ctx context.Context, plan ExecutionPlan, inputs map[string]
 		return ExecutionResult{}, errors.New("automation: provider is nil")
 	}
 
-	result := ExecutionResult{
+	result = ExecutionResult{
 		Steps:   make([]StepResult, 0, len(plan)),
 		Outputs: make(map[string]any),
 	}
@@ -89,6 +89,14 @@ func (r *Runner) run(ctx context.Context, plan ExecutionPlan, inputs map[string]
 	// execution concern. Values are copied before being retained to prevent a
 	// provider from mutating the data observed by later steps.
 	internalOutputs := make(map[string]any, len(plan))
+	// Discarded output remains available to internal bindings, but it must never
+	// be observable through the returned result (including a callback or JSON
+	// log). Keep the values only for the duration of this run so the public
+	// result can be redacted wherever a later step echoed one.
+	var discardedValues []any
+	defer func() {
+		redactExecutionResult(&result, discardedValues)
+	}()
 
 	for index, step := range plan {
 		if err := ctx.Err(); err != nil {
@@ -141,6 +149,12 @@ func (r *Runner) run(ctx context.Context, plan ExecutionPlan, inputs map[string]
 			}
 		}
 		stepResult := StepResult{StepID: step.ID, ActionID: actionID, Invocation: invocation, Result: cloneActionResult(actionResult)}
+		if actionResult.Status == ResultSucceeded && step.OutputMode == OutputDiscard {
+			discardedValues = append(discardedValues, cloneValue(actionResult.Output))
+			// Keep discarded output only in internalOutputs. The deferred
+			// redaction also covers later invocations/results that echo it.
+			stepResult.Result.Output = nil
+		}
 		result.Steps = append(result.Steps, stepResult)
 
 		if actionResult.Status == ResultSucceeded {
@@ -255,7 +269,7 @@ func bindString(value string, inputs map[string]any, outputs map[string]any) (an
 		if err != nil {
 			return nil, err
 		}
-		_, _ = fmt.Fprint(&builder, resolved)
+		builder.WriteString(fmt.Sprint(resolved))
 		last = match[1]
 	}
 	builder.WriteString(value[last:])
@@ -320,6 +334,118 @@ func cloneActionResult(result ActionResult) ActionResult {
 		result.Metadata = cloneValue(result.Metadata).(map[string]any)
 	}
 	return result
+}
+
+const redactedOutput = "[REDACTED]"
+
+func redactExecutionResult(result *ExecutionResult, discarded []any) {
+	if result == nil || len(discarded) == 0 {
+		return
+	}
+	for i := range result.Steps {
+		result.Steps[i].Invocation = redactInvocation(result.Steps[i].Invocation, discarded)
+		result.Steps[i].Result = redactActionResult(result.Steps[i].Result, discarded)
+	}
+	for key, value := range result.Outputs {
+		result.Outputs[key] = redactValue(value, discarded)
+	}
+}
+
+func redactInvocation(invocation ActionInvocation, discarded []any) ActionInvocation {
+	invocation.Input = redactMap(invocation.Input, discarded)
+	invocation.Inputs = redactMap(invocation.Inputs, discarded)
+	invocation.Metadata = redactMap(invocation.Metadata, discarded)
+	return invocation
+}
+
+func redactActionResult(result ActionResult, discarded []any) ActionResult {
+	result.Output = redactValue(result.Output, discarded)
+	result.Error = redactString(result.Error, discarded)
+	result.Metadata = redactMap(result.Metadata, discarded)
+	return result
+}
+
+func redactMap(value map[string]any, discarded []any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	redacted := make(map[string]any, len(value))
+	for key, item := range value {
+		redacted[key] = redactValue(item, discarded)
+	}
+	return redacted
+}
+
+func redactValue(value any, discarded []any) any {
+	for _, secret := range discarded {
+		if reflect.DeepEqual(value, secret) {
+			return redactedOutput
+		}
+	}
+	switch value := value.(type) {
+	case string:
+		return redactString(value, discarded)
+	case map[string]any:
+		return redactMap(value, discarded)
+	case []any:
+		redacted := make([]any, len(value))
+		for i, item := range value {
+			redacted[i] = redactValue(item, discarded)
+		}
+		return redacted
+	default:
+		return value
+	}
+}
+
+func redactString(value string, discarded []any) string {
+	for _, secret := range discarded {
+		for _, token := range redactionTokens(secret) {
+			value = strings.ReplaceAll(value, token, redactedOutput)
+		}
+	}
+	return value
+}
+
+func redactionTokens(value any) []string {
+	if value == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var tokens []string
+	add := func(token string) {
+		if token == "" {
+			return
+		}
+		if _, ok := seen[token]; ok {
+			return
+		}
+		seen[token] = struct{}{}
+		tokens = append(tokens, token)
+	}
+	var visit func(any)
+	visit = func(item any) {
+		if item == nil {
+			return
+		}
+		if text, ok := item.(string); ok {
+			add(text)
+			return
+		}
+		add(fmt.Sprint(item))
+		switch item := item.(type) {
+		case map[string]any:
+			for _, nested := range item {
+				visit(nested)
+			}
+		case []any:
+			for _, nested := range item {
+				visit(nested)
+			}
+		}
+	}
+	visit(value)
+	return tokens
 }
 
 func cloneValue(value any) any {

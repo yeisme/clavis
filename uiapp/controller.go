@@ -1930,6 +1930,11 @@ func (c *AppController) executeWorkflowContext(parent context.Context, workflowI
 		c.workflowHUD(fmt.Sprintf("Workflow %s failed to plan: %v", workflowID, err))
 		return err
 	}
+	inputs, inputErr := workflowInputs(workflow, actionCtx)
+	if inputErr != nil {
+		c.workflowHUD(fmt.Sprintf("Workflow %s failed: %v", workflowID, inputErr))
+		return inputErr
+	}
 
 	if parent == nil {
 		parent = context.Background()
@@ -1957,7 +1962,6 @@ func (c *AppController) executeWorkflowContext(parent context.Context, workflowI
 	c.workflowLifecycleMu.Unlock()
 
 	c.workflowHUD(fmt.Sprintf("Workflow %s planned (%d steps)", workflowID, len(plan)))
-	inputs := workflowInputs(workflow, actionCtx)
 	actionCtxCopy := actionCtx
 	go func() {
 		provider := workflowProvider{controller: c, actions: registry.actions, actionCtx: actionCtxCopy}
@@ -2045,7 +2049,7 @@ func workflowDefinition(workflow config.Workflow) automation.WorkflowDefinition 
 	return definition
 }
 
-func workflowInputs(workflow config.Workflow, actionCtx engine.CapsuleContext) map[string]any {
+func workflowInputs(workflow config.Workflow, actionCtx engine.CapsuleContext) (map[string]any, error) {
 	values := map[string]any{
 		"selection": actionCtx.SelectedText, "selected_text": actionCtx.SelectedText,
 		"clipboard": actionCtx.ClipboardPreview, "clipboard_text": actionCtx.ClipboardPreview,
@@ -2054,11 +2058,28 @@ func workflowInputs(workflow config.Workflow, actionCtx engine.CapsuleContext) m
 		"url": actionCtx.ActiveURL, "window_title": actionCtx.WindowTitle,
 	}
 	for _, input := range workflow.Inputs {
-		if _, ok := values[input.ID]; !ok {
-			values[input.ID] = input.Default
+		value, ok := values[input.ID]
+		if !ok || isEmptyWorkflowInput(value) {
+			if input.Default != "" {
+				values[input.ID] = input.Default
+				continue
+			}
+			if input.Required {
+				return nil, fmt.Errorf("required workflow input %q is not supplied", input.ID)
+			}
 		}
 	}
-	return values
+	return values, nil
+}
+
+func isEmptyWorkflowInput(value any) bool {
+	if value == nil {
+		return true
+	}
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text) == ""
+	}
+	return false
 }
 
 type workflowProvider struct {
@@ -2080,14 +2101,22 @@ func (p workflowProvider) Invoke(ctx context.Context, invocation automation.Acti
 		// Substitute into each argv element rather than a shell command. This keeps
 		// input and previous-step output observable without changing command safety.
 		spec := *action.script
-		spec.Args = substituteWorkflowArgs(spec.Args, bindings)
+		var err error
+		spec.Args, err = substituteWorkflowArgs(spec.Args, bindings)
+		if err != nil {
+			return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultFailed, Error: err.Error()}, nil
+		}
 		result, err := actions.ExecuteScriptComponent(ctx, spec, p.actionCtx)
 		return cliActionResult(result, err), nil
 	}
 	if action.leader == nil || action.leader.Type != config.ActionCLI {
 		return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultFailed, Error: "workflow action is not a CLI or script action"}, nil
 	}
-	return p.invokeCLI(ctx, action.leader.Command, substituteWorkflowArgs(action.leader.Args, bindings), 0)
+	args, err := substituteWorkflowArgs(action.leader.Args, bindings)
+	if err != nil {
+		return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultFailed, Error: err.Error()}, nil
+	}
+	return p.invokeCLI(ctx, action.leader.Command, args, 0)
 }
 
 func mergeWorkflowInvocationInputs(invocation automation.ActionInvocation) map[string]any {
@@ -2101,19 +2130,25 @@ func mergeWorkflowInvocationInputs(invocation automation.ActionInvocation) map[s
 	return bindings
 }
 
-func substituteWorkflowArgs(args []string, bindings map[string]any) []string {
+func substituteWorkflowArgs(args []string, bindings map[string]any) ([]string, error) {
 	resolved := make([]string, len(args))
 	for i, arg := range args {
-		resolved[i] = substituteWorkflowArg(arg, bindings)
+		value, err := substituteWorkflowArg(arg, bindings)
+		if err != nil {
+			return nil, err
+		}
+		resolved[i] = value
 	}
-	return resolved
+	return resolved, nil
 }
 
-func substituteWorkflowArg(arg string, bindings map[string]any) string {
-	return workflowTemplatePattern.ReplaceAllStringFunc(arg, func(match string) string {
+func substituteWorkflowArg(arg string, bindings map[string]any) (string, error) {
+	var firstErr error
+	resolved := workflowTemplatePattern.ReplaceAllStringFunc(arg, func(match string) string {
 		expression := strings.TrimSpace(match[2 : len(match)-2])
 		value, ok := resolveWorkflowBinding(expression, bindings)
 		if !ok {
+			firstErr = fmt.Errorf("workflow: unresolved template %q", expression)
 			return match
 		}
 		if encoded, ok := value.(map[string]any); ok {
@@ -2130,6 +2165,10 @@ func substituteWorkflowArg(arg string, bindings map[string]any) string {
 		}
 		return fmt.Sprint(value)
 	})
+	if firstErr != nil {
+		return "", firstErr
+	}
+	return resolved, nil
 }
 
 func resolveWorkflowBinding(expression string, bindings map[string]any) (any, bool) {

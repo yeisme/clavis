@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -49,6 +50,37 @@ func TestRunnerSerialBindingsAndDeterministicResults(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Outputs, map[string]any{"first": map[string]any{"value": "Ada"}, "second": map[string]any{"value": "prefix-Ada"}}) {
 		t.Fatalf("outputs = %#v", got.Outputs)
+	}
+}
+
+func TestRunnerDiscardedOutputStaysInternalAndIsRedactedFromResult(t *testing.T) {
+	provider := ProviderFunc(func(_ context.Context, invocation ActionInvocation) (ActionResult, error) {
+		if invocation.ActionID == "produce" {
+			return ActionResult{Status: ResultSucceeded, Output: "discarded-secret"}, nil
+		}
+		return ActionResult{Status: ResultSucceeded, Output: map[string]any{"echo": invocation.Input["value"]}}, nil
+	})
+	plan := ExecutionPlan{
+		{ID: "produce", ActionID: "produce", FailureMode: FailureStop, OutputMode: OutputDiscard},
+		{ID: "consume", ActionID: "consume", FailureMode: FailureStop, OutputMode: OutputCapture,
+			Input: map[string]any{"value": "prefix-{{step.produce.output}}"}},
+	}
+	got, err := Run(context.Background(), plan, provider, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Steps[0].Result.Output != nil {
+		t.Fatalf("discarded step result output = %#v", got.Steps[0].Result.Output)
+	}
+	if got.Steps[1].Invocation.Input["value"] != "prefix-[REDACTED]" {
+		t.Fatalf("discarded value leaked through invocation: %#v", got.Steps[1].Invocation.Input)
+	}
+	serialized, marshalErr := json.Marshal(got)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if strings.Contains(string(serialized), "discarded-secret") {
+		t.Fatalf("discarded value leaked through execution result: %s", serialized)
 	}
 }
 
