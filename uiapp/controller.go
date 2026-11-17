@@ -114,7 +114,9 @@ type Options struct {
 	// watcher skips Clavis's own writes.
 	OnConfigSaved func()
 	// OnWorkflowResult receives the provider-independent execution result after
-	// a workflow finishes. HUD events remain the default shell.
+	// a workflow finishes. HUD events remain the default shell. The hook runs
+	// while the controller serializes workflow lifecycle changes, so it must not
+	// call CancelWorkflow, Close, or execute another workflow synchronously.
 	OnWorkflowResult func(workflowID string, result automation.ExecutionResult, err error)
 }
 
@@ -215,6 +217,15 @@ type AppController struct {
 	aiCancel  context.CancelFunc
 	aiGen     uint64
 	transform *inplaceSession
+
+	// Workflow cancellation and lifecycle guards. A controller owns at most one
+	// active workflow run; starting or stopping another run invalidates the old
+	// run's completion and output.
+	workflowLifecycleMu sync.Mutex
+	workflowCancel      context.CancelFunc
+	workflowRunID       uint64
+	workflowTargetGen   uint64
+	closed              bool
 
 	// HUD auto-dismiss timer & generation guard
 	hudTimer *time.Timer
@@ -377,6 +388,17 @@ func defaultConfigDir() string {
 
 // Close stops background workers, cancels any running AI request, and stops HUD timers.
 func (c *AppController) Close() {
+	c.workflowLifecycleMu.Lock()
+	if c.workflowCancel != nil {
+		c.workflowCancel()
+		c.workflowCancel = nil
+	}
+	c.workflowRunID++
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+	c.workflowLifecycleMu.Unlock()
+
 	c.mu.Lock()
 	if c.aiCancel != nil {
 		c.aiCancel()
@@ -436,8 +458,23 @@ func (c *AppController) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop stops the host bridge.
+// CancelWorkflow cancels the active workflow, if any. It is safe to call from
+// UI actions such as Escape and returns whether a run was canceled.
+func (c *AppController) CancelWorkflow() bool {
+	c.workflowLifecycleMu.Lock()
+	defer c.workflowLifecycleMu.Unlock()
+	if c.workflowCancel == nil {
+		return false
+	}
+	c.workflowCancel()
+	c.workflowCancel = nil
+	c.workflowRunID++
+	return true
+}
+
+// Stop stops the host bridge and cancels any active workflow.
 func (c *AppController) Stop() error {
+	c.CancelWorkflow()
 	c.mu.Lock()
 	c.monitorRunning = false
 	br := c.Bridge
@@ -542,6 +579,9 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 	c.mu.Lock()
 	if ev.Type == engine.EventOpenLeader || ev.Type == engine.EventOpenOmnibox {
 		c.ensureInstalledAppsSyncedLocked()
+		// A new foreground capsule establishes a new output target. Workflow
+		// completion must not inject into a target opened after its run began.
+		c.workflowTargetGen++
 	}
 	prev := c.StateMachine.State()
 	// A HUD notice must never destroy an active Capsule session. When a floating pill sink is
@@ -1793,6 +1833,29 @@ func (c *AppController) injectTextAsync(text string, deleteCount, cursorBackOffs
 	}()
 }
 
+// injectWorkflowTextAsync rechecks controller shutdown and the foreground
+// target immediately before injection. The check is intentionally performed in
+// the goroutine: workflow output can finish long after the capsule was opened.
+func (c *AppController) injectWorkflowTextAsync(text string, deleteCount, cursorBackOffset int, targetGen uint64) {
+	go func() {
+		c.workflowLifecycleMu.Lock()
+		defer c.workflowLifecycleMu.Unlock()
+		c.mu.Lock()
+		if c.closed || c.workflowTargetGen != targetGen || c.Bridge == nil {
+			c.mu.Unlock()
+			return
+		}
+		br := c.Bridge
+		beforeInject := c.BeforeInject
+		c.mu.Unlock()
+		ctx := context.Background()
+		if beforeInject != nil {
+			beforeInject(ctx)
+		}
+		_ = br.InjectText(ctx, text, deleteCount, cursorBackOffset)
+	}()
+}
+
 func (c *AppController) writeClipboardText(text string) {
 	c.mu.Lock()
 	writer := c.ClipboardWriter
@@ -1867,14 +1930,39 @@ func (c *AppController) executeWorkflowContext(parent context.Context, workflowI
 		c.workflowHUD(fmt.Sprintf("Workflow %s failed to plan: %v", workflowID, err))
 		return err
 	}
-	c.workflowHUD(fmt.Sprintf("Workflow %s planned (%d steps)", workflowID, len(plan)))
 
+	if parent == nil {
+		parent = context.Background()
+	}
+	c.workflowLifecycleMu.Lock()
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		c.workflowLifecycleMu.Unlock()
+		return errors.New("controller is closed")
+	}
+	// There is one controller-owned run slot. A subsequent run supersedes and
+	// cancels the previous one, avoiding completion races between runs.
+	if c.workflowCancel != nil {
+		c.workflowCancel()
+	}
+	runCtx, cancel := context.WithCancel(parent)
+	c.workflowCancel = cancel
+	c.workflowRunID++
+	runID := c.workflowRunID
+	c.mu.Lock()
+	targetGen := c.workflowTargetGen
+	c.mu.Unlock()
+	c.workflowLifecycleMu.Unlock()
+
+	c.workflowHUD(fmt.Sprintf("Workflow %s planned (%d steps)", workflowID, len(plan)))
 	inputs := workflowInputs(workflow, actionCtx)
 	actionCtxCopy := actionCtx
 	go func() {
 		provider := workflowProvider{controller: c, actions: registry.actions, actionCtx: actionCtxCopy}
-		result, runErr := automation.NewRunner(provider).Run(parent, plan, inputs)
-		c.reportWorkflow(workflow, actionCtxCopy, result, runErr)
+		result, runErr := automation.NewRunner(provider).Run(runCtx, plan, inputs)
+		c.reportWorkflow(runID, targetGen, workflow, actionCtxCopy, result, runErr)
 	}()
 	return nil
 }
@@ -2111,7 +2199,28 @@ func cliActionResult(result actions.CLIExecutionResult, err error) automation.Ac
 	return actionResult
 }
 
-func (c *AppController) reportWorkflow(workflow config.Workflow, actionCtx engine.CapsuleContext, result automation.ExecutionResult, runErr error) {
+func (c *AppController) reportWorkflow(runID, targetGen uint64, workflow config.Workflow, actionCtx engine.CapsuleContext, result automation.ExecutionResult, runErr error) {
+	c.workflowLifecycleMu.Lock()
+	currentRun := runID == c.workflowRunID
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed || !currentRun {
+		c.workflowLifecycleMu.Unlock()
+		return
+	}
+	// Cancellation is intentionally silent. In particular, a canceled command
+	// must not turn Escape or shutdown into a late failure HUD.
+	if result.Canceled || errors.Is(runErr, context.Canceled) {
+		if c.workflowCancel != nil && runID == c.workflowRunID {
+			c.workflowCancel = nil
+		}
+		c.workflowLifecycleMu.Unlock()
+		return
+	}
+	if c.workflowCancel != nil && runID == c.workflowRunID {
+		c.workflowCancel = nil
+	}
 	if runErr != nil {
 		c.workflowHUD(fmt.Sprintf("Workflow %s failed: %v", workflow.ID, runErr))
 	} else if result.Stopped {
@@ -2125,7 +2234,7 @@ func (c *AppController) reportWorkflow(workflow config.Workflow, actionCtx engin
 		c.workflowHUD(fmt.Sprintf("Workflow %s %s", workflow.ID, message))
 	} else {
 		c.workflowHUD(fmt.Sprintf("Workflow %s completed", workflow.ID))
-		c.applyWorkflowOutput(workflow.Output, actionCtx, result)
+		c.applyWorkflowOutputAtTarget(workflow.Output, actionCtx, result, targetGen)
 	}
 	c.mu.Lock()
 	hook := c.OnWorkflowResult
@@ -2133,13 +2242,27 @@ func (c *AppController) reportWorkflow(workflow config.Workflow, actionCtx engin
 	if hook != nil {
 		hook(workflow.ID, result, runErr)
 	}
+	c.workflowLifecycleMu.Unlock()
 }
 
 func (c *AppController) workflowHUD(message string) {
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return
+	}
 	c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: message})
 }
 
 func (c *AppController) applyWorkflowOutput(mode config.WorkflowOutput, actionCtx engine.CapsuleContext, result automation.ExecutionResult) {
+	c.mu.Lock()
+	targetGen := c.workflowTargetGen
+	c.mu.Unlock()
+	c.applyWorkflowOutputAtTarget(mode, actionCtx, result, targetGen)
+}
+
+func (c *AppController) applyWorkflowOutputAtTarget(mode config.WorkflowOutput, actionCtx engine.CapsuleContext, result automation.ExecutionResult, targetGen uint64) {
 	if mode == config.WorkflowOutputNone || mode == config.WorkflowOutputDiscard {
 		return
 	}
@@ -2155,15 +2278,29 @@ func (c *AppController) applyWorkflowOutput(mode config.WorkflowOutput, actionCt
 			output = value
 		}
 	}
+	if output == nil {
+		return
+	}
 	text := strings.TrimSpace(fmt.Sprint(output))
 	if text == "" {
 		return
 	}
 	switch mode {
-	case config.WorkflowOutputReplace:
-		c.injectTextAsync(text, len([]rune(actionCtx.SelectedText)), 0)
-	case config.WorkflowOutputInsert:
-		c.injectTextAsync(text, 0, 0)
+	case config.WorkflowOutputReplace, config.WorkflowOutputInsert:
+		c.mu.Lock()
+		stale := c.workflowTargetGen != targetGen || c.closed
+		c.mu.Unlock()
+		if stale {
+			// The selected text belongs to an older foreground target. Never
+			// inject into an unrelated field; a notification preserves the result.
+			c.workflowHUD(text)
+			return
+		}
+		if mode == config.WorkflowOutputReplace {
+			c.injectWorkflowTextAsync(text, len([]rune(actionCtx.SelectedText)), 0, targetGen)
+		} else {
+			c.injectWorkflowTextAsync(text, 0, 0, targetGen)
+		}
 	case config.WorkflowOutputClipboard:
 		c.writeClipboardText(text)
 	case config.WorkflowOutputNotify:
