@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -329,6 +330,51 @@ func workflowFailureMode(mode config.WorkflowFailureMode) automation.FailureMode
 	return automation.FailureStop
 }
 
+var workflowTemplatePattern = regexp.MustCompile(`\{\{[^{}]+\}\}`)
+
+// workflowStepSourceInputID mirrors the controller's private source binding
+// key. The key is metadata only: it identifies the source value that a
+// provider would receive at execution time without putting that value in a
+// CLI plan.
+func workflowStepSourceInputID(step config.WorkflowStep) string {
+	id := strings.TrimSpace(step.ID)
+	var encoded strings.Builder
+	encoded.Grow(len(id))
+	for i := 0; i < len(id); i++ {
+		ch := id[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') {
+			encoded.WriteByte(ch)
+			continue
+		}
+		fmt.Fprintf(&encoded, "_x%02x_", ch)
+	}
+	return "__workflow_step_" + encoded.String() + "_text"
+}
+
+// normalizeWorkflowTemplates mirrors the controller's documented template
+// shorthand. In particular, {{text}} means this step's configured source,
+// rather than a shared workflow-level value.
+func normalizeWorkflowTemplates(value string, workflow config.Workflow, step config.WorkflowStep) string {
+	return workflowTemplatePattern.ReplaceAllStringFunc(value, func(match string) string {
+		expression := strings.TrimSpace(match[2 : len(match)-2])
+		if strings.HasPrefix(expression, "input.") || strings.HasPrefix(expression, "step.") {
+			return match
+		}
+		switch expression {
+		case "text":
+			return "{{input." + workflowStepSourceInputID(step) + "}}"
+		case "selection", "selected_text", "clipboard", "clipboard_text", "prompt", "app", "app_name", "bundle_id", "url", "window_title":
+			return "{{input." + expression + "}}"
+		}
+		for _, input := range workflow.Inputs {
+			if expression == input.ID || (input.Name != "" && expression == input.Name) {
+				return "{{input." + input.ID + "}}"
+			}
+		}
+		return match
+	})
+}
+
 func toAutomationWorkflow(workflow config.Workflow) automation.WorkflowDefinition {
 	result := automation.WorkflowDefinition{ID: workflow.ID, Name: workflow.Name, Description: workflow.Description, FailureMode: workflowFailureMode(workflow.Failure)}
 	for _, input := range workflow.Inputs {
@@ -355,11 +401,15 @@ func toAutomationWorkflow(workflow config.Workflow) automation.WorkflowDefinitio
 		}
 		input := map[string]any{}
 		if step.Input != "" {
-			input["input"] = step.Input
+			input["input"] = normalizeWorkflowTemplates(step.Input, workflow, step)
 		}
 		if step.Prompt != "" {
-			input["prompt"] = step.Prompt
+			input["prompt"] = normalizeWorkflowTemplates(step.Prompt, workflow, step)
 		}
+		// Keep the source binding as an alias, not a captured value. Planning
+		// must remain metadata-only and must never inspect or execute providers.
+		input["source"] = string(step.Source)
+		input["text"] = "{{input." + workflowStepSourceInputID(step) + "}}"
 		result.Steps = append(result.Steps, automation.WorkflowStep{ID: step.ID, ActionID: step.Action, Input: input, DependsOn: append([]string(nil), step.DependsOn...), FailureMode: failure, OutputMode: output})
 	}
 	return result
