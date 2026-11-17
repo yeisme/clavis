@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	stdsync "sync"
 	"time"
@@ -61,7 +62,7 @@ func NewSQLiteSyncStore(ctx context.Context, dbPath string) (*SQLiteSyncStore, e
 		if err := mkdirPrivate(filepath.Dir(dbPath)); err != nil {
 			return nil, fmt.Errorf("sync: create database directory: %w", err)
 		}
-		if err := rejectDatabaseSymlinks(dbPath); err != nil {
+		if err := rejectDatabaseFiles(dbPath); err != nil {
 			return nil, fmt.Errorf("sync: unsafe database path: %w", err)
 		}
 	}
@@ -69,7 +70,10 @@ func NewSQLiteSyncStore(ctx context.Context, dbPath string) (*SQLiteSyncStore, e
 	if err != nil {
 		return nil, fmt.Errorf("sync: open sqlite store: %w", err)
 	}
-	s := &SQLiteSyncStore{db: db, ownsDB: true, path: dbPath}
+	s := &SQLiteSyncStore{db: db, ownsDB: true}
+	if file {
+		s.path = dbPath
+	}
 	if err := s.initSchema(ctx, file); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -205,23 +209,28 @@ func secureDatabasePath(path string) (string, error) {
 	if path == ":memory:" || strings.ContainsRune(path, 0) {
 		return "", errors.New("invalid database path")
 	}
-	return filepath.Clean(path), nil
+	path = filepath.Clean(path)
+	// macOS exposes /var as a system compatibility symlink. Canonicalize only
+	// that fixed system component; caller-controlled components are still
+	// checked and rejected below rather than resolved.
+	if runtime.GOOS == "darwin" && strings.HasPrefix(path, "/var/") {
+		path = "/private" + path
+	}
+	return path, nil
 }
 
 // mkdirPrivate creates only missing components. Existing parent permissions are
-// intentionally never changed; every component is checked with Lstat so a
-// symlink cannot redirect the database into an unrelated directory.
+// intentionally never changed. Every component is checked with Lstat, so a
+// symlink cannot redirect the database into an unrelated directory, and an
+// existing group/world-writable directory is rejected rather than chmodded.
 func mkdirPrivate(dir string) error {
 	dir = filepath.Clean(dir)
 	missing := make([]string, 0)
 	for current := dir; ; current = filepath.Dir(current) {
 		info, err := os.Lstat(current)
 		if err == nil {
-			if info.Mode()&os.ModeSymlink != 0 {
-				return fmt.Errorf("%s is a symlink", current)
-			}
-			if !info.IsDir() {
-				return fmt.Errorf("%s is not a directory", current)
+			if err := validateDatabaseDirectory(current, info); err != nil {
+				return err
 			}
 			break
 		}
@@ -239,20 +248,67 @@ func mkdirPrivate(dir string) error {
 			return err
 		}
 		info, err := os.Lstat(missing[i])
-		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("%s is not a private directory", missing[i])
+		if err != nil {
+			return err
 		}
+		if err := validateDatabaseDirectory(missing[i], info); err != nil {
+			return err
+		}
+	}
+	// The first existing directory above the newly-created chain was checked
+	// while walking upward; validate the complete path again to catch a changed
+	// component and to make the invariant explicit at the point of opening.
+	return validatePrivateDirectory(dir)
+}
+
+func validateDatabaseDirectory(path string, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symlink", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", path)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%s is group/world-writable (mode %o)", path, info.Mode().Perm())
 	}
 	return nil
 }
 
-func rejectDatabaseSymlinks(path string) error {
+func validatePrivateDirectory(dir string) error {
+	dir = filepath.Clean(dir)
+	for current := dir; ; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err != nil {
+			return fmt.Errorf("inspect database directory %s: %w", current, err)
+		}
+		if err := validateDatabaseDirectory(current, info); err != nil {
+			return err
+		}
+		if filepath.Dir(current) == current {
+			return nil
+		}
+	}
+}
+
+// rejectDatabaseFiles performs the pre-open path checks. protectDatabaseFiles
+// repeats them after SQLite has opened the database because path checks alone
+// cannot establish a safe file identity across an intervening rename.
+func rejectDatabaseFiles(path string) error {
+	if err := validatePrivateDirectory(filepath.Dir(path)); err != nil {
+		return err
+	}
 	for _, name := range []string{path, path + "-wal", path + "-shm"} {
 		info, err := os.Lstat(name)
-		if err == nil && info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%s is a symlink", name)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("%s is a symlink", name)
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("%s is not a regular file", name)
+			}
+			continue
 		}
-		if err != nil && !os.IsNotExist(err) {
+		if !os.IsNotExist(err) {
 			return err
 		}
 	}
@@ -260,28 +316,70 @@ func rejectDatabaseSymlinks(path string) error {
 }
 
 func protectDatabaseFiles(path string) error {
-	if err := rejectDatabaseSymlinks(path); err != nil {
+	if err := rejectDatabaseFiles(path); err != nil {
 		return err
 	}
 	var errs []error
-	for _, name := range []string{path, path + "-wal", path + "-shm"} {
-		info, err := os.Lstat(name)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		if !info.Mode().IsRegular() {
-			errs = append(errs, fmt.Errorf("%s is not a regular file", name))
-			continue
-		}
-		if err := os.Chmod(name, 0o600); err != nil {
+	if err := protectDatabaseFile(path, true); err != nil {
+		errs = append(errs, err)
+	}
+	for _, name := range []string{path + "-wal", path + "-shm"} {
+		if err := protectDatabaseFile(name, false); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// protectDatabaseFile opens the file before changing its mode. Chmod is then
+// performed through the opened descriptor, not the pathname. If a pathname is
+// replaced between Lstat and Open, SameFile detects the replacement and the
+// descriptor is closed without changing the (possibly external) target.
+func protectDatabaseFile(name string, required bool) error {
+	info, err := os.Lstat(name)
+	if os.IsNotExist(err) {
+		if required {
+			return fmt.Errorf("%s disappeared while protecting it", name)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", name, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symlink", name)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", name)
+	}
+	file, err := os.Open(name)
+	if err != nil {
+		return fmt.Errorf("open %s for protection: %w", name, err)
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat opened %s: %w", name, err)
+	}
+	if !os.SameFile(info, opened) {
+		return fmt.Errorf("%s changed while protecting it", name)
+	}
+	if !opened.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", name)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		return fmt.Errorf("chmod %s: %w", name, err)
+	}
+	// A replacement after Open is safe for the descriptor-based chmod, but it
+	// is still a security failure for this operation and must be surfaced.
+	current, err := os.Lstat(name)
+	if err != nil {
+		return fmt.Errorf("recheck %s after protection: %w", name, err)
+	}
+	if current.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, current) {
+		return fmt.Errorf("%s changed during protection", name)
+	}
+	return nil
 }
 
 func (s *SQLiteSyncStore) secureOwnedFiles() error {
@@ -293,8 +391,12 @@ func (s *SQLiteSyncStore) secureOwnedFiles() error {
 
 func validID(v string) bool { return strings.TrimSpace(v) != "" }
 
-func (s *SQLiteSyncStore) RegisterAccount(account string) ([]byte, error) {
-	defer func() { _ = s.secureOwnedFiles() }()
+func (s *SQLiteSyncStore) RegisterAccount(account string) (credentialOut []byte, err error) {
+	defer func() {
+		if protectErr := s.secureOwnedFiles(); protectErr != nil {
+			err = errors.Join(err, fmt.Errorf("sync: protect database files: %w", protectErr))
+		}
+	}()
 	if !validID(account) {
 		return nil, fmt.Errorf("%w: account id", coresync.ErrStoreInvalidArgument)
 	}
@@ -304,7 +406,7 @@ func (s *SQLiteSyncStore) RegisterAccount(account string) ([]byte, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Execute(context.Background(), `INSERT INTO sync_accounts(account_id,credential) VALUES(?,?)`, account, credential)
+	_, err = s.db.Execute(context.Background(), `INSERT INTO sync_accounts(account_id,credential) VALUES(?,?)`, account, credential)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return nil, coresync.ErrStoreAccountExists
@@ -331,8 +433,12 @@ func (s *SQLiteSyncStore) LoginWithCredential(account string, credential []byte)
 	return nil
 }
 
-func (s *SQLiteSyncStore) PairDeviceWithCredential(account, device string, pub ed25519.PublicKey, credential []byte) error {
-	defer func() { _ = s.secureOwnedFiles() }()
+func (s *SQLiteSyncStore) PairDeviceWithCredential(account, device string, pub ed25519.PublicKey, credential []byte) (err error) {
+	defer func() {
+		if protectErr := s.secureOwnedFiles(); protectErr != nil {
+			err = errors.Join(err, fmt.Errorf("sync: protect database files: %w", protectErr))
+		}
+	}()
 	if !validID(account) || !validID(device) || len(pub) != ed25519.PublicKeySize {
 		return fmt.Errorf("%w: device pairing", coresync.ErrStoreInvalidArgument)
 	}
@@ -388,8 +494,12 @@ func (s *SQLiteSyncStore) DevicePublicKey(account, device string) (ed25519.Publi
 	return ed25519.PublicKey(key), nil
 }
 
-func (s *SQLiteSyncStore) UploadEnvelope(account, device, object string, version uint64, e coresync.EncryptedEnvelope) error {
-	defer func() { _ = s.secureOwnedFiles() }()
+func (s *SQLiteSyncStore) UploadEnvelope(account, device, object string, version uint64, e coresync.EncryptedEnvelope) (err error) {
+	defer func() {
+		if protectErr := s.secureOwnedFiles(); protectErr != nil {
+			err = errors.Join(err, fmt.Errorf("sync: protect database files: %w", protectErr))
+		}
+	}()
 	if !validID(account) || !validID(device) || !validID(object) || version == 0 {
 		return fmt.Errorf("%w: envelope identity", coresync.ErrStoreInvalidArgument)
 	}
@@ -479,8 +589,12 @@ func (s *SQLiteSyncStore) ObjectVersion(account, object string) (uint64, error) 
 	return uint64(syncInt64val(rows.Values[0], 0)), nil
 }
 
-func (s *SQLiteSyncStore) SubmitDelete(d coresync.DeleteInstruction) (coresync.Tombstone, error) {
-	defer func() { _ = s.secureOwnedFiles() }()
+func (s *SQLiteSyncStore) SubmitDelete(d coresync.DeleteInstruction) (t coresync.Tombstone, err error) {
+	defer func() {
+		if protectErr := s.secureOwnedFiles(); protectErr != nil {
+			err = errors.Join(err, fmt.Errorf("sync: protect database files: %w", protectErr))
+		}
+	}()
 	if !validID(d.AccountID) || !validID(d.ObjectID) || !validID(d.DeviceID) || d.Version == 0 || d.ProtocolVersion != coresync.ProtocolVersion {
 		return coresync.Tombstone{}, fmt.Errorf("%w: delete instruction", coresync.ErrStoreInvalidArgument)
 	}
@@ -496,7 +610,7 @@ func (s *SQLiteSyncStore) SubmitDelete(d coresync.DeleteInstruction) (coresync.T
 	}
 	sequence := uint64(syncInt64val(rows.Values[0], 0) + 1)
 	now := time.Now().UTC()
-	t := coresync.Tombstone{AccountID: d.AccountID, ObjectID: d.ObjectID, DeviceID: d.DeviceID, Version: d.Version, Sequence: sequence, IssuedAt: d.IssuedAt, DeletedAt: now, ProtocolVersion: coresync.ProtocolVersion, Signature: append([]byte(nil), d.Signature...)}
+	t = coresync.Tombstone{AccountID: d.AccountID, ObjectID: d.ObjectID, DeviceID: d.DeviceID, Version: d.Version, Sequence: sequence, IssuedAt: d.IssuedAt, DeletedAt: now, ProtocolVersion: coresync.ProtocolVersion, Signature: append([]byte(nil), d.Signature...)}
 	digest := sha256.Sum256([]byte(d.ObjectID))
 	// Sequence allocation, append log, permanent boundary, object purge and
 	// audit are one SQLite transaction. A newer delete supersedes an older
@@ -526,8 +640,12 @@ func (s *SQLiteSyncStore) SubmitDelete(d coresync.DeleteInstruction) (coresync.T
 	return t, nil
 }
 
-func (s *SQLiteSyncStore) SyncTombstones(account, device string, _ uint64) ([]coresync.Tombstone, error) {
-	defer func() { _ = s.secureOwnedFiles() }()
+func (s *SQLiteSyncStore) SyncTombstones(account, device string, _ uint64) (out []coresync.Tombstone, err error) {
+	defer func() {
+		if protectErr := s.secureOwnedFiles(); protectErr != nil {
+			err = errors.Join(err, fmt.Errorf("sync: protect database files: %w", protectErr))
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Read the candidate batch first, then publish exactly that range in a
@@ -542,7 +660,7 @@ func (s *SQLiteSyncStore) SyncTombstones(account, device string, _ uint64) ([]co
 	if err != nil {
 		return nil, err
 	}
-	out := make([]coresync.Tombstone, 0, len(rows.Values))
+	out = make([]coresync.Tombstone, 0, len(rows.Values))
 	for _, r := range rows.Values {
 		t := rowTombstone(account, r)
 		if t.Sequence != from+uint64(len(out))+1 {
@@ -564,8 +682,12 @@ func (s *SQLiteSyncStore) SyncTombstones(account, device string, _ uint64) ([]co
 	return out, nil
 }
 
-func (s *SQLiteSyncStore) ConfirmTombstones(account, device string, sequence uint64) error {
-	defer func() { _ = s.secureOwnedFiles() }()
+func (s *SQLiteSyncStore) ConfirmTombstones(account, device string, sequence uint64) (err error) {
+	defer func() {
+		if protectErr := s.secureOwnedFiles(); protectErr != nil {
+			err = errors.Join(err, fmt.Errorf("sync: protect database files: %w", protectErr))
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rows, err := s.db.Query(context.Background(), `SELECT watermark,issued,issued_from,issued_to FROM sync_devices WHERE account_id=? AND device_id=?`, account, device)

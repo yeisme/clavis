@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -362,6 +363,40 @@ func TestSQLiteRejectsRelativeAndSymlinkDatabasePaths(t *testing.T) {
 	}
 }
 
+func TestSQLiteCloseRejectsReplacedRegularSidecar(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := NewSQLiteSyncStore(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := path + "-wal"
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("outside"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(link, []byte("sidecar"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustFileMode(t, link); got != 0o600 {
+		t.Fatalf("regular sidecar mode = %o, want 600", got)
+	}
+	if got := mustFileMode(t, outside); got != 0o644 {
+		t.Fatalf("external file mode changed to %o", got)
+	}
+}
+
+func mustFileMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Mode().Perm()
+}
+
 func TestSQLiteCloseReleasesConnectionWhenProtectionFails(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	store, err := NewSQLiteSyncStore(context.Background(), path)
@@ -384,6 +419,50 @@ func TestSQLiteCloseReleasesConnectionWhenProtectionFails(t *testing.T) {
 	}
 	if _, err := store.db.Execute(context.Background(), `SELECT 1`); !errors.Is(err, sqlite.ErrClosed) {
 		t.Fatalf("connection remains usable after failed Close: %v", err)
+	}
+}
+
+func TestSQLiteRejectsWritableExistingParentDirectories(t *testing.T) {
+	for _, mode := range []os.FileMode{0o775, 0o777} {
+		t.Run(fmt.Sprintf("%o", mode), func(t *testing.T) {
+			parent := t.TempDir()
+			unsafe := filepath.Join(parent, "unsafe")
+			if err := os.Mkdir(unsafe, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(unsafe, mode); err != nil {
+				t.Fatal(err)
+			}
+			_, err := NewSQLiteSyncStore(context.Background(), filepath.Join(unsafe, "state.db"))
+			if err == nil {
+				t.Fatalf("writable parent mode %o accepted", mode)
+			}
+			info, statErr := os.Stat(unsafe)
+			if statErr != nil {
+				t.Fatal(statErr)
+			}
+			if got := info.Mode().Perm(); got != mode {
+				t.Fatalf("existing parent mode changed from %o to %o", mode, got)
+			}
+		})
+	}
+}
+
+func TestSQLiteRejectsSymlinkParentComponent(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewSQLiteSyncStore(context.Background(), filepath.Join(link, "nested", "state.db")); err == nil {
+		t.Fatal("symlink parent component accepted")
+	}
+	if _, err := os.Stat(filepath.Join(target, "nested")); !os.IsNotExist(err) {
+		t.Fatalf("symlink target was modified: %v", err)
 	}
 }
 
