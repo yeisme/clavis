@@ -827,6 +827,17 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 			c.runAction(*eff.Action, actionCtx)
 		}
 
+	case engine.EffectRunWorkflow:
+		var actionCtx engine.CapsuleContext
+		if eff.Context != nil {
+			actionCtx = *eff.Context
+		} else {
+			actionCtx = state.Context
+		}
+		if err := c.ExecuteWorkflow(eff.WorkflowID, actionCtx); err != nil {
+			c.workflowHUD(fmt.Sprintf("Workflow %s failed: %v", eff.WorkflowID, err))
+		}
+
 	case engine.EffectBindAppIMERule:
 		c.bindAppIMERule(eff, state)
 

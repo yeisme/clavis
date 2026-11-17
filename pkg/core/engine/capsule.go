@@ -82,6 +82,7 @@ const (
 	ItemAppIMERule     OmniboxItemKind = "app_ime_rule"
 	ItemPromptTemplate OmniboxItemKind = "prompt_template"
 	ItemScriptCommand  OmniboxItemKind = "script_command"
+	ItemWorkflow       OmniboxItemKind = "workflow"
 	ItemPortProcess    OmniboxItemKind = "port_process"
 )
 
@@ -131,6 +132,7 @@ type OmniboxItem struct {
 	PromptTemplate   *config.PromptTemplate `json:"promptTemplate,omitempty"`
 	OptimizerPreset  string                 `json:"optimizerPreset,omitempty"`
 	ScriptID         string                 `json:"scriptId,omitempty"`
+	Workflow         *config.Workflow       `json:"workflow,omitempty"`
 	Port             int                    `json:"port,omitempty"`
 	PortPID          int                    `json:"portPid,omitempty"`
 	PortProcess      string                 `json:"portProcess,omitempty"`
@@ -246,6 +248,7 @@ const (
 	EffectPresentCapsule     EffectType = "present_capsule"
 	EffectClose              EffectType = "close"
 	EffectRunAction          EffectType = "run_action"
+	EffectRunWorkflow        EffectType = "run_workflow"
 	EffectStartAI            EffectType = "start_ai"
 	EffectCancelAI           EffectType = "cancel_ai"
 	EffectApplyAIOutput      EffectType = "apply_ai_output"
@@ -261,6 +264,7 @@ const (
 type Effect struct {
 	Type             EffectType             `json:"type"`
 	Action           *config.LeaderAction   `json:"action,omitempty"`
+	WorkflowID       string                 `json:"workflowId,omitempty"`
 	Context          *CapsuleContext        `json:"context,omitempty"`
 	Mode             string                 `json:"mode,omitempty"`
 	Prompt           string                 `json:"prompt,omitempty"`
@@ -338,6 +342,7 @@ func (m *StateMachine) rebuildCandidateCorpus() {
 			items = append(items, OmniboxItem{ID: "script:" + x.ID, Title: x.Title, Subtitle: x.Subtitle, KeyHint: x.Trigger, Kind: ItemScriptCommand, ScriptID: x.ID})
 		}
 	}
+	items = append(items, makeWorkflowItems(m.config.Workflows.Workflows)...)
 	m.CandidateCorpus = CandidateCorpus{Items: items, Generation: m.corpusGeneration}
 }
 
@@ -1029,6 +1034,11 @@ func AvailableItemActions(item OmniboxItem) []OmniboxActionSpec {
 			{ID: "compose", Label: i18n.T("engine.action.compose_prompt"), Shortcut: "↵"},
 			{ID: "copy_template", Label: i18n.T("engine.action.copy_template"), Shortcut: modKey() + "↵"},
 		}
+	case ItemWorkflow:
+		return []OmniboxActionSpec{
+			{ID: "run_workflow", Label: "Run Workflow", Shortcut: "↵"},
+			{ID: "copy_title", Label: i18n.T("engine.action.copy_item_title"), Shortcut: modKey() + "↵"},
+		}
 	default:
 		return []OmniboxActionSpec{
 			{ID: "primary", Label: i18n.T("engine.action.run"), Shortcut: "↵"},
@@ -1342,6 +1352,15 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 			{Type: EffectApplyAIOutput, Text: val},
 			{Type: EffectClose},
 		}
+
+	case ItemWorkflow:
+		if item.Workflow == nil || strings.TrimSpace(item.Workflow.ID) == "" {
+			return next, nil
+		}
+		ctxCopy := next.Context
+		clearPhaseFields(&next)
+		next.Phase = PhaseHidden
+		return next, []Effect{{Type: EffectRunWorkflow, WorkflowID: item.Workflow.ID, Context: &ctxCopy}, {Type: EffectClose}}
 
 	case ItemPromptTemplate:
 		if item.PromptTemplate == nil {
@@ -1664,6 +1683,8 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 					}
 				}
 				return scoreCandidatesWithFrecency(scripts, rest, state.FrecencyScores)
+			case "workflows":
+				return scoreCandidatesWithFrecency(makeWorkflowItems(cfg.Workflows.Workflows), rest, state.FrecencyScores)
 			}
 		}
 	}
@@ -1740,6 +1761,7 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 				}
 			}
 		}
+		candidates = append(candidates, makeWorkflowItems(cfg.Workflows.Workflows)...)
 		for _, p := range state.ListeningPorts {
 			candidates = append(candidates, OmniboxItem{ID: fmt.Sprintf("port:%d", p.Port), Title: fmt.Sprintf(":%d %s", p.Port, p.Process), Subtitle: p.Command, Keywords: []string{"port", "kill", strconv.Itoa(p.Port)}, Kind: ItemPortProcess, Port: p.Port, PortPID: p.PID, PortProcess: p.Process, Score: 1000})
 		}
@@ -1828,6 +1850,30 @@ appendAdhocAI:
 	}
 
 	return results
+}
+
+func makeWorkflowItems(workflows []config.Workflow) []OmniboxItem {
+	items := make([]OmniboxItem, 0, len(workflows))
+	for _, workflow := range workflows {
+		if !workflow.Enabled || strings.TrimSpace(workflow.ID) == "" {
+			continue
+		}
+		w := workflow
+		title := strings.TrimSpace(workflow.Name)
+		if title == "" {
+			title = workflow.ID
+		}
+		subtitle := strings.TrimSpace(workflow.Description)
+		if subtitle == "" {
+			subtitle = fmt.Sprintf("%d steps • safe CLI/script actions", len(workflow.Steps))
+		}
+		items = append(items, OmniboxItem{
+			ID: "workflow:" + workflow.ID, Title: title, Subtitle: subtitle,
+			Keywords: []string{"workflow", workflow.ID, workflow.Name, workflow.Description},
+			Icon:     "arrow.triangle.branch", Kind: ItemWorkflow, Workflow: &w, Score: 1000,
+		})
+	}
+	return items
 }
 
 func makeInstalledAppItems(apps []InstalledAppEntry) []OmniboxItem {

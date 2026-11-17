@@ -186,7 +186,8 @@ func omniboxPreviewItem(state engine.State) (engine.OmniboxItem, bool) {
 		engine.ItemAIMode,
 		engine.ItemUtility,
 		engine.ItemAppIMERule,
-		engine.ItemInstalledApp:
+		engine.ItemInstalledApp,
+		engine.ItemWorkflow:
 		return item, true
 	default:
 		return engine.OmniboxItem{}, false
@@ -465,6 +466,33 @@ func (a *AppController) renderOmniboxPreviewBody(
 			ui.Text(c, item.Subtitle).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 		}
 
+	case engine.ItemWorkflow:
+		workflow := item.Workflow
+		if workflow == nil {
+			renderPreviewLines(c, theme, item.Subtitle, 8)
+			return
+		}
+		ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
+			previewBadge(c, theme, "arrow.triangle.branch", "Safe workflow", true)
+			previewBadge(c, theme, fmt.Sprintf("%d steps", len(workflow.Steps)), "", false)
+		})
+		if workflow.Description != "" {
+			renderPreviewLines(c, theme, workflow.Description, 8)
+		}
+		kitInsetWell(c, theme, func() {
+			ui.Text(c, "Execution plan").FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+			for _, step := range workflow.Steps {
+				if !step.Enabled {
+					continue
+				}
+				label := step.Name
+				if label == "" {
+					label = step.ID
+				}
+				ui.Text(c, fmt.Sprintf("• %s  (%s)", label, step.Action)).FontSize(typeMeta).TextColor(theme.Text).Wrap()
+			}
+		})
+
 	case engine.ItemInstalledApp:
 		if bmp := a.AppIconBitmap(item.AppPath); bmp != nil {
 			ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
@@ -602,6 +630,8 @@ func previewKindLabel(item engine.OmniboxItem) string {
 		return i18n.T("preview.kind.ime_rule")
 	case engine.ItemInstalledApp:
 		return i18n.T("preview.kind.app")
+	case engine.ItemWorkflow:
+		return "Workflow"
 	default:
 		return i18n.T("preview.kind.item")
 	}
@@ -624,6 +654,8 @@ func previewIcon(item engine.OmniboxItem) string {
 		return "app.badge"
 	case engine.ItemAppIMERule:
 		return "keyboard"
+	case engine.ItemWorkflow:
+		return "arrow.triangle.branch"
 	default:
 		return "bolt"
 	}
