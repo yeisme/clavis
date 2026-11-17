@@ -2109,8 +2109,8 @@ func workflowDefinition(workflow config.Workflow) automation.WorkflowDefinition 
 		failure := automation.FailureMode("")
 		if step.Failure == config.WorkflowFailureContinue {
 			failure = automation.FailureContinue
-		} else if step.Failure != "" && step.Failure != config.DefaultWorkflowFailure {
-			failure = workflowFailureMode(step.Failure)
+		} else if step.Failure == config.WorkflowFailureStop && !step.FailureInherited {
+			failure = automation.FailureStop
 		}
 		output := automation.OutputCapture
 		switch step.Output {

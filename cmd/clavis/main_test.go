@@ -109,10 +109,32 @@ func TestRunWorkflowPlanJSON(t *testing.T) {
 }
 
 func TestToAutomationWorkflowInheritsWorkflowFailurePolicy(t *testing.T) {
-	workflow := config.Workflow{ID: "continue", Failure: config.WorkflowFailureContinue, Steps: []config.WorkflowStep{{ID: "first", Action: "run", Enabled: true}}}
+	workflow := config.Workflow{ID: "continue", Failure: config.WorkflowFailureContinue, Steps: []config.WorkflowStep{{ID: "first", Action: "run", Enabled: true, Failure: config.WorkflowFailureStop, FailureInherited: true}}}
 	definition := toAutomationWorkflow(workflow)
 	plan, err := automation.BuildExecutionPlan(definition)
 	if err != nil || definition.FailureMode != automation.FailureContinue || len(plan) != 1 || plan[0].FailureMode != automation.FailureContinue {
+		t.Fatalf("definition=%+v plan=%+v err=%v", definition, plan, err)
+	}
+}
+
+func TestToAutomationWorkflowAllowsExplicitStepStopToOverrideContinue(t *testing.T) {
+	workflow := config.Workflow{ID: "continue", Failure: config.WorkflowFailureContinue, Steps: []config.WorkflowStep{{
+		ID: "stop", Action: "run", Enabled: true, Failure: config.WorkflowFailureStop,
+	}}}
+	definition := toAutomationWorkflow(workflow)
+	plan, err := automation.BuildExecutionPlan(definition)
+	if err != nil || definition.FailureMode != automation.FailureContinue || len(plan) != 1 || plan[0].FailureMode != automation.FailureStop {
+		t.Fatalf("definition=%+v plan=%+v err=%v", definition, plan, err)
+	}
+}
+
+func TestToAutomationWorkflowAllowsStepContinueToOverrideStop(t *testing.T) {
+	workflow := config.Workflow{ID: "stop", Failure: config.WorkflowFailureStop, Steps: []config.WorkflowStep{{
+		ID: "continue", Action: "run", Enabled: true, Failure: config.WorkflowFailureContinue,
+	}}}
+	definition := toAutomationWorkflow(workflow)
+	plan, err := automation.BuildExecutionPlan(definition)
+	if err != nil || definition.FailureMode != automation.FailureStop || len(plan) != 1 || plan[0].FailureMode != automation.FailureContinue {
 		t.Fatalf("definition=%+v plan=%+v err=%v", definition, plan, err)
 	}
 }

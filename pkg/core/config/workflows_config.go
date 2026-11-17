@@ -61,18 +61,22 @@ type WorkflowInput struct {
 // WorkflowStep is one executable unit in a workflow. Dependencies name other
 // steps in the same workflow and are evaluated before the step is run.
 type WorkflowStep struct {
-	ID        string                `json:"id"`
-	Name      string                `json:"name"`
-	Action    string                `json:"action"`
-	Command   string                `json:"command"`
-	Prompt    string                `json:"prompt"`
-	Input     string                `json:"input"`
-	DependsOn []string              `json:"dependsOn"`
-	Enabled   bool                  `json:"enabled"`
-	Source    WorkflowSource        `json:"source"`
-	Output    WorkflowOutput        `json:"output"`
-	Failure   WorkflowFailureMode   `json:"failure"`
-	Execution WorkflowExecutionMode `json:"execution"`
+	ID        string              `json:"id"`
+	Name      string              `json:"name"`
+	Action    string              `json:"action"`
+	Command   string              `json:"command"`
+	Prompt    string              `json:"prompt"`
+	Input     string              `json:"input"`
+	DependsOn []string            `json:"dependsOn"`
+	Enabled   bool                `json:"enabled"`
+	Source    WorkflowSource      `json:"source"`
+	Output    WorkflowOutput      `json:"output"`
+	Failure   WorkflowFailureMode `json:"failure"`
+	// FailureInherited distinguishes an omitted step policy from an explicit
+	// stop. The persisted value remains the safe stop default for compatibility,
+	// while omitted TOML policies inherit the workflow policy.
+	FailureInherited bool                  `json:"failureInherited,omitempty"`
+	Execution        WorkflowExecutionMode `json:"execution"`
 }
 
 // Workflow describes a persisted, declarative workflow.
@@ -200,6 +204,8 @@ func decodeWorkflowStep(t *toml.Table, path string) (WorkflowStep, error) {
 		return WorkflowStep{}, e
 	} else if ok {
 		step.Failure = WorkflowFailureMode(value)
+	} else {
+		step.FailureInherited = true
 	}
 	if value, ok, e := optionalString(t, "execution", path); e != nil {
 		return WorkflowStep{}, e
@@ -231,7 +237,12 @@ func (s WorkflowStep) toTOML() *toml.Table {
 	t.Set("enabled", toml.BoolVal(s.Enabled))
 	t.Set("source", toml.StringVal(string(s.Source)))
 	t.Set("output", toml.StringVal(string(s.Output)))
-	t.Set("failure", toml.StringVal(string(s.Failure)))
+	// An omitted step failure inherits the workflow policy. Continue and
+	// explicit stop are emitted; inherited stop is omitted to preserve the
+	// distinction on reload.
+	if !s.FailureInherited {
+		t.Set("failure", toml.StringVal(string(s.Failure)))
+	}
 	t.Set("execution", toml.StringVal(string(s.Execution)))
 	return t
 }

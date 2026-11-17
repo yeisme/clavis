@@ -134,6 +134,7 @@ func normalizeWorkflow(w config.Workflow) config.Workflow {
 		}
 		if step.Failure == "" {
 			step.Failure = config.DefaultWorkflowFailure
+			step.FailureInherited = true
 		}
 		if step.Execution == "" {
 			step.Execution = config.DefaultWorkflowExecution
@@ -401,12 +402,13 @@ func (a *AppController) addWorkflowStep() {
 	se := a.settingsEditor()
 	seSet(se, func(s *settingsEditorState) {
 		step := config.WorkflowStep{
-			Enabled:   true,
-			Source:    config.DefaultWorkflowSource,
-			Output:    config.DefaultWorkflowOutput,
-			Failure:   config.DefaultWorkflowFailure,
-			Execution: config.DefaultWorkflowExecution,
-			DependsOn: []string{},
+			Enabled:          true,
+			Source:           config.DefaultWorkflowSource,
+			Output:           config.DefaultWorkflowOutput,
+			Failure:          config.DefaultWorkflowFailure,
+			FailureInherited: true,
+			Execution:        config.DefaultWorkflowExecution,
+			DependsOn:        []string{},
 		}
 		steps := make([]config.WorkflowStep, len(s.workflowDraft.Steps)+1)
 		copy(steps, s.workflowDraft.Steps)
@@ -741,7 +743,10 @@ func (a *AppController) renderWorkflowStepEditor(c *ui.Context, theme *ui.Theme,
 	}
 	if v, changed := settingChoiceRow(c, theme, i18n.T("settings.workflows.step_failure"), "step.failure", "",
 		workflowFailureOptions(), string(step.Failure)); changed {
-		setWorkflowStep(se, index, func(s *config.WorkflowStep) { s.Failure = config.WorkflowFailureMode(v) })
+		setWorkflowStep(se, index, func(s *config.WorkflowStep) {
+			s.Failure = config.WorkflowFailureMode(v)
+			s.FailureInherited = false
+		})
 	}
 	if v, changed := settingChoiceRow(c, theme, i18n.T("settings.workflows.step_execution"), "step.execution", "",
 		workflowExecutionOptions(), string(step.Execution)); changed {

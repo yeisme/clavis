@@ -66,8 +66,42 @@ id = "step"
 	if !step.Enabled || step.Source != config.DefaultWorkflowSource || step.Output != config.DefaultWorkflowOutput || step.Failure != config.DefaultWorkflowFailure || step.Execution != config.DefaultWorkflowExecution {
 		t.Fatalf("unsafe or unexpected step defaults: %#v", step)
 	}
+	if !step.FailureInherited {
+		t.Fatalf("omitted step failure should be marked inherited: %#v", step)
+	}
 	if issues := config.ValidateWorkflows(got); len(issues) != 0 {
 		t.Fatalf("safe defaults should validate: %+v", issues)
+	}
+}
+
+func TestWorkflowsConfigDistinguishesExplicitStopFromInheritedFailure(t *testing.T) {
+	decoded, err := config.DecodeWorkflowsConfig(`[[workflows]]
+ id = "policies"
+ failure = "continue"
+ [[workflows.steps]]
+ id = "inherited"
+ [[workflows.steps]]
+ id = "stop"
+ failure = "stop"
+`)
+	if err != nil {
+		t.Fatalf("decode policies: %v", err)
+	}
+	steps := decoded.Workflows[0].Steps
+	if !steps[0].FailureInherited || steps[1].FailureInherited {
+		t.Fatalf("failure inheritance markers = %#v, %#v; want true, false", steps[0], steps[1])
+	}
+	encoded := decoded.Encode()
+	if !strings.Contains(encoded, `failure = "stop"`) {
+		t.Fatalf("explicit stop was not preserved:\n%s", encoded)
+	}
+	roundTrip, err := config.DecodeWorkflowsConfig(encoded)
+	if err != nil {
+		t.Fatalf("decode encoded policies: %v", err)
+	}
+	roundTripSteps := roundTrip.Workflows[0].Steps
+	if !roundTripSteps[0].FailureInherited || roundTripSteps[1].FailureInherited {
+		t.Fatalf("round-trip failure inheritance markers = %#v, %#v; want true, false", roundTripSteps[0], roundTripSteps[1])
 	}
 }
 
