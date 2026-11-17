@@ -294,6 +294,33 @@ func TestConfirmRequiresIssuedTombstoneBatch(t *testing.T) {
 	}
 }
 
+func TestRepeatedTombstoneConfirmationIsRejected(t *testing.T) {
+	s, a, b := setupClients(t)
+	if err := a.Delete("object"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.SyncTombstones("acct", "b", 0)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("issued batch = %+v, %v", got, err)
+	}
+	sequence := got[0].Sequence
+	if err := s.ConfirmTombstones("acct", "b", sequence); err != nil {
+		t.Fatalf("first confirmation failed: %v", err)
+	}
+	if err := s.ConfirmTombstones("acct", "b", sequence); err == nil {
+		t.Fatal("repeated confirmation of an already consumed batch succeeded")
+	}
+	if err := s.ConfirmTombstones("acct", "b", sequence+1); err == nil {
+		t.Fatal("confirmation beyond the issued batch succeeded")
+	}
+	if err := b.Upload("new", 1, []byte("new")); err != nil {
+		t.Fatalf("upload after the first confirmation failed: %v", err)
+	}
+	if err := s.ConfirmTombstones("acct", "b", 0); err == nil {
+		t.Fatal("confirmation moved backwards")
+	}
+}
+
 func TestPairCannotOverwriteKeyAndCredentialRequired(t *testing.T) {
 	s := NewServer()
 	if err := s.Login("acct"); err != nil {

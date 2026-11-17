@@ -543,8 +543,15 @@ func (s *Server) ConfirmTombstones(account, device string, sequence uint64) erro
 		return errors.New("sync: confirmation is ahead of server")
 	}
 	if sequence == confirmed {
+		// A watermark match is not proof of a fresh confirmation. The only
+		// legal no-op is the initial zero watermark before any tombstone exists.
+		// Once a sequence has been consumed, repeating it has no issued batch and
+		// must be rejected rather than treated as success.
 		if _, pending := s.issued[account][device]; pending {
 			return errors.New("sync: tombstone batch is not confirmed")
+		}
+		if sequence != 0 {
+			return errors.New("sync: tombstone batch is already confirmed")
 		}
 		return nil
 	}
