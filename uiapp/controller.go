@@ -1836,7 +1836,7 @@ func (c *AppController) injectTextAsync(text string, deleteCount, cursorBackOffs
 // injectWorkflowTextAsync rechecks controller shutdown and the foreground
 // target immediately before injection. The check is intentionally performed in
 // the goroutine: workflow output can finish long after the capsule was opened.
-func (c *AppController) injectWorkflowTextAsync(text string, deleteCount, cursorBackOffset int, targetGen uint64) {
+func (c *AppController) injectWorkflowTextAsync(text string, deleteCount, cursorBackOffset int, targetGen uint64, target engine.CapsuleContext) {
 	go func() {
 		c.workflowLifecycleMu.Lock()
 		defer c.workflowLifecycleMu.Unlock()
@@ -1849,6 +1849,13 @@ func (c *AppController) injectWorkflowTextAsync(text string, deleteCount, cursor
 		beforeInject := c.BeforeInject
 		c.mu.Unlock()
 		ctx := context.Background()
+		// A foreground-app switch does not necessarily open another Clavis
+		// capsule. Verify the target again immediately before injection so a
+		// completed workflow cannot write into the newly focused application.
+		snapshot, err := br.SnapshotContext(ctx)
+		if err != nil || !workflowTargetMatchesSnapshot(target, snapshot) {
+			return
+		}
 		if beforeInject != nil {
 			beforeInject(ctx)
 		}
@@ -1968,7 +1975,7 @@ func (c *AppController) executeWorkflowContext(parent context.Context, workflowI
 	c.workflowHUD(fmt.Sprintf("Workflow %s planned (%d steps)", workflowID, len(plan)))
 	actionCtxCopy := actionCtx
 	go func() {
-		provider := workflowProvider{controller: c, actions: registry.actions, actionCtx: actionCtxCopy}
+		provider := workflowProvider{controller: c, actions: registry.actions, actionCtx: actionCtxCopy, workflowInputs: inputs}
 		result, runErr := automation.NewRunner(provider).Run(runCtx, plan, inputs)
 		c.reportWorkflow(runID, targetGen, workflow, actionCtxCopy, result, runErr)
 	}()
@@ -2088,37 +2095,151 @@ func workflowDefinition(workflow config.Workflow) automation.WorkflowDefinition 
 		}
 		input := map[string]any{}
 		if step.Input != "" {
-			input["input"] = step.Input
+			input["input"] = normalizeWorkflowTemplates(step.Input, workflow, step)
 		}
 		if step.Prompt != "" {
-			input["prompt"] = step.Prompt
+			input["prompt"] = normalizeWorkflowTemplates(step.Prompt, workflow, step)
 		}
+		// Keep the persisted source on the invocation. The provider uses it to
+		// expose one deterministic source alias instead of making text,
+		// selection, and clipboard interchangeable.
+		input["source"] = string(step.Source)
+		input["text"] = fmt.Sprintf("{{input.%s}}", workflowStepSourceInputID(step))
 		definition.Steps = append(definition.Steps, automation.WorkflowStep{ID: step.ID, ActionID: step.Action, Input: input, DependsOn: append([]string(nil), step.DependsOn...), FailureMode: failure, OutputMode: output})
 	}
 	return definition
 }
 
 func workflowInputs(workflow config.Workflow, actionCtx engine.CapsuleContext) (map[string]any, error) {
-	values := map[string]any{
-		"selection": actionCtx.SelectedText, "selected_text": actionCtx.SelectedText,
-		"clipboard": actionCtx.ClipboardPreview, "clipboard_text": actionCtx.ClipboardPreview,
-		"text": actionCtx.SelectedText, "prompt": actionCtx.SelectedText,
-		"app": actionCtx.AppName, "app_name": actionCtx.AppName, "bundle_id": actionCtx.BundleID,
-		"url": actionCtx.ActiveURL, "window_title": actionCtx.WindowTitle,
+	if workflow.Source != "" && workflow.Source != config.WorkflowSourceClipboard && workflow.Source != config.WorkflowSourceSelection && workflow.Source != config.WorkflowSourceText && workflow.Source != config.WorkflowSourcePrompt {
+		return nil, fmt.Errorf("workflow %q has unsupported source %q", workflow.ID, workflow.Source)
+	}
+	values := workflowContextInputs(workflow.Source, actionCtx)
+	if workflow.Source == config.WorkflowSourcePrompt {
+		return nil, fmt.Errorf("workflow %q uses unsupported prompt source: prompt input is not available in controller workflows", workflow.ID)
+	}
+	for _, step := range workflow.Steps {
+		if step.Enabled {
+			if step.Source == config.WorkflowSourcePrompt {
+				return nil, fmt.Errorf("workflow step %q uses unsupported prompt source: prompt input is not available in controller workflows", step.ID)
+			}
+			value, err := workflowSourceValue(step.Source, actionCtx)
+			if err != nil && step.Source != config.WorkflowSourcePrompt {
+				return nil, fmt.Errorf("workflow step %q: %w", step.ID, err)
+			}
+			values[workflowStepSourceInputID(step)] = value
+		}
 	}
 	for _, input := range workflow.Inputs {
 		value, ok := values[input.ID]
 		if !ok || isEmptyWorkflowInput(value) {
 			if input.Default != "" {
-				values[input.ID] = input.Default
-				continue
+				value, ok = input.Default, true
+				values[input.ID] = value
 			}
-			if input.Required {
+			if input.Required && (!ok || isEmptyWorkflowInput(value)) {
 				return nil, fmt.Errorf("required workflow input %q is not supplied", input.ID)
 			}
 		}
+		// Persisted workflows commonly use the display name in templates while
+		// the runner receives the stable input ID. Expose both aliases.
+		if ok && input.Name != "" {
+			values[input.Name] = value
+		}
 	}
 	return values, nil
+}
+
+func workflowContextInputs(source config.WorkflowSource, actionCtx engine.CapsuleContext) map[string]any {
+	selection := actionCtx.SelectedText
+	clipboard := actionCtx.ClipboardPreview
+	text := selection
+	switch source {
+	case "", config.WorkflowSourceClipboard:
+		text = clipboard
+	case config.WorkflowSourceText:
+		if actionCtx.SurroundingText != "" {
+			text = actionCtx.SurroundingText
+		}
+	case config.WorkflowSourcePrompt:
+		text = ""
+	}
+	values := map[string]any{
+		"selection": selection, "selected_text": selection,
+		"clipboard": clipboard, "clipboard_text": clipboard,
+		"text": text,
+		"app":  actionCtx.AppName, "app_name": actionCtx.AppName, "bundle_id": actionCtx.BundleID,
+		"url": actionCtx.ActiveURL, "window_title": actionCtx.WindowTitle,
+	}
+	if source != config.WorkflowSourcePrompt {
+		values["prompt"] = text
+	}
+	return values
+}
+
+var workflowStepSourceInputPattern = regexp.MustCompile(`[^a-zA-Z0-9_]+`)
+
+func workflowStepSourceInputID(step config.WorkflowStep) string {
+	id := strings.TrimSpace(step.ID)
+	id = workflowStepSourceInputPattern.ReplaceAllString(id, "_")
+	return "__workflow_step_" + id + "_text"
+}
+
+func normalizeWorkflowTemplates(value string, workflow config.Workflow, step config.WorkflowStep) string {
+	return workflowTemplatePattern.ReplaceAllStringFunc(value, func(match string) string {
+		expression := strings.TrimSpace(match[2 : len(match)-2])
+		if strings.HasPrefix(expression, "input.") || strings.HasPrefix(expression, "step.") {
+			return match
+		}
+		switch expression {
+		case "text":
+			return "{{input." + workflowStepSourceInputID(step) + "}}"
+		case "selection", "selected_text", "clipboard", "clipboard_text", "prompt", "app", "app_name", "bundle_id", "url", "window_title":
+			return "{{input." + expression + "}}"
+		}
+		for _, input := range workflow.Inputs {
+			if expression == input.ID || (input.Name != "" && expression == input.Name) {
+				return "{{input." + input.ID + "}}"
+			}
+		}
+		return match
+	})
+}
+
+func workflowSourceValue(source config.WorkflowSource, actionCtx engine.CapsuleContext) (string, error) {
+	switch source {
+	case config.WorkflowSourceSelection:
+		return actionCtx.SelectedText, nil
+	case "", config.WorkflowSourceClipboard:
+		return actionCtx.ClipboardPreview, nil
+	case config.WorkflowSourceText:
+		if actionCtx.SurroundingText != "" {
+			return actionCtx.SurroundingText, nil
+		}
+		return actionCtx.SelectedText, nil
+	case config.WorkflowSourcePrompt:
+		return "", fmt.Errorf("workflow prompt source requires explicit prompt input")
+	default:
+		return "", fmt.Errorf("unsupported workflow source %q", source)
+	}
+}
+
+func workflowTargetMatchesSnapshot(target engine.CapsuleContext, current host.ContextSnapshot) bool {
+	// Empty target identity is not verifiable. Refuse injection rather than
+	// guessing, while retaining compatibility with contexts that only carry text.
+	if strings.TrimSpace(target.BundleID) == "" && strings.TrimSpace(target.ProcessName) == "" && strings.TrimSpace(target.AppName) == "" {
+		return false
+	}
+	if target.BundleID != "" && current.BundleID != target.BundleID {
+		return false
+	}
+	if target.ProcessName != "" && current.ProcessName != target.ProcessName {
+		return false
+	}
+	if target.AppName != "" && current.AppName != target.AppName {
+		return false
+	}
+	return true
 }
 
 func isEmptyWorkflowInput(value any) bool {
@@ -2132,9 +2253,10 @@ func isEmptyWorkflowInput(value any) bool {
 }
 
 type workflowProvider struct {
-	controller *AppController
-	actions    map[string]workflowAction
-	actionCtx  engine.CapsuleContext
+	controller     *AppController
+	actions        map[string]workflowAction
+	actionCtx      engine.CapsuleContext
+	workflowInputs map[string]any
 }
 
 func (p workflowProvider) Invoke(ctx context.Context, invocation automation.ActionInvocation) (automation.ActionResult, error) {
@@ -2142,7 +2264,10 @@ func (p workflowProvider) Invoke(ctx context.Context, invocation automation.Acti
 	if !ok {
 		return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultFailed, Error: "action is not available"}, nil
 	}
-	bindings := mergeWorkflowInvocationInputs(invocation)
+	bindings := mergeWorkflowInputs(workflowContextInputs("", p.actionCtx), invocation)
+	for key, value := range p.workflowInputs {
+		bindings[key] = value
+	}
 	if action.script != nil {
 		if !action.script.Enabled {
 			return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultSkipped, Error: "script is disabled"}, nil
@@ -2166,6 +2291,20 @@ func (p workflowProvider) Invoke(ctx context.Context, invocation automation.Acti
 		return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultFailed, Error: err.Error()}, nil
 	}
 	return p.invokeCLI(ctx, action.leader.Command, args, 0)
+}
+
+func mergeWorkflowInputs(workflowInputs map[string]any, invocation automation.ActionInvocation) map[string]any {
+	bindings := make(map[string]any, len(workflowInputs)+len(invocation.Input)+len(invocation.Inputs))
+	for key, value := range workflowInputs {
+		bindings[key] = value
+	}
+	for key, value := range invocation.Input {
+		bindings[key] = value
+	}
+	for key, value := range invocation.Inputs {
+		bindings[key] = value
+	}
+	return bindings
 }
 
 func mergeWorkflowInvocationInputs(invocation automation.ActionInvocation) map[string]any {
@@ -2385,9 +2524,9 @@ func (c *AppController) applyWorkflowOutputAtTarget(mode config.WorkflowOutput, 
 			return
 		}
 		if mode == config.WorkflowOutputReplace {
-			c.injectWorkflowTextAsync(text, len([]rune(actionCtx.SelectedText)), 0, targetGen)
+			c.injectWorkflowTextAsync(text, len([]rune(actionCtx.SelectedText)), 0, targetGen, actionCtx)
 		} else {
-			c.injectWorkflowTextAsync(text, 0, 0, targetGen)
+			c.injectWorkflowTextAsync(text, 0, 0, targetGen, actionCtx)
 		}
 	case config.WorkflowOutputClipboard:
 		c.writeClipboardText(text)

@@ -67,6 +67,38 @@ func TestWorkflowProviderRejectsUnresolvedTemplates(t *testing.T) {
 	}
 }
 
+func TestWorkflowTemplatesResolveBareAndNamedInputs(t *testing.T) {
+	cli := config.CLIAction("printf", "%s|%s|%s", "{{text}}", "{{tone}}", "{{input}}")
+	provider := workflowProvider{
+		actions:        map[string]workflowAction{"cli": {leader: &cli}},
+		workflowInputs: map[string]any{"text": "selected", "tone": "concise", "input": map[string]any{"text": "selected", "tone": "concise"}},
+	}
+	result, err := provider.Invoke(context.Background(), automation.ActionInvocation{ActionID: "cli"})
+	if err != nil || result.Status != automation.ResultSucceeded || result.Output != "selected|concise|{\"text\":\"selected\",\"tone\":\"concise\"}" {
+		t.Fatalf("invoke = %#v, %v", result, err)
+	}
+}
+
+func TestWorkflowSourceMapsToDistinctCapsuleValues(t *testing.T) {
+	ctx := engine.CapsuleContext{SelectedText: "selection", SurroundingText: "surrounding", ClipboardPreview: "clipboard"}
+	for _, tc := range []struct {
+		source config.WorkflowSource
+		want   string
+	}{
+		{config.WorkflowSourceSelection, "selection"},
+		{config.WorkflowSourceText, "surrounding"},
+		{config.WorkflowSourceClipboard, "clipboard"},
+	} {
+		got, err := workflowSourceValue(tc.source, ctx)
+		if err != nil || got != tc.want {
+			t.Errorf("source %q = %q, %v; want %q", tc.source, got, err, tc.want)
+		}
+	}
+	if _, err := workflowSourceValue(config.WorkflowSourcePrompt, ctx); err == nil {
+		t.Fatal("prompt source without explicit prompt input should fail")
+	}
+}
+
 func TestWorkflowProviderBindsInputAndStepOutputToCLIAndScript(t *testing.T) {
 	cli := config.CLIAction("printf", "%s|%s", "{{input}}", "{{stepOutput}}")
 	provider := workflowProvider{
