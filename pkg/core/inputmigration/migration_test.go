@@ -10,7 +10,7 @@ func baseline() PersonalBaseline {
 	b.Revision, b.Scheme, b.CandidateCount, b.ShiftToggleASCII = 3, "quanpin", 7, true
 	b.FuzzyPinyin = []string{"zh=z", "ch=c", "sh=s"}
 	b.Dictionaries = []DictionaryMetadata{{ID: "custom", ContentHash: strings.Repeat("ab", 32), Format: "clavis-dict", EntryCount: 4, SourceDigest: Digest("dict-source")}}
-	b.Learning = LearningData{Enabled: true, Words: []LearningEntry{NewLearningEntry("nihao", "你好", 8, true)}, Bigrams: []BigramEntry{NewBigramEntry("你好", "世界", 3)}, Aggregates: []LearningEntry{NewLearningEntry("nihao", "你好", 11, false)}}
+	b.Learning = LearningData{Enabled: true, SummaryOnly: true, Words: []LearningEntry{NewLearningEntry("nihao", "你好", 8, true)}, Bigrams: []BigramEntry{NewBigramEntry("你好", "世界", 3)}, Aggregates: []LearningEntry{NewLearningEntry("nihao", "你好", 11, false)}}
 	b.Shortcuts = []ShortcutRule{{Chord: "caps", Action: "toggle-ascii", Explicit: true, RequiresHook: true, Apps: []StableApp{{BundleID: "com.example.editor", Process: "editor"}}}}
 	b.AppRules = []AppRule{{ID: "editor-chinese", Apps: []StableApp{{BundleID: "com.example.editor"}}, Action: "scheme:quanpin"}}
 	b.FieldRevisions = map[string]uint64{"scheme": 1, "candidateCount": 1, "shiftToggleASCII": 1, "fuzzyPinyin": 1, "learning": 1, "shortcuts": 1, "appRules": 1}
@@ -102,14 +102,109 @@ func TestUnsupportedRulesAreDeferredAndPreviewIsRedacted(t *testing.T) {
 func TestMergeKeepsNewerBaselineWithoutTouchingDeviceState(t *testing.T) {
 	source, target := baseline(), baseline()
 	source.FieldRevisions["scheme"] = 5
-	source.Scheme = "shuangpin"
+	source.Scheme = "xiaohe"
 	target.CandidateCount = 9
 	merged, conflicts, err := MergeBaselines(source, target)
-	if err != nil || merged.Scheme != "shuangpin" || merged.CandidateCount != 9 || len(conflicts) == 0 {
+	if err != nil || merged.Scheme != "xiaohe" || merged.CandidateCount != 9 || len(conflicts) == 0 {
 		t.Fatalf("%+v %+v %v", merged, conflicts, err)
 	}
 	target.Scheme = "quanpin"
-	if merged.Scheme != "shuangpin" {
+	if merged.Scheme != "xiaohe" {
 		t.Fatal("merge result aliases target")
+	}
+}
+
+func TestMergeRevisionsConvergeAndDictionaryConflictsAreExplicit(t *testing.T) {
+	cases := []struct {
+		name                           string
+		sourceRevision, targetRevision uint64
+		wantRevision                   uint64
+		wantScheme                     string
+	}{
+		{"equal", 2, 2, 3, "quanpin"},
+		{"source-newer", 5, 2, 5, "xiaohe"},
+		{"target-newer", 2, 5, 5, "quanpin"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, d := baseline(), baseline()
+			s.FieldRevisions["scheme"], d.FieldRevisions["scheme"] = tc.sourceRevision, tc.targetRevision
+			s.Scheme, d.Scheme = "xiaohe", "quanpin"
+			got, _, err := MergeBaselines(s, d)
+			if err != nil || got.FieldRevisions["scheme"] != tc.wantRevision || got.Scheme != tc.wantScheme {
+				t.Fatalf("got=%+v err=%v", got, err)
+			}
+			replay, _, err := MergeBaselines(got, d)
+			if err != nil || replay.FieldRevisions["scheme"] != got.FieldRevisions["scheme"] || replay.Scheme != got.Scheme {
+				t.Fatalf("replay=%+v err=%v", replay, err)
+			}
+		})
+	}
+	s, d := baseline(), baseline()
+	s.Dictionaries = []DictionaryMetadata{{ID: "same", ContentHash: Digest("one"), Revision: 4}}
+	d.Dictionaries = []DictionaryMetadata{{ID: "same", ContentHash: Digest("two"), Revision: 4}, {ID: "other", ContentHash: Digest("one")}}
+	got, conflicts, err := MergeBaselines(s, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conflicts) == 0 || conflicts[0].Winner != "target" {
+		t.Fatalf("missing dictionary conflict: %+v", conflicts)
+	}
+	if len(got.Dictionaries) != 2 {
+		t.Fatalf("dictionary merge lost distinct content: %+v", got.Dictionaries)
+	}
+	foundTwo := false
+	for _, d := range got.Dictionaries {
+		if d.ContentHash == Digest("two") {
+			foundTwo = true
+		}
+	}
+	if !foundTwo {
+		t.Fatalf("dictionary merge lost winner: %+v", got.Dictionaries)
+	}
+}
+
+func TestNestedRulesAreCopiedAndAppRuleContractIsStrict(t *testing.T) {
+	b := baseline()
+	p, err := GenerateOverlay(b, windowsCaps(), "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Overlay.Shortcuts[0].Apps[0].BundleID = "changed"
+	p.Overlay.AppRules[0].Apps[0].BundleID = "changed"
+	if b.Shortcuts[0].Apps[0].BundleID == "changed" || b.AppRules[0].Apps[0].BundleID == "changed" {
+		t.Fatal("overlay aliases baseline apps")
+	}
+	bad := b
+	bad.AppRules[0].Action = "not-a-mode"
+	if err := bad.Validate(); err == nil {
+		t.Fatal("unknown app mode accepted")
+	}
+	bad = b
+	bad.AppRules[0].Action = "scheme:not-a-scheme"
+	if err := bad.Validate(); err == nil {
+		t.Fatal("unknown scheme accepted")
+	}
+}
+
+func TestStrictPayloadAndPreviewPrivacy(t *testing.T) {
+	b := baseline()
+	if _, err := UnmarshalBaseline([]byte(`{"schemaVersion":1} garbage`)); err == nil {
+		t.Fatal("trailing JSON accepted")
+	}
+	tooLarge := strings.Repeat(" ", 1<<20+1)
+	if _, err := UnmarshalBaseline([]byte(tooLarge)); err == nil {
+		t.Fatal("oversized payload accepted")
+	}
+	caps := macCaps()
+	caps.OS = "macos"
+	p, err := GenerateOverlay(b, caps, "device/with-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range p.Diffs {
+		if strings.Contains(d.Path, "device/with-secret") || strings.Contains(d.Path, "caps") {
+			t.Fatalf("diff path leaked input: %+v", d)
+		}
 	}
 }

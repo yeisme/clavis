@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -18,6 +19,13 @@ import (
 const (
 	SchemaVersion            uint16 = 1
 	MigrationProtocolVersion        = syncprotocol.ProtocolVersion
+
+	// Bounds are deliberately conservative: migration payloads are settings, not
+	// bulk stores.  The encrypted learning-store object is transported by the
+	// sync layer separately.
+	maxJSONSize       = 1 << 20
+	maxCollectionSize = 4096
+	maxMetadataSize   = 256
 )
 
 type Sensitivity string
@@ -36,6 +44,7 @@ type FieldMetadata struct {
 type DictionaryMetadata struct {
 	ID           string `json:"id"`
 	ContentHash  string `json:"contentHash"`
+	Revision     uint64 `json:"revision,omitempty"`
 	Format       string `json:"format,omitempty"`
 	EntryCount   uint64 `json:"entryCount,omitempty"`
 	SourceDigest string `json:"sourceDigest,omitempty"`
@@ -58,13 +67,19 @@ type BigramEntry struct {
 	Frequency      uint64 `json:"frequency"`
 }
 
+// LearningData is a privacy-preserving summary only. It is useful for
+// conflict resolution and ranking hints, but it cannot reconstruct a
+// LearningStore: digests are one-way and no plaintext words are present.
+// The actual store, when recovery is requested, must be supplied as a
+// separately encrypted object by the sync/envelope layer.
 type LearningData struct {
 	Enabled bool            `json:"enabled"`
 	Words   []LearningEntry `json:"words,omitempty"`
 	Bigrams []BigramEntry   `json:"bigrams,omitempty"`
-	// Aggregates are stable digest/frequency pairs used by implementations
-	// which merge data from more than one local store.
-	Aggregates []LearningEntry `json:"aggregates,omitempty"`
+	// Aggregates are stable digest/frequency pairs used for merge/ranking hints.
+	Aggregates        []LearningEntry `json:"aggregates,omitempty"`
+	SummaryOnly       bool            `json:"summaryOnly"`
+	RecoveryObjectRef string          `json:"recoveryObjectRef,omitempty"`
 }
 
 type StableApp struct {
@@ -81,9 +96,13 @@ type ShortcutRule struct {
 }
 
 type AppRule struct {
-	ID     string      `json:"id"`
-	Apps   []StableApp `json:"apps"`
-	Action string      `json:"action"`
+	ID             string      `json:"id"`
+	Apps           []StableApp `json:"apps"`
+	Action         string      `json:"action,omitempty"` // legacy serialized action
+	Mode           string      `json:"mode"`             // ascii, native, keep
+	Scheme         string      `json:"scheme,omitempty"`
+	InputSourceID  string      `json:"inputSourceId,omitempty"`
+	RestoreOnLeave bool        `json:"restoreOnLeave"`
 	// Context is intentionally not represented. In particular, an app rule
 	// cannot carry a title, URL, document name, or password-field state.
 }
@@ -244,12 +263,52 @@ func validOS(os string) bool {
 	}
 	return false
 }
+func validScheme(s string) bool {
+	switch s {
+	case "quanpin", "xiaohe", "ziranma", "microsoft", "sogou", "pinyin_plus":
+		return true
+	}
+	return false
+}
+func normalizedRuleMode(r AppRule) (string, error) {
+	if r.Scheme != "" && !validScheme(r.Scheme) {
+		return "", fmt.Errorf("inputmigration: unknown app rule scheme %q", r.Scheme)
+	}
+	mode := strings.TrimSpace(r.Mode)
+	if mode == "" && r.Action != "" {
+		// Compatibility conversion for the old portable action representation.
+		if strings.HasPrefix(r.Action, "scheme:") {
+			if !validScheme(strings.TrimPrefix(r.Action, "scheme:")) {
+				return "", fmt.Errorf("inputmigration: unknown app rule scheme %q", r.Action)
+			}
+			return "native", nil
+		}
+		mode = r.Action
+	}
+	switch mode {
+	case "ascii", "native", "keep":
+		return mode, nil
+	default:
+		return "", fmt.Errorf("inputmigration: unknown app rule mode %q", mode)
+	}
+}
 func validateApp(a StableApp) error {
 	if a.BundleID == "" && a.Process == "" {
 		return errors.New("inputmigration: app reference is empty")
 	}
-	if strings.ContainsAny(a.BundleID+a.Process, "\r\n") {
+	if len(a.BundleID) > maxMetadataSize || len(a.Process) > maxMetadataSize || strings.ContainsAny(a.BundleID+a.Process, "\r\n") {
 		return errors.New("inputmigration: invalid app reference")
+	}
+	return nil
+}
+func validateShortcut(r ShortcutRule) error {
+	if strings.TrimSpace(r.Chord) == "" || strings.TrimSpace(r.Action) == "" || len(r.Chord) > maxMetadataSize || len(r.Action) > maxMetadataSize {
+		return errors.New("inputmigration: invalid shortcut rule")
+	}
+	for _, a := range r.Apps {
+		if err := validateApp(a); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -260,16 +319,19 @@ func (c DeviceCapabilities) Validate() error {
 	if strings.TrimSpace(c.Arch) == "" || strings.TrimSpace(c.KeyboardLayout) == "" {
 		return errors.New("inputmigration: architecture and keyboard layout are required")
 	}
-	if len(c.InputSourceIDs) == 0 {
+	if len(c.InputSourceIDs) == 0 || len(c.InputSourceIDs) > maxCollectionSize {
 		return errors.New("inputmigration: at least one input source is required")
 	}
 	for _, id := range c.InputSourceIDs {
-		if strings.TrimSpace(id) == "" {
+		if strings.TrimSpace(id) == "" || len(id) > maxMetadataSize {
 			return errors.New("inputmigration: empty input source")
 		}
 	}
+	if len(c.Permissions) > maxMetadataSize {
+		return errors.New("inputmigration: too many permissions")
+	}
 	for key, p := range c.Permissions {
-		if key == "" || (p != PermissionGranted && p != PermissionDenied && p != PermissionUnknown) {
+		if key == "" || len(key) > maxMetadataSize || (p != PermissionGranted && p != PermissionDenied && p != PermissionUnknown) {
 			return errors.New("inputmigration: invalid permission")
 		}
 	}
@@ -285,15 +347,30 @@ func (b PersonalBaseline) Validate() error {
 	if strings.TrimSpace(b.AccountID) == "" || b.Scope != "personal" {
 		return errors.New("inputmigration: invalid baseline scope")
 	}
-	if strings.TrimSpace(b.Scheme) == "" || b.CandidateCount < 1 || b.CandidateCount > 99 {
+	if !validScheme(b.Scheme) || b.CandidateCount < 1 || b.CandidateCount > 99 {
 		return errors.New("inputmigration: invalid input-engine settings")
 	}
-	if b.FieldMetadata == nil {
-		return errors.New("inputmigration: missing field metadata")
+	if len(b.FuzzyPinyin) > maxCollectionSize || len(b.Dictionaries) > maxCollectionSize || len(b.Shortcuts) > maxCollectionSize || len(b.AppRules) > maxCollectionSize {
+		return errors.New("inputmigration: collection too large")
+	}
+	if err := validateMetadata(b.FieldMetadata); err != nil {
+		return err
+	}
+	if len(b.Learning.Words) > maxCollectionSize || len(b.Learning.Bigrams) > maxCollectionSize || len(b.Learning.Aggregates) > maxCollectionSize {
+		return errors.New("inputmigration: learning summary too large")
+	}
+	if b.Learning.SummaryOnly == false && (len(b.Learning.Words) > 0 || len(b.Learning.Bigrams) > 0 || len(b.Learning.Aggregates) > 0) {
+		return errors.New("inputmigration: learning summaries must declare summaryOnly")
+	}
+	if b.Learning.RecoveryObjectRef != "" && len(b.Learning.RecoveryObjectRef) > maxMetadataSize {
+		return errors.New("inputmigration: recovery object reference too long")
 	}
 	for _, d := range b.Dictionaries {
-		if d.ID == "" || d.ContentHash == "" {
+		if strings.TrimSpace(d.ID) == "" || !validDigest(d.ContentHash) {
 			return errors.New("inputmigration: invalid dictionary metadata")
+		}
+		if len(d.ID) > maxMetadataSize || len(d.Format) > maxMetadataSize || len(d.SourceDigest) > maxMetadataSize {
+			return errors.New("inputmigration: dictionary metadata too long")
 		}
 	}
 	for _, w := range b.Learning.Words {
@@ -312,15 +389,16 @@ func (b PersonalBaseline) Validate() error {
 		}
 	}
 	for _, r := range b.Shortcuts {
-		for _, a := range r.Apps {
-			if err := validateApp(a); err != nil {
-				return err
-			}
+		if err := validateShortcut(r); err != nil {
+			return err
 		}
 	}
 	for _, r := range b.AppRules {
-		if r.ID == "" || r.Action == "" {
+		if r.ID == "" || len(r.ID) > maxMetadataSize || len(r.InputSourceID) > maxMetadataSize {
 			return errors.New("inputmigration: invalid app rule")
+		}
+		if _, err := normalizedRuleMode(r); err != nil {
+			return err
 		}
 		for _, a := range r.Apps {
 			if err := validateApp(a); err != nil {
@@ -334,11 +412,25 @@ func (b PersonalBaseline) Validate() error {
 	return nil
 }
 func validDigest(v string) bool {
-	if len(v) != sha256.Size*2 {
+	if len(v) != sha256.Size*2 || v != strings.ToLower(v) {
 		return false
 	}
 	_, err := hex.DecodeString(v)
 	return err == nil
+}
+func validateMetadata(m map[string]FieldMetadata) error {
+	if m == nil || len(m) > maxMetadataSize {
+		return errors.New("inputmigration: missing field metadata")
+	}
+	for key, value := range m {
+		if strings.TrimSpace(key) == "" || len(key) > maxMetadataSize || len(value.Source) > maxMetadataSize {
+			return errors.New("inputmigration: invalid field metadata")
+		}
+		if value.Sensitivity != SensitivityPublic && value.Sensitivity != SensitivityPrivate && value.Sensitivity != SensitivitySecret {
+			return errors.New("inputmigration: invalid field sensitivity")
+		}
+	}
+	return nil
 }
 func (o DeviceOverlay) Validate() error {
 	if o.SchemaVersion != SchemaVersion || o.ProtocolVersion != MigrationProtocolVersion {
@@ -350,9 +442,43 @@ func (o DeviceOverlay) Validate() error {
 	if strings.TrimSpace(o.KeyboardLayout) == "" || strings.TrimSpace(o.InputSourceID) == "" || strings.TrimSpace(o.Backend) == "" {
 		return errors.New("inputmigration: incomplete overlay")
 	}
+	if len(o.InputSourceIDs) == 0 || len(o.InputSourceIDs) > maxCollectionSize || len(o.Shortcuts) > maxCollectionSize || len(o.AppRules) > maxCollectionSize || len(o.DeferredRules) > maxCollectionSize {
+		return errors.New("inputmigration: overlay collection too large or empty")
+	}
+	if err := validateMetadata(o.FieldMetadata); err != nil {
+		return err
+	}
+	for _, id := range o.InputSourceIDs {
+		if strings.TrimSpace(id) == "" || len(id) > maxMetadataSize {
+			return errors.New("inputmigration: invalid overlay input source")
+		}
+	}
+	for _, r := range o.Shortcuts {
+		if err := validateShortcut(r); err != nil {
+			return err
+		}
+	}
 	for _, r := range o.AppRules {
 		if r.ID == "" {
 			return errors.New("inputmigration: invalid overlay app rule")
+		}
+		if _, err := normalizedRuleMode(r); err != nil {
+			return err
+		}
+		for _, a := range r.Apps {
+			if err := validateApp(a); err != nil {
+				return err
+			}
+		}
+	}
+	for _, r := range o.DeferredRules {
+		if r.RuleID == "" || (r.State != "deferred" && r.State != "unsupported") || r.Reason == "" {
+			return errors.New("inputmigration: invalid deferred rule")
+		}
+	}
+	for key, p := range o.Permissions {
+		if key == "" || len(key) > maxMetadataSize || (p != PermissionGranted && p != PermissionDenied && p != PermissionUnknown) {
+			return errors.New("inputmigration: invalid overlay permission")
 		}
 	}
 	return nil
@@ -362,9 +488,19 @@ func marshalStrict(v any, validate func() error) ([]byte, error) {
 	if err := validate(); err != nil {
 		return nil, err
 	}
-	return json.Marshal(v)
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxJSONSize {
+		return nil, errors.New("inputmigration: JSON payload too large")
+	}
+	return data, nil
 }
 func unmarshalStrict(data []byte, v any, validate func() error) error {
+	if len(data) > maxJSONSize {
+		return errors.New("inputmigration: JSON payload too large")
+	}
 	dec := json.NewDecoder(strings.NewReader(string(data)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
@@ -373,8 +509,12 @@ func unmarshalStrict(data []byte, v any, validate func() error) error {
 	if err := validate(); err != nil {
 		return err
 	}
-	if dec.More() {
-		return errors.New("inputmigration: trailing JSON")
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("inputmigration: trailing JSON")
+		}
+		return fmt.Errorf("inputmigration: trailing JSON: %w", err)
 	}
 	return nil
 }
@@ -456,7 +596,7 @@ func GenerateOverlay(b PersonalBaseline, target DeviceCapabilities, deviceID str
 	o.Permissions, o.Display = copyPermissions(target.Permissions), target.Display
 	o.Backend = backendFor(target)
 	o.HookEnabled = target.HookCapability && o.Backend == "hook"
-	o.Shortcuts, o.AppRules = append([]ShortcutRule(nil), b.Shortcuts...), append([]AppRule(nil), b.AppRules...)
+	o.Shortcuts, o.AppRules = cloneShortcuts(b.Shortcuts), cloneAppRules(b.AppRules)
 	for _, r := range o.Shortcuts {
 		if r.RequiresHook && !target.HookCapability {
 			o.DeferredRules = append(o.DeferredRules, DeferredRule{RuleID: r.Chord, State: "unsupported", Reason: "target lacks hook capability"})
@@ -472,7 +612,7 @@ func GenerateOverlay(b PersonalBaseline, target DeviceCapabilities, deviceID str
 	if b.SourceDevice == nil {
 		add("/platform", CategoryPlatform, "unspecified", target.OS, "platform")
 	} else {
-		if !strings.EqualFold(b.SourceDevice.OS, target.OS) {
+		if normalizeOS(b.SourceDevice.OS) != normalizeOS(target.OS) {
 			add("/platform/os", CategoryPlatform, b.SourceDevice.OS, target.OS, "platform")
 		}
 		if b.SourceDevice.Arch != target.Arch {
@@ -495,9 +635,22 @@ func GenerateOverlay(b PersonalBaseline, target DeviceCapabilities, deviceID str
 		add("/display", CategoryDisplay, fmt.Sprintf("%dx%d", b.SourceDevice.Display.Width, b.SourceDevice.Display.Height), fmt.Sprintf("%dx%d", target.Display.Width, target.Display.Height), "display")
 	}
 	for _, r := range o.DeferredRules {
-		add("/shortcuts/"+r.RuleID, CategoryAppRule, "supported", r.State, "app-rule")
+		add("/shortcuts/"+safePathSegment(r.RuleID), CategoryAppRule, "supported", r.State, "app-rule")
 	}
 	return p, nil
+}
+func normalizeOS(os string) string {
+	os = strings.ToLower(strings.TrimSpace(os))
+	if os == "macos" {
+		return "darwin"
+	}
+	return os
+}
+func safePathSegment(v string) string {
+	if v == "" {
+		return "empty"
+	}
+	return digest(v)[:16]
 }
 func backendFor(c DeviceCapabilities) string {
 	if strings.EqualFold(c.OS, "windows") && c.NativeTSF {
@@ -521,7 +674,7 @@ func safeSummary(v string) string {
 	return digest(v)[:12]
 }
 func permissionSummary(c *DeviceCapabilities) string {
-	if c == nil {
+	if c == nil || len(c.Permissions) == 0 {
 		return "<none>"
 	}
 	keys := make([]string, 0, len(c.Permissions))
@@ -578,27 +731,112 @@ func MergeBaselines(source, target PersonalBaseline) (PersonalBaseline, []FieldC
 		return PersonalBaseline{}, nil, errors.New("inputmigration: account mismatch")
 	}
 	out := cloneBaseline(source)
+	out.FieldRevisions = copyRevisions(source.FieldRevisions)
 	conflicts := []FieldConflict{}
 	choose := func(path string, different bool, apply func()) {
+		sr, tr := source.FieldRevisions[path], target.FieldRevisions[path]
 		if !different {
+			out.FieldRevisions[path] = max(sr, tr)
 			return
 		}
-		sr, tr := source.FieldRevisions[path], target.FieldRevisions[path]
-		if tr >= sr {
+		if tr > sr {
+			// A newer target is already the result of a previous import. Do not
+			// manufacture a revision on every replay of an older source.
 			apply()
+			out.FieldRevisions[path] = tr
+			return
 		}
 		if tr == sr {
 			conflicts = append(conflicts, FieldConflict{Path: path, Source: "source", Target: "target", Winner: "target"})
+			apply()
+			// Equal-revision conflicts advance once; replaying the resulting
+			// baseline sees the newer revision and therefore converges.
+			out.FieldRevisions[path] = max(sr, tr) + 1
+			return
 		}
+		// Source is newer and remains the winner. Keeping its revision avoids
+		// manufacturing a new revision each time an older export is replayed.
+		out.FieldRevisions[path] = sr
 	}
 	choose("scheme", source.Scheme != target.Scheme, func() { out.Scheme = target.Scheme })
 	choose("candidateCount", source.CandidateCount != target.CandidateCount, func() { out.CandidateCount = target.CandidateCount })
 	choose("shiftToggleASCII", source.ShiftToggleASCII != target.ShiftToggleASCII, func() { out.ShiftToggleASCII = target.ShiftToggleASCII })
 	choose("fuzzyPinyin", !sameStringSet(source.FuzzyPinyin, target.FuzzyPinyin), func() { out.FuzzyPinyin = append([]string(nil), target.FuzzyPinyin...) })
+	choose("dictionaries", !sameJSON(source.Dictionaries, target.Dictionaries), func() { out.Dictionaries = mergeDictionaries(source, target, &conflicts) })
 	choose("learning", !sameLearning(source.Learning, target.Learning), func() { out.Learning = cloneLearning(target.Learning) })
-	choose("shortcuts", !sameJSON(source.Shortcuts, target.Shortcuts), func() { out.Shortcuts = append([]ShortcutRule(nil), target.Shortcuts...) })
-	choose("appRules", !sameJSON(source.AppRules, target.AppRules), func() { out.AppRules = append([]AppRule(nil), target.AppRules...) })
+	choose("shortcuts", !sameJSON(source.Shortcuts, target.Shortcuts), func() { out.Shortcuts = cloneShortcuts(target.Shortcuts) })
+	choose("appRules", !sameJSON(source.AppRules, target.AppRules), func() { out.AppRules = cloneAppRules(target.AppRules) })
 	return out, conflicts, out.Validate()
+}
+func max(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+func copyRevisions(in map[string]uint64) map[string]uint64 {
+	out := make(map[string]uint64, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+func cloneShortcuts(in []ShortcutRule) []ShortcutRule {
+	out := make([]ShortcutRule, len(in))
+	for i, r := range in {
+		out[i] = r
+		out[i].Apps = append([]StableApp(nil), r.Apps...)
+	}
+	return out
+}
+func cloneAppRules(in []AppRule) []AppRule {
+	out := make([]AppRule, len(in))
+	for i, r := range in {
+		out[i] = r
+		out[i].Apps = append([]StableApp(nil), r.Apps...)
+	}
+	return out
+}
+func mergeDictionaries(source, target PersonalBaseline, conflicts *[]FieldConflict) []DictionaryMetadata {
+	byID := map[string]DictionaryMetadata{}
+	for _, d := range source.Dictionaries {
+		byID[d.ID] = d
+	}
+	for _, d := range target.Dictionaries {
+		if old, ok := byID[d.ID]; ok && old.ContentHash != d.ContentHash {
+			winner := old
+			winnerName := "source"
+			if d.Revision >= old.Revision {
+				winner, winnerName = d, "target"
+			}
+			*conflicts = append(*conflicts, FieldConflict{Path: "/dictionaries/" + safePathSegment(d.ID), Source: old.ContentHash, Target: d.ContentHash, Winner: winnerName})
+			byID[d.ID] = winner
+			continue
+		}
+		// Same ID/content is an idempotent import; newer metadata is preferred.
+		if old, ok := byID[d.ID]; !ok || d.Revision >= old.Revision {
+			byID[d.ID] = d
+		}
+	}
+	// A content hash identifies the dictionary payload even when two stores
+	// assigned different IDs. Keep one deterministic representative.
+	byHash := map[string]DictionaryMetadata{}
+	for _, d := range byID {
+		if old, ok := byHash[d.ContentHash]; !ok || d.ID < old.ID {
+			byHash[d.ContentHash] = d
+		}
+	}
+	out := make([]DictionaryMetadata, 0, len(byHash))
+	for _, d := range byHash {
+		out = append(out, d)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ID != out[j].ID {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].ContentHash < out[j].ContentHash
+	})
+	return out
 }
 func cloneLearning(v LearningData) LearningData {
 	v.Words = append([]LearningEntry(nil), v.Words...)
