@@ -1923,6 +1923,10 @@ func (c *AppController) executeWorkflowContext(parent context.Context, workflowI
 		return fmt.Errorf("workflow %q is disabled", workflowID)
 	}
 
+	if err := validateWorkflowAdapter(workflow); err != nil {
+		c.workflowHUD(fmt.Sprintf("Workflow %s failed to plan: %v", workflowID, err))
+		return err
+	}
 	registry := c.workflowActionRegistry(cfg)
 	definition := workflowDefinition(workflow)
 	plan, err := automation.BuildExecutionPlanWithRegistry(definition, registry)
@@ -2013,6 +2017,51 @@ func (c *AppController) workflowActionRegistry(cfg config.ClavisConfig) workflow
 		register("script."+script.ID, action, automation.ProviderScript, script.Title)
 	}
 	return registry
+}
+
+// validateWorkflowAdapter rejects configuration values that the controller
+// cannot represent in automation.WorkflowDefinition. Config validation runs for
+// persisted files, but this boundary is also used by in-memory callers and
+// therefore must not rely on a prior config validation pass.
+func validateWorkflowAdapter(workflow config.Workflow) error {
+	if workflow.Execution != "" && workflow.Execution != config.WorkflowExecutionSequential {
+		return fmt.Errorf("workflow %q has unsupported execution mode %q (only %q is supported)", workflow.ID, workflow.Execution, config.WorkflowExecutionSequential)
+	}
+	if workflow.Failure != "" && workflow.Failure != config.WorkflowFailureStop && workflow.Failure != config.WorkflowFailureContinue && workflow.Failure != config.WorkflowFailureAbort {
+		return fmt.Errorf("workflow %q has unsupported failure mode %q", workflow.ID, workflow.Failure)
+	}
+	switch workflow.Output {
+	case "", config.WorkflowOutputReplace, config.WorkflowOutputInsert, config.WorkflowOutputClipboard, config.WorkflowOutputNotify, config.WorkflowOutputNone:
+	default:
+		return fmt.Errorf("workflow %q has unsupported output mode %q", workflow.ID, workflow.Output)
+	}
+
+	stepEnabled := make(map[string]bool, len(workflow.Steps))
+	for _, step := range workflow.Steps {
+		stepEnabled[step.ID] = step.Enabled
+	}
+	for _, step := range workflow.Steps {
+		if step.Execution != "" && step.Execution != config.WorkflowExecutionSequential {
+			return fmt.Errorf("workflow %q step %q has unsupported execution mode %q (only %q is supported)", workflow.ID, step.ID, step.Execution, config.WorkflowExecutionSequential)
+		}
+		if step.Failure != "" && step.Failure != config.WorkflowFailureStop && step.Failure != config.WorkflowFailureContinue && step.Failure != config.WorkflowFailureAbort {
+			return fmt.Errorf("workflow %q step %q has unsupported failure mode %q", workflow.ID, step.ID, step.Failure)
+		}
+		switch step.Output {
+		case "", config.WorkflowOutputReplace, config.WorkflowOutputNotify, config.WorkflowOutputNone:
+		default:
+			return fmt.Errorf("workflow %q step %q has unsupported output mode %q", workflow.ID, step.ID, step.Output)
+		}
+		if !step.Enabled {
+			continue
+		}
+		for _, dependency := range step.DependsOn {
+			if enabled, exists := stepEnabled[dependency]; exists && !enabled {
+				return fmt.Errorf("workflow %q step %q depends on disabled step %q", workflow.ID, step.ID, dependency)
+			}
+		}
+	}
+	return nil
 }
 
 func workflowDefinition(workflow config.Workflow) automation.WorkflowDefinition {

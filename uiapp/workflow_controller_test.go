@@ -92,6 +92,61 @@ func TestWorkflowProviderBindsInputAndStepOutputToCLIAndScript(t *testing.T) {
 	}
 }
 
+func TestValidateWorkflowAdapterRejectsDisabledDependency(t *testing.T) {
+	workflow := config.Workflow{
+		ID: "in-memory",
+		Steps: []config.WorkflowStep{
+			{ID: "disabled", Enabled: false},
+			{ID: "enabled", Enabled: true, DependsOn: []string{"disabled"}},
+		},
+	}
+	if err := validateWorkflowAdapter(workflow); err == nil || !strings.Contains(err.Error(), "depends on disabled step") {
+		t.Fatalf("validateWorkflowAdapter error = %v, want targeted disabled-step dependency error", err)
+	}
+}
+
+func TestValidateWorkflowAdapterRejectsUnsupportedModes(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*config.Workflow)
+		want   string
+	}{
+		{"workflow execution", func(w *config.Workflow) { w.Execution = "parallel" }, "unsupported execution mode"},
+		{"workflow failure", func(w *config.Workflow) { w.Failure = config.WorkflowFailureNotify }, "unsupported failure mode"},
+		{"workflow output", func(w *config.Workflow) { w.Output = "unknown" }, "unsupported output mode"},
+		{"step execution", func(w *config.Workflow) { w.Steps[0].Execution = "parallel" }, "unsupported execution mode"},
+		{"step failure", func(w *config.Workflow) { w.Steps[0].Failure = config.WorkflowFailureNotify }, "unsupported failure mode"},
+		{"step output", func(w *config.Workflow) { w.Steps[0].Output = config.WorkflowOutputInsert }, "unsupported output mode"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workflow := config.Workflow{ID: "in-memory", Steps: []config.WorkflowStep{{ID: "one", Enabled: true}}}
+			tt.mutate(&workflow)
+			if err := validateWorkflowAdapter(workflow); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("validateWorkflowAdapter error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateWorkflowAdapterAcceptsRunnerSupportedModes(t *testing.T) {
+	workflow := config.Workflow{
+		ID:        "supported",
+		Output:    config.WorkflowOutputNotify,
+		Failure:   config.WorkflowFailureStop,
+		Execution: config.WorkflowExecutionSequential,
+		Steps: []config.WorkflowStep{{
+			ID: "one", Enabled: true,
+			Output:    config.WorkflowOutputNotify,
+			Failure:   config.WorkflowFailureContinue,
+			Execution: config.WorkflowExecutionSequential,
+		}},
+	}
+	if err := validateWorkflowAdapter(workflow); err != nil {
+		t.Fatalf("validateWorkflowAdapter returned error: %v", err)
+	}
+}
+
 func TestApplyWorkflowOutputIgnoresDiscardedStepOutput(t *testing.T) {
 	var clipboard string
 	controller := &AppController{ClipboardWriter: func(value string) { clipboard = value }}
