@@ -281,6 +281,7 @@ const (
 	EffectRunWorkflow           EffectType = "run_workflow"
 	EffectStartAI               EffectType = "start_ai"
 	EffectCancelAI              EffectType = "cancel_ai"
+	EffectStopAll               EffectType = "stop_all"
 	EffectApplyAIOutput         EffectType = "apply_ai_output"
 	EffectCopyText              EffectType = "copy_text"
 	EffectPasteClipboardItem    EffectType = "paste_clipboard_item"
@@ -839,7 +840,7 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 			if wasComplete {
 				return next, []Effect{{Type: EffectClose}}
 			}
-			return next, []Effect{{Type: EffectCancelAI}, {Type: EffectClose}}
+			return next, []Effect{{Type: EffectStopAll}, {Type: EffectCancelAI}, {Type: EffectClose}}
 
 		case PhaseLeader:
 			if len(state.LeaderPath) == 0 {
