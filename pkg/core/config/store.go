@@ -43,14 +43,25 @@ type ConfigStore struct {
 	lastErrors   []LoadError
 	lastWarnings []ValidationIssue
 	savedDigests map[string][32]byte
+
+	// writeConfigFile is kept injectable for deterministic SaveAll failure tests;
+	// production stores always use atomicWriteConfigFile.
+	writeConfigFile func(string, ConfigFileKind, string) error
+}
+
+type savedConfigFileState struct {
+	kind    ConfigFileKind
+	exists  bool
+	content []byte
 }
 
 // NewConfigStore creates a ConfigStore rooted at dir with DefaultConfig().
 func NewConfigStore(dir string) *ConfigStore {
 	return &ConfigStore{
-		dir:          dir,
-		current:      DefaultConfig(),
-		savedDigests: make(map[string][32]byte),
+		dir:             dir,
+		current:         DefaultConfig(),
+		savedDigests:    make(map[string][32]byte),
+		writeConfigFile: atomicWriteConfigFile,
 	}
 }
 
@@ -197,17 +208,17 @@ func (s *ConfigStore) SaveMain(mainCfg MainConfig) error {
 		return err
 	}
 	encoded := mainCfg.Encode()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := atomicWriteConfigFile(s.dir, FileMain, encoded); err != nil {
 		return err
 	}
 	sum := sha256.Sum256([]byte(encoded))
-	s.mu.Lock()
 	s.ensureSavedDigestsLocked()
 	s.current.Main = mainCfg
 	s.lastErrors = nil
 	s.lastWarnings = collectWarningIssues(Validate(s.current))
 	s.savedDigests[string(FileMain)] = sum
-	s.mu.Unlock()
 	return nil
 }
 
@@ -250,17 +261,17 @@ func (s *ConfigStore) SaveSnippets(snippetsCfg SnippetsConfig) error {
 		return err
 	}
 	encoded := snippetsCfg.Encode()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := atomicWriteConfigFile(s.dir, FileSnippets, encoded); err != nil {
 		return err
 	}
 	sum := sha256.Sum256([]byte(encoded))
-	s.mu.Lock()
 	s.ensureSavedDigestsLocked()
 	s.current.Snippets = snippetsCfg
 	s.lastErrors = nil
 	s.lastWarnings = collectWarningIssues(Validate(s.current))
 	s.savedDigests[string(FileSnippets)] = sum
-	s.mu.Unlock()
 	return nil
 }
 
@@ -270,17 +281,17 @@ func (s *ConfigStore) SaveGlossary(glossaryCfg GlossaryConfig) error {
 		return err
 	}
 	encoded := glossaryCfg.Encode()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := atomicWriteConfigFile(s.dir, FileGlossary, encoded); err != nil {
 		return err
 	}
 	sum := sha256.Sum256([]byte(encoded))
-	s.mu.Lock()
 	s.ensureSavedDigestsLocked()
 	s.current.Glossary = glossaryCfg
 	s.lastErrors = nil
 	s.lastWarnings = collectWarningIssues(Validate(s.current))
 	s.savedDigests[string(FileGlossary)] = sum
-	s.mu.Unlock()
 	return nil
 }
 
@@ -289,15 +300,16 @@ func (s *ConfigStore) SavePrompts(cfg PromptsConfig) error {
 	if err := firstErrorIssue(ValidatePrompts(cfg)); err != nil {
 		return err
 	}
-	if err := atomicWriteConfigFile(s.dir, FilePrompts, cfg.Encode()); err != nil {
+	encoded := cfg.Encode()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := atomicWriteConfigFile(s.dir, FilePrompts, encoded); err != nil {
 		return err
 	}
-	s.mu.Lock()
 	s.ensureSavedDigestsLocked()
 	s.current.Prompts = cfg
 	s.lastErrors = nil
-	s.savedDigests[string(FilePrompts)] = sha256.Sum256([]byte(cfg.Encode()))
-	s.mu.Unlock()
+	s.savedDigests[string(FilePrompts)] = sha256.Sum256([]byte(encoded))
 	return nil
 }
 func (s *ConfigStore) SavePromptMarkdown(id, content string) error {
@@ -314,15 +326,16 @@ func (s *ConfigStore) SaveComponents(cfg ComponentsConfig) error {
 	if err := firstErrorIssue(ValidateComponents(cfg)); err != nil {
 		return err
 	}
-	if err := atomicWriteConfigFile(s.dir, FileComponents, cfg.Encode()); err != nil {
+	encoded := cfg.Encode()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := atomicWriteConfigFile(s.dir, FileComponents, encoded); err != nil {
 		return err
 	}
-	s.mu.Lock()
 	s.ensureSavedDigestsLocked()
 	s.current.Components = cfg
 	s.lastErrors = nil
-	s.savedDigests[string(FileComponents)] = sha256.Sum256([]byte(cfg.Encode()))
-	s.mu.Unlock()
+	s.savedDigests[string(FileComponents)] = sha256.Sum256([]byte(encoded))
 	return nil
 }
 
@@ -361,17 +374,17 @@ func (s *ConfigStore) SaveIMERules(imeRulesCfg IMERulesConfig) error {
 		return err
 	}
 	encoded := imeRulesCfg.Encode()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := atomicWriteConfigFile(s.dir, FileIMERules, encoded); err != nil {
 		return err
 	}
 	sum := sha256.Sum256([]byte(encoded))
-	s.mu.Lock()
 	s.ensureSavedDigestsLocked()
 	s.current.IMERules = imeRulesCfg
 	s.lastErrors = nil
 	s.lastWarnings = collectWarningIssues(Validate(s.current))
 	s.savedDigests[string(FileIMERules)] = sum
-	s.mu.Unlock()
 	return nil
 }
 
@@ -402,11 +415,38 @@ func (s *ConfigStore) SaveAll(cfg ClavisConfig) error {
 		{FileComponents, cfg.Components.Encode()},
 		{FileWorkflows, cfg.Workflows.Encode()},
 	}
+	// Snapshot every destination before changing any file. If a later atomic
+	// rename fails, restoring the files already committed below leaves disk at
+	// the same coherent version it had before SaveAll started.
+	states := make([]savedConfigFileState, len(files))
+	for i, f := range files {
+		path := filepath.Join(s.dir, string(f.kind))
+		content, err := os.ReadFile(path)
+		switch {
+		case err == nil:
+			states[i] = savedConfigFileState{kind: f.kind, exists: true, content: content}
+		case os.IsNotExist(err):
+			states[i] = savedConfigFileState{kind: f.kind}
+		default:
+			return fmt.Errorf("snapshot %s before SaveAll: %w", f.kind, err)
+		}
+	}
+
+	writer := s.writeConfigFile
+	if writer == nil {
+		writer = atomicWriteConfigFile
+	}
 	sums := make(map[string][32]byte, len(files))
+	written := 0
 	for _, f := range files {
-		if err := atomicWriteConfigFile(s.dir, f.kind, f.content); err != nil {
+		if err := writer(s.dir, f.kind, f.content); err != nil {
+			rollbackErr := rollbackConfigFiles(s.dir, states[:written], atomicWriteConfigFile)
+			if rollbackErr != nil {
+				return errors.Join(err, fmt.Errorf("rollback SaveAll: %w", rollbackErr))
+			}
 			return err
 		}
+		written++
 		sums[string(f.kind)] = sha256.Sum256([]byte(f.content))
 	}
 	warnings := collectWarningIssues(issues)
@@ -416,6 +456,27 @@ func (s *ConfigStore) SaveAll(cfg ClavisConfig) error {
 	s.lastWarnings = warnings
 	maps.Copy(s.savedDigests, sums)
 	return nil
+}
+
+func rollbackConfigFiles(dir string, states []savedConfigFileState, write func(string, ConfigFileKind, string) error) error {
+	var errs []error
+	for i := len(states) - 1; i >= 0; i-- {
+		state := states[i]
+		path := filepath.Join(dir, string(state.kind))
+		var err error
+		if state.exists {
+			err = write(dir, state.kind, string(state.content))
+		} else {
+			err = os.Remove(path)
+			if os.IsNotExist(err) {
+				err = nil
+			}
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("restore %s: %w", state.kind, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func atomicWriteFile(path, content string) error {
@@ -475,6 +536,12 @@ func atomicWriteConfigFile(dir string, kind ConfigFileKind, content string) erro
 // On any parse, decode, or validation error, it preserves the previous Current() config
 // and records errors in LastErrors(). Returns true if reload succeeded.
 func (s *ConfigStore) Reload() bool {
+	// Serialize the complete disk read and candidate installation with saves.
+	// Taking a snapshot without this lock permits a stale candidate to be
+	// installed after SaveAll has committed newer files.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	var errs []LoadError
 
 	mainCfg, ok := loadConfigFile(s.dir, FileMain, DecodeMainConfig, &errs)
@@ -507,9 +574,7 @@ func (s *ConfigStore) Reload() bool {
 	}
 
 	if len(errs) > 0 || !ok || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 || !ok7 || !ok8 {
-		s.mu.Lock()
 		s.lastErrors = errs
-		s.mu.Unlock()
 		return false
 	}
 
@@ -548,9 +613,7 @@ func (s *ConfigStore) Reload() bool {
 				KeyPath: issue.KeyPath,
 			}
 		}
-		s.mu.Lock()
 		s.lastErrors = loadErrs
-		s.mu.Unlock()
 		return false
 	}
 
@@ -559,14 +622,12 @@ func (s *ConfigStore) Reload() bool {
 	// out-of-range value; the running config gets the clamped one, so no view
 	// has to re-check the range.
 	candidate.Main.Appearance.StageIntensity = NormalizeStageIntensity(candidate.Main.Appearance.StageIntensity)
-	s.mu.Lock()
 	s.current = candidate
 	s.lastErrors = nil
 	s.lastWarnings = warningIssues
 	if diskHashes != nil {
 		s.savedDigests = diskHashes
 	}
-	s.mu.Unlock()
 	return true
 }
 
