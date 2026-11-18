@@ -682,6 +682,94 @@ func TestNestedRulesAreCopiedAndAppRuleContractIsStrict(t *testing.T) {
 	}
 }
 
+func TestLegacyV1CompatibilityNormalization(t *testing.T) {
+	b := baseline()
+	raw, err := MarshalBaseline(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := string(raw)
+	legacy = strings.Replace(legacy, `"scheme":"quanpin"`, `"scheme":"shuangpin"`, 1)
+	legacy = strings.Replace(legacy, `,"summaryOnly":true`, "", 1)
+	legacy = strings.Replace(legacy, `"action":"scheme:quanpin"`, `"action":"toggle-ime"`, 1)
+	got, err := UnmarshalBaseline([]byte(legacy))
+	if err != nil {
+		t.Fatalf("legacy v1 baseline rejected: %v", err)
+	}
+	if got.Scheme != "shuangpin" || got.legacyV1Scheme != "shuangpin" {
+		t.Fatalf("legacy scheme was not preserved/deferred: %+v", got)
+	}
+	if !got.Learning.SummaryOnly {
+		t.Fatal("legacy digest learning data was not normalized to summary-only")
+	}
+	if got.AppRules[0].Action != "toggle-ime" || got.AppRules[0].legacyV1Action != "toggle-ime" {
+		t.Fatalf("legacy action was not preserved/deferred: %+v", got.AppRules[0])
+	}
+	if _, err := MarshalBaseline(got); err != nil {
+		t.Fatalf("normalized legacy baseline failed round trip: %v", err)
+	}
+	preview, err := GenerateOverlay(got, windowsCaps(), "legacy-device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundLegacyDeferred := false
+	for _, rule := range preview.Overlay.DeferredRules {
+		if rule.RuleID == got.AppRules[0].ID && rule.State == "deferred" {
+			foundLegacyDeferred = true
+		}
+	}
+	if !foundLegacyDeferred {
+		t.Fatalf("legacy action was not explicitly deferred: %+v", preview.Overlay.DeferredRules)
+	}
+
+	bad := b
+	bad.Scheme = "shuangpin"
+	if _, err := MarshalBaseline(bad); err == nil {
+		t.Fatal("new baseline with unsupported scheme was accepted")
+	}
+	bad = b
+	bad.AppRules[0].Action = "toggle-ime"
+	if err := bad.Validate(); err == nil {
+		t.Fatal("new baseline with unsupported action was accepted")
+	}
+}
+
+func TestStrictJSONRejectsDuplicateKeysRecursively(t *testing.T) {
+	b := baseline()
+	raw, err := MarshalBaseline(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		data string
+	}{
+		{"top-level scheme", strings.Replace(string(raw), `"scheme":"quanpin"`, `"scheme":"quanpin","scheme":"quanpin"`, 1)},
+		{"nested app rule scheme", strings.Replace(string(raw), `"action":"scheme:quanpin"`, `"action":"scheme:quanpin","scheme":"quanpin","scheme":"quanpin"`, 1)},
+		{"nested learning summaryOnly", strings.Replace(string(raw), `"summaryOnly":true`, `"summaryOnly":true,"summaryOnly":true`, 1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := UnmarshalBaseline([]byte(tc.data)); err == nil || !strings.Contains(err.Error(), "duplicate JSON object key") {
+				t.Fatalf("duplicate key accepted or wrong error: %v", err)
+			}
+		})
+	}
+
+	o, err := GenerateOverlay(b, windowsCaps(), "duplicate-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oRaw, err := MarshalOverlay(o.Overlay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicateBackend := strings.Replace(string(oRaw), `"backend":"native-tsf"`, `"backend":"native-tsf","backend":"native-tsf"`, 1)
+	if _, err := UnmarshalOverlay([]byte(duplicateBackend)); err == nil || !strings.Contains(err.Error(), "duplicate JSON object key") {
+		t.Fatalf("nested backend duplicate accepted or wrong error: %v", err)
+	}
+}
+
 func TestStrictPayloadAndPreviewPrivacy(t *testing.T) {
 	b := baseline()
 	if _, err := UnmarshalBaseline([]byte(`{"schemaVersion":1} garbage`)); err == nil {

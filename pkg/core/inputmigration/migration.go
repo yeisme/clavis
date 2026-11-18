@@ -4,6 +4,7 @@
 package inputmigration
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -104,6 +105,10 @@ type AppRule struct {
 	Scheme         string      `json:"scheme,omitempty"`
 	InputSourceID  string      `json:"inputSourceId,omitempty"`
 	RestoreOnLeave bool        `json:"restoreOnLeave"`
+	// legacyV1Action records an unknown, non-empty action accepted only while
+	// importing a v1 payload. It is deliberately not serialized: the original
+	// Action value remains available for display and round-trip preservation.
+	legacyV1Action string
 	// Context is intentionally not represented. In particular, an app rule
 	// cannot carry a title, URL, document name, or password-field state.
 }
@@ -128,6 +133,11 @@ type PersonalBaseline struct {
 	AppRules         []AppRule                `json:"appRules,omitempty"`
 	FieldMetadata    map[string]FieldMetadata `json:"fieldMetadata"`
 	SourceDevice     *DeviceCapabilities      `json:"sourceDevice,omitempty"`
+	// legacyV1Scheme is set only by the v1 importer when Scheme is a non-empty
+	// value outside the current engine whitelist. Keeping it separate from the
+	// wire shape preserves old values without weakening validation for newly
+	// constructed baselines.
+	legacyV1Scheme string
 }
 
 // PermissionState is deliberately an enum: arbitrary permission details must
@@ -293,9 +303,6 @@ func normalizedRuleMode(r AppRule) (string, error) {
 	mode := strings.TrimSpace(r.Mode)
 	if r.Action != "" {
 		// Compatibility conversion for the old portable action representation.
-		// Action is still validated when Mode is present: accepting Mode while
-		// ignoring a conflicting or malformed legacy Action would bypass the
-		// rule contract.
 		actionMode := ""
 		if strings.HasPrefix(r.Action, "scheme:") {
 			actionScheme := strings.TrimPrefix(r.Action, "scheme:")
@@ -351,7 +358,21 @@ func validateAppRule(r AppRule) error {
 	if strings.TrimSpace(r.ID) == "" || len(r.ID) > maxMetadataSize || len(r.InputSourceID) > maxMetadataSize || len(r.Action) > maxMetadataSize || len(r.Mode) > maxMetadataSize || len(r.Scheme) > maxMetadataSize || len(r.Apps) > maxCollectionSize {
 		return errors.New("inputmigration: invalid app rule")
 	}
-	if _, err := normalizedRuleMode(r); err != nil {
+	if r.legacyV1Action != "" {
+		if r.Action != r.legacyV1Action || strings.TrimSpace(r.Action) == "" {
+			return errors.New("inputmigration: invalid legacy app rule action")
+		}
+		if r.Scheme != "" && !validScheme(r.Scheme) {
+			return fmt.Errorf("inputmigration: unknown app rule scheme %q", r.Scheme)
+		}
+		if r.Mode != "" {
+			switch r.Mode {
+			case "ascii", "native", "keep":
+			default:
+				return fmt.Errorf("inputmigration: unknown app rule mode %q", r.Mode)
+			}
+		}
+	} else if _, err := normalizedRuleMode(r); err != nil {
 		return err
 	}
 	for _, a := range r.Apps {
@@ -399,7 +420,7 @@ func (b PersonalBaseline) Validate() error {
 	if strings.TrimSpace(b.AccountID) == "" || b.Scope != "personal" {
 		return errors.New("inputmigration: invalid baseline scope")
 	}
-	if !validScheme(b.Scheme) || b.CandidateCount < 1 || b.CandidateCount > 99 {
+	if (!validScheme(b.Scheme) && (b.legacyV1Scheme == "" || b.legacyV1Scheme != b.Scheme)) || b.CandidateCount < 1 || b.CandidateCount > 99 {
 		return errors.New("inputmigration: invalid input-engine settings")
 	}
 	if len(b.FuzzyPinyin) > maxCollectionSize || len(b.Dictionaries) > maxCollectionSize || len(b.Shortcuts) > maxCollectionSize || len(b.AppRules) > maxCollectionSize {
@@ -633,10 +654,16 @@ func unmarshalStrict(data []byte, v any, validate func() error) error {
 	if len(data) > maxJSONSize {
 		return errors.New("inputmigration: JSON payload too large")
 	}
-	dec := json.NewDecoder(strings.NewReader(string(data)))
+	if err := rejectDuplicateKeys(data); err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("inputmigration: invalid JSON: %w", err)
+	}
+	if err := normalizeLegacyPayload(data, v); err != nil {
+		return err
 	}
 	if err := validate(); err != nil {
 		return err
@@ -649,6 +676,141 @@ func unmarshalStrict(data []byte, v any, validate func() error) error {
 		return fmt.Errorf("inputmigration: trailing JSON: %w", err)
 	}
 	return nil
+}
+
+// rejectDuplicateKeys walks JSON tokens instead of decoding objects into maps.
+// This preserves the normal struct decoder's type and unknown-field checks,
+// while making duplicate keys (including nested keys) an explicit error.
+func rejectDuplicateKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if err := scanJSONValue(dec); err != nil {
+		return fmt.Errorf("inputmigration: invalid JSON: %w", err)
+	}
+	return nil
+}
+
+func scanJSONValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	switch delimiter := tok.(type) {
+	case json.Delim:
+		switch delimiter {
+		case '{':
+			seen := map[string]struct{}{}
+			for dec.More() {
+				key, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				name, ok := key.(string)
+				if !ok {
+					return errors.New("object key is not a string")
+				}
+				if _, exists := seen[name]; exists {
+					return fmt.Errorf("duplicate JSON object key %q", name)
+				}
+				seen[name] = struct{}{}
+				if err := scanJSONValue(dec); err != nil {
+					return err
+				}
+			}
+			end, err := dec.Token()
+			if err != nil || end != json.Delim('}') {
+				if err != nil {
+					return err
+				}
+				return errors.New("object did not end")
+			}
+		case '[':
+			for dec.More() {
+				if err := scanJSONValue(dec); err != nil {
+					return err
+				}
+			}
+			end, err := dec.Token()
+			if err != nil || end != json.Delim(']') {
+				if err != nil {
+					return err
+				}
+				return errors.New("array did not end")
+			}
+		default:
+			return errors.New("unexpected JSON delimiter")
+		}
+	}
+	return nil
+}
+
+func normalizeLegacyPayload(data []byte, v any) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return fmt.Errorf("inputmigration: invalid JSON object: %w", err)
+	}
+	var version uint16
+	if raw, ok := fields["schemaVersion"]; ok {
+		if err := json.Unmarshal(raw, &version); err != nil {
+			return nil // the strict struct decoder reports the useful type error
+		}
+	}
+	if version != SchemaVersion {
+		return nil
+	}
+	normalizeBaseline := func(b *PersonalBaseline, object map[string]json.RawMessage) {
+		if raw, ok := object["scheme"]; ok && !validScheme(b.Scheme) && b.Scheme != "" {
+			b.legacyV1Scheme = b.Scheme
+			_ = raw
+		}
+		if raw, ok := object["learning"]; ok {
+			var learning map[string]json.RawMessage
+			if json.Unmarshal(raw, &learning) == nil {
+				if _, present := learning["summaryOnly"]; !present && (len(b.Learning.Words) > 0 || len(b.Learning.Bigrams) > 0 || len(b.Learning.Aggregates) > 0) {
+					b.Learning.SummaryOnly = true
+				}
+			}
+		}
+		normalizeRuleActions(b.AppRules, object["appRules"])
+	}
+	switch x := v.(type) {
+	case *PersonalBaseline:
+		normalizeBaseline(x, fields)
+	case *DeviceOverlay:
+		normalizeRuleActions(x.AppRules, fields["appRules"])
+	case *Export:
+		var baselineFields map[string]json.RawMessage
+		if raw, ok := fields["baseline"]; ok && json.Unmarshal(raw, &baselineFields) == nil {
+			normalizeBaseline(&x.Baseline, baselineFields)
+		}
+		if x.Overlay != nil {
+			var overlayFields map[string]json.RawMessage
+			if raw, ok := fields["overlay"]; ok && json.Unmarshal(raw, &overlayFields) == nil {
+				normalizeRuleActions(x.Overlay.AppRules, overlayFields["appRules"])
+			}
+		}
+	}
+	return nil
+}
+
+func normalizeRuleActions(rules []AppRule, raw json.RawMessage) {
+	if len(rules) == 0 || len(raw) == 0 {
+		return
+	}
+	var encoded []json.RawMessage
+	if json.Unmarshal(raw, &encoded) != nil {
+		return
+	}
+	for i := range rules {
+		if i >= len(encoded) || rules[i].Action == "" || rules[i].Action == "ascii" || rules[i].Action == "native" || rules[i].Action == "keep" || strings.HasPrefix(rules[i].Action, "scheme:") {
+			continue
+		}
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(encoded[i], &fields) == nil {
+			if _, present := fields["action"]; present {
+				rules[i].legacyV1Action = rules[i].Action
+			}
+		}
+	}
 }
 func MarshalBaseline(b PersonalBaseline) ([]byte, error) { return marshalStrict(b, b.Validate) }
 func UnmarshalBaseline(data []byte) (PersonalBaseline, error) {
@@ -740,12 +902,23 @@ func cloneBaseline(b PersonalBaseline) PersonalBaseline {
 	raw, _ := json.Marshal(b)
 	var out PersonalBaseline
 	_ = json.Unmarshal(raw, &out)
+	out.legacyV1Scheme = b.legacyV1Scheme
+	for i := range out.AppRules {
+		if i < len(b.AppRules) {
+			out.AppRules[i].legacyV1Action = b.AppRules[i].legacyV1Action
+		}
+	}
 	return out
 }
 func cloneOverlay(o DeviceOverlay) DeviceOverlay {
 	raw, _ := json.Marshal(o)
 	var out DeviceOverlay
 	_ = json.Unmarshal(raw, &out)
+	for i := range out.AppRules {
+		if i < len(o.AppRules) {
+			out.AppRules[i].legacyV1Action = o.AppRules[i].legacyV1Action
+		}
+	}
 	return out
 }
 
@@ -773,7 +946,18 @@ func GenerateOverlay(b PersonalBaseline, target DeviceCapabilities, deviceID str
 	o.Backend = backendFor(target)
 	o.HookEnabled = target.HookCapability && o.Backend == "hook"
 	o.Shortcuts = cloneShortcuts(b.Shortcuts)
+	if b.legacyV1Scheme != "" && b.Scheme == b.legacyV1Scheme {
+		o.DeferredRules = append(o.DeferredRules, DeferredRule{
+			RuleID: "scheme",
+			State:  "deferred",
+			Reason: "legacy scheme " + safeSummary(b.legacyV1Scheme) + " is unsupported",
+		})
+	}
 	for _, r := range b.AppRules {
+		if r.legacyV1Action != "" && r.Action == r.legacyV1Action {
+			o.DeferredRules = append(o.DeferredRules, DeferredRule{RuleID: r.ID, State: "deferred", Reason: "legacy action " + safeSummary(r.Action) + " is unsupported"})
+			continue
+		}
 		if r.InputSourceID != "" && !containsString(target.InputSourceIDs, r.InputSourceID) {
 			o.DeferredRules = append(o.DeferredRules, DeferredRule{
 				RuleID: r.ID,
@@ -823,7 +1007,7 @@ func GenerateOverlay(b PersonalBaseline, target DeviceCapabilities, deviceID str
 	}
 	for _, r := range o.DeferredRules {
 		path := "/shortcuts/" + safePathSegment(r.RuleID)
-		if strings.HasPrefix(r.Reason, "target lacks input source") {
+		if strings.HasPrefix(r.Reason, "target lacks input source") || strings.HasPrefix(r.Reason, "legacy action") {
 			path = "/app-rules/" + safePathSegment(r.RuleID)
 		}
 		add(path, CategoryAppRule, "supported", r.State, r.Reason)
