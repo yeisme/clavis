@@ -1350,6 +1350,7 @@ type MainConfig struct {
 	SelectionBar SelectionBarConfig `json:"selectionBar"`
 	Daemon       DaemonConfig       `json:"daemon"`
 	CLI          CLIConfig          `json:"cli"`
+	MCP          MCPConfig          `json:"mcp"`
 }
 
 func DefaultMainConfig() MainConfig {
@@ -1364,6 +1365,7 @@ func DefaultMainConfig() MainConfig {
 		SelectionBar: DefaultSelectionBarConfig(),
 		Daemon:       DefaultDaemonConfig(),
 		CLI:          DefaultCLIConfig(),
+		MCP:          DefaultMCPConfig(),
 	}
 }
 
@@ -1418,6 +1420,10 @@ func MainConfigFromTOML(tbl *toml.Table) (MainConfig, error) {
 	if err != nil {
 		return MainConfig{}, err
 	}
+	mcpTbl, _, err := optionalTable(tbl, "mcp", "")
+	if err != nil {
+		return MainConfig{}, err
+	}
 
 	trigger, err := decodeTriggerConfig(triggerTbl, "trigger")
 	if err != nil {
@@ -1459,7 +1465,11 @@ func MainConfigFromTOML(tbl *toml.Table) (MainConfig, error) {
 	if err != nil {
 		return MainConfig{}, err
 	}
-	return MainConfig{Trigger: trigger, Keymap: keymap, Appearance: appearance, AI: aiCfg, Clipboard: clipboard, IME: ime, InputEngine: inputEngine, SelectionBar: selectionBar, Daemon: daemon, CLI: cli}, nil
+	mcp, err := decodeMCPConfig(mcpTbl, "mcp")
+	if err != nil {
+		return MainConfig{}, err
+	}
+	return MainConfig{Trigger: trigger, Keymap: keymap, Appearance: appearance, AI: aiCfg, Clipboard: clipboard, IME: ime, InputEngine: inputEngine, SelectionBar: selectionBar, Daemon: daemon, CLI: cli, MCP: mcp}, nil
 }
 
 // Encode serializes MainConfig to deterministic TOML.
@@ -1475,5 +1485,6 @@ func (c MainConfig) Encode() string {
 	root.Set("selection_bar", toml.TableVal(c.SelectionBar.toTOML()))
 	root.Set("daemon", toml.TableVal(c.Daemon.toTOML()))
 	root.Set("cli", toml.TableVal(c.CLI.toTOML()))
+	root.Set("mcp", toml.TableVal(c.MCP.toTOML()))
 	return toml.Encode(root)
 }

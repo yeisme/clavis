@@ -81,6 +81,24 @@ default_input_source_id = "`+WindowsDefaultInputSourceID+`"`, 1)
 
 const defaultMainTOML = `# Clavis main configuration
 
+# Optional MCP servers. Tool calls are denied unless explicitly allowed.
+[mcp]
+enabled = false
+# [[mcp.servers]]
+# id = "local-tools"
+# name = "Local tools"
+# enabled = true
+# transport = "stdio" # "stdio" or "http"
+# command = "/absolute/path/to/server"
+# args = []
+# environment = ["KEY=VALUE"]
+# working_dir = "/absolute/path"
+# timeout_seconds = 60
+# max_concurrency = 4
+# allowed_tools = ["*"]
+# opt_in = false
+# auto_start = false
+
 [trigger]
 # Primary leader key trigger (e.g. "right_option", "right_alt", "right_command", "right_win", "caps_lock")
 leader_key = "right_option"
