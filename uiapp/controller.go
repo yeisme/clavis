@@ -1896,8 +1896,6 @@ func (c *AppController) injectWorkflowTextAsync(text string, deleteCount, cursor
 	}()
 }
 
-func (c *AppController) writeClipboardText(text string) {
-func (c *AppController) writeClipboardText(text string) {
 func (c *AppController) writeClipboardText(text string) error {
 	c.mu.Lock()
 	writer := c.ClipboardWriter

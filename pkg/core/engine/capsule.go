@@ -271,7 +271,7 @@ type Event struct {
 type EffectType string
 
 const (
-	EffectPresentCapsule       EffectType = "present_capsule"
+	EffectPresentCapsule EffectType = "present_capsule"
 	// EffectActivateClipboardItem is the domain-level single-click operation.
 	// Consumers execute its ordered contract: pin (when requested), write the
 	// system clipboard, then present the preview.
@@ -292,7 +292,24 @@ const (
 
 // Effect describes a side effect that the host/coordinator should perform.
 type Effect struct {
-	ClipboardActivation *ClipboardActivation `json:"clipboardActivation,omitempty"`
+	Type                EffectType             `json:"type"`
+	Action              *config.LeaderAction   `json:"action,omitempty"`
+	WorkflowID          string                 `json:"workflowId,omitempty"`
+	Context             *CapsuleContext        `json:"context,omitempty"`
+	Mode                string                 `json:"mode,omitempty"`
+	Prompt              string                 `json:"prompt,omitempty"`
+	SourceText          string                 `json:"sourceText,omitempty"`
+	History             []ChatTurn             `json:"history,omitempty"`
+	ProfileID           string                 `json:"profileId,omitempty"`
+	Text                string                 `json:"text,omitempty"`
+	ClipboardID         string                 `json:"clipboardId,omitempty"`
+	ClipboardContent    string                 `json:"clipboardContent,omitempty"`
+	ClipboardMedia      *ClipboardMedia        `json:"clipboardMedia,omitempty"`
+	IsPinned            bool                   `json:"isPinned,omitempty"`
+	IMEMode             config.IMEMode         `json:"imeMode,omitempty"`
+	PromptTemplate      *config.PromptTemplate `json:"promptTemplate,omitempty"`
+	OptimizerPreset     string                 `json:"optimizerPreset,omitempty"`
+	ClipboardActivation *ClipboardActivation   `json:"clipboardActivation,omitempty"`
 }
 
 // ClipboardActivation is the portable effect contract for a single-click
@@ -315,7 +332,6 @@ type ClipboardActivation struct {
 	PinBeforeWrite bool                      `json:"pinBeforeWrite"`
 	PresentPreview bool                      `json:"presentPreview"`
 	Generation     uint64                    `json:"generation,omitempty"`
-}
 }
 
 // StateMachine wraps State + ClavisConfig with a stateful Handle method.
