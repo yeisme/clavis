@@ -43,14 +43,41 @@ func Fingerprint(parts ...string) string {
 // ParseStructuredOutput validates JSON syntax and a conservative JSON-schema subset.
 // Callers must check the error before handing output to automation.
 func ParseStructuredOutput(raw string, schema map[string]any) (any, error) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
 	var value any
-	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+	if err := decoder.Decode(&value); err != nil {
 		return nil, fmt.Errorf("structured_output_invalid_json: %w", err)
 	}
 	if err := validateSchema(value, schema, "$"); err != nil {
 		return nil, fmt.Errorf("structured_output_schema_mismatch: %w", err)
 	}
-	return value, nil
+	return normalizeJSONNumbers(value), nil
+}
+
+func normalizeJSONNumbers(value any) any {
+	switch v := value.(type) {
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			return i
+		}
+		if f, err := v.Float64(); err == nil {
+			return f
+		}
+		return v.String()
+	case map[string]any:
+		for key, child := range v {
+			v[key] = normalizeJSONNumbers(child)
+		}
+		return v
+	case []any:
+		for i, child := range v {
+			v[i] = normalizeJSONNumbers(child)
+		}
+		return v
+	default:
+		return value
+	}
 }
 func validateSchema(v any, s map[string]any, path string) error {
 	if err := validateSchemaDefinition(s, path); err != nil {
@@ -121,8 +148,17 @@ func validateSchema(v any, s map[string]any, path string) error {
 			return fmt.Errorf("%s must be number", path)
 		}
 	case "integer":
-		n, ok := v.(float64)
-		if !ok || math.Trunc(n) != n {
+		switch n := v.(type) {
+		case json.Number:
+			if _, err := n.Int64(); err != nil {
+				return fmt.Errorf("%s must be integer", path)
+			}
+		case int64:
+		case float64:
+			if math.Trunc(n) != n {
+				return fmt.Errorf("%s must be integer", path)
+			}
+		default:
 			return fmt.Errorf("%s must be integer", path)
 		}
 	case "boolean":

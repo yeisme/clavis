@@ -56,8 +56,8 @@ func trimRunes(s string, max int) string {
 var (
 	mcpPrivateKeyPattern = regexp.MustCompile(`(?is)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----`)
 	mcpBearerPattern     = regexp.MustCompile(`(?i)(\b(?:authorization\s*:\s*bearer|bearer)\s+)[^\s,;]+`)
-	mcpJSONBearerPattern = regexp.MustCompile(`(?i)("authorization"\s*:\s*")bearer\s+[^"]*(")`)
-	mcpSecretPattern     = regexp.MustCompile(`(?i)((?:"|')?(?:api[_-]?key|access[_-]?token|token|secret|password|passwd)(?:"|')?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&]+)`)
+	mcpJSONAuthPattern   = regexp.MustCompile(`(?i)("(?:authorization|cookie)"\s*:\s*")(?:\\.|[^"\\])*(")`)
+	mcpSecretPattern     = regexp.MustCompile(`(?i)((?:"|')?(?:api[_-]?key|access[_-]?token|token|secret|password|passwd)(?:"|')?\s*[:=]\s*)((?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&]+))`)
 )
 
 func sanitizeMCPResource(raw string, maxRunes int) string {
@@ -65,7 +65,7 @@ func sanitizeMCPResource(raw string, maxRunes int) string {
 		maxRunes = 2048
 	}
 	clean := mcpPrivateKeyPattern.ReplaceAllString(raw, "[REDACTED PRIVATE KEY]")
-	clean = mcpJSONBearerPattern.ReplaceAllString(clean, "${1}[REDACTED]${2}")
+	clean = mcpJSONAuthPattern.ReplaceAllString(clean, "${1}[REDACTED]${2}")
 	clean = mcpBearerPattern.ReplaceAllString(clean, "${1}[REDACTED]")
 	clean = mcpSecretPattern.ReplaceAllString(clean, "${1}[REDACTED]")
 	return strings.TrimSpace(trimRunes(clean, maxRunes))

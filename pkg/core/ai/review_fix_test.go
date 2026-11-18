@@ -18,9 +18,9 @@ func TestIsKeylessAllowedRequiresLocalEndpoint(t *testing.T) {
 }
 
 func TestSanitizeMCPResourceRedactsJSONSecrets(t *testing.T) {
-	raw := `{"apiKey": "secret", "Authorization": "Bearer bearer-secret", "token": "abc"}`
+	raw := `{"apiKey": "secret", "authorization": "Basic dXNlcjpwYXNz", "token": "abc\"TAIL", "cookie": "session=abc"}`
 	got := sanitizeMCPResource(raw, 2048)
-	for _, secret := range []string{"secret", "bearer-secret", "abc"} {
+	for _, secret := range []string{"secret", "dXNlcjpwYXNz", "abc\\\"TAIL", "session=abc"} {
 		if strings.Contains(got, secret) {
 			t.Fatalf("secret %q remained: %s", secret, got)
 		}
@@ -39,5 +39,12 @@ func TestParseStructuredOutputEnforcesIntegerAndEnum(t *testing.T) {
 	}
 	if _, err := ParseStructuredOutput(`"open"`, map[string]any{"type": "string", "enum": []any{"open", "closed"}}); err != nil {
 		t.Fatalf("valid enum rejected: %v", err)
+	}
+	got, err := ParseStructuredOutput(`9007199254740993`, map[string]any{"type": "integer"})
+	if err != nil {
+		t.Fatalf("large integer rejected: %v", err)
+	}
+	if got != int64(9007199254740993) {
+		t.Fatalf("large integer precision lost: %#v", got)
 	}
 }
