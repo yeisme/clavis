@@ -110,11 +110,12 @@ type ActionInvocation struct {
 // ActionResult is a provider-neutral result envelope. Error is a string so the
 // value can be marshalled without depending on a provider's error type.
 type ActionResult struct {
-	ActionID string         `json:"actionId"`
-	Status   ResultStatus   `json:"status"`
-	Output   any            `json:"output,omitempty"`
-	Error    string         `json:"error,omitempty"`
-	Metadata map[string]any `json:"metadata,omitempty"`
+	ActionID      string         `json:"actionId"`
+	Status        ResultStatus   `json:"status"`
+	Output        any            `json:"output,omitempty"`
+	Error         string         `json:"error,omitempty"`
+	ErrorCategory string         `json:"errorCategory,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
 }
 
 // WorkflowInput declares a named workflow input.

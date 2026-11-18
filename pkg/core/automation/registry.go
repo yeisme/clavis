@@ -59,6 +59,7 @@ type Descriptor struct {
 	Kind         DescriptorKind              `json:"kind"`
 	Provider     string                      `json:"provider"`
 	Availability ProviderAvailability        `json:"availability"`
+	OutputSchema map[string]any              `json:"outputSchema,omitempty"`
 	Action       *config.LeaderAction        `json:"action,omitempty"`
 	Script       *config.ScriptComponentSpec `json:"script,omitempty"`
 	Workflow     any                         `json:"workflow,omitempty"`
@@ -355,6 +356,9 @@ func (r *Registry) Lookup(id string) (Descriptor, bool) { return r.Get(id) }
 func (r *Registry) GetDescriptor(id string) (Descriptor, bool) { return r.Get(id) }
 
 func cloneDescriptor(descriptor Descriptor) Descriptor {
+	if descriptor.OutputSchema != nil {
+		descriptor.OutputSchema = cloneValue(descriptor.OutputSchema).(map[string]any)
+	}
 	descriptor.Action = cloneActionPtrValue(descriptor.Action)
 	descriptor.Script = cloneScriptPtrValue(descriptor.Script)
 	return descriptor
@@ -380,6 +384,33 @@ func cloneActionPtrValue(action *config.LeaderAction) *config.LeaderAction {
 
 func cloneScriptPtr(script config.ScriptComponentSpec) *config.ScriptComponentSpec {
 	return cloneScriptPtrValue(&script)
+}
+
+// OutputSchema implements SchemaResolver for registry descriptors.
+func (r *Registry) OutputSchema(actionID string) (map[string]any, bool) {
+	if r == nil {
+		return nil, false
+	}
+	descriptor, ok := r.Get(actionID)
+	if !ok || descriptor.OutputSchema == nil {
+		return nil, false
+	}
+	return cloneValue(descriptor.OutputSchema).(map[string]any), true
+}
+
+// NewRegistrySchemaResolver adapts any ActionRegistry, including Registry and
+// MapActionRegistry, to the runner's output-schema resolver seam.
+func NewRegistrySchemaResolver(registry ActionRegistry) SchemaResolver {
+	if resolver, ok := registry.(SchemaResolver); ok {
+		return resolver
+	}
+	return SchemaResolverFunc(func(actionID string) (map[string]any, bool) {
+		descriptor, ok := lookupAction(registry, actionID)
+		if !ok || descriptor.OutputSchema == nil {
+			return nil, false
+		}
+		return cloneValue(descriptor.OutputSchema).(map[string]any), true
+	})
 }
 
 func cloneScriptPtrValue(script *config.ScriptComponentSpec) *config.ScriptComponentSpec {
@@ -436,10 +467,14 @@ func adaptDescriptor(value any, kind DescriptorKind, provider string) (Descripto
 	if strings.TrimSpace(id) == "" {
 		return Descriptor{}, false
 	}
-	return Descriptor{
+	descriptor := Descriptor{
 		ID: id, Name: fieldString("Name"), Description: fieldString("Description"),
 		Kind: kind, Provider: firstNonEmpty(fieldString("Provider"), provider), Workflow: value,
-	}, true
+	}
+	if field := v.FieldByName("OutputSchema"); field.IsValid() && field.CanInterface() && field.Type() == reflect.TypeOf(map[string]any{}) && !field.IsNil() {
+		descriptor.OutputSchema = cloneValue(field.Interface()).(map[string]any)
+	}
+	return descriptor, true
 }
 
 func firstNonEmpty(values ...string) string {
