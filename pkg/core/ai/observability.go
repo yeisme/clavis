@@ -5,7 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math"
+	"io"
+	"math/big"
 	"reflect"
 	"strings"
 	"time"
@@ -49,6 +50,9 @@ func ParseStructuredOutput(raw string, schema map[string]any) (any, error) {
 	if err := decoder.Decode(&value); err != nil {
 		return nil, fmt.Errorf("structured_output_invalid_json: %w", err)
 	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("structured_output_invalid_json: trailing data")
+	}
 	if err := validateSchema(value, schema, "$"); err != nil {
 		return nil, fmt.Errorf("structured_output_schema_mismatch: %w", err)
 	}
@@ -87,7 +91,7 @@ func validateSchema(v any, s map[string]any, path string) error {
 		values, _ := raw.([]any)
 		matched := false
 		for _, candidate := range values {
-			if reflect.DeepEqual(v, candidate) {
+			if jsonValuesEqual(v, candidate) {
 				matched = true
 				break
 			}
@@ -144,21 +148,11 @@ func validateSchema(v any, s map[string]any, path string) error {
 			return fmt.Errorf("%s must be string", path)
 		}
 	case "number":
-		if _, ok := v.(float64); !ok {
+		if !isJSONNumber(v) {
 			return fmt.Errorf("%s must be number", path)
 		}
 	case "integer":
-		switch n := v.(type) {
-		case json.Number:
-			if _, err := n.Int64(); err != nil {
-				return fmt.Errorf("%s must be integer", path)
-			}
-		case int64:
-		case float64:
-			if math.Trunc(n) != n {
-				return fmt.Errorf("%s must be integer", path)
-			}
-		default:
+		if !isJSONInteger(v) {
 			return fmt.Errorf("%s must be integer", path)
 		}
 	case "boolean":
@@ -174,6 +168,44 @@ func validateSchema(v any, s map[string]any, path string) error {
 		return fmt.Errorf("%s uses unsupported schema type %q", path, typ)
 	}
 	return nil
+}
+
+func jsonValuesEqual(left any, right any) bool {
+	if reflect.DeepEqual(left, right) {
+		return true
+	}
+	leftNumber, leftOK := numericBigFloat(left)
+	rightNumber, rightOK := numericBigFloat(right)
+	return leftOK && rightOK && leftNumber.Cmp(rightNumber) == 0
+}
+
+func isJSONNumber(value any) bool {
+	_, ok := numericBigFloat(value)
+	return ok
+}
+
+func isJSONInteger(value any) bool {
+	number, ok := numericBigFloat(value)
+	if !ok {
+		return false
+	}
+	return number.IsInt()
+}
+
+func numericBigFloat(value any) (*big.Float, bool) {
+	switch n := value.(type) {
+	case json.Number:
+		number, _, err := big.ParseFloat(n.String(), 10, 256, big.ToNearestEven)
+		return number, err == nil
+	case int, int8, int16, int32, int64:
+		return new(big.Float).SetInt64(reflect.ValueOf(n).Int()), true
+	case uint, uint8, uint16, uint32, uint64:
+		return new(big.Float).SetUint64(reflect.ValueOf(n).Uint()), true
+	case float32, float64:
+		return big.NewFloat(reflect.ValueOf(n).Float()), true
+	default:
+		return nil, false
+	}
 }
 
 func validateSchemaDefinition(s map[string]any, path string) error {
