@@ -10,10 +10,16 @@ import (
 
 // AuditEvent intentionally stores references, fingerprints and classifications only.
 type AuditEvent struct {
-	At                                     time.Time `json:"at"`
-	Actor, Profile, Template, Target, Tool string    `json:"actor,omitempty"`
-	InputFingerprint                       string    `json:"inputFingerprint,omitempty"`
-	Summary, Status, ErrorCategory         string    `json:"summary,omitempty"`
+	At               time.Time `json:"at"`
+	Actor            string    `json:"actor,omitempty"`
+	Profile          string    `json:"profile,omitempty"`
+	Template         string    `json:"template,omitempty"`
+	Target           string    `json:"target,omitempty"`
+	Tool             string    `json:"tool,omitempty"`
+	InputFingerprint string    `json:"inputFingerprint,omitempty"`
+	Summary          string    `json:"summary,omitempty"`
+	Status           string    `json:"status,omitempty"`
+	ErrorCategory    string    `json:"errorCategory,omitempty"`
 }
 type AuditLog struct {
 	mu     sync.Mutex
