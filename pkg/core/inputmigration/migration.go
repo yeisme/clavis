@@ -342,6 +342,15 @@ func validateApp(a StableApp) error {
 	}
 	return nil
 }
+func validateLegacyV1RuleActions(rules []AppRule) error {
+	for _, r := range rules {
+		if r.legacyV1Action != "" && r.Action == r.legacyV1Action {
+			return fmt.Errorf("%w: app rule %q has unsupported legacy v1 action %q", ErrDeferredOverlay, r.ID, r.Action)
+		}
+	}
+	return nil
+}
+
 func validateShortcut(r ShortcutRule) error {
 	if strings.TrimSpace(r.Chord) == "" || strings.TrimSpace(r.Action) == "" || len(r.Chord) > maxMetadataSize || len(r.Action) > maxMetadataSize {
 		return errors.New("inputmigration: invalid shortcut rule")
@@ -592,6 +601,14 @@ func (o DeviceOverlay) ValidateForCapabilities(target DeviceCapabilities) error 
 	if err := o.Validate(); err != nil {
 		return err
 	}
+	// Validate intentionally accepts the marker used to preserve unknown v1
+	// actions for structural compatibility. It must never be treated as an
+	// executable action by a capability-aware import, though: GenerateOverlay
+	// turns the same marker into a DeferredRule, so direct overlay imports must
+	// report the equivalent deferred state rather than returning nil.
+	if err := validateLegacyV1RuleActions(o.AppRules); err != nil {
+		return err
+	}
 	if err := target.Validate(); err != nil {
 		return err
 	}
@@ -818,6 +835,10 @@ func UnmarshalBaseline(data []byte) (PersonalBaseline, error) {
 	return b, unmarshalStrict(data, &b, func() error { return b.Validate() })
 }
 func MarshalOverlay(o DeviceOverlay) ([]byte, error) { return marshalStrict(o, o.Validate) }
+
+// UnmarshalOverlay performs strict structural parsing and v1 compatibility
+// normalization only. Its result is not proven executable; callers importing
+// an overlay onto a target must use UnmarshalOverlayForCapabilities first.
 func UnmarshalOverlay(data []byte) (DeviceOverlay, error) {
 	var o DeviceOverlay
 	return o, unmarshalStrict(data, &o, func() error { return o.Validate() })
@@ -837,6 +858,11 @@ func UnmarshalOverlayForCapabilities(data []byte, target DeviceCapabilities) (De
 }
 
 func MarshalExport(e Export) ([]byte, error) { return marshalStrict(e, e.Validate) }
+
+// UnmarshalExport performs strict structural parsing and v1 compatibility
+// normalization only. Its result is not proven executable; callers importing
+// an export with an overlay must use UnmarshalExportForCapabilities before
+// applying that overlay.
 func UnmarshalExport(data []byte) (Export, error) {
 	var e Export
 	return e, unmarshalStrict(data, &e, func() error { return e.Validate() })

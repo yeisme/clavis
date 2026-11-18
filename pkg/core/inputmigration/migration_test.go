@@ -405,6 +405,68 @@ func TestValidateForCapabilitiesRequiresMatchingLayoutAndUsedSources(t *testing.
 	}
 }
 
+func TestCapabilityAwareUnmarshalRejectsUnknownLegacyV1OverlayAction(t *testing.T) {
+	generated, err := GenerateOverlay(baseline(), windowsCaps(), "legacy-overlay-device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawOverlay, err := MarshalOverlay(generated.Overlay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep the v1 schema and otherwise-valid overlay intact, changing only the
+	// old action spelling. The importer must retain it for inspection but never
+	// treat the normalization marker as executable.
+	legacyRaw := strings.Replace(string(rawOverlay), `"action":"scheme:quanpin"`, `"action":"toggle-ime"`, 1)
+	gotOverlay, err := UnmarshalOverlayForCapabilities([]byte(legacyRaw), windowsCaps())
+	if !errors.Is(err, ErrDeferredOverlay) {
+		t.Fatalf("legacy overlay error = %v, want ErrDeferredOverlay", err)
+	}
+	if gotOverlay.DeviceID != generated.Overlay.DeviceID || len(gotOverlay.AppRules) != 1 || gotOverlay.AppRules[0].Action != "toggle-ime" {
+		t.Fatalf("legacy overlay was not retained: %+v", gotOverlay)
+	}
+
+	export, err := NewExport(baseline(), &generated.Overlay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawExport, err := MarshalExport(export)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exportJSON := string(rawExport)
+	actionJSON := `"action":"scheme:quanpin"`
+	firstAction := strings.Index(exportJSON, actionJSON)
+	if firstAction < 0 {
+		t.Fatal("export did not contain baseline action")
+	}
+	offset := firstAction + len(actionJSON)
+	secondAction := strings.Index(exportJSON[offset:], actionJSON)
+	if secondAction < 0 {
+		t.Fatal("export did not contain overlay action")
+	}
+	secondAction += offset
+	legacyExportRaw := exportJSON[:secondAction] + `"action":"toggle-ime"` + exportJSON[secondAction+len(actionJSON):]
+	gotExport, err := UnmarshalExportForCapabilities([]byte(legacyExportRaw), windowsCaps())
+	if !errors.Is(err, ErrDeferredOverlay) {
+		t.Fatalf("legacy export error = %v, want ErrDeferredOverlay", err)
+	}
+	if gotExport.Overlay == nil || len(gotExport.Overlay.AppRules) != 1 || gotExport.Overlay.AppRules[0].Action != "toggle-ime" {
+		t.Fatalf("legacy export overlay was not retained: %+v", gotExport)
+	}
+
+	// Native/current actions remain executable through the same capability-aware
+	// entry points; the legacy marker is the only extra deferred condition.
+	gotOverlay, err = UnmarshalOverlayForCapabilities(rawOverlay, windowsCaps())
+	if err != nil || len(gotOverlay.AppRules) != 1 || gotOverlay.AppRules[0].Action != "scheme:quanpin" {
+		t.Fatalf("native overlay import changed: overlay=%+v err=%v", gotOverlay, err)
+	}
+	gotExport, err = UnmarshalExportForCapabilities(rawExport, windowsCaps())
+	if err != nil || gotExport.Overlay == nil || len(gotExport.Overlay.AppRules) != 1 || gotExport.Overlay.AppRules[0].Action != "scheme:quanpin" {
+		t.Fatalf("native export import changed: export=%+v err=%v", gotExport, err)
+	}
+}
+
 func TestCapabilityAwareUnmarshalRetainsDeferredObjectsAndAllowsBaselineOnly(t *testing.T) {
 	deferredCaps := windowsCaps()
 	deferredCaps.NativeTSF = false
