@@ -36,6 +36,10 @@ type CompletionRequest struct {
 	GlossaryTerms []config.GlossaryTerm
 	History       []ChatMessage
 	Profile       *config.AIProfile
+	// ContextPolicy controls ambient context injection through one shared allowlist.
+	ContextPolicy   ContextPolicy
+	MCPResources    []string
+	DeveloperPrompt string
 	// SystemPromptOverride is used by transient workflows such as prompt optimization.
 	SystemPromptOverride string
 }
@@ -235,6 +239,17 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 		contextText,
 		0,
 	)
+	// The policy path is additive and opt-in for legacy callers; new callers use it
+	// instead of hand-concatenating glossary/app/selection/MCP values.
+	if req.ContextPolicy != (ContextPolicy{}) {
+		bundle := ContextBundleFromCapsule(req.Context)
+		bundle.Glossary = req.GlossaryTerms
+		bundle.MCPResources = append([]string(nil), req.MCPResources...)
+		messages := ApplyContextPolicy(req.ContextPolicy, bundle, systemPrompt, req.DeveloperPrompt, "")
+		if len(messages.System) > 0 {
+			systemPrompt = messages.System[0].Content
+		}
+	}
 
 	userPrompt := req.Prompt
 	if len(req.History) == 0 && strings.TrimSpace(req.SourceText) != "" {
@@ -265,6 +280,9 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 			"role":    "user",
 			"content": userPrompt,
 		})
+		if strings.TrimSpace(req.DeveloperPrompt) != "" {
+			systemPrompt = strings.TrimSpace(systemPrompt + "\n\n" + req.DeveloperPrompt)
+		}
 		payload := map[string]any{
 			"model":       profile.Model,
 			"max_tokens":  4096,
@@ -319,9 +337,13 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 				"temperature": profile.Temperature,
 			},
 		}
-		if strings.TrimSpace(systemPrompt) != "" {
+		if strings.TrimSpace(systemPrompt+req.DeveloperPrompt) != "" {
+			instruction := systemPrompt
+			if strings.TrimSpace(req.DeveloperPrompt) != "" {
+				instruction += "\n\n" + req.DeveloperPrompt
+			}
 			payload["systemInstruction"] = map[string]any{
-				"parts": []map[string]string{{"text": systemPrompt}},
+				"parts": []map[string]string{{"text": instruction}},
 			}
 		}
 		bodyBytes, err := json.Marshal(payload)
@@ -344,11 +366,14 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 		if err != nil {
 			return nil, err
 		}
-		messages := make([]map[string]string, 0, len(req.History)+2)
+		messages := make([]map[string]string, 0, len(req.History)+3)
 		messages = append(messages, map[string]string{
 			"role":    "system",
 			"content": systemPrompt,
 		})
+		if strings.TrimSpace(req.DeveloperPrompt) != "" {
+			messages = append(messages, map[string]string{"role": "developer", "content": req.DeveloperPrompt})
+		}
 		for _, turn := range req.History {
 			if strings.TrimSpace(turn.Content) == "" {
 				continue

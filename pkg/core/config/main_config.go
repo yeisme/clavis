@@ -272,6 +272,17 @@ const (
 	ProtocolGemini           AIProtocol = "gemini"
 )
 
+// ModelCapabilities declares features a provider/model profile may safely use.
+// False and zero values are conservative: callers must not assume a capability.
+type ModelCapabilities struct {
+	StructuredOutput bool  `json:"structuredOutput"`
+	ToolCalling      bool  `json:"toolCalling"`
+	Vision           bool  `json:"vision"`
+	ReasoningEffort  bool  `json:"reasoningEffort"`
+	ContextWindow    int64 `json:"contextWindow,omitempty"`
+	Streaming        bool  `json:"streaming"`
+}
+
 // AllAIProtocols returns all supported AI wire protocols in deterministic order.
 func AllAIProtocols() []AIProtocol {
 	return []AIProtocol{
@@ -297,18 +308,19 @@ const defaultAISystemPrompt = "You are a concise macOS writing and productivity 
 // protocol for reasoning models ("low" keeps DeepSeek V4.1 Flash quick);
 // empty sends nothing.
 type AIProfile struct {
-	ID              string     `json:"id"`
-	Name            string     `json:"name"`
-	Provider        string     `json:"provider"`
-	Protocol        AIProtocol `json:"protocol"`
-	BaseURL         string     `json:"baseUrl"`
-	Model           string     `json:"model"`
-	Temperature     float64    `json:"temperature"`
-	TimeoutSeconds  float64    `json:"timeoutSeconds"`
-	SystemPrompt    string     `json:"systemPrompt"`
-	KeychainAccount string     `json:"keychainAccount"`
-	APIKeyEnvVar    string     `json:"apiKeyEnvVar,omitempty"`
-	ReasoningEffort string     `json:"reasoningEffort,omitempty"`
+	ID              string            `json:"id"`
+	Name            string            `json:"name"`
+	Provider        string            `json:"provider"`
+	Protocol        AIProtocol        `json:"protocol"`
+	BaseURL         string            `json:"baseUrl"`
+	Model           string            `json:"model"`
+	Temperature     float64           `json:"temperature"`
+	TimeoutSeconds  float64           `json:"timeoutSeconds"`
+	SystemPrompt    string            `json:"systemPrompt"`
+	KeychainAccount string            `json:"keychainAccount"`
+	APIKeyEnvVar    string            `json:"apiKeyEnvVar,omitempty"`
+	ReasoningEffort string            `json:"reasoningEffort,omitempty"`
+	Capabilities    ModelCapabilities `json:"capabilities"`
 }
 
 // DefaultAIProfiles returns the built-in multi-provider AI profiles (DeepSeek, Ollama, Claude, Gemini).
@@ -575,6 +587,32 @@ func decodeAIProfile(tbl *toml.Table, path string) (AIProfile, error) {
 	if err != nil {
 		return AIProfile{}, err
 	}
+	capabilities := ModelCapabilities{}
+	if caps, ok, err := optionalTable(tbl, "capabilities", path); err != nil {
+		return AIProfile{}, err
+	} else if ok {
+		var e error
+		if capabilities.StructuredOutput, _, e = optionalBool(caps, "structured_output", joinPath(path, "capabilities")); e != nil {
+			return AIProfile{}, e
+		}
+		if capabilities.ToolCalling, _, e = optionalBool(caps, "tool_calling", joinPath(path, "capabilities")); e != nil {
+			return AIProfile{}, e
+		}
+		if capabilities.Vision, _, e = optionalBool(caps, "vision", joinPath(path, "capabilities")); e != nil {
+			return AIProfile{}, e
+		}
+		if capabilities.ReasoningEffort, _, e = optionalBool(caps, "reasoning_effort", joinPath(path, "capabilities")); e != nil {
+			return AIProfile{}, e
+		}
+		if capabilities.Streaming, _, e = optionalBool(caps, "streaming", joinPath(path, "capabilities")); e != nil {
+			return AIProfile{}, e
+		}
+		if v, _, e2 := optionalInt(caps, "context_window", joinPath(path, "capabilities")); e2 != nil {
+			return AIProfile{}, e2
+		} else {
+			capabilities.ContextWindow = int64(v)
+		}
+	}
 
 	return AIProfile{
 		ID:              id,
@@ -589,6 +627,7 @@ func decodeAIProfile(tbl *toml.Table, path string) (AIProfile, error) {
 		KeychainAccount: keychainAcc,
 		APIKeyEnvVar:    envVar,
 		ReasoningEffort: strings.TrimSpace(effort),
+		Capabilities:    capabilities,
 	}, nil
 }
 
@@ -611,6 +650,16 @@ func (p AIProfile) toTOML() *toml.Table {
 	t.Set("api_key_env_var", toml.StringVal(p.APIKeyEnvVar))
 	if p.ReasoningEffort != "" {
 		t.Set("reasoning_effort", toml.StringVal(p.ReasoningEffort))
+	}
+	if p.Capabilities != (ModelCapabilities{}) {
+		caps := toml.NewTable()
+		caps.Set("structured_output", toml.BoolVal(p.Capabilities.StructuredOutput))
+		caps.Set("tool_calling", toml.BoolVal(p.Capabilities.ToolCalling))
+		caps.Set("vision", toml.BoolVal(p.Capabilities.Vision))
+		caps.Set("reasoning_effort", toml.BoolVal(p.Capabilities.ReasoningEffort))
+		caps.Set("context_window", toml.IntVal(p.Capabilities.ContextWindow))
+		caps.Set("streaming", toml.BoolVal(p.Capabilities.Streaming))
+		t.Set("capabilities", toml.TableVal(caps))
 	}
 	return t
 }
