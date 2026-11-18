@@ -2,7 +2,6 @@ package uiapp
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"image"
@@ -15,7 +14,6 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
-	"github.com/yeisme/clavis/internal/bridge"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/i18n"
@@ -141,32 +139,11 @@ func (c *AppController) pasteClipboardMediaAsync(m engine.ClipboardMedia, onWrit
 // callers use pasteClipboardMediaAsync, while tests can verify callback ordering without starting a
 // MyGo app or mutating a process-global clipboard.
 func (c *AppController) pasteClipboardMediaAsyncWithWriter(m engine.ClipboardMedia, writeMedia func(engine.ClipboardMedia) error, onWritten func()) {
-	c.mu.Lock()
-	br := c.Bridge
-	beforeInject := c.BeforeInject
-	c.mu.Unlock()
 	if err := writeMedia(m); err != nil {
 		c.ShowToastOrHUD(err.Error())
 		return
 	}
-	paster, ok := br.(bridge.MediaPaster)
-	if !ok || paster == nil {
-		c.ShowToastOrHUD(i18n.T("clipboard.media.paste_unsupported"))
-		return
-	}
-	go func() {
-		ctx := context.Background()
-		if beforeInject != nil {
-			beforeInject(ctx)
-		}
-		if err := paster.PasteClipboard(ctx); err != nil {
-			c.ShowToastOrHUD(err.Error())
-			return
-		}
-		if onWritten != nil {
-			onWritten()
-		}
-	}()
+	c.startClipboardPaste(onWritten)
 }
 
 func firstCallback(callbacks []func()) func() {

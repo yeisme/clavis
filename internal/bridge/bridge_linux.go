@@ -159,6 +159,22 @@ func (b *linuxBridge) InjectText(ctx context.Context, _ string, _ int, _ int) er
 	return errors.ErrUnsupported
 }
 
+// PasteClipboard uses the conventional xdotool backend when available. Unlike
+// the clipboard write, sending a shortcut is optional on Linux, so absence of
+// a supported backend is reported honestly rather than treated as success.
+func (b *linuxBridge) PasteClipboard(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if path, err := exec.LookPath("xdotool"); err == nil {
+		return exec.CommandContext(ctx, path, "key", "ctrl+v").Run()
+	}
+	if path, err := exec.LookPath("wtype"); err == nil {
+		return exec.CommandContext(ctx, path, "-M", "ctrl", "-k", "v", "-m", "ctrl").Run()
+	}
+	return errors.ErrUnsupported
+}
+
 func (b *linuxBridge) OpenApp(ctx context.Context, target string) error {
 	if err := ctx.Err(); err != nil {
 		return err

@@ -272,9 +272,9 @@ type EffectType string
 
 const (
 	EffectPresentCapsule EffectType = "present_capsule"
-	// EffectActivateClipboardItem is the domain-level single-click operation.
-	// Consumers execute its ordered contract: pin (when requested), write the
-	// system clipboard, then present the preview.
+	// EffectActivateClipboardItem is retained for compatibility with older
+	// integrations. Clipboard activation is now a pure paste operation and
+	// never changes pin state.
 	EffectActivateClipboardItem EffectType = "activate_clipboard_item"
 	EffectClose                 EffectType = "close"
 	EffectRunAction             EffectType = "run_action"
@@ -312,26 +312,27 @@ type Effect struct {
 	ClipboardActivation *ClipboardActivation   `json:"clipboardActivation,omitempty"`
 }
 
-// ClipboardActivation is the portable effect contract for a single-click
-// clipboard activation. PinBeforeWrite is false for already-pinned entries;
-// those entries still get written and presented without another pin mutation.
-// ClipboardActivationStep names the ordered effects of a quick activation.
+// ClipboardActivation is the portable effect contract for a clipboard
+// activation. It is a pure paste operation: activation never changes pin
+// state. Pin changes are explicit through the pin action or Cmd/Ctrl+P.
+// ClipboardActivationStep names the ordered effects of an activation.
 type ClipboardActivationStep string
 
 const (
-	ClipboardStepPin     ClipboardActivationStep = "pin"
-	ClipboardStepWrite   ClipboardActivationStep = "write_system_clipboard"
-	ClipboardStepPreview ClipboardActivationStep = "present_preview"
+	ClipboardStepWrite ClipboardActivationStep = "write_system_clipboard"
+	ClipboardStepPaste ClipboardActivationStep = "paste_to_active_app"
 )
 
 type ClipboardActivation struct {
-	ID             string                    `json:"id"`
-	Content        string                    `json:"content,omitempty"`
-	Media          *ClipboardMedia           `json:"media,omitempty"`
-	Steps          []ClipboardActivationStep `json:"steps"`
-	PinBeforeWrite bool                      `json:"pinBeforeWrite"`
-	PresentPreview bool                      `json:"presentPreview"`
-	Generation     uint64                    `json:"generation,omitempty"`
+	ID      string                    `json:"id"`
+	Content string                    `json:"content,omitempty"`
+	Media   *ClipboardMedia           `json:"media,omitempty"`
+	Steps   []ClipboardActivationStep `json:"steps"`
+	// PinBeforeWrite is deprecated and always false. It remains serialized for
+	// compatibility with older clients.
+	PinBeforeWrite bool   `json:"pinBeforeWrite"`
+	PresentPreview bool   `json:"presentPreview"`
+	Generation     uint64 `json:"generation,omitempty"`
 }
 
 // StateMachine wraps State + ClavisConfig with a stateful Handle method.
@@ -632,17 +633,13 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		if selected.Kind != ItemClipboardEntry || strings.TrimSpace(selected.ClipboardID) == "" {
 			return next, nil
 		}
-		pinBeforeWrite := selected.KeyHint != KeyHintPinned
-		steps := []ClipboardActivationStep{ClipboardStepWrite, ClipboardStepPreview}
-		if pinBeforeWrite {
-			steps = append([]ClipboardActivationStep{ClipboardStepPin}, steps...)
-		}
 		return next, []Effect{{
 			Type: EffectActivateClipboardItem,
 			ClipboardActivation: &ClipboardActivation{
 				ID: selected.ClipboardID, Content: selected.ClipboardContent,
-				Media: selected.ClipboardMedia, Steps: steps,
-				PinBeforeWrite: pinBeforeWrite, PresentPreview: true,
+				Media:          selected.ClipboardMedia,
+				Steps:          []ClipboardActivationStep{ClipboardStepWrite, ClipboardStepPaste},
+				PinBeforeWrite: false, PresentPreview: false,
 			},
 		}}
 
@@ -1146,12 +1143,8 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 			actID = "primary"
 		}
 	}
-	// Clipboard history follows Maccy semantics: the primary action copies the
-	// selected item to the system clipboard; paste is explicit via the secondary
-	// action or the action palette.
-	if item.Kind == ItemClipboardEntry && actID == "primary" {
-		actID = "copy"
-	}
+	// Clipboard history follows Maccy semantics: the primary action pastes the
+	// selected item into the active app. Copy remains an explicit action-menu item.
 
 	// Handle explicit cross-item secondary actions before falling through to primary execution.
 	switch actID {
@@ -1210,7 +1203,6 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 			next.Phase = PhaseHidden
 			return next, []Effect{
 				{Type: EffectPasteClipboardItem, ClipboardID: item.ClipboardID, ClipboardContent: item.ClipboardContent, ClipboardMedia: item.ClipboardMedia},
-				{Type: EffectClose},
 			}
 		}
 	case ItemSnippet:
@@ -1351,12 +1343,9 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 		return next, nil
 
 	case ItemClipboardEntry:
-		clearPhaseFields(&next)
-		next.Phase = PhaseHidden
-		return next, []Effect{
-			{Type: EffectPasteClipboardItem, ClipboardID: item.ClipboardID, ClipboardContent: item.ClipboardContent, ClipboardMedia: item.ClipboardMedia},
-			{Type: EffectClose},
-		}
+		// Keep the Capsule open until the asynchronous write and platform paste
+		// both succeed; the controller dismisses it from the success callback.
+		return next, []Effect{{Type: EffectPasteClipboardItem, ClipboardID: item.ClipboardID, ClipboardContent: item.ClipboardContent, ClipboardMedia: item.ClipboardMedia}}
 
 	case ItemGlossaryTerm:
 		if item.GlossaryTerm == nil {

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/markdown"
 	"github.com/yeisme/clavis/internal/apps"
@@ -79,23 +80,24 @@ const (
 
 // Options configures an AppController.
 type Options struct {
-	ConfigStore           *config.ConfigStore
-	ClipboardStore        clipboard.Store
-	ClipboardSearcher     ClipboardSearcher
-	SecretStore           secrets.APIKeyStore
-	Bridge                bridge.HostService
-	AppProvider           apps.AppProvider
-	HTTPDoer              ai.HTTPDoer
-	ClipboardWriter       func(text string)
-	BeforeInject          func(ctx context.Context)
-	OpenPath              func(path string) error
-	OnRepaint             func()
-	OnPresentPhase        func(phase engine.CapsulePhase)
-	OnHide                func()
-	OnOpenSettings        func(tab SettingsTab)
-	OnOpenPromptComposer  func()
-	OnClosePromptComposer func()
-	OnShowIMEPill         func(label string, anchor *host.CursorAnchor)
+	ConfigStore              *config.ConfigStore
+	ClipboardStore           clipboard.Store
+	ClipboardSearcher        ClipboardSearcher
+	SecretStore              secrets.APIKeyStore
+	Bridge                   bridge.HostService
+	AppProvider              apps.AppProvider
+	HTTPDoer                 ai.HTTPDoer
+	ClipboardWriter          func(text string)
+	ClipboardWriterWithError func(text string) error
+	BeforeInject             func(ctx context.Context)
+	OpenPath                 func(path string) error
+	OnRepaint                func()
+	OnPresentPhase           func(phase engine.CapsulePhase)
+	OnHide                   func()
+	OnOpenSettings           func(tab SettingsTab)
+	OnOpenPromptComposer     func()
+	OnClosePromptComposer    func()
+	OnShowIMEPill            func(label string, anchor *host.CursorAnchor)
 	// OnShowSelectionBar presents actions for the current focused-field selection.
 	// The callback is optional so headless and non-native shells remain supported.
 	OnShowSelectionBar func(SelectionBarPayload)
@@ -183,24 +185,25 @@ type AppController struct {
 	Glossary          engine.GlossaryEngine
 	Snippets          *engine.SnippetEngine
 
-	httpDoer              ai.HTTPDoer
-	ClipboardWriter       func(text string)
-	BeforeInject          func(ctx context.Context)
-	OpenPath              func(path string) error
-	OnRepaint             func()
-	OnPresentPhase        func(phase engine.CapsulePhase)
-	OnHide                func()
-	OnOpenSettings        func(tab SettingsTab)
-	OnOpenPromptComposer  func()
-	OnClosePromptComposer func()
-	OnShowIMEPill         func(label string, anchor *host.CursorAnchor)
-	OnShowSelectionBar    func(SelectionBarPayload)
-	OnHideSelectionBar    func()
-	OnLanguageChange      func()
-	OnRecordItemUse       func(itemID string)
-	OnRecordPromptVersion func(promptID, trigger, rawDraft, finalOutput, preset string)
-	OnConfigSaved         func()
-	OnWorkflowResult      func(workflowID string, result automation.ExecutionResult, err error)
+	httpDoer                 ai.HTTPDoer
+	ClipboardWriter          func(text string)
+	ClipboardWriterWithError func(text string) error
+	BeforeInject             func(ctx context.Context)
+	OpenPath                 func(path string) error
+	OnRepaint                func()
+	OnPresentPhase           func(phase engine.CapsulePhase)
+	OnHide                   func()
+	OnOpenSettings           func(tab SettingsTab)
+	OnOpenPromptComposer     func()
+	OnClosePromptComposer    func()
+	OnShowIMEPill            func(label string, anchor *host.CursorAnchor)
+	OnShowSelectionBar       func(SelectionBarPayload)
+	OnHideSelectionBar       func()
+	OnLanguageChange         func()
+	OnRecordItemUse          func(itemID string)
+	OnRecordPromptVersion    func(promptID, trigger, rawDraft, finalOutput, preset string)
+	OnConfigSaved            func()
+	OnWorkflowResult         func(workflowID string, result automation.ExecutionResult, err error)
 
 	// Decoded application icon bitmap cache
 	iconMu          sync.Mutex
@@ -233,6 +236,12 @@ type AppController struct {
 	workflowRunID       uint64
 	workflowTargetGen   uint64
 	closed              bool
+
+	// Clipboard paste operations are serialized and invalidated when the foreground
+	// target changes. Clipboard writes happen before the asynchronous platform paste;
+	// stale work must never send a shortcut into a newer application.
+	clipboardPasteGen    uint64
+	clipboardPasteCancel context.CancelFunc
 
 	// HUD auto-dismiss timer & generation guard
 	hudTimer *time.Timer
@@ -331,43 +340,44 @@ func NewAppController(opts Options) *AppController {
 	clipBaseCtx, clipBaseCancel := context.WithCancel(context.Background())
 
 	c := &AppController{
-		ConfigStore:           cfgStore,
-		StateMachine:          sm,
-		ClipboardStore:        clipStore,
-		ClipboardSearcher:     clipSearcher,
-		SecretStore:           secStore,
-		Bridge:                opts.Bridge,
-		AppProvider:           appProv,
-		CLIExecutor:           actions.NewCLIExecutor(),
-		Glossary:              glossary,
-		Snippets:              snippets,
-		httpDoer:              opts.HTTPDoer,
-		ClipboardWriter:       opts.ClipboardWriter,
-		BeforeInject:          opts.BeforeInject,
-		OpenPath:              opts.OpenPath,
-		OnRepaint:             opts.OnRepaint,
-		OnPresentPhase:        opts.OnPresentPhase,
-		OnHide:                opts.OnHide,
-		OnOpenSettings:        opts.OnOpenSettings,
-		OnOpenPromptComposer:  opts.OnOpenPromptComposer,
-		OnClosePromptComposer: opts.OnClosePromptComposer,
-		OnShowIMEPill:         opts.OnShowIMEPill,
-		OnShowSelectionBar:    opts.OnShowSelectionBar,
-		OnHideSelectionBar:    opts.OnHideSelectionBar,
-		OnLanguageChange:      opts.OnLanguageChange,
-		OnRecordItemUse:       opts.OnRecordItemUse,
-		OnRecordPromptVersion: opts.OnRecordPromptVersion,
-		OnConfigSaved:         opts.OnConfigSaved,
-		OnWorkflowResult:      opts.OnWorkflowResult,
-		appIconCache:          make(map[string]*ui.Bitmap),
-		thumbCache:            make(map[string]*ui.Bitmap),
-		originalCache:         make(map[string]*ui.Bitmap),
-		originalLoading:       make(map[string]bool),
-		clipDone:              make(chan struct{}),
-		clipBaseCtx:           clipBaseCtx,
-		clipBaseCancel:        clipBaseCancel,
-		clipSearchDebounce:    defaultClipboardSearchDebounce,
-		aiTestStatus:          AITestIdle,
+		ConfigStore:              cfgStore,
+		StateMachine:             sm,
+		ClipboardStore:           clipStore,
+		ClipboardSearcher:        clipSearcher,
+		SecretStore:              secStore,
+		Bridge:                   opts.Bridge,
+		AppProvider:              appProv,
+		CLIExecutor:              actions.NewCLIExecutor(),
+		Glossary:                 glossary,
+		Snippets:                 snippets,
+		httpDoer:                 opts.HTTPDoer,
+		ClipboardWriter:          opts.ClipboardWriter,
+		ClipboardWriterWithError: opts.ClipboardWriterWithError,
+		BeforeInject:             opts.BeforeInject,
+		OpenPath:                 opts.OpenPath,
+		OnRepaint:                opts.OnRepaint,
+		OnPresentPhase:           opts.OnPresentPhase,
+		OnHide:                   opts.OnHide,
+		OnOpenSettings:           opts.OnOpenSettings,
+		OnOpenPromptComposer:     opts.OnOpenPromptComposer,
+		OnClosePromptComposer:    opts.OnClosePromptComposer,
+		OnShowIMEPill:            opts.OnShowIMEPill,
+		OnShowSelectionBar:       opts.OnShowSelectionBar,
+		OnHideSelectionBar:       opts.OnHideSelectionBar,
+		OnLanguageChange:         opts.OnLanguageChange,
+		OnRecordItemUse:          opts.OnRecordItemUse,
+		OnRecordPromptVersion:    opts.OnRecordPromptVersion,
+		OnConfigSaved:            opts.OnConfigSaved,
+		OnWorkflowResult:         opts.OnWorkflowResult,
+		appIconCache:             make(map[string]*ui.Bitmap),
+		thumbCache:               make(map[string]*ui.Bitmap),
+		originalCache:            make(map[string]*ui.Bitmap),
+		originalLoading:          make(map[string]bool),
+		clipDone:                 make(chan struct{}),
+		clipBaseCtx:              clipBaseCtx,
+		clipBaseCancel:           clipBaseCancel,
+		clipSearchDebounce:       defaultClipboardSearchDebounce,
+		aiTestStatus:             AITestIdle,
 		uiState: uiViewState{
 			imeRuleModeDraft: config.IMEModeASCII,
 		},
@@ -403,6 +413,11 @@ func (c *AppController) Close() {
 	}
 	c.workflowRunID++
 	c.mu.Lock()
+	if c.clipboardPasteCancel != nil {
+		c.clipboardPasteCancel()
+		c.clipboardPasteCancel = nil
+	}
+	c.clipboardPasteGen++
 	c.closed = true
 	c.mu.Unlock()
 	c.workflowLifecycleMu.Unlock()
@@ -587,9 +602,14 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 	c.mu.Lock()
 	if ev.Type == engine.EventOpenLeader || ev.Type == engine.EventOpenOmnibox {
 		c.ensureInstalledAppsSyncedLocked()
-		// A new foreground capsule establishes a new output target. Workflow
-		// completion must not inject into a target opened after its run began.
+		// A new foreground capsule establishes a new output target. Workflow and
+		// clipboard completion must not inject into a target opened after their run began.
 		c.workflowTargetGen++
+		if c.clipboardPasteCancel != nil {
+			c.clipboardPasteCancel()
+			c.clipboardPasteCancel = nil
+		}
+		c.clipboardPasteGen++
 	}
 	prev := c.StateMachine.State()
 	// A HUD notice must never destroy an active Capsule session. When a floating pill sink is
@@ -852,8 +872,9 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 				c.ShowToastOrHUD(err.Error())
 				return
 			}
-		} else {
-			c.writeClipboardText(eff.Text)
+		} else if err := c.writeClipboardText(eff.Text); err != nil {
+			c.ShowToastOrHUD(err.Error())
+			return
 		}
 		if eff.ClipboardID != "" {
 			c.recordItemUse("clipboard:" + eff.ClipboardID)
@@ -1913,14 +1934,19 @@ func (c *AppController) injectWorkflowTextAsync(text string, deleteCount, cursor
 func (c *AppController) writeClipboardText(text string) error {
 	c.mu.Lock()
 	writer := c.ClipboardWriter
+	writerWithError := c.ClipboardWriterWithError
 	c.mu.Unlock()
+	if writerWithError != nil {
+		return writerWithError(text)
+	}
 	if writer != nil {
 		writer(text)
 		return nil
 	}
 	if mygo.App.IsReady() {
-		mygo.Clipboard.WriteText(text)
-		return nil
+		// WriteText intentionally discards backend errors. Use Write directly so
+		// a failed system clipboard write cannot be mistaken for a successful paste.
+		return mygo.Clipboard.Write(transfer.TextData(text))
 	}
 	return errors.New("app not ready")
 }
@@ -1930,80 +1956,78 @@ func (c *AppController) writeClipboardText(text string) error {
 // invoked only after both operations succeed, so failed writes or unsupported
 // paste capabilities cannot be recorded as successful item use.
 func (c *AppController) pasteClipboardTextAsync(text string, onPasted func()) {
-	c.mu.Lock()
-	br := c.Bridge
-	beforeInject := c.BeforeInject
-	c.mu.Unlock()
 	if err := c.writeClipboardText(text); err != nil {
 		c.ShowToastOrHUD(err.Error())
 		return
 	}
+	c.startClipboardPaste(onPasted)
+}
+
+// startClipboardPaste serializes delayed paste shortcuts and invalidates them when
+// a new Capsule target or controller lifecycle supersedes the operation.
+func (c *AppController) startClipboardPaste(onPasted func()) {
+	c.mu.Lock()
+	br := c.Bridge
+	beforeInject := c.BeforeInject
+	if c.clipboardPasteCancel != nil {
+		c.clipboardPasteCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.clipboardPasteCancel = cancel
+	c.clipboardPasteGen++
+	generation := c.clipboardPasteGen
+	c.mu.Unlock()
 	paster, ok := br.(bridge.MediaPaster)
 	if !ok || paster == nil {
+		cancel()
 		c.ShowToastOrHUD(i18n.T("clipboard.media.paste_unsupported"))
 		return
 	}
 	go func() {
-		ctx := context.Background()
 		if beforeInject != nil {
 			beforeInject(ctx)
 		}
+		if err := ctx.Err(); err != nil || !c.clipboardPasteCurrent(generation) {
+			return
+		}
 		if err := paster.PasteClipboard(ctx); err != nil {
-			c.ShowToastOrHUD(err.Error())
+			if ctx.Err() == nil {
+				c.ShowToastOrHUD(err.Error())
+			}
+			return
+		}
+		if !c.clipboardPasteCurrent(generation) {
 			return
 		}
 		if onPasted != nil {
 			onPasted()
 		}
+		c.Dispatch(engine.Event{Type: engine.EventDismiss})
 	}()
 }
 
-// activateClipboardItem executes the single-click domain contract. Pinning is
-// serialized and must succeed before write-back. A write failure deliberately
-// leaves the pin intact, while preview decoding is best-effort and falls back
-// to the row's type icon/text summary. Clipboard generation is captured at
-// dispatch time and checked before presenting a late result.
+func (c *AppController) clipboardPasteCurrent(generation uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.closed && c.clipboardPasteGen == generation
+}
+
+// activateClipboardItem is the compatibility entry point for old shells. A
+// click is a paste, never a pin or preview mutation; explicit pinning remains
+// available through the action menu and Cmd/Ctrl+P.
 func (c *AppController) activateClipboardItem(op engine.ClipboardActivation) {
-	if c.ClipboardStore == nil || strings.TrimSpace(op.ID) == "" {
+	if op.Media != nil && op.Media.IsMedia() {
+		c.pasteClipboardMediaAsync(*op.Media, func() {
+			if op.ID != "" {
+				c.recordItemUse("clipboard:" + op.ID)
+			}
+		})
 		return
 	}
-	pin := func(ctx context.Context) error {
-		if !op.PinBeforeWrite {
-			return nil
-		}
-		return c.ClipboardStore.Pin(ctx, op.ID, true)
-	}
-	write := func() error {
-		if op.Media != nil && op.Media.IsMedia() {
-			return writeClipboardMedia(*op.Media)
-		}
-		return c.writeClipboardText(op.Content)
-	}
-	c.enqueueClipboardTaskWithGeneration(func(ctx context.Context, taskGeneration uint64) error {
-		if err := pin(ctx); err != nil {
-			c.ShowToastOrHUD(fmt.Sprintf("clipboard pin failed: %v", err))
-			return err
-		}
-		if err := write(); err != nil {
-			// Pin succeeded and is intentionally not rolled back.
-			c.ShowToastOrHUD(fmt.Sprintf("clipboard write failed: %v", err))
-			return err
-		}
-		if strings.TrimSpace(op.ID) != "" {
+	c.pasteClipboardTextAsync(op.Content, func() {
+		if op.ID != "" {
 			c.recordItemUse("clipboard:" + op.ID)
 		}
-		if !op.PresentPreview {
-			c.Dispatch(engine.Event{Type: engine.EventDismiss})
-			return nil
-		}
-		// Do not present a late result after a newer clipboard mutation or
-		// activation has superseded this operation.
-		if c.clipGen.Load() != taskGeneration {
-			return nil
-		}
-		c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.T("hud.pinned_written")})
-		c.Dispatch(engine.Event{Type: engine.EventDismiss})
-		return nil
 	})
 }
 

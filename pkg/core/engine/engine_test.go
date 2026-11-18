@@ -554,7 +554,7 @@ func TestPinyinFullWidthPrefixRoutingAndDualActions(t *testing.T) {
 		t.Fatalf("expected pin action in @ prefix view, got %+v", pinEff)
 	}
 	secClipEff := sm.Handle(engine.Event{Type: engine.EventConfirmSecondarySelection})
-	if len(secClipEff) != 2 || secClipEff[0].Type != engine.EffectPasteClipboardItem || secClipEff[0].ClipboardContent != "beta clipboard line" {
+	if len(secClipEff) != 1 || secClipEff[0].Type != engine.EffectPasteClipboardItem || secClipEff[0].ClipboardContent != "beta clipboard line" {
 		t.Fatalf("expected secondary confirm on clipboard item to paste, got %+v", secClipEff)
 	}
 

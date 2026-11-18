@@ -48,10 +48,10 @@ func TestClipboardActivationIsOrderedAndDoesNotRepin(t *testing.T) {
 		t.Fatal("missing second clipboard activation operation")
 	}
 	if firstID == "pinned" {
-		if op.ID != "unpinned" || !op.PinBeforeWrite || len(op.Steps) != 3 || op.Steps[0] != engine.ClipboardStepPin || op.Steps[1] != engine.ClipboardStepWrite || op.Steps[2] != engine.ClipboardStepPreview {
-			t.Fatalf("unpinned activation must pin/write/preview: %+v", op)
+		if op.ID != "unpinned" || op.PinBeforeWrite || len(op.Steps) != 2 || op.Steps[0] != engine.ClipboardStepWrite || op.Steps[1] != engine.ClipboardStepPaste {
+			t.Fatalf("unpinned activation must paste without pinning: %+v", op)
 		}
-	} else if op.ID != "pinned" || op.PinBeforeWrite || len(op.Steps) != 2 || op.Steps[0] != engine.ClipboardStepWrite || op.Steps[1] != engine.ClipboardStepPreview {
-		t.Fatalf("pinned activation must write+preview without repin: %+v", op)
+	} else if op.ID != "pinned" || op.PinBeforeWrite || len(op.Steps) != 2 || op.Steps[0] != engine.ClipboardStepWrite || op.Steps[1] != engine.ClipboardStepPaste {
+		t.Fatalf("pinned activation must paste without repin: %+v", op)
 	}
 }

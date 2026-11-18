@@ -636,8 +636,8 @@ func (a *AppController) renderOmniboxView(
 							a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
 						} else if row.RowClicked() {
 							a.SelectIndex(i)
-							// Clipboard rows use the domain-level activation contract: pin when
-							// needed, write to the system clipboard, then present the preview.
+							// Clipboard rows use Maccy semantics: a click pastes; pinning is
+							// available only through the explicit action menu.
 							if item.Kind == engine.ItemClipboardEntry {
 								a.Dispatch(engine.Event{Type: engine.EventActivateClipboardItem})
 							} else {

@@ -354,11 +354,11 @@ func TestControllerOnRecordItemUseOnClipboardPasteAndCopy(t *testing.T) {
 	}
 	clipStore := clipboard.NewMemoryStore(clipboard.NewPrivacyFilterFromConfig(cfgStore.Current().Main.Clipboard))
 	ctx := context.Background()
-	item1, _, err := clipStore.Record(ctx, clipboard.CaptureCandidate{Content: "alpha item", Timestamp: time.Now().UTC()})
+	_, _, err := clipStore.Record(ctx, clipboard.CaptureCandidate{Content: "alpha item", Timestamp: time.Now().UTC()})
 	if err != nil {
 		t.Fatalf("Record item1: %v", err)
 	}
-	item2, _, err := clipStore.Record(ctx, clipboard.CaptureCandidate{Content: "beta item", Timestamp: time.Now().UTC().Add(time.Second)})
+	_, _, err = clipStore.Record(ctx, clipboard.CaptureCandidate{Content: "beta item", Timestamp: time.Now().UTC().Add(time.Second)})
 	if err != nil {
 		t.Fatalf("Record item2: %v", err)
 	}
@@ -396,18 +396,14 @@ func TestControllerOnRecordItemUseOnClipboardPasteAndCopy(t *testing.T) {
 	gotUsed := slices.Clone(used)
 	mu.Unlock()
 
-	// The controller has no platform paste capability in this fixture, so the
-	// secondary action writes no usage record; T4 requires a successful platform
-	// paste before recording it.
-	wantUsed := []string{
-		"clipboard:" + item2.ID,
-		"clipboard:" + item1.ID,
-	}
+	// Paste is the primary action and is not recorded without a supported
+	// platform paste. Explicit copy is available from the action menu.
+	wantUsed := []string{}
 	if !slices.Equal(gotUsed, wantUsed) {
 		t.Fatalf("recorded uses = %v, want %v", gotUsed, wantUsed)
 	}
 	if len(copied) != 3 || copied[0] != "beta item" || copied[1] != "beta item" || copied[2] != "alpha item" {
-		t.Fatalf("copied texts = %v", copied)
+		t.Fatalf("clipboard writes = %v", copied)
 	}
 }
 
@@ -487,8 +483,8 @@ func TestDesktopAppDaemonFrecencyReloadAndShutdown(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := ctrl.State().FrecencyScores[wantKey]; got <= 0 {
-		t.Fatalf("FrecencyScores[%q] = %d, want > 0", wantKey, got)
+	if got := ctrl.State().FrecencyScores[wantKey]; got != 0 {
+		t.Fatalf("unsupported paste unexpectedly recorded FrecencyScores[%q] = %d", wantKey, got)
 	}
 
 	// Hot reload updates supervisor thresholds and prunes cleanly.
