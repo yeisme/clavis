@@ -69,8 +69,8 @@ func normalizeJSONNumbers(value any) any {
 			}
 			return integer
 		}
-		if f, err := v.Float64(); err == nil {
-			return f
+		if rational, ok := numericRat(v); ok {
+			return rational
 		}
 		return v.String()
 	case map[string]any:
@@ -208,6 +208,9 @@ func numericRat(value any) (*big.Rat, bool) {
 	var text string
 	switch n := value.(type) {
 	case json.Number:
+		if len(n.String()) > 4096 {
+			return nil, false
+		}
 		text = n.String()
 	case float32:
 		text = strconv.FormatFloat(float64(n), 'g', -1, 32)

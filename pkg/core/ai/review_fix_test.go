@@ -35,6 +35,12 @@ func TestSanitizeMCPResourceRedactsJSONSecrets(t *testing.T) {
 			t.Fatalf("header secret %q remained: %s", secret, header)
 		}
 	}
+	escaped := sanitizeMCPResource(`{"\u0061piKey":"escaped-secret","\u0061uthorization":"Basic escaped-auth"}`, 2048)
+	for _, secret := range []string{"escaped-secret", "escaped-auth"} {
+		if strings.Contains(escaped, secret) {
+			t.Fatalf("escaped-key secret %q remained: %s", secret, escaped)
+		}
+	}
 }
 
 func TestParseStructuredOutputEnforcesIntegerAndEnum(t *testing.T) {
@@ -86,6 +92,17 @@ func TestParseStructuredOutputEnforcesIntegerAndEnum(t *testing.T) {
 	}
 	if _, err := ParseStructuredOutput(`0.1`, map[string]any{"type": "number", "enum": []any{float64(0.1)}}); err != nil {
 		t.Fatalf("decimal numeric enum rejected: %v", err)
+	}
+	fraction, err := ParseStructuredOutput(`9007199254740992.1`, map[string]any{"type": "number"})
+	if err != nil {
+		t.Fatalf("exact fraction rejected: %v", err)
+	}
+	fractionRat, ok := fraction.(*big.Rat)
+	if !ok || fractionRat.RatString() != "90071992547409921/10" {
+		t.Fatalf("fraction precision lost: %#v", fraction)
+	}
+	if _, err := ParseStructuredOutput("1e"+strings.Repeat("9", 5000), map[string]any{"type": "number"}); err == nil || !strings.Contains(err.Error(), "must be number") {
+		t.Fatalf("oversized numeric literal was accepted: %v", err)
 	}
 	veryLarge := "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"
 	gotVeryLarge, err := ParseStructuredOutput(veryLarge, map[string]any{"type": "integer"})

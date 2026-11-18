@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 
@@ -61,9 +62,50 @@ var (
 	mcpSecretPattern     = regexp.MustCompile(`(?i)((?:"|')?(?:api[_-]?key|access[_-]?token|token|secret|password|passwd)(?:"|')?\s*[:=]\s*)((?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&]+))`)
 )
 
+func sanitizeJSONMCPValue(value any) any {
+	switch current := value.(type) {
+	case map[string]any:
+		for key, child := range current {
+			if isSensitiveMCPKey(key) {
+				current[key] = "[REDACTED]"
+			} else {
+				current[key] = sanitizeJSONMCPValue(child)
+			}
+		}
+		return current
+	case []any:
+		for i, child := range current {
+			current[i] = sanitizeJSONMCPValue(child)
+		}
+		return current
+	default:
+		return value
+	}
+}
+
+func isSensitiveMCPKey(key string) bool {
+	switch strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(key), "_", ""), "-", "")) {
+	case "authorization", "cookie", "apikey", "accesstoken", "token", "secret", "password", "passwd":
+		return true
+	default:
+		return false
+	}
+}
+
 func sanitizeMCPResource(raw string, maxRunes int) string {
 	if maxRunes <= 0 {
 		maxRunes = 2048
+	}
+	if decoded, err := func() (any, error) {
+		var value any
+		if err := json.Unmarshal([]byte(raw), &value); err != nil {
+			return nil, err
+		}
+		return sanitizeJSONMCPValue(value), nil
+	}(); err == nil {
+		if encoded, marshalErr := json.Marshal(decoded); marshalErr == nil {
+			raw = string(encoded)
+		}
 	}
 	clean := mcpPrivateKeyPattern.ReplaceAllString(raw, "[REDACTED PRIVATE KEY]")
 	clean = mcpJSONAuthPattern.ReplaceAllString(clean, "${1}[REDACTED]${2}")
