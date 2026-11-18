@@ -7,6 +7,7 @@ import (
 	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/pkg/core/ai"
 	"github.com/yeisme/clavis/pkg/core/inputengine"
+	runtimecoord "github.com/yeisme/clavis/pkg/core/runtime"
 )
 
 // SuggestInputCandidates asks the active AI profile for pinyin candidates (design §5).
@@ -31,6 +32,8 @@ func (c *AppController) SuggestInputCandidates(ctx context.Context, raw, appName
 		return secrets.ResolveProfileAPIKey(secStore, profile)
 	}
 	ctx, cancel := context.WithTimeout(ctx, inputengine.AITimeout)
+	unregister := c.RegisterCancellable(runtimecoord.AISuggestion, cancel, "AI input suggestion")
+	defer unregister()
 	defer cancel()
 	var reply strings.Builder
 	err := client.StreamCompletion(ctx, ai.CompletionRequest{

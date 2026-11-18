@@ -179,7 +179,7 @@ func TestCapsuleFreeformAIAndClipboardAndGlossary(t *testing.T) {
 
 	// Escape while streaming cancels AI
 	cancelEff := sm.Handle(engine.Event{Type: engine.EventEscape})
-	if len(cancelEff) != 2 || cancelEff[0].Type != engine.EffectCancelAI || cancelEff[1].Type != engine.EffectClose {
+	if len(cancelEff) != 3 || cancelEff[0].Type != engine.EffectStopAll || cancelEff[1].Type != engine.EffectCancelAI || cancelEff[2].Type != engine.EffectClose {
 		t.Fatalf("unexpected cancel effects: %+v", cancelEff)
 	}
 

@@ -32,6 +32,7 @@ import (
 	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/pkg/core/i18n"
 	"github.com/yeisme/clavis/pkg/core/prompt"
+	runtimecoord "github.com/yeisme/clavis/pkg/core/runtime"
 )
 
 // SettingsTab identifies one of the 5 native Settings tabs.
@@ -224,15 +225,20 @@ type AppController struct {
 	activeKeymapLayer string
 
 	// AI cancellation & generation guard
-	aiCancel  context.CancelFunc
-	aiGen     uint64
-	transform *inplaceSession
+	aiCancel      context.CancelFunc
+	aiDone        func()
+	runtime       *runtimecoord.Registry
+	runtimeCtx    context.Context
+	runtimeCancel context.CancelFunc
+	aiGen         uint64
+	transform     *inplaceSession
 
 	// Workflow cancellation and lifecycle guards. A controller owns at most one
 	// active workflow run; starting or stopping another run invalidates the old
 	// run's completion and output.
 	workflowLifecycleMu sync.Mutex
 	workflowCancel      context.CancelFunc
+	workflowDone        func()
 	workflowRunID       uint64
 	workflowTargetGen   uint64
 	closed              bool
@@ -242,6 +248,7 @@ type AppController struct {
 	// stale work must never send a shortcut into a newer application.
 	clipboardPasteGen    uint64
 	clipboardPasteCancel context.CancelFunc
+	clipboardPasteDone   func()
 
 	// HUD auto-dismiss timer & generation guard
 	hudTimer *time.Timer
@@ -338,6 +345,7 @@ func NewAppController(opts Options) *AppController {
 		sm.SetExternalClipboardSearch(true)
 	}
 	clipBaseCtx, clipBaseCancel := context.WithCancel(context.Background())
+	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
 
 	c := &AppController{
 		ConfigStore:              cfgStore,
@@ -378,6 +386,9 @@ func NewAppController(opts Options) *AppController {
 		clipBaseCancel:           clipBaseCancel,
 		clipSearchDebounce:       defaultClipboardSearchDebounce,
 		aiTestStatus:             AITestIdle,
+		runtime:                  runtimecoord.NewRegistry(runtimeCtx),
+		runtimeCtx:               runtimeCtx,
+		runtimeCancel:            runtimeCancel,
 		uiState: uiViewState{
 			imeRuleModeDraft: config.IMEModeASCII,
 		},
@@ -406,6 +417,13 @@ func defaultConfigDir() string {
 
 // Close stops background workers, cancels any running AI request, and stops HUD timers.
 func (c *AppController) Close() {
+	c.StopAll("close")
+	c.mu.Lock()
+	if c.runtimeCancel != nil {
+		c.runtimeCancel()
+		c.runtimeCancel = nil
+	}
+	c.mu.Unlock()
 	c.workflowLifecycleMu.Lock()
 	if c.workflowCancel != nil {
 		c.workflowCancel()
@@ -491,8 +509,42 @@ func (c *AppController) CancelWorkflow() bool {
 	}
 	c.workflowCancel()
 	c.workflowCancel = nil
+	if c.workflowDone != nil {
+		c.workflowDone()
+		c.workflowDone = nil
+	}
 	c.workflowRunID++
 	return true
+}
+
+// RegisterCancellable exposes the cancellation seam for MCP and agent adapters.
+func (c *AppController) RegisterCancellable(kind runtimecoord.Kind, cancel context.CancelFunc, label string) func() {
+	return c.ensureRuntime().Register(kind, cancel, label)
+}
+
+func (c *AppController) ensureRuntime() *runtimecoord.Registry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.runtime == nil {
+		c.runtimeCtx, c.runtimeCancel = context.WithCancel(context.Background())
+		c.runtime = runtimecoord.NewRegistry(c.runtimeCtx)
+	}
+	return c.runtime
+}
+
+// StopAll cancels all registered work without waiting for providers to return.
+func (c *AppController) StopAll(reason string) runtimecoord.Report {
+	report := c.ensureRuntime().StopAll(reason)
+	c.cancelAIStream()
+	c.CancelWorkflow()
+	c.mu.Lock()
+	if c.clipboardPasteCancel != nil {
+		c.clipboardPasteCancel()
+		c.clipboardPasteCancel = nil
+	}
+	c.clipboardPasteGen++
+	c.mu.Unlock()
+	return report
 }
 
 // Stop stops the host bridge and cancels any active workflow.
@@ -608,6 +660,10 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 		if c.clipboardPasteCancel != nil {
 			c.clipboardPasteCancel()
 			c.clipboardPasteCancel = nil
+			if c.clipboardPasteDone != nil {
+				c.clipboardPasteDone()
+				c.clipboardPasteDone = nil
+			}
 		}
 		c.clipboardPasteGen++
 	}
@@ -732,12 +788,12 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 	}
 
 	for _, eff := range effects {
-		if eff.Type == engine.EffectCancelAI || eff.Type == engine.EffectClose {
+		if eff.Type == engine.EffectStopAll || eff.Type == engine.EffectCancelAI || eff.Type == engine.EffectClose {
 			c.executeEffect(eff, next)
 		}
 	}
 	for _, eff := range effects {
-		if eff.Type != engine.EffectCancelAI && eff.Type != engine.EffectClose {
+		if eff.Type != engine.EffectStopAll && eff.Type != engine.EffectCancelAI && eff.Type != engine.EffectClose {
 			if eff.Type == engine.EffectCopyText && eff.ClipboardID == "" && actedClipboardID != "" {
 				eff.ClipboardID = actedClipboardID
 			}
@@ -785,6 +841,23 @@ func (c *AppController) ShowToastOrHUD(message string) {
 	}
 
 	c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: msg})
+}
+
+func stopKindLabel(kind runtimecoord.Kind) string {
+	switch kind {
+	case runtimecoord.AIStream, runtimecoord.AISuggestion, runtimecoord.AIConnectionTest:
+		return "AI"
+	case runtimecoord.MCPRequest:
+		return "MCP"
+	case runtimecoord.AgentWait:
+		return "Agent"
+	case runtimecoord.WorkflowRun:
+		return "工作流"
+	case runtimecoord.ClipboardPaste:
+		return "剪贴板"
+	default:
+		return string(kind)
+	}
 }
 
 func stateChanged(a, b engine.State) bool {
@@ -846,6 +919,22 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 
 	case engine.EffectCancelAI:
 		c.cancelAIStream()
+
+	case engine.EffectStopAll:
+		report := c.StopAll("user")
+		if len(report.Operations) > 0 && state.Phase != engine.PhaseHidden {
+			seen := make(map[string]struct{})
+			labels := make([]string, 0, len(report.Operations))
+			for _, op := range report.Operations {
+				label := stopKindLabel(op.Kind)
+				if _, ok := seen[label]; ok {
+					continue
+				}
+				seen[label] = struct{}{}
+				labels = append(labels, label)
+			}
+			c.ShowToastOrHUD("已停止 " + strings.Join(labels, " / "))
+		}
 
 	case engine.EffectApplyAIOutput:
 		c.injectTextAsync(eff.Text, 0, 0)
@@ -1438,9 +1527,15 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 		timeout = 30 * time.Second
 	}
 
+	regCtx, done := c.ensureRuntime().Begin(runtimecoord.AIStream, "AI stream")
+	ctx, timeoutCancel := context.WithTimeout(regCtx, timeout)
 	c.mu.Lock()
 	if c.aiCancel != nil {
 		c.aiCancel()
+		if c.aiDone != nil {
+			c.aiDone()
+			c.aiDone = nil
+		}
 	}
 	// A new AI surface supersedes any pending focused-field write-back.
 	if eff.Mode != "custom" {
@@ -1448,8 +1543,8 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 	}
 	c.aiGen++
 	gen := c.aiGen
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	c.aiCancel = cancel
+	c.aiDone = done
+	c.aiCancel = timeoutCancel
 	hasClient := c.AIClient != nil
 	var streamClient ai.OpenAICompatibleClient
 	if hasClient {
@@ -1459,7 +1554,8 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 	c.mu.Unlock()
 
 	if !hasClient {
-		cancel()
+		timeoutCancel()
+		done()
 		c.Dispatch(engine.Event{
 			Type:  engine.EventAIFailed,
 			Error: i18n.T("settings.ai.not_configured"),
@@ -1547,7 +1643,8 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 	}
 
 	go func() {
-		defer cancel()
+		defer done()
+		defer timeoutCancel()
 		err := streamClient.StreamCompletion(ctx, req, func(delta string) {
 			if delta == "" {
 				return
@@ -1609,9 +1706,14 @@ func (c *AppController) cancelAIStream() {
 	c.transform = nil
 	cancel := c.aiCancel
 	c.aiCancel = nil
+	done := c.aiDone
+	c.aiDone = nil
 	c.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if done != nil {
+		done()
 	}
 }
 
@@ -1653,13 +1755,13 @@ func (c *AppController) enqueueClipboardTask(fn func(ctx context.Context) error)
 func (c *AppController) enqueueClipboardTaskWithGeneration(fn func(ctx context.Context, generation uint64) error) uint64 {
 	gen := c.clipGen.Add(1)
 	c.clipMu.Lock()
+	defer c.clipMu.Unlock()
 	if !c.clipClosed {
 		c.clipQueue = append(c.clipQueue, clipTask{gen: gen, syncAfter: true, fn: func(ctx context.Context) error {
 			return fn(ctx, gen)
 		}})
 		c.clipCond.Signal()
 	}
-	c.clipMu.Unlock()
 	return gen
 }
 
@@ -1966,13 +2068,19 @@ func (c *AppController) pasteClipboardTextAsync(text string, onPasted func()) {
 // startClipboardPaste serializes delayed paste shortcuts and invalidates them when
 // a new Capsule target or controller lifecycle supersedes the operation.
 func (c *AppController) startClipboardPaste(onPasted func()) {
+	regCtx, done := c.ensureRuntime().Begin(runtimecoord.ClipboardPaste, "Clipboard paste")
+	ctx, cancel := context.WithCancel(regCtx)
 	c.mu.Lock()
 	br := c.Bridge
 	beforeInject := c.BeforeInject
 	if c.clipboardPasteCancel != nil {
 		c.clipboardPasteCancel()
+		if c.clipboardPasteDone != nil {
+			c.clipboardPasteDone()
+			c.clipboardPasteDone = nil
+		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	c.clipboardPasteDone = done
 	c.clipboardPasteCancel = cancel
 	c.clipboardPasteGen++
 	generation := c.clipboardPasteGen
@@ -1980,10 +2088,12 @@ func (c *AppController) startClipboardPaste(onPasted func()) {
 	paster, ok := br.(bridge.MediaPaster)
 	if !ok || paster == nil {
 		cancel()
+		done()
 		c.ShowToastOrHUD(i18n.T("clipboard.media.paste_unsupported"))
 		return
 	}
 	go func() {
+		defer done()
 		if beforeInject != nil {
 			beforeInject(ctx)
 		}
@@ -2105,6 +2215,7 @@ func (c *AppController) executeWorkflowContext(parent context.Context, workflowI
 	if parent == nil {
 		parent = context.Background()
 	}
+	runtimeRegistry := c.ensureRuntime()
 	c.workflowLifecycleMu.Lock()
 	c.mu.Lock()
 	closed := c.closed
@@ -2117,9 +2228,15 @@ func (c *AppController) executeWorkflowContext(parent context.Context, workflowI
 	// cancels the previous one, avoiding completion races between runs.
 	if c.workflowCancel != nil {
 		c.workflowCancel()
+		if c.workflowDone != nil {
+			c.workflowDone()
+			c.workflowDone = nil
+		}
 	}
 	runCtx, cancel := context.WithCancel(parent)
+	workflowDone := runtimeRegistry.Register(runtimecoord.WorkflowRun, cancel, "Workflow "+workflowID)
 	c.workflowCancel = cancel
+	c.workflowDone = workflowDone
 	c.workflowRunID++
 	runID := c.workflowRunID
 	c.mu.Lock()
@@ -2132,6 +2249,7 @@ func (c *AppController) executeWorkflowContext(parent context.Context, workflowI
 	go func() {
 		provider := workflowProvider{controller: c, actions: registry.actions, actionCtx: actionCtxCopy, workflowInputs: inputs}
 		result, runErr := automation.NewRunner(provider).Run(runCtx, plan, inputs)
+		workflowDone()
 		c.reportWorkflow(runID, targetGen, workflow, actionCtxCopy, result, runErr)
 	}()
 	return nil
@@ -2629,6 +2747,10 @@ func (c *AppController) reportWorkflow(runID, targetGen uint64, workflow config.
 		// Finalize the run before doing any HUD, output, or callback work. Those
 		// operations may synchronously enter the lifecycle API themselves.
 		c.workflowCancel = nil
+		if c.workflowDone != nil {
+			c.workflowDone()
+			c.workflowDone = nil
+		}
 	}
 	c.workflowLifecycleMu.Unlock()
 	if canceled {
@@ -3178,6 +3300,10 @@ func (c *AppController) TestAIConnectionForProfile(ctx context.Context, profileI
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	unregister := c.RegisterCancellable(runtimecoord.AIConnectionTest, cancel, "AI connection test")
+	defer unregister()
+	defer cancel()
 	cfg := c.ConfigStore.Current()
 	profile := c.ActiveAIProfile()
 	if trimmed := strings.TrimSpace(profileID); trimmed != "" {
