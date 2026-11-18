@@ -28,6 +28,22 @@ func TestCLIConfigRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCLIAndMCPSectionsRoundTripTogether(t *testing.T) {
+	cfg := DefaultMainConfig()
+	cfg.CLI = CLIConfig{Enabled: true, TrustedProfiles: []CLITrustedProfile{{ID: "safe", Enabled: true, Commands: []string{"/bin/echo"}, TimeoutSeconds: 15}}}
+	cfg.MCP = MCPConfig{Enabled: true, Servers: []MCPServerConfig{{ID: "local", Name: "Local", Enabled: true, Transport: "stdio", Command: "/bin/tool", TimeoutSeconds: 30, MaxConcurrency: 2, AllowedTools: []string{"echo"}}}}
+	decoded, err := DecodeMainConfig(cfg.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.CLI.Enabled || len(decoded.CLI.TrustedProfiles) != 1 || decoded.CLI.TrustedProfiles[0].ID != "safe" {
+		t.Fatalf("CLI section changed during combined round trip: %#v", decoded.CLI)
+	}
+	if !decoded.MCP.Enabled || len(decoded.MCP.Servers) != 1 || decoded.MCP.Servers[0].ID != "local" || decoded.MCP.Servers[0].AllowedTools[0] != "echo" {
+		t.Fatalf("MCP section changed during combined round trip: %#v", decoded.MCP)
+	}
+}
+
 func TestCLISectionIsOptionalForLegacyConfig(t *testing.T) {
 	cfg, err := DecodeMainConfig("")
 	if err != nil {

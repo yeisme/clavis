@@ -6,15 +6,121 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yeisme/clavis/pkg/core/actions"
 	"github.com/yeisme/clavis/pkg/core/automation"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 )
 
+type schemaCLIExecutor struct{}
+
+func (schemaCLIExecutor) ExecuteRequest(context.Context, actions.CommandRequest) actions.CommandResult {
+	return actions.CommandResult{ExitCode: 0, Stdout: `{"unexpected":true}`}
+}
+
+func TestWorkflowExecutionUsesProductionDescriptorOutputSchema(t *testing.T) {
+	f := newInteractionFixture(t, nil)
+	cfg := f.ctrl.Config()
+	cfg.Main.CLI.Enabled = true
+	cfg.Main.CLI.TrustedProfiles = []config.CLITrustedProfile{{ID: "safe", Enabled: true, Commands: []string{"/bin/echo"}, TimeoutSeconds: 15}}
+	cfg.Leader.Nodes = []config.LeaderNode{{Key: "schema", Label: "Schema", Action: config.CLIProfileAction("safe", "/bin/echo")}}
+	cfg.Workflows.Workflows = []config.Workflow{{ID: "schema", Enabled: true, Steps: []config.WorkflowStep{{ID: "one", Action: "schema", Enabled: true}}}}
+	if err := f.ctrl.ConfigStore.SaveAll(cfg); err != nil {
+		t.Fatal(err)
+	}
+	f.ctrl.StateMachine.SetConfig(cfg)
+	f.ctrl.CLIExecutor = schemaCLIExecutor{}
+	f.ctrl.workflowRegistryOverride = func(cfg config.ClavisConfig) workflowActionRegistry {
+		registry := f.ctrl.workflowActionRegistry(cfg)
+		registry.descriptors["leader.schema"] = automation.ActionDescriptor{
+			ID: "leader.schema", Provider: automation.ProviderCLI,
+			OutputSchema: map[string]any{"type": "object", "required": []any{"ok"}},
+		}
+		registry.descriptors["schema"] = registry.descriptors["leader.schema"]
+		return registry
+	}
+	resultDone := make(chan automation.ExecutionResult, 1)
+	f.ctrl.OnWorkflowResult = func(_ string, result automation.ExecutionResult, _ error) { resultDone <- result }
+	if err := f.ctrl.ExecuteWorkflow("schema", engine.CapsuleContext{}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-resultDone:
+		if len(result.Steps) != 1 {
+			t.Fatalf("steps = %#v", result.Steps)
+		}
+		step := result.Steps[0].Result
+		if step.Status != automation.ResultFailed || step.ErrorCategory != automation.ErrorCategoryOutputSchema {
+			t.Fatalf("schema result = %#v", step)
+		}
+		if _, ok := result.Outputs["one"]; ok {
+			t.Fatalf("invalid output was captured: %#v", result.Outputs)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("workflow did not report result")
+	}
+}
+
+type delayedCLIExecutor struct {
+	calls     chan string
+	allowA    chan struct{}
+	bCanceled chan struct{}
+}
+
+func (e *delayedCLIExecutor) ExecuteRequest(ctx context.Context, req actions.CommandRequest) actions.CommandResult {
+	e.calls <- req.Args[0]
+	if req.Args[0] == "A" {
+		<-e.allowA // Deliberately outlive cancellation to exercise stale completion.
+		return actions.CommandResult{ExitCode: 0}
+	}
+	select {
+	case <-ctx.Done():
+		close(e.bCanceled)
+		return actions.CommandResult{Canceled: true, Err: ctx.Err(), ExitCode: -1}
+	case <-time.After(time.Second):
+		return actions.CommandResult{ExitCode: 0}
+	}
+}
+
+func TestCLIStopAllGenerationKeepsReplacementCancellationOwned(t *testing.T) {
+	f := newInteractionFixture(t, nil)
+	cfg := f.ctrl.Config()
+	cfg.Main.CLI.Enabled = true
+	cfg.Main.CLI.TrustedProfiles = []config.CLITrustedProfile{{ID: "safe", Enabled: true, Commands: []string{"/bin/echo"}, TimeoutSeconds: 15}}
+	f.ctrl.ConfigStore.SaveAll(cfg)
+	exec := &delayedCLIExecutor{calls: make(chan string, 2), allowA: make(chan struct{}), bCanceled: make(chan struct{})}
+	f.ctrl.CLIExecutor = exec
+	a := config.CLIProfileAction("safe", "/bin/echo", "A")
+	b := config.CLIProfileAction("safe", "/bin/echo", "B")
+	f.ctrl.runAction(a, engine.CapsuleContext{})
+	f.ctrl.runAction(b, engine.CapsuleContext{})
+	for i := 0; i < 2; i++ {
+		select {
+		case <-exec.calls:
+		case <-time.After(time.Second):
+			t.Fatal("CLI replacement did not start")
+		}
+	}
+	close(exec.allowA)
+	select {
+	case <-exec.bCanceled:
+		t.Fatal("B canceled before StopAll")
+	case <-time.After(50 * time.Millisecond):
+	}
+	f.ctrl.StopAll("test")
+	select {
+	case <-exec.bCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("StopAll failed to cancel replacement CLI")
+	}
+}
+
 func TestWorkflowEnterRunsConfiguredSafeActionAndReportsResult(t *testing.T) {
 	f := newInteractionFixture(t, nil)
 	cfg := f.ctrl.Config()
-	cfg.Leader.Nodes = []config.LeaderNode{{Key: "safe", Label: "Safe", Action: config.CLIAction("printf", "%s", "workflow-ok")}}
+	cfg.Main.CLI.Enabled = true
+	cfg.Main.CLI.TrustedProfiles = []config.CLITrustedProfile{{ID: "safe", Enabled: true, Commands: []string{"/usr/bin/printf", "/bin/printf"}, TimeoutSeconds: 15}}
+	cfg.Leader.Nodes = []config.LeaderNode{{Key: "safe", Label: "Safe", Action: config.CLIProfileAction("safe", "/usr/bin/printf", "%s", "workflow-ok")}}
 	cfg.Workflows.Workflows = []config.Workflow{{
 		ID: "run", Name: "Run", Description: "safe", Enabled: true,
 		Output: config.WorkflowOutputNotify,
@@ -53,7 +159,9 @@ func TestWorkflowEnterRunsConfiguredSafeActionAndReportsResult(t *testing.T) {
 func TestWorkflowResultCallbackCanCancelWorkflow(t *testing.T) {
 	f := newInteractionFixture(t, nil)
 	cfg := f.ctrl.Config()
-	cfg.Leader.Nodes = []config.LeaderNode{{Key: "safe", Label: "Safe", Action: config.CLIAction("printf", "ok")}}
+	cfg.Main.CLI.Enabled = true
+	cfg.Main.CLI.TrustedProfiles = []config.CLITrustedProfile{{ID: "safe", Enabled: true, Commands: []string{"/usr/bin/printf", "/bin/printf"}, TimeoutSeconds: 15}}
+	cfg.Leader.Nodes = []config.LeaderNode{{Key: "safe", Label: "Safe", Action: config.CLIProfileAction("safe", "/usr/bin/printf", "ok")}}
 	cfg.Workflows.Workflows = []config.Workflow{{
 		ID: "callback-cancel", Enabled: true,
 		Steps: []config.WorkflowStep{{ID: "one", Action: "safe", Enabled: true}},
@@ -83,7 +191,9 @@ func TestWorkflowResultCallbackCanCancelWorkflow(t *testing.T) {
 func TestWorkflowRequiredInputFailsBeforeProviderExecution(t *testing.T) {
 	f := newInteractionFixture(t, nil)
 	cfg := f.ctrl.Config()
-	cfg.Leader.Nodes = []config.LeaderNode{{Key: "safe", Label: "Safe", Action: config.CLIAction("printf", "provider-ran")}}
+	cfg.Main.CLI.Enabled = true
+	cfg.Main.CLI.TrustedProfiles = []config.CLITrustedProfile{{ID: "safe", Enabled: true, Commands: []string{"/usr/bin/printf", "/bin/printf"}, TimeoutSeconds: 15}}
+	cfg.Leader.Nodes = []config.LeaderNode{{Key: "safe", Label: "Safe", Action: config.CLIProfileAction("safe", "/usr/bin/printf", "provider-ran")}}
 	cfg.Workflows.Workflows = []config.Workflow{{
 		ID: "required", Enabled: true,
 		Inputs: []config.WorkflowInput{{ID: "token", Required: true}},
@@ -101,7 +211,9 @@ func TestWorkflowRequiredInputFailsBeforeProviderExecution(t *testing.T) {
 func TestWorkflowContextCancellationReportsCanceledResult(t *testing.T) {
 	f := newInteractionFixture(t, nil)
 	cfg := f.ctrl.Config()
-	cfg.Leader.Nodes = []config.LeaderNode{{Key: "safe", Label: "Safe", Action: config.CLIAction("printf", "ok")}}
+	cfg.Main.CLI.Enabled = true
+	cfg.Main.CLI.TrustedProfiles = []config.CLITrustedProfile{{ID: "safe", Enabled: true, Commands: []string{"/usr/bin/printf", "/bin/printf"}, TimeoutSeconds: 15}}
+	cfg.Leader.Nodes = []config.LeaderNode{{Key: "safe", Label: "Safe", Action: config.CLIProfileAction("safe", "/usr/bin/printf", "ok")}}
 	cfg.Workflows.Workflows = []config.Workflow{{ID: "cancel", Enabled: true, Steps: []config.WorkflowStep{{ID: "one", Action: "safe", Enabled: true}}}}
 	if err := f.ctrl.ConfigStore.SaveAll(cfg); err != nil {
 		t.Fatalf("save config: %v", err)
@@ -141,7 +253,9 @@ func TestCancelWorkflowSuppressesCompletionCallbackAndHUD(t *testing.T) {
 func TestWorkflowShutdownSuppressesCompletionCallback(t *testing.T) {
 	f := newInteractionFixture(t, nil)
 	cfg := f.ctrl.Config()
-	cfg.Leader.Nodes = []config.LeaderNode{{Key: "slow", Label: "Slow", Action: config.CLIAction("sleep", "5")}}
+	cfg.Main.CLI.Enabled = true
+	cfg.Main.CLI.TrustedProfiles = []config.CLITrustedProfile{{ID: "safe", Enabled: true, Commands: []string{"/bin/sleep"}, TimeoutSeconds: 15}}
+	cfg.Leader.Nodes = []config.LeaderNode{{Key: "slow", Label: "Slow", Action: config.CLIProfileAction("safe", "/bin/sleep", "5")}}
 	cfg.Workflows.Workflows = []config.Workflow{{ID: "shutdown", Enabled: true, Steps: []config.WorkflowStep{{ID: "one", Action: "slow", Enabled: true}}}}
 	if err := f.ctrl.ConfigStore.SaveAll(cfg); err != nil {
 		t.Fatalf("save config: %v", err)
@@ -163,7 +277,9 @@ func TestWorkflowShutdownSuppressesCompletionCallback(t *testing.T) {
 func TestWorkflowReplaceOutputInjectsIntoActiveTarget(t *testing.T) {
 	f := newInteractionFixture(t, nil)
 	cfg := f.ctrl.Config()
-	cfg.Leader.Nodes = []config.LeaderNode{{Key: "safe", Label: "Safe", Action: config.CLIAction("printf", "%s", "replacement-text")}}
+	cfg.Main.CLI.Enabled = true
+	cfg.Main.CLI.TrustedProfiles = []config.CLITrustedProfile{{ID: "safe", Enabled: true, Commands: []string{"/usr/bin/printf", "/bin/printf"}, TimeoutSeconds: 15}}
+	cfg.Leader.Nodes = []config.LeaderNode{{Key: "safe", Label: "Safe", Action: config.CLIProfileAction("safe", "/usr/bin/printf", "%s", "replacement-text")}}
 	cfg.Workflows.Workflows = []config.Workflow{{
 		ID: "replace", Name: "Replace", Enabled: true,
 		Output: config.WorkflowOutputReplace,

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yeisme/clavis/pkg/core/actions"
 	"github.com/yeisme/clavis/pkg/core/automation"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
@@ -14,7 +15,7 @@ import (
 func TestWorkflowActionRegistryOnlyExposesSafeCLIAndScripts(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Leader.Nodes = []config.LeaderNode{
-		{Key: "safe", Label: "Safe", Action: config.CLIAction("printf", "ok")},
+		{Key: "safe", Label: "Safe", Action: config.CLIProfileAction("safe", "/usr/bin/printf", "ok")},
 		{Key: "window", Label: "Window", Action: config.WindowAction(config.WindowLeftHalf)},
 	}
 	cfg.Components.Scripts = []config.ScriptComponentSpec{{ID: "script", Command: "printf", Args: []string{"script"}, Enabled: true}}
@@ -33,12 +34,35 @@ func TestWorkflowActionRegistryOnlyExposesSafeCLIAndScripts(t *testing.T) {
 	}
 }
 
+type countingExecutor struct{ calls int }
+
+func (e *countingExecutor) ExecuteRequest(context.Context, actions.CommandRequest) actions.CommandResult {
+	e.calls++
+	return actions.CommandResult{ExitCode: 0}
+}
+
+func TestWorkflowProviderRejectsProfilelessCLIWithoutExecuting(t *testing.T) {
+	store := config.NewConfigStore(t.TempDir())
+	if _, err := store.LoadOrInitialize(); err != nil {
+		t.Fatal(err)
+	}
+	exec := &countingExecutor{}
+	provider := workflowProvider{controller: &AppController{ConfigStore: store, CLIExecutor: exec}}
+	result, err := provider.invokeCLIProfile(context.Background(), "", "/bin/echo", nil, 0)
+	if err != nil || result.Status != automation.ResultFailed || !strings.Contains(result.Error, "trusted profile") {
+		t.Fatalf("result = %#v, err=%v", result, err)
+	}
+	if exec.calls != 0 {
+		t.Fatalf("profileless workflow invoked executor %d times", exec.calls)
+	}
+}
+
 func TestWorkflowProviderInvokesCLIWithoutShellInterpolation(t *testing.T) {
 	provider := workflowProvider{
 		actionCtx: engine.CapsuleContext{SelectedText: "selected"},
 		actions: map[string]workflowAction{
 			"safe": {leader: func() *config.LeaderAction {
-				a := config.CLIAction("printf", "%s", "literal;not-shell")
+				a := config.CLIProfileAction("safe", "/usr/bin/printf", "%s", "literal;not-shell")
 				return &a
 			}()},
 		},
@@ -56,7 +80,7 @@ func TestWorkflowProviderInvokesCLIWithoutShellInterpolation(t *testing.T) {
 }
 
 func TestWorkflowProviderRejectsUnresolvedTemplates(t *testing.T) {
-	cli := config.CLIAction("printf", "%s", "{{missing.value}}")
+	cli := config.CLIProfileAction("safe", "/usr/bin/printf", "%s", "{{missing.value}}")
 	provider := workflowProvider{actions: map[string]workflowAction{"cli": {leader: &cli}}}
 	result, err := provider.Invoke(context.Background(), automation.ActionInvocation{ActionID: "cli"})
 	if err != nil {
@@ -68,7 +92,7 @@ func TestWorkflowProviderRejectsUnresolvedTemplates(t *testing.T) {
 }
 
 func TestWorkflowTemplatesResolveBareAndNamedInputs(t *testing.T) {
-	cli := config.CLIAction("printf", "%s|%s|%s", "{{text}}", "{{tone}}", "{{input}}")
+	cli := config.CLIProfileAction("safe", "/usr/bin/printf", "%s|%s|%s", "{{text}}", "{{tone}}", "{{input}}")
 	provider := workflowProvider{
 		actions:        map[string]workflowAction{"cli": {leader: &cli}},
 		workflowInputs: map[string]any{"text": "selected", "tone": "concise", "input": map[string]any{"text": "selected", "tone": "concise"}},
@@ -170,7 +194,7 @@ func TestWorkflowProviderStepSourceOverridesWorkflowSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cli := config.CLIAction("printf", "%s|%s", "{{text}}", "{{input}}")
+	cli := config.CLIProfileAction("safe", "/usr/bin/printf", "%s|%s", "{{text}}", "{{input}}")
 	provider := workflowProvider{
 		actionCtx:      engine.CapsuleContext{SelectedText: "selected text", ClipboardPreview: "clipboard text"},
 		actions:        map[string]workflowAction{"cli": {leader: &cli}},
@@ -203,7 +227,7 @@ func TestWorkflowProviderUsesWorkflowSourceWhenStepDoesNotOverride(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cli := config.CLIAction("printf", "%s|%s", "{{text}}", "{{input}}")
+	cli := config.CLIProfileAction("safe", "/usr/bin/printf", "%s|%s", "{{text}}", "{{input}}")
 	provider := workflowProvider{
 		actionCtx:      engine.CapsuleContext{SelectedText: "selected text", ClipboardPreview: "clipboard text"},
 		actions:        map[string]workflowAction{"cli": {leader: &cli}},
@@ -226,7 +250,7 @@ func TestWorkflowProviderUsesWorkflowSourceWhenStepDoesNotOverride(t *testing.T)
 }
 
 func TestWorkflowProviderBindsInputAndStepOutputToCLIAndScript(t *testing.T) {
-	cli := config.CLIAction("printf", "%s|%s", "{{input}}", "{{stepOutput}}")
+	cli := config.CLIProfileAction("safe", "/usr/bin/printf", "%s|%s", "{{input}}", "{{stepOutput}}")
 	provider := workflowProvider{
 		actions: map[string]workflowAction{
 			"cli":    {leader: &cli},

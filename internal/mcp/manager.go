@@ -127,14 +127,26 @@ func (m *Manager) start(ctx context.Context, id string) error {
 		return initErr
 	}
 	tools, toolsErr := managed.ListTools(ctx)
+	if toolsErr != nil {
+		// Discovery happens after initialize, so this client owns a live
+		// transport even though it is not usable. Close it before returning;
+		// otherwise a failed start leaks the process/socket and a retry can
+		// incorrectly observe a half-started entry.
+		closeErr := managed.Close()
+		if closeErr != nil {
+			toolsErr = errors.Join(toolsErr, closeErr)
+		}
+		m.recordError(id, toolsErr)
+		return toolsErr
+	}
 	m.mu.Lock()
 	restarts := 0
 	if old := m.entries[id]; old != nil {
 		restarts = old.status.Restarts
 	}
-	m.entries[id] = &managerEntry{client: managed, transport: transport, sem: managed.sem, status: ServerStatus{ID: id, Running: true, Tools: tools, LastError: toolsErr, Restarts: restarts, StartedAt: time.Now()}}
+	m.entries[id] = &managerEntry{client: managed, transport: transport, sem: managed.sem, status: ServerStatus{ID: id, Running: true, Tools: tools, Restarts: restarts, StartedAt: time.Now()}}
 	m.mu.Unlock()
-	return toolsErr
+	return nil
 }
 
 func (m *Manager) StartAll(ctx context.Context) error {

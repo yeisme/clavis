@@ -3,6 +3,7 @@ package actions_test
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -51,6 +52,51 @@ func TestCLIExecutorScrubsSecrets(t *testing.T) {
 	}
 	if strings.TrimSpace(res.Stdout) != "" {
 		t.Fatalf("secret leaked: %q", res.Stdout)
+	}
+}
+
+func TestResolveTrustedRejectsSharedWritableDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permissions test")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0777); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "tool")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	profile := config.CLITrustedProfile{ID: "shared", Enabled: true, Commands: []string{path}}
+	if _, err := actions.ResolveTrusted(profile, path); err == nil {
+		t.Fatal("trusted executable in temporary/shared ancestry was accepted")
+	}
+	if _, err := actions.ResolveTrusted(config.CLITrustedProfile{ID: "system", Enabled: true, Commands: []string{"/bin/echo"}}, "/bin/echo"); err != nil {
+		t.Fatalf("system executable rejected: %v", err)
+	}
+}
+
+func TestCLIExecutorDenylistCannotBeOverriddenByAllowEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix printenv test")
+	}
+	command := "/usr/bin/printenv"
+	if _, err := os.Stat(command); err != nil {
+		command = "/bin/printenv"
+	}
+	for _, name := range []string{"KEY_VALUE", "TOKEN_VALUE", "SECRET_VALUE", "PASSWORD_VALUE", "AUTH_VALUE", "CREDENTIAL_VALUE", "COOKIE_VALUE", "SESSION_VALUE", "CLAVIS_INTERNAL", "CUSTOM_MODE"} {
+		t.Setenv(name, "hidden")
+	}
+	profile := config.CLITrustedProfile{ID: "env", Enabled: true, Commands: []string{command}, AllowEnv: []string{"KEY_VALUE", "TOKEN_VALUE", "SECRET_VALUE", "PASSWORD_VALUE", "AUTH_VALUE", "CREDENTIAL_VALUE", "COOKIE_VALUE", "SESSION_VALUE", "CLAVIS_INTERNAL", "CUSTOM_MODE"}}
+	for _, name := range []string{"KEY_VALUE", "TOKEN_VALUE", "SECRET_VALUE", "PASSWORD_VALUE", "AUTH_VALUE", "CREDENTIAL_VALUE", "COOKIE_VALUE", "SESSION_VALUE", "CLAVIS_INTERNAL"} {
+		result := actions.NewCLIExecutor().ExecuteRequest(context.Background(), actions.CommandRequest{Profile: &profile, Command: command, Args: []string{name}})
+		if strings.TrimSpace(result.Stdout) != "" {
+			t.Errorf("sensitive %s leaked: %q", name, result.Stdout)
+		}
+	}
+	result := actions.NewCLIExecutor().ExecuteRequest(context.Background(), actions.CommandRequest{Profile: &profile, Command: command, Args: []string{"CUSTOM_MODE"}})
+	if strings.TrimSpace(result.Stdout) != "hidden" {
+		t.Fatalf("ordinary allowlisted env missing: %q (%v)", result.Stdout, result.Err)
 	}
 }
 

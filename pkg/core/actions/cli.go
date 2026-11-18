@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -80,7 +81,10 @@ func ResolveTrusted(profile config.CLITrustedProfile, command string) (string, e
 			continue
 		}
 		info, err := os.Stat(clean)
-		if err != nil || info.IsDir() {
+		if err != nil || info.IsDir() || (runtime.GOOS != "windows" && info.Mode()&0111 == 0) || !info.Mode().IsRegular() {
+			continue
+		}
+		if !secureExecutablePath(clean, info) {
 			continue
 		}
 		resolved, err := exec.LookPath(clean)
@@ -95,6 +99,26 @@ func ResolveTrusted(profile config.CLITrustedProfile, command string) (string, e
 		return resolved, nil
 	}
 	return "", fmt.Errorf("%w: %s", ErrUntrustedCommand, command)
+}
+
+// secureExecutablePath rejects world/group-writable executable locations. Owner
+// writable files are allowed because normal user-owned profiles necessarily need
+// that permission; writable shared directories such as /tmp are not trusted.
+func secureExecutablePath(path string, info os.FileInfo) bool {
+	if info == nil || !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode()&0111 == 0) {
+		return false
+	}
+	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+		stat, err := os.Stat(dir)
+		if err != nil || !stat.IsDir() || stat.Mode()&0022 != 0 {
+			return false
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+	}
+	return true
 }
 
 var sensitiveEnv = []string{"KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH", "CREDENTIAL", "COOKIE", "SESSION"}
@@ -120,7 +144,7 @@ func sanitizeEnv(extra []string, profile config.CLITrustedProfile) []string {
 	out := []string{}
 	for _, item := range append(append([]string{}, os.Environ()...), extra...) {
 		n, _, ok := strings.Cut(item, "=")
-		if !ok || seen[n] || !allowed[n] || (sensitive(n) && !contains(profile.AllowEnv, n)) || (strings.HasPrefix(strings.ToUpper(n), "CLAVIS_")) {
+		if !ok || seen[n] || !allowed[n] || sensitive(n) {
 			continue
 		}
 		seen[n] = true
@@ -128,15 +152,6 @@ func sanitizeEnv(extra []string, profile config.CLITrustedProfile) []string {
 	}
 	return out
 }
-func contains(a []string, s string) bool {
-	for _, x := range a {
-		if x == s {
-			return true
-		}
-	}
-	return false
-}
-
 func (e CLIExecutor) ExecuteRequest(ctx context.Context, req CommandRequest) CommandResult {
 	res := CommandResult{ExitCode: -1}
 	if ctx == nil {

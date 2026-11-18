@@ -86,6 +86,69 @@ func TestClientInitializeListsAndInvokes(t *testing.T) {
 	}
 }
 
+func TestConfiguredClientDeniesUnlistedToolWithoutTransportRequest(t *testing.T) {
+	transport := &fakeTransport{results: map[string]json.RawMessage{
+		"initialize": json.RawMessage(`{"protocolVersion":"2024-11-05"}`),
+	}, errors: map[string]error{}}
+	client := NewConfiguredClient(transport, ServerConfig{Name: "restricted", AllowedTools: []string{"allowed"}}, ClientOptions{})
+	if _, err := client.Initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	transport.mu.Lock()
+	before := len(transport.calls)
+	transport.mu.Unlock()
+	if _, err := client.Invoke(context.Background(), "denied", nil); !errors.Is(err, ErrToolNotAllowed) {
+		t.Fatalf("denial error = %v", err)
+	}
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	if len(transport.calls) != before {
+		t.Fatalf("denied invocation sent transport request: calls=%v", transport.calls)
+	}
+}
+
+func TestManagerDiscoveryFailureClosesTransportAndRetryStartsFresh(t *testing.T) {
+	first := &fakeTransport{results: map[string]json.RawMessage{
+		"initialize": json.RawMessage(`{"protocolVersion":"2024-11-05"}`),
+	}, errors: map[string]error{"tools/list": errors.New("discovery failed")}}
+	second := &fakeTransport{results: map[string]json.RawMessage{
+		"initialize": json.RawMessage(`{"protocolVersion":"2024-11-05"}`),
+		"tools/list": json.RawMessage(`{"tools":[{"name":"ok"}]}`),
+	}, errors: map[string]error{}}
+	attempt := 0
+	manager := NewManager([]Spec{{ID: "demo", Config: ServerConfig{Name: "demo"}, Factory: func(context.Context, Spec) (Transport, error) {
+		attempt++
+		if attempt == 1 {
+			return first, nil
+		}
+		return second, nil
+	}}}, Options{})
+	if err := manager.Start(context.Background(), "demo"); err == nil {
+		t.Fatal("discovery failure unexpectedly succeeded")
+	}
+	if !first.closed {
+		t.Fatal("failed discovery transport was not closed")
+	}
+	if status := manager.Status()[0]; status.Running {
+		t.Fatalf("failed server is still running: %+v", status)
+	}
+	if err := manager.Start(context.Background(), "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if !second.closed && manager.Client("demo") == nil {
+		t.Fatal("retry did not install a running client")
+	}
+	if status := manager.Status()[0]; !status.Running || len(status.Tools) != 1 {
+		t.Fatalf("retry status = %+v", status)
+	}
+	if err := manager.StopAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !second.closed {
+		t.Fatal("stop all did not close retry transport")
+	}
+}
+
 func TestClientRequiresInitializationAndPreservesRPCError(t *testing.T) {
 	rpcErr := &RPCError{Code: -32601, Message: "missing", Data: json.RawMessage(`{"method":"tools/list"}`)}
 	transport := &fakeTransport{results: map[string]json.RawMessage{}, errors: map[string]error{"tools/list": rpcErr}}

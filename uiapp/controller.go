@@ -80,6 +80,12 @@ const (
 )
 
 // Options configures an AppController.
+// MCPManager is the minimal lifecycle contract held by the controller. MCP
+// servers remain injected-only; this seam does not start configured servers.
+type MCPManager interface {
+	StopAll(context.Context) error
+}
+
 type Options struct {
 	ConfigStore              *config.ConfigStore
 	ClipboardStore           clipboard.Store
@@ -122,6 +128,9 @@ type Options struct {
 	// CancelWorkflow, Close, or execute another workflow synchronously.
 	OnWorkflowResult func(workflowID string, result automation.ExecutionResult, err error)
 	AuditLog         *automation.AuditLog
+	// MCPManager is an optional lifecycle seam. The controller never auto-starts
+	// configured servers; callers explicitly manage opted-in servers.
+	MCPManager MCPManager
 }
 
 type clipTask struct {
@@ -184,9 +193,14 @@ type AppController struct {
 	AppProvider       apps.AppProvider
 	AIClient          *ai.OpenAICompatibleClient
 	CLIExecutor       actions.Executor
+	MCPManager        MCPManager
 	AuditLog          *automation.AuditLog
-	Glossary          engine.GlossaryEngine
-	Snippets          *engine.SnippetEngine
+	// workflowRegistryOverride is an injectable registry seam for hosts that
+	// enrich configured actions with runtime descriptor metadata (such as output
+	// schemas). The normal production path uses workflowActionRegistry below.
+	workflowRegistryOverride func(config.ClavisConfig) workflowActionRegistry
+	Glossary                 engine.GlossaryEngine
+	Snippets                 *engine.SnippetEngine
 
 	httpDoer                 ai.HTTPDoer
 	ClipboardWriter          func(text string)
@@ -242,6 +256,7 @@ type AppController struct {
 	workflowCancel      context.CancelFunc
 	workflowDone        func()
 	cliCancel           context.CancelFunc
+	cliGeneration       uint64
 	workflowRunID       uint64
 	workflowTargetGen   uint64
 	closed              bool
@@ -381,6 +396,7 @@ func NewAppController(opts Options) *AppController {
 		OnConfigSaved:            opts.OnConfigSaved,
 		OnWorkflowResult:         opts.OnWorkflowResult,
 		AuditLog:                 opts.AuditLog,
+		MCPManager:               opts.MCPManager,
 		appIconCache:             make(map[string]*ui.Bitmap),
 		thumbCache:               make(map[string]*ui.Bitmap),
 		originalCache:            make(map[string]*ui.Bitmap),
@@ -422,6 +438,12 @@ func defaultConfigDir() string {
 // Close stops background workers, cancels any running AI request, and stops HUD timers.
 func (c *AppController) Close() {
 	c.StopAll("close")
+	c.mu.Lock()
+	mcpManager := c.MCPManager
+	c.mu.Unlock()
+	if mcpManager != nil {
+		_ = mcpManager.StopAll(context.Background())
+	}
 	c.mu.Lock()
 	if c.runtimeCancel != nil {
 		c.runtimeCancel()
@@ -2212,6 +2234,9 @@ func (c *AppController) executeWorkflowContext(parent context.Context, workflowI
 		return err
 	}
 	registry := c.workflowActionRegistry(cfg)
+	if c.workflowRegistryOverride != nil {
+		registry = c.workflowRegistryOverride(cfg)
+	}
 	definition := workflowDefinition(workflow)
 	plan, err := automation.BuildExecutionPlanWithRegistry(definition, registry)
 	if err != nil {
@@ -2260,7 +2285,7 @@ func (c *AppController) executeWorkflowContext(parent context.Context, workflowI
 	actionCtxCopy := actionCtx
 	go func() {
 		provider := workflowProvider{controller: c, actions: registry.actions, actionCtx: actionCtxCopy, workflowInputs: inputs}
-		result, runErr := automation.NewRunner(provider).Run(runCtx, plan, inputs)
+		result, runErr := automation.NewRunner(provider, automation.WithActionRegistry(registry.descriptors)).Run(runCtx, plan, inputs)
 		workflowDone()
 		c.reportWorkflow(runID, targetGen, workflow, actionCtxCopy, result, runErr)
 	}()
@@ -2713,6 +2738,9 @@ func (p workflowProvider) invokeCLI(ctx context.Context, command string, args []
 }
 
 func (p workflowProvider) invokeCLIProfile(ctx context.Context, profileID, command string, args []string, timeout time.Duration) (automation.ActionResult, error) {
+	if strings.TrimSpace(profileID) == "" {
+		return automation.ActionResult{Status: automation.ResultFailed, Error: "workflow CLI action requires a trusted profile"}, nil
+	}
 	var executor actions.Executor = actions.NewCLIExecutor()
 	var profile *config.CLITrustedProfile
 	if p.controller != nil {
@@ -2720,10 +2748,10 @@ func (p workflowProvider) invokeCLIProfile(ctx context.Context, profileID, comma
 		executor = p.controller.CLIExecutor
 		cfg := p.controller.ConfigStore.Current()
 		p.controller.mu.Unlock()
+		if !cfg.Main.CLI.Enabled {
+			return automation.ActionResult{Status: automation.ResultFailed, Error: "CLI execution is disabled; configure a trusted profile"}, nil
+		}
 		if profileID != "" {
-			if !cfg.Main.CLI.Enabled {
-				return automation.ActionResult{Status: automation.ResultFailed, Error: "CLI execution is disabled"}, nil
-			}
 			for i := range cfg.Main.CLI.TrustedProfiles {
 				if cfg.Main.CLI.TrustedProfiles[i].ID == profileID {
 					profile = &cfg.Main.CLI.TrustedProfiles[i]
@@ -2947,10 +2975,18 @@ func (c *AppController) runAction(act config.LeaderAction, actionCtx engine.Caps
 		if c.cliCancel != nil {
 			c.cliCancel()
 		}
+		c.cliGeneration++
+		generation := c.cliGeneration
 		c.cliCancel = cancel
 		c.mu.Unlock()
 		go func() {
-			defer func() { c.mu.Lock(); c.cliCancel = nil; c.mu.Unlock() }()
+			defer func() {
+				c.mu.Lock()
+				if c.cliGeneration == generation {
+					c.cliCancel = nil
+				}
+				c.mu.Unlock()
+			}()
 			res := execer.ExecuteRequest(ctx, actions.CommandRequest{Profile: profile, Command: act.Command, Args: act.Args, Dir: profile.DefaultDir, ProfileID: profile.ID})
 			status := "succeeded"
 			category := ""
