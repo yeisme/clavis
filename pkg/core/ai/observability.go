@@ -65,6 +65,9 @@ func normalizeJSONNumbers(value any) any {
 		if i, err := v.Int64(); err == nil {
 			return i
 		}
+		if integer, ok := exactJSONInteger(v); ok {
+			return integer
+		}
 		if f, err := v.Float64(); err == nil {
 			return f
 		}
@@ -190,6 +193,15 @@ func isJSONInteger(value any) bool {
 		return false
 	}
 	return number.IsInt()
+}
+
+func exactJSONInteger(number json.Number) (*big.Int, bool) {
+	parsed, ok := numericBigFloat(number)
+	if !ok || !parsed.IsInt() {
+		return nil, false
+	}
+	integer, _ := parsed.Int(nil)
+	return integer, integer != nil
 }
 
 func numericBigFloat(value any) (*big.Float, bool) {

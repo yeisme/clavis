@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"math/big"
 	"strings"
 	"testing"
 )
@@ -28,6 +29,12 @@ func TestSanitizeMCPResourceRedactsJSONSecrets(t *testing.T) {
 	if !strings.Contains(got, "[REDACTED]") {
 		t.Fatalf("expected redaction marker: %s", got)
 	}
+	header := sanitizeMCPResource("Authorization: Basic dXNlcjpwYXNz\nCookie: session=abc123", 2048)
+	for _, secret := range []string{"dXNlcjpwYXNz", "session=abc123"} {
+		if strings.Contains(header, secret) {
+			t.Fatalf("header secret %q remained: %s", secret, header)
+		}
+	}
 }
 
 func TestParseStructuredOutputEnforcesIntegerAndEnum(t *testing.T) {
@@ -50,8 +57,29 @@ func TestParseStructuredOutputEnforcesIntegerAndEnum(t *testing.T) {
 	if _, err := ParseStructuredOutput(`1.5`, map[string]any{"type": "number"}); err != nil {
 		t.Fatalf("json number rejected: %v", err)
 	}
-	if _, err := ParseStructuredOutput(`1e3`, map[string]any{"type": "integer"}); err != nil {
+	gotExponent, err := ParseStructuredOutput(`1e3`, map[string]any{"type": "integer"})
+	if err != nil {
 		t.Fatalf("exponent integer rejected: %v", err)
+	}
+	switch value := gotExponent.(type) {
+	case int64:
+		if value != 1000 {
+			t.Fatalf("exponent integer normalized incorrectly: %#v", gotExponent)
+		}
+	case *big.Int:
+		if value.String() != "1000" {
+			t.Fatalf("exponent integer normalized incorrectly: %#v", gotExponent)
+		}
+	default:
+		t.Fatalf("exponent integer normalized incorrectly: %#v", gotExponent)
+	}
+	gotBig, err := ParseStructuredOutput(`9223372036854775808`, map[string]any{"type": "integer"})
+	if err != nil {
+		t.Fatalf("big integer rejected: %v", err)
+	}
+	integer, ok := gotBig.(*big.Int)
+	if !ok || integer.String() != "9223372036854775808" {
+		t.Fatalf("big integer precision lost: %#v", gotBig)
 	}
 	if _, err := ParseStructuredOutput(`1`, map[string]any{"type": "integer", "enum": []any{float64(1)}}); err != nil {
 		t.Fatalf("numeric enum rejected: %v", err)

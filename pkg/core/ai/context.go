@@ -56,6 +56,7 @@ func trimRunes(s string, max int) string {
 var (
 	mcpPrivateKeyPattern = regexp.MustCompile(`(?is)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----`)
 	mcpBearerPattern     = regexp.MustCompile(`(?i)(\b(?:authorization\s*:\s*bearer|bearer)\s+)[^\s,;]+`)
+	mcpHeaderAuthPattern = regexp.MustCompile(`(?i)(\b(?:authorization|cookie)\s*:\s*)[^\r\n]+`)
 	mcpJSONAuthPattern   = regexp.MustCompile(`(?i)("(?:authorization|cookie)"\s*:\s*")(?:\\.|[^"\\])*(")`)
 	mcpSecretPattern     = regexp.MustCompile(`(?i)((?:"|')?(?:api[_-]?key|access[_-]?token|token|secret|password|passwd)(?:"|')?\s*[:=]\s*)((?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&]+))`)
 )
@@ -66,6 +67,7 @@ func sanitizeMCPResource(raw string, maxRunes int) string {
 	}
 	clean := mcpPrivateKeyPattern.ReplaceAllString(raw, "[REDACTED PRIVATE KEY]")
 	clean = mcpJSONAuthPattern.ReplaceAllString(clean, "${1}[REDACTED]${2}")
+	clean = mcpHeaderAuthPattern.ReplaceAllString(clean, "${1}[REDACTED]")
 	clean = mcpBearerPattern.ReplaceAllString(clean, "${1}[REDACTED]")
 	clean = mcpSecretPattern.ReplaceAllString(clean, "${1}[REDACTED]")
 	return strings.TrimSpace(trimRunes(clean, maxRunes))
