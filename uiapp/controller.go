@@ -2305,10 +2305,14 @@ func (p workflowProvider) Invoke(ctx context.Context, invocation automation.Acti
 	if !ok {
 		return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultFailed, Error: "action is not available"}, nil
 	}
-	bindings := mergeWorkflowInputs(workflowContextInputs("", p.actionCtx), invocation)
-	for key, value := range p.workflowInputs {
-		bindings[key] = value
-	}
+	// Workflow inputs provide the defaults for an action invocation. The
+	// runner's step-specific bindings must be applied last: a step may select a
+	// different source than the workflow (for example, selection in a clipboard
+	// workflow), and its text/source aliases must win while resolving action
+	// templates. This also keeps named workflow inputs and internal step-output
+	// bindings available without letting them overwrite the current step.
+	bindings := mergeWorkflowInputs(workflowContextInputs("", p.actionCtx), automation.ActionInvocation{Input: p.workflowInputs})
+	bindings = mergeWorkflowInputs(bindings, invocation)
 	if action.script != nil {
 		if !action.script.Enabled {
 			return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultFailed, Error: "script is disabled and cannot complete workflow"}, nil

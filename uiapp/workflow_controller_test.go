@@ -150,6 +150,81 @@ func TestWorkflowStepSourceBindingsResolveCollidingIDs(t *testing.T) {
 	}
 }
 
+func TestWorkflowProviderStepSourceOverridesWorkflowSource(t *testing.T) {
+	workflow := config.Workflow{
+		ID:     "clipboard-with-selection-step",
+		Source: config.WorkflowSourceClipboard,
+		Steps: []config.WorkflowStep{{
+			ID:      "select",
+			Action:  "cli",
+			Input:   "{{text}}",
+			Source:  config.WorkflowSourceSelection,
+			Enabled: true,
+		}},
+	}
+	definition := workflowDefinition(workflow)
+	inputs, err := workflowInputs(workflow, engine.CapsuleContext{
+		SelectedText:     "selected text",
+		ClipboardPreview: "clipboard text",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli := config.CLIAction("printf", "%s|%s", "{{text}}", "{{input}}")
+	provider := workflowProvider{
+		actionCtx:      engine.CapsuleContext{SelectedText: "selected text", ClipboardPreview: "clipboard text"},
+		actions:        map[string]workflowAction{"cli": {leader: &cli}},
+		workflowInputs: inputs,
+	}
+	plan, err := automation.BuildExecutionPlan(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := automation.Run(context.Background(), plan, provider, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Steps) != 1 || result.Steps[0].Result.Status != automation.ResultSucceeded {
+		t.Fatalf("workflow result = %#v", result)
+	}
+	if got, want := result.Steps[0].Result.Output, "selected text|selected text"; got != want {
+		t.Fatalf("step source binding = %#v, want %q", got, want)
+	}
+}
+
+func TestWorkflowProviderUsesWorkflowSourceWhenStepDoesNotOverride(t *testing.T) {
+	workflow := config.Workflow{
+		ID:     "clipboard-workflow",
+		Source: config.WorkflowSourceClipboard,
+		Steps:  []config.WorkflowStep{{ID: "clip", Action: "cli", Input: "{{text}}", Source: config.WorkflowSourceClipboard, Enabled: true}},
+	}
+	definition := workflowDefinition(workflow)
+	inputs, err := workflowInputs(workflow, engine.CapsuleContext{SelectedText: "selected text", ClipboardPreview: "clipboard text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli := config.CLIAction("printf", "%s|%s", "{{text}}", "{{input}}")
+	provider := workflowProvider{
+		actionCtx:      engine.CapsuleContext{SelectedText: "selected text", ClipboardPreview: "clipboard text"},
+		actions:        map[string]workflowAction{"cli": {leader: &cli}},
+		workflowInputs: inputs,
+	}
+	plan, err := automation.BuildExecutionPlan(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := automation.Run(context.Background(), plan, provider, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Steps) != 1 || result.Steps[0].Result.Status != automation.ResultSucceeded {
+		t.Fatalf("workflow result = %#v", result)
+	}
+	if got, want := result.Steps[0].Result.Output, "clipboard text|clipboard text"; got != want {
+		t.Fatalf("workflow source binding = %#v, want %q", got, want)
+	}
+}
+
 func TestWorkflowProviderBindsInputAndStepOutputToCLIAndScript(t *testing.T) {
 	cli := config.CLIAction("printf", "%s|%s", "{{input}}", "{{stepOutput}}")
 	provider := workflowProvider{
