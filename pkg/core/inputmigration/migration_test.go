@@ -1,6 +1,7 @@
 package inputmigration
 
 import (
+	"encoding/json"
 	"errors"
 	"math"
 	"strings"
@@ -304,9 +305,11 @@ func TestCapabilityAwareOverlayImport(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := tc.overlay.ValidateForCapabilities(tc.target); (err != nil) != tc.wantErr {
+			err := tc.overlay.ValidateForCapabilities(tc.target)
+			if (err != nil) != tc.wantErr {
 				t.Fatalf("ValidateForCapabilities() error=%v, wantErr=%v", err, tc.wantErr)
-			} else if tc.isErr != nil && !errors.Is(err, tc.isErr) {
+			}
+			if tc.isErr != nil && !errors.Is(err, tc.isErr) {
 				t.Fatalf("error=%v, want errors.Is(%v)", err, tc.isErr)
 			}
 		})
@@ -332,8 +335,136 @@ func TestCapabilityAwareOverlayImport(t *testing.T) {
 	if err != nil || gotExport.Overlay == nil || gotExport.Overlay.Backend != "native-tsf" {
 		t.Fatalf("export JSON round trip: overlay=%+v err=%v", gotExport.Overlay, err)
 	}
-	if _, err := UnmarshalOverlayForCapabilities(rawOverlay, darwinTarget); err == nil {
-		t.Fatal("capability-incompatible overlay accepted during unmarshal")
+	gotOverlay, err = UnmarshalOverlayForCapabilities(rawOverlay, darwinTarget)
+	if err == nil || gotOverlay.Backend != "native-tsf" {
+		t.Fatalf("capability-incompatible overlay was not retained: overlay=%+v err=%v", gotOverlay, err)
+	}
+}
+
+func TestValidateForCapabilitiesRequiresMatchingLayoutAndUsedSources(t *testing.T) {
+	generated, err := GenerateOverlay(baseline(), windowsCaps(), "windows-device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := generated.Overlay
+
+	cases := []struct {
+		name    string
+		mutate  func(DeviceCapabilities, *DeviceOverlay) DeviceCapabilities
+		wantErr string
+	}{
+		{
+			name: "keyboard layout mismatch",
+			mutate: func(target DeviceCapabilities, overlay *DeviceOverlay) DeviceCapabilities {
+				target.KeyboardLayout = "00000804"
+				return target
+			},
+			wantErr: "keyboard layout mismatch",
+		},
+		{
+			name: "source-device extra ids are allowed",
+			mutate: func(target DeviceCapabilities, overlay *DeviceOverlay) DeviceCapabilities {
+				overlay.InputSourceIDs = append(overlay.InputSourceIDs, "source-device-extra")
+				return target
+			},
+		},
+		{
+			name: "selected source missing",
+			mutate: func(target DeviceCapabilities, overlay *DeviceOverlay) DeviceCapabilities {
+				target.InputSourceIDs = []string{"target-only"}
+				return target
+			},
+			wantErr: "selected input source",
+		},
+		{
+			name: "app rule source missing",
+			mutate: func(target DeviceCapabilities, overlay *DeviceOverlay) DeviceCapabilities {
+				overlay.AppRules = []AppRule{{ID: "rule", Apps: []StableApp{{BundleID: "com.example.editor"}}, Mode: "native", InputSourceID: "rule-source"}}
+				overlay.InputSourceIDs = append(overlay.InputSourceIDs, "rule-source")
+				return target
+			},
+			wantErr: "app rule input source",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			target := windowsCaps()
+			overlay := cloneOverlay(base)
+			target = tc.mutate(target, &overlay)
+			err := overlay.ValidateForCapabilities(target)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateForCapabilities() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("ValidateForCapabilities() error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestCapabilityAwareUnmarshalRetainsDeferredObjectsAndAllowsBaselineOnly(t *testing.T) {
+	deferredCaps := windowsCaps()
+	deferredCaps.NativeTSF = false
+	deferredCaps.HookCapability = false
+	preview, err := GenerateOverlay(baseline(), deferredCaps, "deferred-device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawOverlay, err := MarshalOverlay(preview.Overlay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotOverlay, err := UnmarshalOverlayForCapabilities(rawOverlay, deferredCaps)
+	if !errors.Is(err, ErrDeferredOverlay) {
+		t.Fatalf("overlay error = %v, want ErrDeferredOverlay", err)
+	}
+	if gotOverlay.Backend != "deferred" || gotOverlay.DeviceID != preview.Overlay.DeviceID {
+		t.Fatalf("deferred overlay was not retained: %+v", gotOverlay)
+	}
+	var schemaErrOverlay DeviceOverlay
+	if err := json.Unmarshal(rawOverlay, &schemaErrOverlay); err != nil {
+		t.Fatal(err)
+	}
+	schemaErrOverlay.Backend = "not-a-backend"
+	schemaRaw, err := json.Marshal(schemaErrOverlay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotOverlay, err = UnmarshalOverlayForCapabilities(schemaRaw, deferredCaps)
+	if err == nil || errors.Is(err, ErrDeferredOverlay) || gotOverlay.Backend != "not-a-backend" {
+		t.Fatalf("schema error was not distinct or object was lost: overlay=%+v err=%v", gotOverlay, err)
+	}
+
+	export, err := NewExport(baseline(), &preview.Overlay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawExport, err := MarshalExport(export)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotExport, err := UnmarshalExportForCapabilities(rawExport, deferredCaps)
+	if !errors.Is(err, ErrDeferredOverlay) {
+		t.Fatalf("export error = %v, want ErrDeferredOverlay", err)
+	}
+	if gotExport.Overlay == nil || gotExport.Overlay.Backend != "deferred" {
+		t.Fatalf("deferred export was not retained: %+v", gotExport)
+	}
+
+	baselineOnly, err := NewExport(baseline(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawBaselineOnly, err := MarshalExport(baselineOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotBaselineOnly, err := UnmarshalExportForCapabilities(rawBaselineOnly, DeviceCapabilities{})
+	if err != nil || gotBaselineOnly.Overlay != nil || gotBaselineOnly.AccountID != baselineOnly.AccountID {
+		t.Fatalf("baseline-only capability-aware import = %+v, error=%v", gotBaselineOnly, err)
 	}
 }
 

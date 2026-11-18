@@ -574,6 +574,9 @@ func (o DeviceOverlay) ValidateForCapabilities(target DeviceCapabilities) error 
 	if err := target.Validate(); err != nil {
 		return err
 	}
+	if o.KeyboardLayout != target.KeyboardLayout {
+		return fmt.Errorf("inputmigration: keyboard layout mismatch: overlay %q, target %q", o.KeyboardLayout, target.KeyboardLayout)
+	}
 
 	switch o.Backend {
 	case "native-imk":
@@ -599,6 +602,9 @@ func (o DeviceOverlay) ValidateForCapabilities(target DeviceCapabilities) error 
 	if _, ok := targetSources[o.InputSourceID]; !ok {
 		return errors.New("inputmigration: selected input source is not available on target")
 	}
+	// InputSourceIDs can include source-device extras that are not installed on
+	// the target. The selected source and every app-rule source are the sources
+	// the overlay actually uses, however, and must be available on the target.
 	for _, r := range o.AppRules {
 		if r.InputSourceID == "" {
 			continue
@@ -655,8 +661,11 @@ func UnmarshalOverlay(data []byte) (DeviceOverlay, error) {
 	return o, unmarshalStrict(data, &o, func() error { return o.Validate() })
 }
 
-// UnmarshalOverlayForCapabilities first performs strict schema validation and
-// then checks whether the decoded overlay is executable on target.
+// UnmarshalOverlayForCapabilities strictly parses and validates an overlay,
+// then checks whether it is executable on target. On every error, including
+// ErrDeferredOverlay, the returned overlay contains the successfully decoded
+// object when schema validation succeeded so callers can inspect and explain
+// why execution was deferred.
 func UnmarshalOverlayForCapabilities(data []byte, target DeviceCapabilities) (DeviceOverlay, error) {
 	var o DeviceOverlay
 	if err := unmarshalStrict(data, &o, func() error { return o.Validate() }); err != nil {
@@ -671,20 +680,23 @@ func UnmarshalExport(data []byte) (Export, error) {
 	return e, unmarshalStrict(data, &e, func() error { return e.Validate() })
 }
 
-// UnmarshalExportForCapabilities first performs strict export validation and
-// then applies target capability checks to its optional device overlay.
+// UnmarshalExportForCapabilities strictly parses and validates the baseline
+// and optional overlay. A baseline-only export is portable without a complete
+// target capability snapshot, so target validation is skipped when Overlay is
+// nil. With an overlay, capability validation is required. As with
+// UnmarshalOverlayForCapabilities, a successfully decoded export is returned
+// even when its overlay is deferred or otherwise not executable, allowing
+// callers to inspect and present the reason.
 func UnmarshalExportForCapabilities(data []byte, target DeviceCapabilities) (Export, error) {
 	var e Export
 	if err := unmarshalStrict(data, &e, func() error { return e.Validate() }); err != nil {
 		return e, err
 	}
-	if err := target.Validate(); err != nil {
-		return e, err
+	if e.Overlay == nil {
+		return e, nil
 	}
-	if e.Overlay != nil {
-		if err := e.Overlay.ValidateForCapabilities(target); err != nil {
-			return e, err
-		}
+	if err := e.Overlay.ValidateForCapabilities(target); err != nil {
+		return e, err
 	}
 	return e, nil
 }
