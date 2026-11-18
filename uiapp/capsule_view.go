@@ -658,6 +658,11 @@ func (a *AppController) renderOmniboxView(
 
 			// Side-by-side split: results list on the left, rich preview on the right.
 			previewItem, hasPreview := omniboxPreviewItem(state)
+			if !hasPreview || previewItem.ClipboardMedia == nil || !previewItem.ClipboardMedia.IsMedia() {
+				// Media zoom/pan is scoped to the selected media candidate; never
+				// leak it through a text candidate or a later selection.
+				a.uiState.mediaPreview = mediaPreviewState{}
+			}
 			if hasPreview && a.previewPaneVisible(cfg) {
 				ui.Row(c).FillWidth().Grow(1).Gap(10).AlignItems(ui.Stretch).Children(func() {
 					ui.Column(c).Grow(3).Children(renderList)

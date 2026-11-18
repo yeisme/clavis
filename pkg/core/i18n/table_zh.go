@@ -327,6 +327,13 @@ var zhTable = map[string]string{
 	"preview.kind.ime_rule":     "输入法规则",
 	"preview.kind.app":          "应用",
 	"preview.kind.item":         "条目",
+	"preview.media.fit":         "适应",
+	"preview.media.zoom_out":    "缩小",
+	"preview.media.zoom_in":     "放大",
+	"preview.media.original":    "原始尺寸",
+	"preview.media.loading":     "正在加载图片…",
+	"preview.media.unavailable": "预览不可用",
+	"preview.media.focus_hint":  "点击图片聚焦 • 滚轮/+/- 缩放 • 拖动平移",
 
 	// ---- 设置中心（uiapp/settings_view.go）----
 	"settings.center":                    "配置中心",

@@ -326,6 +326,13 @@ var enTable = map[string]string{
 	"preview.kind.ime_rule":     "IME Rule",
 	"preview.kind.app":          "App",
 	"preview.kind.item":         "Item",
+	"preview.media.fit":         "Fit",
+	"preview.media.zoom_out":    "Zoom out",
+	"preview.media.zoom_in":     "Zoom in",
+	"preview.media.original":    "Original",
+	"preview.media.loading":     "Loading image…",
+	"preview.media.unavailable": "Preview unavailable",
+	"preview.media.focus_hint":  "Click image to focus • wheel/+/- to zoom • drag to pan",
 
 	// ---- settings center (uiapp/settings_view.go) ----
 	"settings.center":                    "Configuration Center",

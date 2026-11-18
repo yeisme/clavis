@@ -163,15 +163,18 @@ func surfaceHighlight(t *ui.Theme) ui.Color {
 // the literals the views used to inline (header 40, search 52, row 44, footer
 // 44) and are the numbers layout.go's Preferred* formulas build on.
 const (
-	headerHeight     float32 = 40
-	searchRowHeight  float32 = 52
-	rowHeightOmnibox float32 = 44
-	footerHeight     float32 = 44
-	controlHeight    float32 = 28
-	cardPadX         float32 = 12
-	cardPadY         float32 = 10
-	cardGap          float32 = 10
-	railWidth        float32 = 216
+	headerHeight              float32 = 40
+	searchRowHeight           float32 = 52
+	rowHeightOmnibox          float32 = 44
+	footerHeight              float32 = 44
+	controlHeight             float32 = 28
+	mediaCanvasHeight         float32 = 300
+	mediaCanvasPortraitHeight float32 = 324
+	mediaImageBase            float32 = 340
+	cardPadX                  float32 = 12
+	cardPadY                  float32 = 10
+	cardGap                   float32 = 10
+	railWidth                 float32 = 216
 )
 
 // Row metrics for the Omnibox result list.

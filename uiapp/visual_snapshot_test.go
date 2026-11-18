@@ -165,6 +165,12 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, m
 	w, h = PreferredCapsuleSizeForState(f.ctrl.State(), appearance)
 	shoot("05b-hex-colour", f.ctrl.CapsuleView, w, h, 2, nil)
 	f.ctrl.OpenOmnibox(config.TabClipboard, "")
+	for idx, candidate := range f.ctrl.State().OmniboxItems {
+		if candidate.ClipboardMedia != nil && candidate.ClipboardMedia.IsMedia() {
+			f.ctrl.SelectIndex(idx)
+			break
+		}
+	}
 	w, h = PreferredCapsuleSizeForState(f.ctrl.State(), appearance)
 	shoot("05c-preview-media-deck", f.ctrl.CapsuleView, w, h, 2, nil)
 

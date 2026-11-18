@@ -158,6 +158,12 @@ type uiViewState struct {
 	aiShakeRun         uint64
 	lastPreviewSnippet string
 	snippetFlashRun    uint64
+
+	// Media preview state belongs to this controller, not a package-global map.
+	// It is reset when the selected Omnibox item changes and is only mutated by
+	// the Capsule UI thread.
+	mediaPreview       mediaPreviewState
+	mediaPreviewHandle ui.Handle
 }
 
 // AppController coordinates Clavis state, host integration, AI streaming,
@@ -197,10 +203,11 @@ type AppController struct {
 	OnWorkflowResult      func(workflowID string, result automation.ExecutionResult, err error)
 
 	// Decoded application icon bitmap cache
-	iconMu        sync.Mutex
-	appIconCache  map[string]*ui.Bitmap
-	thumbCache    map[string]*ui.Bitmap
-	originalCache map[string]*ui.Bitmap
+	iconMu          sync.Mutex
+	appIconCache    map[string]*ui.Bitmap
+	thumbCache      map[string]*ui.Bitmap
+	originalCache   map[string]*ui.Bitmap
+	originalLoading map[string]bool
 
 	// Leader temporary ASCII IME lock state
 	preLeaderIMESourceID string
@@ -355,6 +362,7 @@ func NewAppController(opts Options) *AppController {
 		appIconCache:          make(map[string]*ui.Bitmap),
 		thumbCache:            make(map[string]*ui.Bitmap),
 		originalCache:         make(map[string]*ui.Bitmap),
+		originalLoading:       make(map[string]bool),
 		clipDone:              make(chan struct{}),
 		clipBaseCtx:           clipBaseCtx,
 		clipBaseCancel:        clipBaseCancel,

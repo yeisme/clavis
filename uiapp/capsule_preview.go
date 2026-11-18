@@ -663,6 +663,7 @@ func previewIcon(item engine.OmniboxItem) string {
 
 // renderClipboardMediaPreview shows the thumbnail and metadata for image/file/video entries.
 func (a *AppController) renderClipboardMediaPreview(c *ui.Context, theme *ui.Theme, item engine.OmniboxItem, m engine.ClipboardMedia) {
+	a.resetMediaPreview(item)
 	source := strings.TrimSpace(item.Subtitle)
 	ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
 		previewBadge(c, theme, item.Icon, source, false)
@@ -670,12 +671,13 @@ func (a *AppController) renderClipboardMediaPreview(c *ui.Context, theme *ui.The
 			previewBadge(c, theme, "pin.fill", i18n.T("common.pinned"), true)
 		}
 	})
+	if m.Kind == "image" || m.Kind == "video" {
+		a.renderClipboardMediaToolbar(c, theme)
+	}
 	kitInsetWell(c, theme, func() {
 		bmp := a.ThumbBitmap(m.ThumbPath)
-		if m.Kind == "image" {
-			if original := a.OriginalBitmap(m.Path); original != nil {
-				bmp = original
-			}
+		if (m.Kind == "image" || m.Kind == "video") && len(m.FilePaths) <= 1 {
+			a.renderClipboardMediaCanvas(c, theme, m)
 		}
 		if len(m.FilePaths) > 1 {
 			CoverFlowDeck3D(c, len(m.FilePaths), 0, effectiveSpatialAppearance(c, a.Config().Main.Appearance), func(i int, active bool) {
@@ -690,8 +692,10 @@ func (a *AppController) renderClipboardMediaPreview(c *ui.Context, theme *ui.The
 					ui.Text(c, path).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 				}
 			})
-		} else if bmp != nil {
-			ui.Image(c, bmp).FillWidth().Height(220).Fit(ui.Contain).Radius(radiusChip)
+		} else if bmp != nil && m.Kind != "image" && m.Kind != "video" {
+			ui.Image(c, bmp).FillWidth().Height(mediaPreviewCanvasHeight(m)).Fit(ui.Contain).Radius(radiusChip)
+		} else if bmp == nil && m.Kind != "image" && m.Kind != "video" {
+			ui.Text(c, i18n.T("preview.media.unavailable")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 		}
 		for _, row := range clipboardMediaMetaRows(m) {
 			ui.Text(c, row).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()

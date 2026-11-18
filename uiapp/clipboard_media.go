@@ -216,19 +216,30 @@ func (c *AppController) OriginalBitmap(path string) *ui.Bitmap {
 	if path == "" {
 		return nil
 	}
-	if info, err := os.Stat(path); err != nil || info.Size() > 8<<20 {
-		return nil
+	if bmp, ok := c.cachedOriginalBitmap(path); ok {
+		return bmp
 	}
+	// Preserve the old helper's synchronous contract for non-render callers.
+	// The media preview itself uses requestOriginalBitmap, which never blocks a
+	// frame on disk I/O or bitmap decoding.
+	return c.decodeOriginalBitmap(path)
+}
+
+func (c *AppController) cachedOriginalBitmap(path string) (*ui.Bitmap, bool) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.originalCache == nil {
 		c.originalCache = map[string]*ui.Bitmap{}
 	}
-	if bmp, ok := c.originalCache[path]; ok {
-		c.mu.Unlock()
-		return bmp
-	}
-	c.mu.Unlock()
+	bmp, ok := c.originalCache[path]
+	return bmp, ok
+}
 
+func (c *AppController) decodeOriginalBitmap(path string) *ui.Bitmap {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() > 8<<20 {
+		return nil
+	}
 	var bmp *ui.Bitmap
 	if data, err := os.ReadFile(path); err == nil {
 		if _, _, err := clipboard.CheckImage(data); err == nil {
@@ -238,12 +249,39 @@ func (c *AppController) OriginalBitmap(path string) *ui.Bitmap {
 		}
 	}
 	c.mu.Lock()
+	if c.originalCache == nil {
+		c.originalCache = map[string]*ui.Bitmap{}
+	}
 	if len(c.originalCache) >= 32 {
 		clear(c.originalCache)
 	}
 	c.originalCache[path] = bmp
 	c.mu.Unlock()
 	return bmp
+}
+
+func (c *AppController) loadOriginalBitmapAsync(path string) {
+	c.mu.Lock()
+	if c.originalLoading == nil {
+		c.originalLoading = map[string]bool{}
+	}
+	if c.originalLoading[path] {
+		c.mu.Unlock()
+		return
+	}
+	c.originalLoading[path] = true
+	onRepaint := c.OnRepaint
+	c.mu.Unlock()
+	go func() {
+		c.decodeOriginalBitmap(path)
+		c.mu.Lock()
+		delete(c.originalLoading, path)
+		onRepaint = c.OnRepaint
+		c.mu.Unlock()
+		if onRepaint != nil {
+			onRepaint()
+		}
+	}()
 }
 
 // clipboardMediaMetaRows renders "1920×1080 · 2.3 MB" / "Duration 0:42" lines for the preview.
