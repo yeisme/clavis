@@ -164,6 +164,11 @@ type DeferredRule struct {
 	State  string `json:"state"` // deferred or unsupported
 }
 
+// ErrDeferredOverlay reports that an otherwise well-formed overlay cannot be
+// executed on a target because its backend is deferred. The overlay is still
+// parseable so callers can inspect and present its deferred state.
+var ErrDeferredOverlay = errors.New("inputmigration: deferred overlay is not executable")
+
 type DeviceOverlay struct {
 	SchemaVersion   uint16                     `json:"schemaVersion"`
 	ProtocolVersion uint16                     `json:"protocolVersion"`
@@ -478,6 +483,10 @@ func validateMetadata(m map[string]FieldMetadata) error {
 	}
 	return nil
 }
+
+// Validate performs structural and internal consistency checks only. It does
+// not prove that the overlay can execute on any particular target device; use
+// ValidateForCapabilities when importing onto a known target.
 func (o DeviceOverlay) Validate() error {
 	if o.SchemaVersion != SchemaVersion || o.ProtocolVersion != MigrationProtocolVersion {
 		return errors.New("inputmigration: unsupported overlay version")
@@ -553,6 +562,54 @@ func (o DeviceOverlay) Validate() error {
 	return nil
 }
 
+// ValidateForCapabilities validates an overlay against a concrete target. The
+// target is deliberately supplied here rather than stored in DeviceOverlay so
+// the portable overlay schema does not become tied to one operating system.
+func (o DeviceOverlay) ValidateForCapabilities(target DeviceCapabilities) error {
+	// Keep the structural validation first: callers get the same schema and
+	// account/device/scope errors as Validate, before target policy is applied.
+	if err := o.Validate(); err != nil {
+		return err
+	}
+	if err := target.Validate(); err != nil {
+		return err
+	}
+
+	switch o.Backend {
+	case "native-imk":
+		if canonicalOS(target.OS) != "darwin" || !target.NativeIMK {
+			return errors.New("inputmigration: native-imk backend is incompatible with target capabilities")
+		}
+	case "native-tsf":
+		if canonicalOS(target.OS) != "windows" || !target.NativeTSF {
+			return errors.New("inputmigration: native-tsf backend is incompatible with target capabilities")
+		}
+	case "hook":
+		if !target.HookCapability {
+			return errors.New("inputmigration: hook backend requires target hook capability")
+		}
+	case "deferred":
+		return fmt.Errorf("%w: backend is deferred", ErrDeferredOverlay)
+	}
+
+	targetSources := make(map[string]struct{}, len(target.InputSourceIDs))
+	for _, id := range target.InputSourceIDs {
+		targetSources[id] = struct{}{}
+	}
+	if _, ok := targetSources[o.InputSourceID]; !ok {
+		return errors.New("inputmigration: selected input source is not available on target")
+	}
+	for _, r := range o.AppRules {
+		if r.InputSourceID == "" {
+			continue
+		}
+		if _, ok := targetSources[r.InputSourceID]; !ok {
+			return errors.New("inputmigration: app rule input source is not available on target")
+		}
+	}
+	return nil
+}
+
 func marshalStrict(v any, validate func() error) ([]byte, error) {
 	if err := validate(); err != nil {
 		return nil, err
@@ -597,11 +654,44 @@ func UnmarshalOverlay(data []byte) (DeviceOverlay, error) {
 	var o DeviceOverlay
 	return o, unmarshalStrict(data, &o, func() error { return o.Validate() })
 }
+
+// UnmarshalOverlayForCapabilities first performs strict schema validation and
+// then checks whether the decoded overlay is executable on target.
+func UnmarshalOverlayForCapabilities(data []byte, target DeviceCapabilities) (DeviceOverlay, error) {
+	var o DeviceOverlay
+	if err := unmarshalStrict(data, &o, func() error { return o.Validate() }); err != nil {
+		return o, err
+	}
+	return o, o.ValidateForCapabilities(target)
+}
+
 func MarshalExport(e Export) ([]byte, error) { return marshalStrict(e, e.Validate) }
 func UnmarshalExport(data []byte) (Export, error) {
 	var e Export
 	return e, unmarshalStrict(data, &e, func() error { return e.Validate() })
 }
+
+// UnmarshalExportForCapabilities first performs strict export validation and
+// then applies target capability checks to its optional device overlay.
+func UnmarshalExportForCapabilities(data []byte, target DeviceCapabilities) (Export, error) {
+	var e Export
+	if err := unmarshalStrict(data, &e, func() error { return e.Validate() }); err != nil {
+		return e, err
+	}
+	if err := target.Validate(); err != nil {
+		return e, err
+	}
+	if e.Overlay != nil {
+		if err := e.Overlay.ValidateForCapabilities(target); err != nil {
+			return e, err
+		}
+	}
+	return e, nil
+}
+
+// Validate performs structural and cross-layer consistency checks only. It
+// cannot prove that the optional overlay is compatible with a target device;
+// use UnmarshalExportForCapabilities (or ValidateForCapabilities) at import.
 func (e Export) Validate() error {
 	if e.SchemaVersion != SchemaVersion || e.ProtocolVersion != MigrationProtocolVersion || e.Scope != "layered" || e.AccountID == "" {
 		return errors.New("inputmigration: invalid export version or scope")

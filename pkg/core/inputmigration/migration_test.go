@@ -1,6 +1,7 @@
 package inputmigration
 
 import (
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -244,6 +245,98 @@ func TestOverlayValidationRejectsUnsafeCrossDeviceRules(t *testing.T) {
 		t.Fatal("overlay accepted too many permissions")
 	}
 }
+func TestCapabilityAwareOverlayImport(t *testing.T) {
+	windowsTarget := windowsCaps()
+	darwinTarget := macCaps()
+	// Keep source IDs compatible while isolating backend/OS capability checks.
+	darwinTarget.InputSourceIDs = append([]string(nil), windowsTarget.InputSourceIDs...)
+	windowsTarget.InputSourceIDs = append([]string(nil), darwinTarget.InputSourceIDs...)
+
+	windowsOverlay, err := GenerateOverlay(baseline(), windowsCaps(), "windows-device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	darwinOverlay, err := GenerateOverlay(baseline(), macCaps(), "darwin-device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deferredCaps := windowsCaps()
+	deferredCaps.NativeTSF = false
+	deferredCaps.HookCapability = false
+	deferredOverlay, err := GenerateOverlay(baseline(), deferredCaps, "deferred-device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appRuleSourceOverlay := cloneOverlay(windowsOverlay.Overlay)
+	appRuleSourceOverlay.InputSourceIDs = append(appRuleSourceOverlay.InputSourceIDs, "target-missing-source")
+	appRuleSourceOverlay.AppRules[0].InputSourceID = "target-missing-source"
+
+	tests := []struct {
+		name    string
+		overlay DeviceOverlay
+		target  DeviceCapabilities
+		wantErr bool
+		isErr   error
+	}{
+		{"windows native-tsf on Windows", windowsOverlay.Overlay, windowsCaps(), false, nil},
+		{"Windows native-tsf on darwin", windowsOverlay.Overlay, darwinTarget, true, nil},
+		{"darwin native-imk on Windows", darwinOverlay.Overlay, windowsTarget, true, nil},
+		{"hook capability mismatch", func() DeviceOverlay {
+			caps := windowsCaps()
+			caps.NativeTSF, caps.HookCapability = false, true
+			p, err := GenerateOverlay(baseline(), caps, "hook-device")
+			if err != nil {
+				t.Fatalf("generate hook overlay: %v", err)
+			}
+			return p.Overlay
+		}(), func() DeviceCapabilities {
+			caps := windowsCaps()
+			caps.NativeTSF, caps.HookCapability = false, false
+			return caps
+		}(), true, nil},
+		{"missing selected source", windowsOverlay.Overlay, func() DeviceCapabilities {
+			caps := windowsCaps()
+			caps.InputSourceIDs = []string{"different-source"}
+			return caps
+		}(), true, nil},
+		{"missing app-rule source", appRuleSourceOverlay, windowsCaps(), true, nil},
+		{"deferred backend is explicit", deferredOverlay.Overlay, deferredCaps, true, ErrDeferredOverlay},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.overlay.ValidateForCapabilities(tc.target); (err != nil) != tc.wantErr {
+				t.Fatalf("ValidateForCapabilities() error=%v, wantErr=%v", err, tc.wantErr)
+			} else if tc.isErr != nil && !errors.Is(err, tc.isErr) {
+				t.Fatalf("error=%v, want errors.Is(%v)", err, tc.isErr)
+			}
+		})
+	}
+
+	rawOverlay, err := MarshalOverlay(windowsOverlay.Overlay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotOverlay, err := UnmarshalOverlayForCapabilities(rawOverlay, windowsCaps())
+	if err != nil || gotOverlay.Backend != "native-tsf" {
+		t.Fatalf("overlay JSON round trip: backend=%q err=%v", gotOverlay.Backend, err)
+	}
+	export, err := NewExport(baseline(), &windowsOverlay.Overlay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawExport, err := MarshalExport(export)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotExport, err := UnmarshalExportForCapabilities(rawExport, windowsCaps())
+	if err != nil || gotExport.Overlay == nil || gotExport.Overlay.Backend != "native-tsf" {
+		t.Fatalf("export JSON round trip: overlay=%+v err=%v", gotExport.Overlay, err)
+	}
+	if _, err := UnmarshalOverlayForCapabilities(rawOverlay, darwinTarget); err == nil {
+		t.Fatal("capability-incompatible overlay accepted during unmarshal")
+	}
+}
+
 func TestOverlayBackendAndDisplayValidation(t *testing.T) {
 	validCases := []struct {
 		name    string
