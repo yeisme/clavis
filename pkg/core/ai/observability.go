@@ -59,13 +59,6 @@ func ParseStructuredOutput(raw string, schema map[string]any) (any, error) {
 	return jsonschema.NormalizeJSONNumbers(value), nil
 }
 
-func validateSchemaDefinition(schema map[string]any, path string) error {
-	if path == "" || path == "$" {
-		return jsonschema.ValidateDefinition(schema)
-	}
-	return jsonschema.ValidateDefinition(schema)
-}
-
 func (m RequestMetadata) Safe() RequestMetadata {
 	m.PromptFingerprint = strings.TrimSpace(m.PromptFingerprint)
 	return m

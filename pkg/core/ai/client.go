@@ -14,6 +14,7 @@ import (
 
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
+	"github.com/yeisme/clavis/pkg/core/jsonschema"
 )
 
 // HTTPDoer abstracts http.Client.Do for pure mockable testing.
@@ -561,7 +562,7 @@ func validateStructuredOutputRequest(profile config.AIProfile, req CompletionReq
 	if req.OutputSchema == nil {
 		return &ClientError{Kind: "structured_output_invalid_schema", Message: "structured output requires an output schema"}
 	}
-	if err := validateSchemaDefinition(req.OutputSchema, "$"); err != nil {
+	if err := jsonschema.ValidateDefinition(req.OutputSchema); err != nil {
 		return &ClientError{Kind: "structured_output_invalid_schema", Message: err.Error()}
 	}
 	return nil
