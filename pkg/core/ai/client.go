@@ -40,6 +40,9 @@ type CompletionRequest struct {
 	ContextPolicy   ContextPolicy
 	MCPResources    []string
 	DeveloperPrompt string
+	// OutputSchema and StructuredOutput request validated structured output.
+	OutputSchema     map[string]any
+	StructuredOutput bool
 	// SystemPromptOverride is used by transient workflows such as prompt optimization.
 	SystemPromptOverride string
 }
@@ -208,6 +211,12 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 	if req.GlossaryTerms != nil {
 		activeGlossary = engine.NewGlossaryEngine(req.GlossaryTerms)
 	}
+	if req.ContextPolicy != (ContextPolicy{}) {
+		activeGlossary = engine.GlossaryEngine{}
+	}
+	if err := validateStructuredOutputRequest(profile, req); err != nil {
+		return nil, err
+	}
 
 	var ctxParts []string
 	if req.Context != nil {
@@ -243,7 +252,9 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 	// instead of hand-concatenating glossary/app/selection/MCP values.
 	if req.ContextPolicy != (ContextPolicy{}) {
 		bundle := ContextBundleFromCapsule(req.Context)
-		bundle.Glossary = req.GlossaryTerms
+		if req.ContextPolicy.IncludeGlossary {
+			bundle.Glossary = req.GlossaryTerms
+		}
 		bundle.MCPResources = append([]string(nil), req.MCPResources...)
 		messages := ApplyContextPolicy(req.ContextPolicy, bundle, systemPrompt, req.DeveloperPrompt, "")
 		if len(messages.System) > 0 {
@@ -291,6 +302,9 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 			"system":      systemPrompt,
 			"messages":    messages,
 		}
+		if err := applyStructuredOutput(payload, profile.Protocol, req); err != nil {
+			return nil, err
+		}
 		bodyBytes, err := json.Marshal(payload)
 		if err != nil {
 			return nil, &ClientError{Kind: "encoding_error", Message: err.Error()}
@@ -336,6 +350,9 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 			"generationConfig": map[string]any{
 				"temperature": profile.Temperature,
 			},
+		}
+		if err := applyStructuredOutput(payload, profile.Protocol, req); err != nil {
+			return nil, err
 		}
 		if strings.TrimSpace(systemPrompt+req.DeveloperPrompt) != "" {
 			instruction := systemPrompt
@@ -396,6 +413,9 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 			"stream":      true,
 			"temperature": profile.Temperature,
 			"messages":    messages,
+		}
+		if err := applyStructuredOutput(payload, profile.Protocol, req); err != nil {
+			return nil, err
 		}
 		// Reasoning models think before the first token; the profile may cap
 		// it (DeepSeek V4.1 Flash: seconds with "low", up to a minute and
@@ -524,8 +544,60 @@ func (c *OpenAICompatibleClient) StreamCompletion(
 	return ctx.Err()
 }
 
+func structuredOutputRequested(req CompletionRequest) bool {
+	return req.StructuredOutput || req.OutputSchema != nil
+}
+
+func validateStructuredOutputRequest(profile config.AIProfile, req CompletionRequest) error {
+	if !structuredOutputRequested(req) {
+		return nil
+	}
+	if !profile.Capabilities.StructuredOutput {
+		name := profile.ID
+		if name == "" {
+			name = profile.Provider
+		}
+		return &ClientError{Kind: "structured_output_unsupported", Message: fmt.Sprintf("profile %s does not declare structured output support", name)}
+	}
+	if req.OutputSchema == nil {
+		return &ClientError{Kind: "structured_output_invalid_schema", Message: "structured output requires an output schema"}
+	}
+	if err := validateSchemaDefinition(req.OutputSchema, "$"); err != nil {
+		return &ClientError{Kind: "structured_output_invalid_schema", Message: err.Error()}
+	}
+	return nil
+}
+
+func applyStructuredOutput(payload map[string]any, protocol config.AIProtocol, req CompletionRequest) error {
+	if !structuredOutputRequested(req) {
+		return nil
+	}
+	switch protocol {
+	case config.ProtocolAnthropic:
+		payload["output_format"] = map[string]any{"type": "json_schema", "schema": req.OutputSchema}
+	case config.ProtocolGemini:
+		generation, _ := payload["generationConfig"].(map[string]any)
+		if generation == nil {
+			generation = map[string]any{}
+			payload["generationConfig"] = generation
+		}
+		generation["responseMimeType"] = "application/json"
+		generation["responseSchema"] = req.OutputSchema
+	case config.ProtocolOpenAICompatible, "":
+		payload["response_format"] = map[string]any{
+			"type": "json_schema",
+			"json_schema": map[string]any{
+				"name": "clavis_output", "schema": req.OutputSchema, "strict": true,
+			},
+		}
+	default:
+		return &ClientError{Kind: "structured_output_unsupported", Message: fmt.Sprintf("protocol %s does not support structured output", protocol)}
+	}
+	return nil
+}
+
 func extractHTTPErrorMessage(data []byte, statusCode int) string {
-	var raw map[string]any
+	raw := map[string]any{}
 	if err := json.Unmarshal(data, &raw); err == nil {
 		if msg := extractErrorMessage(raw); msg != "" {
 			return msg
