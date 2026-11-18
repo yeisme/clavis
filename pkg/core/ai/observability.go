@@ -98,6 +98,65 @@ func validateSchema(v any, s map[string]any, path string) error {
 	return nil
 }
 
+func validateSchemaDefinition(s map[string]any, path string) error {
+	if s == nil {
+		return fmt.Errorf("%s has no schema", path)
+	}
+	if raw, exists := s["type"]; exists {
+		typ, ok := raw.(string)
+		if !ok {
+			return fmt.Errorf("%s.type must be a string", path)
+		}
+		switch typ {
+		case "", "object", "array", "string", "number", "integer", "boolean", "null":
+		default:
+			return fmt.Errorf("%s uses unsupported schema type %q", path, typ)
+		}
+	}
+	if raw, exists := s["required"]; exists {
+		required, ok := raw.([]any)
+		if !ok {
+			return fmt.Errorf("%s.required must be an array", path)
+		}
+		for _, item := range required {
+			if name, ok := item.(string); !ok || strings.TrimSpace(name) == "" {
+				return fmt.Errorf("%s.required must contain only property names", path)
+			}
+		}
+	}
+	if raw, exists := s["properties"]; exists {
+		properties, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s.properties must be an object", path)
+		}
+		for name, child := range properties {
+			childSchema, ok := child.(map[string]any)
+			if !ok {
+				return fmt.Errorf("%s.properties.%s must be schema object", path, name)
+			}
+			if err := validateSchemaDefinition(childSchema, path+"."+name); err != nil {
+				return err
+			}
+		}
+	}
+	if raw, exists := s["items"]; exists {
+		items, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s.items must be schema object", path)
+		}
+		if err := validateSchemaDefinition(items, path+"[]"); err != nil {
+			return err
+		}
+	}
+	if raw, exists := s["enum"]; exists {
+		values, ok := raw.([]any)
+		if !ok || len(values) == 0 {
+			return fmt.Errorf("%s.enum must be a non-empty array", path)
+		}
+	}
+	return nil
+}
+
 func (m RequestMetadata) Safe() RequestMetadata {
 	m.PromptFingerprint = strings.TrimSpace(m.PromptFingerprint)
 	return m
