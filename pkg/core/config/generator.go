@@ -233,6 +233,20 @@ idle_compact_seconds = 60
 max_memory_mb = 64
 watchdog_interval_ms = 5000
 in_place_optimize_shortcut = "option+tab"
+
+# External CLI execution is disabled by default. Add an enabled trusted profile
+# with absolute command paths before using a CLI action.
+[cli]
+enabled = false
+# [[cli.trusted_profiles]]
+# id = "safe-tools"
+# name = "Safe tools"
+# enabled = true
+# commands = ["/usr/bin/example"]
+# allow_env = []
+# timeout_seconds = 15
+# default_dir = ""
+# dry_run = false
 `
 
 const defaultLeaderTOML = `# Clavis leader key tree

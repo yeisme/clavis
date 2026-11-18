@@ -42,6 +42,7 @@ func Validate(cfg ClavisConfig) []ValidationIssue {
 		knownWorkflowIDs[workflow.ID] = struct{}{}
 	}
 	issues = append(issues, ValidateLeader(cfg.Leader, knownSnippetIDs, knownWorkflowIDs)...)
+	issues = append(issues, validateCLIActionProfiles(cfg.Leader, cfg.Main.CLI)...)
 	issues = append(issues, ValidateSnippets(cfg.Snippets)...)
 	issues = append(issues, ValidateGlossary(cfg.Glossary)...)
 	issues = append(issues, ValidateIMERules(cfg.IMERules)...)
@@ -54,6 +55,7 @@ func Validate(cfg ClavisConfig) []ValidationIssue {
 // ValidateMain validates MainConfig (config.toml).
 func ValidateMain(main MainConfig) []ValidationIssue {
 	var issues []ValidationIssue
+	issues = append(issues, validateCLIConfig(main.CLI)...)
 	file := string(FileMain)
 
 	leaderKey := strings.TrimSpace(main.Trigger.LeaderKey)

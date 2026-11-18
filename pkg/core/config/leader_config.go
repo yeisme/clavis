@@ -103,6 +103,7 @@ type LeaderAction struct {
 	WindowCommand WindowCommand    `json:"windowCommand,omitempty"`
 	Command       string           `json:"command,omitempty"`
 	Args          []string         `json:"args,omitempty"`
+	Profile       string           `json:"profile,omitempty"`
 	Target        string           `json:"target,omitempty"`
 	Tab           CapsuleTab       `json:"tab,omitempty"`
 	SnippetID     string           `json:"snippetId,omitempty"`
@@ -123,6 +124,11 @@ func WindowAction(cmd WindowCommand) LeaderAction {
 
 func CLIAction(command string, args ...string) LeaderAction {
 	return LeaderAction{Type: ActionCLI, Command: command, Args: args}
+}
+
+// CLIProfileAction creates a CLI action bound to a trusted profile.
+func CLIProfileAction(profile, command string, args ...string) LeaderAction {
+	return LeaderAction{Type: ActionCLI, Profile: profile, Command: command, Args: args}
 }
 
 func OpenAppAction(target string) LeaderAction {
@@ -244,7 +250,11 @@ func decodeLeaderNode(tbl *toml.Table, path string) (LeaderNode, error) {
 		if err != nil {
 			return LeaderNode{}, err
 		}
-		action = CLIAction(command, args...)
+		profile, _, err := optionalString(tbl, "profile", path)
+		if err != nil {
+			return LeaderNode{}, err
+		}
+		action = CLIProfileAction(profile, command, args...)
 
 	case ActionOpenApp:
 		target, err := requiredString(tbl, "target", path)
@@ -342,6 +352,9 @@ func (n LeaderNode) toTOML() *toml.Table {
 	case ActionCLI:
 		t.Set("command", toml.StringVal(n.Action.Command))
 		t.Set("args", stringsToTOMLArray(n.Action.Args))
+		if n.Action.Profile != "" {
+			t.Set("profile", toml.StringVal(n.Action.Profile))
+		}
 	case ActionOpenApp:
 		t.Set("target", toml.StringVal(n.Action.Target))
 	case ActionSwitchTab:

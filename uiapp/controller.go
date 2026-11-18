@@ -121,6 +121,7 @@ type Options struct {
 	// after the workflow lifecycle state has been finalized and may call
 	// CancelWorkflow, Close, or execute another workflow synchronously.
 	OnWorkflowResult func(workflowID string, result automation.ExecutionResult, err error)
+	AuditLog         *automation.AuditLog
 }
 
 type clipTask struct {
@@ -182,7 +183,8 @@ type AppController struct {
 	Bridge            bridge.HostService
 	AppProvider       apps.AppProvider
 	AIClient          *ai.OpenAICompatibleClient
-	CLIExecutor       actions.CLIExecutor
+	CLIExecutor       actions.Executor
+	AuditLog          *automation.AuditLog
 	Glossary          engine.GlossaryEngine
 	Snippets          *engine.SnippetEngine
 
@@ -239,6 +241,7 @@ type AppController struct {
 	workflowLifecycleMu sync.Mutex
 	workflowCancel      context.CancelFunc
 	workflowDone        func()
+	cliCancel           context.CancelFunc
 	workflowRunID       uint64
 	workflowTargetGen   uint64
 	closed              bool
@@ -377,6 +380,7 @@ func NewAppController(opts Options) *AppController {
 		OnRecordPromptVersion:    opts.OnRecordPromptVersion,
 		OnConfigSaved:            opts.OnConfigSaved,
 		OnWorkflowResult:         opts.OnWorkflowResult,
+		AuditLog:                 opts.AuditLog,
 		appIconCache:             make(map[string]*ui.Bitmap),
 		thumbCache:               make(map[string]*ui.Bitmap),
 		originalCache:            make(map[string]*ui.Bitmap),
@@ -446,6 +450,10 @@ func (c *AppController) Close() {
 		c.aiCancel = nil
 	}
 	c.aiGen++
+	if c.cliCancel != nil {
+		c.cliCancel()
+		c.cliCancel = nil
+	}
 	selectionHide := c.OnHideSelectionBar
 	if c.hudTimer != nil {
 		c.hudTimer.Stop()
@@ -543,6 +551,10 @@ func (c *AppController) StopAll(reason string) runtimecoord.Report {
 		c.clipboardPasteCancel = nil
 	}
 	c.clipboardPasteGen++
+	if c.cliCancel != nil {
+		c.cliCancel()
+		c.cliCancel = nil
+	}
 	c.mu.Unlock()
 	return report
 }
@@ -2604,7 +2616,7 @@ func (p workflowProvider) Invoke(ctx context.Context, invocation automation.Acti
 	if err != nil {
 		return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultFailed, Error: err.Error()}, nil
 	}
-	return p.invokeCLI(ctx, action.leader.Command, args, 0)
+	return p.invokeCLIProfile(ctx, action.leader.Profile, action.leader.Command, args, 0)
 }
 
 func mergeWorkflowInputs(workflowInputs map[string]any, invocation automation.ActionInvocation) map[string]any {
@@ -2697,14 +2709,57 @@ func lookupWorkflowBinding(value any, key string) (any, bool) {
 var workflowTemplatePattern = regexp.MustCompile(`\{\{[^{}]+\}\}`)
 
 func (p workflowProvider) invokeCLI(ctx context.Context, command string, args []string, timeout time.Duration) (automation.ActionResult, error) {
-	executor := actions.NewCLIExecutor()
+	return p.invokeCLIProfile(ctx, "", command, args, timeout)
+}
+
+func (p workflowProvider) invokeCLIProfile(ctx context.Context, profileID, command string, args []string, timeout time.Duration) (automation.ActionResult, error) {
+	var executor actions.Executor = actions.NewCLIExecutor()
+	var profile *config.CLITrustedProfile
 	if p.controller != nil {
 		p.controller.mu.Lock()
 		executor = p.controller.CLIExecutor
+		cfg := p.controller.ConfigStore.Current()
 		p.controller.mu.Unlock()
+		if profileID != "" {
+			if !cfg.Main.CLI.Enabled {
+				return automation.ActionResult{Status: automation.ResultFailed, Error: "CLI execution is disabled"}, nil
+			}
+			for i := range cfg.Main.CLI.TrustedProfiles {
+				if cfg.Main.CLI.TrustedProfiles[i].ID == profileID {
+					profile = &cfg.Main.CLI.TrustedProfiles[i]
+					break
+				}
+			}
+			if profile == nil {
+				return automation.ActionResult{Status: automation.ResultFailed, Error: fmt.Sprintf("CLI profile %q was not found", profileID)}, nil
+			}
+			if !profile.Enabled {
+				return automation.ActionResult{Status: automation.ResultFailed, Error: fmt.Sprintf("CLI profile %q is disabled", profileID)}, nil
+			}
+			if profile.DryRun {
+				return automation.ActionResult{Status: automation.ResultFailed, Error: "CLI profile is in dry-run mode"}, nil
+			}
+		}
 	}
-	result, err := executor.Execute(ctx, command, args, p.actionCtx, timeout)
-	return cliActionResult(result, err), nil
+	result := executor.ExecuteRequest(ctx, actions.CommandRequest{Profile: profile, Command: command, Args: args, Timeout: timeout, ProfileID: profileID})
+	return commandActionResult(result), nil
+}
+
+func commandActionResult(result actions.CommandResult) automation.ActionResult {
+	output := result.Stdout
+	if output == "" {
+		output = result.Stderr
+	}
+	actionResult := automation.ActionResult{Status: automation.ResultSucceeded, Output: output, Metadata: map[string]any{"exitCode": result.ExitCode, "stderr": result.Stderr, "timedOut": result.TimedOut}}
+	if result.Err != nil {
+		actionResult.Status = automation.ResultFailed
+		actionResult.Error = result.Err.Error()
+		return actionResult
+	}
+	if result.TimedOut || result.Canceled || result.ExitCode != 0 {
+		actionResult.Status = automation.ResultFailed
+	}
+	return actionResult
 }
 
 func cliActionResult(result actions.CLIExecutionResult, err error) automation.ActionResult {
@@ -2856,30 +2911,79 @@ func (c *AppController) runAction(act config.LeaderAction, actionCtx engine.Caps
 			c.handleInternalSettingCommand(act.Args)
 			return
 		}
+		cfg := c.ConfigStore.Current()
+		if !cfg.Main.CLI.Enabled {
+			c.ShowToastOrHUD("CLI execution is disabled")
+			return
+		}
+		var profile *config.CLITrustedProfile
+		for i := range cfg.Main.CLI.TrustedProfiles {
+			if cfg.Main.CLI.TrustedProfiles[i].ID == act.Profile {
+				profile = &cfg.Main.CLI.TrustedProfiles[i]
+				break
+			}
+		}
+		if profile == nil {
+			c.ShowToastOrHUD("CLI action requires a trusted profile")
+			return
+		}
+		if !profile.Enabled {
+			c.ShowToastOrHUD(fmt.Sprintf("CLI profile %q is disabled", profile.ID))
+			return
+		}
+		if _, err := actions.ResolveTrusted(*profile, act.Command); err != nil {
+			c.ShowToastOrHUD(fmt.Sprintf("CLI command refused: %v", err))
+			return
+		}
+		if profile.DryRun {
+			c.ShowToastOrHUD(fmt.Sprintf("CLI dry-run: %s %s", act.Command, strings.Join(act.Args, " ")))
+			return
+		}
 		c.mu.Lock()
 		execer := c.CLIExecutor
 		c.mu.Unlock()
+		ctx, cancel := context.WithCancel(context.Background())
+		c.mu.Lock()
+		if c.cliCancel != nil {
+			c.cliCancel()
+		}
+		c.cliCancel = cancel
+		c.mu.Unlock()
 		go func() {
-			res, err := execer.Execute(context.Background(), act.Command, act.Args, actionCtx, 0)
-			if err != nil {
-				c.Dispatch(engine.Event{
-					Type:    engine.EventShowHUD,
-					Message: i18n.Tf("hud.command_failed", err),
-				})
+			defer func() { c.mu.Lock(); c.cliCancel = nil; c.mu.Unlock() }()
+			res := execer.ExecuteRequest(ctx, actions.CommandRequest{Profile: profile, Command: act.Command, Args: act.Args, Dir: profile.DefaultDir, ProfileID: profile.ID})
+			status := "succeeded"
+			category := ""
+			if res.Err != nil || res.ExitCode != 0 || res.TimedOut || res.Canceled {
+				status = "failed"
+				category = automation.ErrorCategory(res.Err)
+				if res.TimedOut {
+					category = "timeout"
+				}
+				if res.Canceled {
+					category = "cancelled"
+				}
+			}
+			c.mu.Lock()
+			audit := c.AuditLog
+			c.mu.Unlock()
+			if audit != nil {
+				audit.Append(automation.AuditEvent{Profile: profile.ID, Target: act.Command, InputFingerprint: automation.FingerprintInput(strings.Join(append([]string{act.Command}, act.Args...), "\x00")), Status: status, ErrorCategory: category})
+			}
+			if res.Err != nil {
+				c.ShowToastOrHUD(fmt.Sprintf("CLI command failed: %v", res.Err))
+				return
+			}
+			if res.Canceled {
+				c.ShowToastOrHUD("CLI command cancelled")
 				return
 			}
 			if res.TimedOut {
-				c.Dispatch(engine.Event{
-					Type:    engine.EventShowHUD,
-					Message: i18n.T("hud.command_timeout"),
-				})
+				c.ShowToastOrHUD(i18n.T("hud.command_timeout"))
 				return
 			}
 			if res.ExitCode != 0 {
-				c.Dispatch(engine.Event{
-					Type:    engine.EventShowHUD,
-					Message: i18n.Tf("hud.command_exit_code", res.ExitCode),
-				})
+				c.ShowToastOrHUD(i18n.Tf("hud.command_exit_code", res.ExitCode))
 			}
 		}()
 
