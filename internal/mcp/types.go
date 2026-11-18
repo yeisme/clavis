@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 )
 
 const (
@@ -20,12 +22,41 @@ const (
 // ServerConfig describes an MCP server without containing executable code.
 // Stdio servers are started only when a caller supplies a ProcessLauncher.
 type ServerConfig struct {
-	Name        string            `json:"name"`
-	Version     string            `json:"version,omitempty"`
-	Command     string            `json:"command,omitempty"`
-	Args        []string          `json:"args,omitempty"`
-	Environment map[string]string `json:"environment,omitempty"`
-	WorkingDir  string            `json:"workingDir,omitempty"`
+	Name         string            `json:"name"`
+	Version      string            `json:"version,omitempty"`
+	Command      string            `json:"command,omitempty"`
+	Args         []string          `json:"args,omitempty"`
+	Environment  map[string]string `json:"environment,omitempty"`
+	WorkingDir   string            `json:"workingDir,omitempty"`
+	URL          string            `json:"url,omitempty"`
+	OptIn        bool              `json:"optIn,omitempty"`
+	Timeout      time.Duration     `json:"timeout,omitempty"`
+	AllowedTools []string          `json:"allowedTools,omitempty"`
+}
+
+// ServerSection is the neutral declarative shape used by config adapters.
+// It intentionally avoids making config packages depend on this internal package.
+type ServerSection struct {
+	Name, Command, WorkingDir, URL  string
+	Args, Environment, AllowedTools []string
+	OptIn                           bool
+	TimeoutSeconds, MaxConcurrency  int
+}
+
+// ConfigFromSection converts a neutral configuration section to ServerConfig.
+func ConfigFromSection(s ServerSection) (ServerConfig, error) {
+	if s.Name == "" {
+		return ServerConfig{}, errors.New("mcp: server name is required")
+	}
+	env := make(map[string]string, len(s.Environment))
+	for _, entry := range s.Environment {
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) != 2 || parts[0] == "" {
+			return ServerConfig{}, fmt.Errorf("mcp: invalid environment entry %q", entry)
+		}
+		env[parts[0]] = parts[1]
+	}
+	return ServerConfig{Name: s.Name, Command: s.Command, Args: cloneStrings(s.Args), Environment: env, WorkingDir: s.WorkingDir, URL: s.URL, OptIn: s.OptIn, Timeout: time.Duration(s.TimeoutSeconds) * time.Second, AllowedTools: cloneStrings(s.AllowedTools)}, nil
 }
 
 // ProcessSpec is the executable portion of ServerConfig passed to an injected
@@ -129,6 +160,7 @@ type Client interface {
 	ListResources(context.Context) ([]ResourceDescriptor, error)
 	ListPrompts(context.Context) ([]PromptDescriptor, error)
 	Invoke(context.Context, string, map[string]any) (ToolResult, error)
+	InvokeWithID(context.Context, string, map[string]any) (ToolResult, string, error)
 	Cancel(context.Context, string) error
 	Close() error
 }
@@ -164,6 +196,7 @@ var (
 	ErrClosed         = errors.New("mcp: transport is closed")
 	ErrHTTPOptIn      = errors.New("mcp: HTTP transport requires explicit opt-in")
 	ErrHTTPNotLocal   = errors.New("mcp: HTTP transport URL must be local")
+	ErrToolNotAllowed = errors.New("mcp: tool is not allowed")
 )
 
 func cloneMap(in map[string]any) map[string]any {

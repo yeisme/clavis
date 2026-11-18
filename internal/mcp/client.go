@@ -6,13 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // NewClient constructs a client over an already-created transport. This is
 // useful for tests and for transports other than stdio.
 func NewClient(transport Transport, options ClientOptions) Client {
+	// Legacy constructor preserves historical unrestricted behavior.
+	return NewConfiguredClient(transport, ServerConfig{AllowedTools: []string{"*"}}, options)
+}
+
+// NewConfiguredClient applies request timeout and tool permissions from config.
+func NewConfiguredClient(transport Transport, config ServerConfig, options ClientOptions) Client {
 	o := options.normalized()
-	return &client{transport: transport, options: o}
+	return &client{transport: transport, options: o, timeout: config.Timeout, allowedTools: cloneStrings(config.AllowedTools), serverName: config.Name}
 }
 
 // NewStdioClient launches the configured server through the supplied launcher.
@@ -22,16 +29,19 @@ func NewStdioClient(ctx context.Context, config ServerConfig, launcher ProcessLa
 	if err != nil {
 		return nil, err
 	}
-	return NewClient(transport, options), nil
+	return NewConfiguredClient(transport, config, options), nil
 }
 
 type client struct {
-	transport Transport
-	options   ClientOptions
-	mu        sync.RWMutex
-	manifest  ServerManifest
-	ready     bool
-	closed    bool
+	transport    Transport
+	options      ClientOptions
+	mu           sync.RWMutex
+	manifest     ServerManifest
+	ready        bool
+	closed       bool
+	timeout      time.Duration
+	allowedTools []string
+	serverName   string
 }
 
 func (c *client) Initialize(ctx context.Context) (ServerManifest, error) {
@@ -53,7 +63,7 @@ func (c *client) Initialize(ctx context.Context) (ServerManifest, error) {
 		"capabilities":    cloneMap(c.options.Capabilities),
 		"clientInfo":      map[string]any{"name": c.options.ClientName, "version": c.options.ClientVersion},
 	}
-	result, err := c.request(ctx, "initialize", params)
+	result, _, err := c.request(ctx, "initialize", params)
 	if err != nil {
 		return ServerManifest{}, err
 	}
@@ -117,22 +127,39 @@ func (c *client) ListPrompts(ctx context.Context) ([]PromptDescriptor, error) {
 }
 
 func (c *client) Invoke(ctx context.Context, name string, arguments map[string]any) (ToolResult, error) {
+	result, _, err := c.InvokeWithID(ctx, name, arguments)
+	return result, err
+}
+
+func (c *client) InvokeWithID(ctx context.Context, name string, arguments map[string]any) (ToolResult, string, error) {
 	if name == "" {
-		return ToolResult{}, errors.New("mcp: tool name is required")
+		return ToolResult{}, "", errors.New("mcp: tool name is required")
+	}
+	if !c.toolAllowed(name) {
+		return ToolResult{}, "", fmt.Errorf("%w: server %q tool %q", ErrToolNotAllowed, c.serverName, name)
 	}
 	params := map[string]any{"name": name, "arguments": cloneMap(arguments)}
-	result, err := c.callReadyRaw(ctx, "tools/call", params)
+	result, id, err := c.callReadyRawWithID(ctx, "tools/call", params)
 	if err != nil {
-		return ToolResult{}, err
+		return ToolResult{}, id, err
 	}
 	var output ToolResult
 	if err := json.Unmarshal(result, &output); err != nil {
-		return ToolResult{}, fmt.Errorf("mcp: decode tools/call result: %w", err)
+		return ToolResult{}, id, fmt.Errorf("mcp: decode tools/call result: %w", err)
 	}
 	output.Content = cloneContent(output.Content)
 	output.StructuredContent = cloneJSONValue(output.StructuredContent)
 	output.Metadata = cloneMap(output.Metadata)
-	return output, nil
+	return output, id, nil
+}
+
+func (c *client) toolAllowed(name string) bool {
+	for _, allowed := range c.allowedTools {
+		if allowed == "*" || allowed == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *client) Cancel(ctx context.Context, requestID string) error {
@@ -171,27 +198,42 @@ func (c *client) callReady(ctx context.Context, method string, params any, outpu
 }
 
 func (c *client) callReadyRaw(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	result, _, err := c.callReadyRawWithID(ctx, method, params)
+	return result, err
+}
+
+func (c *client) callReadyRawWithID(ctx context.Context, method string, params any) (json.RawMessage, string, error) {
 	c.mu.RLock()
 	ready, closed := c.ready, c.closed
 	c.mu.RUnlock()
 	if closed {
-		return nil, ErrClosed
+		return nil, "", ErrClosed
 	}
 	if !ready {
-		return nil, ErrNotInitialized
+		return nil, "", ErrNotInitialized
 	}
 	return c.request(ctx, method, params)
 }
 
-func (c *client) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
+func (c *client) request(ctx context.Context, method string, params any) (json.RawMessage, string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	result, err := c.transport.Request(ctx, method, params)
-	if err != nil {
-		return nil, err
+	if c.timeout > 0 {
+		if _, ok := ctx.Deadline(); !ok {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, c.timeout)
+			defer cancel()
+		}
 	}
-	return result, nil
+	if r, ok := c.transport.(interface {
+		RequestWithID(context.Context, string, any) (json.RawMessage, string, error)
+	}); ok {
+		result, id, err := r.RequestWithID(ctx, method, params)
+		return result, id, err
+	}
+	result, err := c.transport.Request(ctx, method, params)
+	return result, "", err
 }
 
 func cloneManifest(in ServerManifest) ServerManifest {

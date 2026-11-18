@@ -73,20 +73,28 @@ func NewStdioTransport(ctx context.Context, config ServerConfig, launcher Proces
 }
 
 func (t *StdioTransport) Request(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	result, _, err := t.RequestWithID(ctx, method, params)
+	return result, err
+}
+
+func (t *StdioTransport) RequestWithID(ctx context.Context, method string, params any) (json.RawMessage, string, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
 	}
 	id := fmt.Sprintf("stdio-%d", t.next.Add(1))
 	encoded, err := marshalParams(params)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	request := pluginprotocol.Request{JSONRPC: pluginprotocol.Version, Method: method, Params: encoded, ID: id}
 	ch := make(chan response, 1)
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
-		return nil, ErrClosed
+		return nil, "", ErrClosed
 	}
 	t.pending[id] = ch
 	err = t.encoder.Write(request)
@@ -95,19 +103,19 @@ func (t *StdioTransport) Request(ctx context.Context, method string, params any)
 	}
 	t.mu.Unlock()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	select {
 	case result := <-ch:
-		return result.result, result.err
+		return result.result, id, result.err
 	case <-ctx.Done():
 		t.mu.Lock()
 		delete(t.pending, id)
 		t.mu.Unlock()
 		_ = t.Cancel(context.Background(), id)
-		return nil, ctx.Err()
+		return nil, id, ctx.Err()
 	case <-t.done:
-		return nil, ErrClosed
+		return nil, id, ErrClosed
 	}
 }
 

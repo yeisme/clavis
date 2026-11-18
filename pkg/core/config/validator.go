@@ -54,6 +54,7 @@ func Validate(cfg ClavisConfig) []ValidationIssue {
 // ValidateMain validates MainConfig (config.toml).
 func ValidateMain(main MainConfig) []ValidationIssue {
 	var issues []ValidationIssue
+	issues = append(issues, ValidateMCP(main.MCP)...)
 	file := string(FileMain)
 
 	leaderKey := strings.TrimSpace(main.Trigger.LeaderKey)
