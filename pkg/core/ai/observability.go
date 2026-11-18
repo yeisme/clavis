@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/big"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -62,10 +63,10 @@ func ParseStructuredOutput(raw string, schema map[string]any) (any, error) {
 func normalizeJSONNumbers(value any) any {
 	switch v := value.(type) {
 	case json.Number:
-		if i, err := v.Int64(); err == nil {
-			return i
-		}
 		if integer, ok := exactJSONInteger(v); ok {
+			if integer.IsInt64() {
+				return integer.Int64()
+			}
 			return integer
 		}
 		if f, err := v.Float64(); err == nil {
@@ -177,47 +178,57 @@ func jsonValuesEqual(left any, right any) bool {
 	if reflect.DeepEqual(left, right) {
 		return true
 	}
-	leftNumber, leftOK := numericBigFloat(left)
-	rightNumber, rightOK := numericBigFloat(right)
+	leftNumber, leftOK := numericRat(left)
+	rightNumber, rightOK := numericRat(right)
 	return leftOK && rightOK && leftNumber.Cmp(rightNumber) == 0
 }
 
 func isJSONNumber(value any) bool {
-	_, ok := numericBigFloat(value)
+	_, ok := numericRat(value)
 	return ok
 }
 
 func isJSONInteger(value any) bool {
-	number, ok := numericBigFloat(value)
-	if !ok {
-		return false
-	}
-	return number.IsInt()
+	number, ok := numericRat(value)
+	return ok && number.IsInt()
 }
 
 func exactJSONInteger(number json.Number) (*big.Int, bool) {
-	parsed, ok := numericBigFloat(number)
+	parsed, ok := numericRat(number)
 	if !ok || !parsed.IsInt() {
 		return nil, false
 	}
-	integer, _ := parsed.Int(nil)
-	return integer, integer != nil
+	return new(big.Int).Quo(parsed.Num(), parsed.Denom()), true
 }
 
-func numericBigFloat(value any) (*big.Float, bool) {
+// numericRat converts JSON numbers and Go numeric enum values to exact rational
+// values. Go floats use their shortest decimal spelling so a schema enum float64
+// (0.1) compares equal to JSON's decimal 0.1 rather than its binary expansion.
+func numericRat(value any) (*big.Rat, bool) {
+	var text string
 	switch n := value.(type) {
 	case json.Number:
-		number, _, err := big.ParseFloat(n.String(), 10, 256, big.ToNearestEven)
-		return number, err == nil
-	case int, int8, int16, int32, int64:
-		return new(big.Float).SetInt64(reflect.ValueOf(n).Int()), true
-	case uint, uint8, uint16, uint32, uint64:
-		return new(big.Float).SetUint64(reflect.ValueOf(n).Uint()), true
-	case float32, float64:
-		return big.NewFloat(reflect.ValueOf(n).Float()), true
+		text = n.String()
+	case float32:
+		text = strconv.FormatFloat(float64(n), 'g', -1, 32)
+	case float64:
+		text = strconv.FormatFloat(n, 'g', -1, 64)
 	default:
-		return nil, false
+		rv := reflect.ValueOf(value)
+		if !rv.IsValid() {
+			return nil, false
+		}
+		switch rv.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return new(big.Rat).SetInt64(rv.Int()), true
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			return new(big.Rat).SetUint64(rv.Uint()), true
+		default:
+			return nil, false
+		}
 	}
+	rat, ok := new(big.Rat).SetString(text)
+	return rat, ok
 }
 
 func validateSchemaDefinition(s map[string]any, path string) error {

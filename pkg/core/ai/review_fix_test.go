@@ -84,6 +84,21 @@ func TestParseStructuredOutputEnforcesIntegerAndEnum(t *testing.T) {
 	if _, err := ParseStructuredOutput(`1`, map[string]any{"type": "integer", "enum": []any{float64(1)}}); err != nil {
 		t.Fatalf("numeric enum rejected: %v", err)
 	}
+	if _, err := ParseStructuredOutput(`0.1`, map[string]any{"type": "number", "enum": []any{float64(0.1)}}); err != nil {
+		t.Fatalf("decimal numeric enum rejected: %v", err)
+	}
+	veryLarge := "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"
+	gotVeryLarge, err := ParseStructuredOutput(veryLarge, map[string]any{"type": "integer"})
+	if err != nil {
+		t.Fatalf("very large integer rejected: %v", err)
+	}
+	veryLargeInt, ok := gotVeryLarge.(*big.Int)
+	if !ok || veryLargeInt.String() != veryLarge {
+		t.Fatalf("very large integer precision lost: %#v", gotVeryLarge)
+	}
+	if _, err := ParseStructuredOutput("10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.5", map[string]any{"type": "integer"}); err == nil || !strings.Contains(err.Error(), "must be integer") {
+		t.Fatalf("huge fractional integer was accepted: %v", err)
+	}
 	if _, err := ParseStructuredOutput(`{"ok":true} trailing`, map[string]any{"type": "object"}); err == nil || !strings.Contains(err.Error(), "trailing data") {
 		t.Fatalf("expected trailing data error, got %v", err)
 	}
