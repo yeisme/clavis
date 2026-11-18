@@ -554,8 +554,8 @@ func TestPinyinFullWidthPrefixRoutingAndDualActions(t *testing.T) {
 		t.Fatalf("expected pin action in @ prefix view, got %+v", pinEff)
 	}
 	secClipEff := sm.Handle(engine.Event{Type: engine.EventConfirmSecondarySelection})
-	if len(secClipEff) != 2 || secClipEff[0].Type != engine.EffectCopyText || secClipEff[0].Text != "beta clipboard line" {
-		t.Fatalf("expected secondary confirm on clipboard item to copy, got %+v", secClipEff)
+	if len(secClipEff) != 2 || secClipEff[0].Type != engine.EffectPasteClipboardItem || secClipEff[0].ClipboardContent != "beta clipboard line" {
+		t.Fatalf("expected secondary confirm on clipboard item to paste, got %+v", secClipEff)
 	}
 
 	// '?' routes to AI with adhoc prompt first; secondary asks without selection

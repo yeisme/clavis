@@ -33,6 +33,7 @@ type interactionFixture struct {
 
 	mu     sync.Mutex
 	copied []string
+	used   []string
 }
 
 func newInteractionFixture(t *testing.T, doer ai.HTTPDoer) *interactionFixture {
@@ -66,6 +67,11 @@ func newInteractionFixture(t *testing.T, doer ai.HTTPDoer) *interactionFixture {
 			defer f.mu.Unlock()
 			f.copied = append(f.copied, text)
 		},
+		OnRecordItemUse: func(itemID string) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.used = append(f.used, itemID)
+		},
 	})
 	t.Cleanup(f.ctrl.Close)
 	return f
@@ -76,6 +82,14 @@ func (f *interactionFixture) copiedTexts() []string {
 	defer f.mu.Unlock()
 	out := make([]string, len(f.copied))
 	copy(out, f.copied)
+	return out
+}
+
+func (f *interactionFixture) usedItemIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.used))
+	copy(out, f.used)
 	return out
 }
 
@@ -152,7 +166,7 @@ func TestLeaderSlashJumpsToCleanOmnibox(t *testing.T) {
 	}
 }
 
-// TestOmniboxQuickIndexAndSecondaryShortcuts covers ⌥1..⌥9 and ⌘↵ / Ctrl+↵.
+// TestOmniboxQuickIndexAndSecondaryShortcuts covers ⌥1..⌥9 and ⌥⌘1..⌥⌘9.
 func TestOmniboxQuickIndexAndSecondaryShortcuts(t *testing.T) {
 	f := newInteractionFixture(t, nil)
 	f.record(t, "alpha", "beta", "gamma")
@@ -166,25 +180,61 @@ func TestOmniboxQuickIndexAndSecondaryShortcuts(t *testing.T) {
 	}
 	secondRow := items[1].ClipboardContent
 
-	// ⌥2 / Alt+2 runs the primary action of the second row directly.
+	// ⌥2 / Alt+2 runs the primary action of the second row directly: copy to
+	// the system clipboard, leaving the user in control of Cmd/Ctrl+V.
 	tt.Key(ui.Alt, ui.Key2)
 	waitUntil(t, 2*time.Second, func() bool {
-		return len(f.bridge.getInjected()) >= 1
-	}, "Alt+2 quick-select injection")
-	if got := f.bridge.getInjected()[0].text; got != secondRow {
-		t.Fatalf("Alt+2 injected %q, want %q", got, secondRow)
+		return len(f.copiedTexts()) >= 1
+	}, "Alt+2 quick-select copy")
+	if got := f.copiedTexts()[0]; got != secondRow {
+		t.Fatalf("Alt+2 copied %q, want %q", got, secondRow)
 	}
 
-	// ⌘↵ / Ctrl+↵ runs the secondary action of the selected row (copy).
+	// ⌥⌘1 / Alt+primary+1 runs the secondary action (paste to the active app).
 	f.ctrl.OpenOmnibox(config.TabClipboard, "")
 	tt.Frame()
-	selected := f.ctrl.State().OmniboxItems[f.ctrl.State().SelectedIndex].ClipboardContent
-	tt.Key(ui.Cmd, ui.KeyEnter)
+	selectedState := f.ctrl.State()
+	selected := selectedState.OmniboxItems[selectedState.SelectedIndex].ClipboardContent
+	tt.Key(ui.Alt|primaryMod(), ui.Key1)
 	waitUntil(t, 2*time.Second, func() bool {
-		return len(f.copiedTexts()) >= 1
-	}, "secondary selection copy")
-	if got := f.copiedTexts()[0]; got != selected {
-		t.Fatalf("secondary action copied %q, want %q", got, selected)
+		return len(f.bridge.getInjected()) >= 1
+	}, "secondary selection paste")
+	if got := f.bridge.getInjected()[0].text; got != selected {
+		t.Fatalf("Alt+primary+1 pasted %q, want %q", got, selected)
+	}
+}
+
+// TestOmniboxClipboardRowClickCopiesAndCloses verifies the Maccy-style single
+// click path through the real UI harness rather than dispatching an event.
+func TestOmniboxClipboardRowClickCopiesAndCloses(t *testing.T) {
+	f := newInteractionFixture(t, nil)
+	f.record(t, "click-target")
+	f.ctrl.OpenOmnibox(config.TabClipboard, "")
+	tt := f.omniboxTester(t)
+
+	items := f.ctrl.State().OmniboxItems
+	if len(items) != 1 {
+		t.Fatalf("expected one clipboard row, got %+v", items)
+	}
+	want := items[0]
+	if err := tt.Click(want.Title); err != nil {
+		t.Fatalf("click clipboard row %q: %v; texts=%v", want.Title, err, tt.Texts())
+	}
+	waitUntil(t, 2*time.Second, func() bool {
+		return len(f.copiedTexts()) == 1 && len(f.usedItemIDs()) == 1
+	}, "clipboard row click copy")
+
+	if got := f.copiedTexts()[0]; got != want.ClipboardContent {
+		t.Fatalf("row click copied %q, want %q", got, want.ClipboardContent)
+	}
+	if got := f.usedItemIDs()[0]; got != "clipboard:"+want.ClipboardID {
+		t.Fatalf("row click recorded use %q, want clipboard:%s", got, want.ClipboardID)
+	}
+	if injected := f.bridge.getInjected(); len(injected) != 0 {
+		t.Fatalf("row click injected paste unexpectedly: %+v", injected)
+	}
+	if got := f.ctrl.State().Phase; got != engine.PhaseHUD && got != engine.PhaseHidden {
+		t.Fatalf("row click left capsule open in phase %s", got)
 	}
 }
 

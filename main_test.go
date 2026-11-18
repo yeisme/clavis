@@ -380,17 +380,17 @@ func TestControllerOnRecordItemUseOnClipboardPasteAndCopy(t *testing.T) {
 	})
 	defer ctrl.Close()
 
-	// Primary action (paste) on index 0 (item2, most recent).
+	// Primary action (copy) on index 0 (item2, most recent).
 	ctrl.OpenOmnibox(config.TabClipboard, "")
 	ctrl.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
 
-	// Secondary action (copy) on index 0 (item2).
+	// Secondary action (paste) on index 0 (item2).
 	ctrl.OpenOmnibox(config.TabClipboard, "")
 	ctrl.Dispatch(engine.Event{Type: engine.EventConfirmSecondarySelection})
 
-	// SelectAndConfirmIndex secondary (copy) on index 1 (item1).
+	// SelectAndConfirmIndex primary (copy) on index 1 (item1).
 	ctrl.OpenOmnibox(config.TabClipboard, "")
-	ctrl.Dispatch(engine.Event{Type: engine.EventSelectAndConfirmIndex, Index: 1, Secondary: true})
+	ctrl.Dispatch(engine.Event{Type: engine.EventSelectAndConfirmIndex, Index: 1})
 
 	mu.Lock()
 	gotUsed := slices.Clone(used)

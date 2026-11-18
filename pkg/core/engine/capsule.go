@@ -1073,8 +1073,8 @@ func AvailableItemActions(item OmniboxItem) []OmniboxActionSpec {
 			pinLabel = i18n.T("engine.action.unpin")
 		}
 		return []OmniboxActionSpec{
-			{ID: "paste", Label: i18n.T("engine.action.paste"), Shortcut: "↵"},
-			{ID: "copy", Label: i18n.T("engine.action.copy_clipboard"), Shortcut: modKey() + "↵"},
+			{ID: "copy", Label: i18n.T("engine.action.copy_clipboard"), Shortcut: "↵"},
+			{ID: "paste", Label: i18n.T("engine.action.paste"), Shortcut: modKey() + "↵"},
 			{ID: "pin", Label: pinLabel, Shortcut: modKey() + "P"},
 			{ID: "delete", Label: i18n.T("engine.action.delete_history"), Shortcut: modKey() + "⌫"},
 		}
@@ -1146,6 +1146,12 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 			actID = "primary"
 		}
 	}
+	// Clipboard history follows Maccy semantics: the primary action copies the
+	// selected item to the system clipboard; paste is explicit via the secondary
+	// action or the action palette.
+	if item.Kind == ItemClipboardEntry && actID == "primary" {
+		actID = "copy"
+	}
 
 	// Handle explicit cross-item secondary actions before falling through to primary execution.
 	switch actID {
@@ -1192,11 +1198,18 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 	switch item.Kind {
 	case ItemClipboardEntry:
 		if actID == "copy" {
-			txt := item.ClipboardContent
 			clearPhaseFields(&next)
 			next.Phase = PhaseHidden
 			return next, []Effect{
-				{Type: EffectCopyText, Text: txt, ClipboardMedia: item.ClipboardMedia},
+				{Type: EffectCopyText, Text: item.ClipboardContent, ClipboardID: item.ClipboardID, ClipboardMedia: item.ClipboardMedia},
+				{Type: EffectClose},
+			}
+		}
+		if actID == "paste" {
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{
+				{Type: EffectPasteClipboardItem, ClipboardID: item.ClipboardID, ClipboardContent: item.ClipboardContent, ClipboardMedia: item.ClipboardMedia},
 				{Type: EffectClose},
 			}
 		}

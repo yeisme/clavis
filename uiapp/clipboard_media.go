@@ -131,14 +131,28 @@ func writeClipboardMedia(m engine.ClipboardMedia) error {
 
 // pasteClipboardMediaAsync writes the media to the clipboard and, where the bridge supports it,
 // sends the paste shortcut; otherwise it leaves it on the clipboard and tells the user.
-func (c *AppController) pasteClipboardMediaAsync(m engine.ClipboardMedia) {
+//
+// The optional callback runs synchronously only after the clipboard write succeeds. Keeping the
+// callback before the bridge goroutine preserves the asynchronous paste behavior while allowing
+// callers to record an item use without reporting failed writes as successful actions.
+func (c *AppController) pasteClipboardMediaAsync(m engine.ClipboardMedia, onWritten ...func()) {
+	c.pasteClipboardMediaAsyncWithWriter(m, writeClipboardMedia, firstCallback(onWritten))
+}
+
+// pasteClipboardMediaAsyncWithWriter is the testable seam for the MyGo clipboard write. Production
+// callers use pasteClipboardMediaAsync, while tests can verify callback ordering without starting a
+// MyGo app or mutating a process-global clipboard.
+func (c *AppController) pasteClipboardMediaAsyncWithWriter(m engine.ClipboardMedia, writeMedia func(engine.ClipboardMedia) error, onWritten func()) {
 	c.mu.Lock()
 	br := c.Bridge
 	beforeInject := c.BeforeInject
 	c.mu.Unlock()
-	if err := writeClipboardMedia(m); err != nil {
+	if err := writeMedia(m); err != nil {
 		c.ShowToastOrHUD(err.Error())
 		return
+	}
+	if onWritten != nil {
+		onWritten()
 	}
 	paster, ok := br.(bridge.MediaPaster)
 	if !ok || paster == nil {
@@ -152,6 +166,13 @@ func (c *AppController) pasteClipboardMediaAsync(m engine.ClipboardMedia) {
 		}
 		_ = paster.PasteClipboard(ctx)
 	}()
+}
+
+func firstCallback(callbacks []func()) func() {
+	if len(callbacks) == 0 {
+		return nil
+	}
+	return callbacks[0]
 }
 
 // ThumbBitmap decodes (and caches) a clipboard thumbnail; nil when missing or undecodable.

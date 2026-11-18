@@ -824,12 +824,17 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 
 	case engine.EffectPasteClipboardItem:
 		if eff.ClipboardMedia != nil && eff.ClipboardMedia.IsMedia() {
-			c.pasteClipboardMediaAsync(*eff.ClipboardMedia)
+			itemID := eff.ClipboardID
+			c.pasteClipboardMediaAsync(*eff.ClipboardMedia, func() {
+				if itemID != "" {
+					c.recordItemUse("clipboard:" + itemID)
+				}
+			})
 		} else {
 			c.injectTextAsync(eff.ClipboardContent, 0, 0)
-		}
-		if eff.ClipboardID != "" {
-			c.recordItemUse("clipboard:" + eff.ClipboardID)
+			if eff.ClipboardID != "" {
+				c.recordItemUse("clipboard:" + eff.ClipboardID)
+			}
 		}
 
 	case engine.EffectCopyText:
@@ -1942,7 +1947,11 @@ func (c *AppController) activateClipboardItem(op engine.ClipboardActivation) {
 			c.ShowToastOrHUD(fmt.Sprintf("clipboard write failed: %v", err))
 			return err
 		}
+		if strings.TrimSpace(op.ID) != "" {
+			c.recordItemUse("clipboard:" + op.ID)
+		}
 		if !op.PresentPreview {
+			c.Dispatch(engine.Event{Type: engine.EventDismiss})
 			return nil
 		}
 		// Do not present a late result after a newer clipboard mutation or
@@ -1951,6 +1960,7 @@ func (c *AppController) activateClipboardItem(op engine.ClipboardActivation) {
 			return nil
 		}
 		c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.T("hud.pinned_written")})
+		c.Dispatch(engine.Event{Type: engine.EventDismiss})
 		return nil
 	})
 }

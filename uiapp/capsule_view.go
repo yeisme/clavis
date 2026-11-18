@@ -636,8 +636,8 @@ func (a *AppController) renderOmniboxView(
 							a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
 						} else if row.RowClicked() {
 							a.SelectIndex(i)
-							// Clipboard rows have a single-click quick activation; all other
-							// rows retain the existing click-to-select behaviour.
+							// Clipboard rows use the domain-level activation contract: pin when
+							// needed, write to the system clipboard, then present the preview.
 							if item.Kind == engine.ItemClipboardEntry {
 								a.Dispatch(engine.Event{Type: engine.EventActivateClipboardItem})
 							} else {
@@ -838,7 +838,7 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 		return true
 	}
 
-	// Direct row quick-select: ⌥1..⌥9 inserts, ⌥⌘1..⌥⌘9 runs the secondary action.
+	// Direct row quick-select: ⌥1..⌥9 copies the row, ⌥⌘1..⌥⌘9 runs the secondary action.
 	if mods == ui.Alt {
 		if idx, ok := rowQuickKeyIndex(key); ok && idx < len(state.OmniboxItems) {
 			a.Dispatch(engine.Event{Type: engine.EventSelectAndConfirmIndex, Index: idx})

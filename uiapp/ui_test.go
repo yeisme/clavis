@@ -53,6 +53,8 @@ type mockBridge struct {
 	activeKeymapLayer     string
 	// Recorded SetIMEMode calls (per-app IME rule application).
 	imeModeCalls []config.IMEMode
+
+	pasteClipboardCalls int
 }
 
 type injectedCall struct {
@@ -196,6 +198,13 @@ func (m *mockBridge) UpdateIMEConfig(_ config.IMEConfig, rules config.IMERulesCo
 	m.updatedIMERule = append(m.updatedIMERule, rules)
 }
 
+func (m *mockBridge) PasteClipboard(context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pasteClipboardCalls++
+	return nil
+}
+
 func (m *mockBridge) SetIMEMode(_ context.Context, mode config.IMEMode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -298,6 +307,12 @@ func (m *mockBridge) getIMEModeCalls() []config.IMEMode {
 	out := make([]config.IMEMode, len(m.imeModeCalls))
 	copy(out, m.imeModeCalls)
 	return out
+}
+
+func (m *mockBridge) getPasteClipboardCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pasteClipboardCalls
 }
 
 func (m *mockBridge) getCurrentIME() host.InputSourceInfo {
@@ -1654,7 +1669,7 @@ func TestBeforeInject_OpenOmnibox_And_TapRecoveryDiagnostics(t *testing.T) {
 		t.Fatalf("expected synced context and clipboard item, got ctx=%+v items=%+v", st.Context, st.OmniboxItems)
 	}
 
-	ctrl.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
+	ctrl.Dispatch(engine.Event{Type: engine.EventConfirmSecondarySelection})
 	waitUntil(t, time.Second, func() bool {
 		return len(br.getInjected()) == 1
 	}, "clipboard item injected")
