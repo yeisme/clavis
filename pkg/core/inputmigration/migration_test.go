@@ -671,6 +671,93 @@ func TestMergeKeepsNewerBaselineWithoutTouchingDeviceState(t *testing.T) {
 	}
 }
 
+func legacyV1Baseline(t *testing.T, scheme, action string) PersonalBaseline {
+	t.Helper()
+	b := baseline()
+	raw, err := MarshalBaseline(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := strings.Replace(string(raw), `"scheme":"quanpin"`, `"scheme":"`+scheme+`"`, 1)
+	legacy = strings.Replace(legacy, `"action":"scheme:quanpin"`, `"action":"`+action+`"`, 1)
+	got, err := UnmarshalBaseline([]byte(legacy))
+	if err != nil {
+		t.Fatalf("legacy baseline rejected: %v", err)
+	}
+	return got
+}
+
+func TestMergePreservesLegacyCompatibilityMetadata(t *testing.T) {
+	cases := []struct {
+		name                           string
+		sourceRevision, targetRevision uint64
+		sourceLegacy, targetLegacy     bool
+		wantLegacy                     bool
+	}{
+		{"source-wins", 5, 2, true, false, true},
+		{"target-wins", 2, 5, false, true, true},
+		{"equal-target-wins", 2, 2, false, true, true},
+		{"target-ordinary-clears-marker", 2, 2, true, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			legacyScheme, legacyAction := "shuangpin", "toggle-ime"
+			ordinaryScheme, ordinaryAction := "quanpin", "scheme:quanpin"
+			scheme, action := ordinaryScheme, ordinaryAction
+			if tc.sourceLegacy {
+				scheme, action = legacyScheme, legacyAction
+			}
+			source := legacyV1Baseline(t, scheme, action)
+			scheme, action = ordinaryScheme, ordinaryAction
+			if tc.targetLegacy {
+				scheme, action = legacyScheme, legacyAction
+			}
+			target := legacyV1Baseline(t, scheme, action)
+			source.FieldRevisions["scheme"], target.FieldRevisions["scheme"] = tc.sourceRevision, tc.targetRevision
+			source.FieldRevisions["appRules"], target.FieldRevisions["appRules"] = tc.sourceRevision, tc.targetRevision
+
+			merged, _, err := MergeBaselines(source, target)
+			if err != nil {
+				t.Fatalf("MergeBaselines() error = %v", err)
+			}
+			if err := merged.Validate(); err != nil {
+				t.Fatalf("merged baseline is invalid: %v", err)
+			}
+			if got := merged.legacyV1Scheme != ""; got != tc.wantLegacy {
+				t.Fatalf("scheme marker present = %v, want %v: %+v", got, tc.wantLegacy, merged)
+			}
+			if got := merged.AppRules[0].legacyV1Action != ""; got != tc.wantLegacy {
+				t.Fatalf("app action marker present = %v, want %v: %+v", got, tc.wantLegacy, merged.AppRules[0])
+			}
+
+			replay, _, err := MergeBaselines(merged, target)
+			if err != nil {
+				t.Fatalf("repeated MergeBaselines() error = %v", err)
+			}
+			if err := replay.Validate(); err != nil {
+				t.Fatalf("repeated merge produced invalid baseline: %v", err)
+			}
+			if replay.Scheme != merged.Scheme || replay.AppRules[0].Action != merged.AppRules[0].Action || replay.legacyV1Scheme != merged.legacyV1Scheme || replay.AppRules[0].legacyV1Action != merged.AppRules[0].legacyV1Action {
+				t.Fatalf("repeated merge did not converge: merged=%+v replay=%+v", merged, replay)
+			}
+
+			preview, err := GenerateOverlay(merged, windowsCaps(), "legacy-merge-device")
+			if err != nil {
+				t.Fatalf("GenerateOverlay() error = %v", err)
+			}
+			deferred := map[string]bool{}
+			for _, rule := range preview.Overlay.DeferredRules {
+				if rule.State == "deferred" {
+					deferred[rule.RuleID] = true
+				}
+			}
+			if deferred["scheme"] != tc.wantLegacy || deferred[merged.AppRules[0].ID] != tc.wantLegacy {
+				t.Fatalf("legacy deferred state = %v, want %v: %+v", deferred, tc.wantLegacy, preview.Overlay.DeferredRules)
+			}
+		})
+	}
+}
+
 func TestMergeRevisionsConvergeAndDictionaryConflictsAreExplicit(t *testing.T) {
 	cases := []struct {
 		name                           string

@@ -1171,7 +1171,12 @@ func MergeBaselines(source, target PersonalBaseline) (PersonalBaseline, []FieldC
 		// manufacturing a new revision each time an older export is replayed.
 		out.FieldRevisions[path] = sr
 	}
-	choose("scheme", source.Scheme != target.Scheme, func() { out.Scheme = target.Scheme })
+	choose("scheme", source.Scheme != target.Scheme, func() {
+		out.Scheme = target.Scheme
+		// A legacy v1 scheme is accepted only with its private importer marker.
+		// Keep that metadata coupled to the value selected by the merge.
+		out.legacyV1Scheme = target.legacyV1Scheme
+	})
 	choose("candidateCount", source.CandidateCount != target.CandidateCount, func() { out.CandidateCount = target.CandidateCount })
 	choose("shiftToggleASCII", source.ShiftToggleASCII != target.ShiftToggleASCII, func() { out.ShiftToggleASCII = target.ShiftToggleASCII })
 	choose("fuzzyPinyin", !sameStringSet(source.FuzzyPinyin, target.FuzzyPinyin), func() { out.FuzzyPinyin = append([]string(nil), target.FuzzyPinyin...) })
@@ -1207,6 +1212,11 @@ func cloneAppRules(in []AppRule) []AppRule {
 	for i, r := range in {
 		out[i] = r
 		out[i].Apps = append([]StableApp(nil), r.Apps...)
+		// The marker is intentionally private to the in-memory v1 compatibility
+		// path, but it must follow the rule when a merge chooses another
+		// baseline. Otherwise cloning a legacy rule turns it into an ordinary
+		// rule and can make a valid merged baseline fail validation.
+		out[i].legacyV1Action = r.legacyV1Action
 	}
 	return out
 }
