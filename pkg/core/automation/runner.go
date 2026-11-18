@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/yeisme/clavis/pkg/core/jsonschema"
 )
 
 // Provider executes an action invocation. Providers own the implementation of
@@ -47,12 +49,47 @@ type ExecutionResult struct {
 }
 
 // Runner executes an ExecutionPlan serially using one provider.
+// SchemaResolver supplies an action's output schema to the runner.
+type SchemaResolver interface {
+	OutputSchema(actionID string) (map[string]any, bool)
+}
+
+// SchemaResolverFunc adapts a function to SchemaResolver.
+type SchemaResolverFunc func(actionID string) (map[string]any, bool)
+
+func (f SchemaResolverFunc) OutputSchema(actionID string) (map[string]any, bool) {
+	return f(actionID)
+}
+
+// RunnerOption configures a Runner while preserving the historical constructor.
+type RunnerOption func(*Runner)
+
+// WithSchemaResolver enables runtime output-schema validation.
+func WithSchemaResolver(resolver SchemaResolver) RunnerOption {
+	return func(r *Runner) { r.SchemaResolver = resolver }
+}
+
+// WithActionRegistry enables output-schema validation from action descriptors.
+func WithActionRegistry(registry ActionRegistry) RunnerOption {
+	return WithSchemaResolver(NewRegistrySchemaResolver(registry))
+}
+
+// Runner executes an ExecutionPlan serially using one provider.
 type Runner struct {
-	Provider Provider
+	Provider       Provider
+	SchemaResolver SchemaResolver
 }
 
 // NewRunner constructs a provider-independent workflow runner.
-func NewRunner(provider Provider) *Runner { return &Runner{Provider: provider} }
+func NewRunner(provider Provider, options ...RunnerOption) *Runner {
+	runner := &Runner{Provider: provider}
+	for _, option := range options {
+		if option != nil {
+			option(runner)
+		}
+	}
+	return runner
+}
 
 // Run executes plan in order. The returned error is reserved for runner-level
 // failures (missing provider and context cancellation). Provider and template
@@ -156,6 +193,21 @@ func (r *Runner) run(ctx context.Context, plan ExecutionPlan, inputs map[string]
 			actionResult.Status = ResultFailed
 			if actionResult.Error == "" {
 				actionResult.Error = "provider returned an invalid result status"
+			}
+		}
+		if actionResult.Status == ResultSucceeded && r.SchemaResolver != nil {
+			if schema, found := r.SchemaResolver.OutputSchema(actionID); found {
+				if err := jsonschema.ValidateDefinition(schema); err != nil {
+					actionResult.Status = ResultFailed
+					actionResult.ErrorCategory = ErrorCategoryOutputSchema
+					actionResult.Error = fmt.Sprintf("automation: action %q output schema definition invalid: %v", actionID, err)
+					actionResult.Output = nil
+				} else if err := jsonschema.Validate(actionResult.Output, schema); err != nil {
+					actionResult.Status = ResultFailed
+					actionResult.ErrorCategory = ErrorCategoryOutputSchema
+					actionResult.Error = fmt.Sprintf("automation: action %q output schema validation failed: %v", actionID, err)
+					actionResult.Output = nil
+				}
 			}
 		}
 		stepResult := StepResult{StepID: step.ID, ActionID: actionID, Invocation: invocation, Result: cloneActionResult(actionResult)}

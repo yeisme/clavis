@@ -43,16 +43,27 @@ func FingerprintInput(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return "sha256:" + hex.EncodeToString(h[:])
 }
+
+const (
+	ErrorCategoryCancelled     = "cancelled"
+	ErrorCategoryTimeout       = "timeout"
+	ErrorCategoryOutputSchema  = "output_schema"
+	ErrorCategoryExecutionFail = "execution_failed"
+)
+
 func ErrorCategory(err error) string {
 	if err == nil {
 		return ""
 	}
 	s := strings.ToLower(err.Error())
 	if strings.Contains(s, "cancel") {
-		return "cancelled"
+		return ErrorCategoryCancelled
 	}
 	if strings.Contains(s, "timeout") {
-		return "timeout"
+		return ErrorCategoryTimeout
 	}
-	return "execution_failed"
+	if strings.Contains(s, "output schema") || strings.Contains(s, "output_schema") {
+		return ErrorCategoryOutputSchema
+	}
+	return ErrorCategoryExecutionFail
 }

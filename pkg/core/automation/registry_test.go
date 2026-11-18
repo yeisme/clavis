@@ -102,6 +102,26 @@ func TestRegistryCopiesConfigValues(t *testing.T) {
 	}
 }
 
+func TestRegistryOutputSchemaResolverCopiesDescriptorSchema(t *testing.T) {
+	schema := map[string]any{"type": "object", "properties": map[string]any{"ok": map[string]any{"type": "boolean"}}}
+	r := NewRegistry()
+	if err := r.Register(Descriptor{ID: "action", Kind: KindBuiltin, OutputSchema: schema}); err != nil {
+		t.Fatal(err)
+	}
+	resolver := NewRegistrySchemaResolver(r)
+	got, ok := resolver.OutputSchema("action")
+	if !ok {
+		t.Fatal("schema not resolved")
+	}
+	got["type"] = "string"
+	nested := got["properties"].(map[string]any)
+	nested["ok"] = map[string]any{"type": "string"}
+	again, _ := resolver.OutputSchema("action")
+	if again["type"] != "object" || again["properties"].(map[string]any)["ok"].(map[string]any)["type"] != "boolean" {
+		t.Fatalf("resolver exposed schema storage: %#v", again)
+	}
+}
+
 func TestRegistryRejectsMissingIDs(t *testing.T) {
 	r := NewRegistry()
 	if err := r.Register(Descriptor{}); !errors.Is(err, ErrInvalidID) {
