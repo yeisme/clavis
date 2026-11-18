@@ -56,7 +56,8 @@ func trimRunes(s string, max int) string {
 var (
 	mcpPrivateKeyPattern = regexp.MustCompile(`(?is)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----`)
 	mcpBearerPattern     = regexp.MustCompile(`(?i)(\b(?:authorization\s*:\s*bearer|bearer)\s+)[^\s,;]+`)
-	mcpSecretPattern     = regexp.MustCompile(`(?i)(\b(?:api[_-]?key|access[_-]?token|token|secret|password|passwd)\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&]+)`)
+	mcpJSONBearerPattern = regexp.MustCompile(`(?i)("authorization"\s*:\s*")bearer\s+[^"]*(")`)
+	mcpSecretPattern     = regexp.MustCompile(`(?i)((?:"|')?(?:api[_-]?key|access[_-]?token|token|secret|password|passwd)(?:"|')?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&]+)`)
 )
 
 func sanitizeMCPResource(raw string, maxRunes int) string {
@@ -64,6 +65,7 @@ func sanitizeMCPResource(raw string, maxRunes int) string {
 		maxRunes = 2048
 	}
 	clean := mcpPrivateKeyPattern.ReplaceAllString(raw, "[REDACTED PRIVATE KEY]")
+	clean = mcpJSONBearerPattern.ReplaceAllString(clean, "${1}[REDACTED]${2}")
 	clean = mcpBearerPattern.ReplaceAllString(clean, "${1}[REDACTED]")
 	clean = mcpSecretPattern.ReplaceAllString(clean, "${1}[REDACTED]")
 	return strings.TrimSpace(trimRunes(clean, maxRunes))
@@ -120,7 +122,7 @@ func ApplyContextPolicy(policy ContextPolicy, bundle ContextBundle, system strin
 		}
 	}
 	if len(context) > 0 {
-		system = strings.TrimSpace(system+"\n\n<context>\n"+strings.Join(context, "\n")+"\n</context>")
+		system = strings.TrimSpace(system + "\n\n<context>\n" + strings.Join(context, "\n") + "\n</context>")
 	}
 	out := MessageSet{}
 	if strings.TrimSpace(system) != "" {

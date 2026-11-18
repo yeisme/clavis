@@ -36,6 +36,26 @@ func TestAdaptThirdPartyDecodesDocumentedTemplateRef(t *testing.T) {
 	}
 }
 
+func TestThirdPartyTemplateJSONRoundTripUsesDocumentedFields(t *testing.T) {
+	original := prompt.ThirdPartyTemplate{Ref: "catalog/review", Version: "2.1", Digest: "sha256:abc", Slots: []prompt.ThirdPartySlot{{Name: "notes", InputType: "textarea", Required: true}}}
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"templateRef", "version", "digest", "slots", "inputType"} {
+		if !strings.Contains(string(data), `"`+field+`"`) {
+			t.Fatalf("missing documented field %q: %s", field, data)
+		}
+	}
+	var decoded prompt.ThirdPartyTemplate
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Ref != original.Ref || decoded.Version != original.Version || decoded.Digest != original.Digest || decoded.Slots[0].InputType != "textarea" {
+		t.Fatalf("round trip mismatch: %+v", decoded)
+	}
+}
+
 func TestAdaptThirdPartyAcceptsLegacyRefAndRejectsInvalidMetadata(t *testing.T) {
 	var legacy prompt.ThirdPartyTemplate
 	if err := json.Unmarshal([]byte(`{"ref":"legacy/ref","slots":[{"name":"body","input_type":"text"}]}`), &legacy); err != nil {

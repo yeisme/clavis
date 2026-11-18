@@ -35,6 +35,15 @@ func (t *ThirdPartyTemplate) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (t ThirdPartyTemplate) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		TemplateRef string           `json:"templateRef"`
+		Version     string           `json:"version,omitempty"`
+		Digest      string           `json:"digest,omitempty"`
+		Slots       []ThirdPartySlot `json:"slots,omitempty"`
+	}{TemplateRef: t.Ref, Version: t.Version, Digest: t.Digest, Slots: t.Slots})
+}
+
 type ThirdPartySlot struct {
 	Name, InputType string
 	Required        bool
@@ -57,6 +66,15 @@ func (s *ThirdPartySlot) UnmarshalJSON(data []byte) error {
 		s.InputType = raw.LegacyType
 	}
 	return nil
+}
+
+func (s ThirdPartySlot) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Name      string   `json:"name"`
+		InputType string   `json:"inputType"`
+		Required  bool     `json:"required,omitempty"`
+		Options   []string `json:"options,omitempty"`
+	}{Name: s.Name, InputType: s.InputType, Required: s.Required, Options: s.Options})
 }
 
 // AdaptThirdParty converts metadata-only catalog slots into a Clavis template.

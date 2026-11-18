@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -51,15 +53,64 @@ func ParseStructuredOutput(raw string, schema map[string]any) (any, error) {
 	return value, nil
 }
 func validateSchema(v any, s map[string]any, path string) error {
+	if err := validateSchemaDefinition(s, path); err != nil {
+		return err
+	}
+	if raw, ok := s["enum"]; ok {
+		values, _ := raw.([]any)
+		matched := false
+		for _, candidate := range values {
+			if reflect.DeepEqual(v, candidate) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("%s is not one of enum values", path)
+		}
+	}
 	typ, _ := s["type"].(string)
 	switch typ {
 	case "object":
-		if _, ok := v.(map[string]any); !ok {
+		obj, ok := v.(map[string]any)
+		if !ok {
 			return fmt.Errorf("%s must be object", path)
 		}
+		required, _ := s["required"].([]any)
+		for _, raw := range required {
+			name, ok := raw.(string)
+			if !ok || strings.TrimSpace(name) == "" {
+				return fmt.Errorf("%s required must contain only property names", path)
+			}
+			if _, exists := obj[name]; !exists {
+				return fmt.Errorf("%s.%s is required", path, name)
+			}
+		}
+		properties, _ := s["properties"].(map[string]any)
+		for name, raw := range properties {
+			if child, exists := obj[name]; exists {
+				childSchema, ok := raw.(map[string]any)
+				if !ok {
+					return fmt.Errorf("%s.properties.%s must be schema object", path, name)
+				}
+				if err := validateSchema(child, childSchema, path+"."+name); err != nil {
+					return err
+				}
+			}
+		}
 	case "array":
-		if _, ok := v.([]any); !ok {
+		values, ok := v.([]any)
+		if !ok {
 			return fmt.Errorf("%s must be array", path)
+		}
+		items, ok := s["items"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s array schema requires items", path)
+		}
+		for i, item := range values {
+			if err := validateSchema(item, items, fmt.Sprintf("%s[%d]", path, i)); err != nil {
+				return err
+			}
 		}
 	case "string":
 		if _, ok := v.(string); !ok {
@@ -69,31 +120,22 @@ func validateSchema(v any, s map[string]any, path string) error {
 		if _, ok := v.(float64); !ok {
 			return fmt.Errorf("%s must be number", path)
 		}
+	case "integer":
+		n, ok := v.(float64)
+		if !ok || math.Trunc(n) != n {
+			return fmt.Errorf("%s must be integer", path)
+		}
 	case "boolean":
 		if _, ok := v.(bool); !ok {
 			return fmt.Errorf("%s must be boolean", path)
 		}
-	}
-	obj, ok := v.(map[string]any)
-	if !ok {
-		return nil
-	}
-	req, _ := s["required"].([]any)
-	for _, r := range req {
-		n, _ := r.(string)
-		if _, exists := obj[n]; !exists {
-			return fmt.Errorf("%s.%s is required", path, n)
+	case "null":
+		if v != nil {
+			return fmt.Errorf("%s must be null", path)
 		}
-	}
-	props, _ := s["properties"].(map[string]any)
-	for n, rawp := range props {
-		if child, exists := obj[n]; exists {
-			if p, ok := rawp.(map[string]any); ok {
-				if err := validateSchema(child, p, path+"."+n); err != nil {
-					return err
-				}
-			}
-		}
+	case "":
+	default:
+		return fmt.Errorf("%s uses unsupported schema type %q", path, typ)
 	}
 	return nil
 }

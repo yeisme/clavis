@@ -95,15 +95,14 @@ func NewOpenAICompatibleClient(
 // IsKeylessAllowed reports whether an empty API key is permitted for the given provider and baseURL
 // (e.g. local Ollama or localhost / 127.0.0.1 / ::1 endpoints).
 func IsKeylessAllowed(provider string, rawBaseURL string) bool {
-	if strings.EqualFold(strings.TrimSpace(provider), "ollama") {
-		return true
-	}
 	u, err := url.Parse(strings.TrimSpace(rawBaseURL))
 	if err != nil {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
-	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+	local := host == "localhost" || host == "127.0.0.1" || host == "::1"
+	// Ollama is keyless only when its endpoint is local; remote endpoints require credentials.
+	return local
 }
 
 func parseAndValidateBaseURL(rawBaseURL string) (*url.URL, error) {
