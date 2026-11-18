@@ -396,15 +396,17 @@ func TestControllerOnRecordItemUseOnClipboardPasteAndCopy(t *testing.T) {
 	gotUsed := slices.Clone(used)
 	mu.Unlock()
 
+	// The controller has no platform paste capability in this fixture, so the
+	// secondary action writes no usage record; T4 requires a successful platform
+	// paste before recording it.
 	wantUsed := []string{
-		"clipboard:" + item2.ID,
 		"clipboard:" + item2.ID,
 		"clipboard:" + item1.ID,
 	}
 	if !slices.Equal(gotUsed, wantUsed) {
 		t.Fatalf("recorded uses = %v, want %v", gotUsed, wantUsed)
 	}
-	if len(copied) != 2 || copied[0] != "beta item" || copied[1] != "alpha item" {
+	if len(copied) != 3 || copied[0] != "beta item" || copied[1] != "beta item" || copied[2] != "alpha item" {
 		t.Fatalf("copied texts = %v", copied)
 	}
 }

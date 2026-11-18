@@ -190,17 +190,18 @@ func TestOmniboxQuickIndexAndSecondaryShortcuts(t *testing.T) {
 		t.Fatalf("Alt+2 copied %q, want %q", got, secondRow)
 	}
 
-	// ⌥⌘1 / Alt+primary+1 runs the secondary action (paste to the active app).
+	// ⌥⌘1 / Alt+primary+1 writes the entry and asks the platform to paste it
+	// into the active app (Cmd+V/Ctrl+V).
 	f.ctrl.OpenOmnibox(config.TabClipboard, "")
 	tt.Frame()
 	selectedState := f.ctrl.State()
 	selected := selectedState.OmniboxItems[selectedState.SelectedIndex].ClipboardContent
 	tt.Key(ui.Alt|primaryMod(), ui.Key1)
 	waitUntil(t, 2*time.Second, func() bool {
-		return len(f.bridge.getInjected()) >= 1
+		return f.bridge.getPasteClipboardCalls() >= 1
 	}, "secondary selection paste")
-	if got := f.bridge.getInjected()[0].text; got != selected {
-		t.Fatalf("Alt+primary+1 pasted %q, want %q", got, selected)
+	if got := f.copiedTexts()[1]; got != selected {
+		t.Fatalf("Alt+primary+1 wrote %q, want %q", got, selected)
 	}
 }
 

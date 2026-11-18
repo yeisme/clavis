@@ -1652,6 +1652,25 @@ func darwinDisplays() []DisplayInfo {
 	return displays
 }
 
+// PasteClipboard implements MediaPaster by sending the platform paste shortcut
+// after the caller has populated NSPasteboard. Accessibility is checked here so
+// callers can distinguish an unavailable optional paste capability from a
+// successful clipboard write.
+func (b *darwinBridge) PasteClipboard(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := initDarwin(); err != nil {
+		return err
+	}
+	if !axIsProcessTrusted() {
+		return errors.New("darwin: Accessibility permission required for clipboard paste")
+	}
+	b.IgnoreSelfPasteboardChange(b.ClipboardSequence())
+	postTaggedKey(kVK_ANSI_V, kCGEventFlagMaskCommand)
+	return nil
+}
+
 func (b *darwinBridge) InjectText(ctx context.Context, text string, deleteCount int, cursorBackOffset int) error {
 	if err := ctx.Err(); err != nil {
 		return err

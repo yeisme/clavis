@@ -382,11 +382,12 @@ func newTestController(t *testing.T, doer ai.HTTPDoer) (*AppController, *mockBri
 	br := newMockBridge()
 
 	ctrl := NewAppController(Options{
-		ConfigStore:    cfgStore,
-		ClipboardStore: clipStore,
-		SecretStore:    secStore,
-		Bridge:         br,
-		HTTPDoer:       doer,
+		ConfigStore:     cfgStore,
+		ClipboardStore:  clipStore,
+		SecretStore:     secStore,
+		Bridge:          br,
+		HTTPDoer:        doer,
+		ClipboardWriter: func(string) {},
 	})
 	t.Cleanup(ctrl.Close)
 	return ctrl, br, clipStore, secStore
@@ -1671,14 +1672,14 @@ func TestBeforeInject_OpenOmnibox_And_TapRecoveryDiagnostics(t *testing.T) {
 
 	ctrl.Dispatch(engine.Event{Type: engine.EventConfirmSecondarySelection})
 	waitUntil(t, time.Second, func() bool {
-		return len(br.getInjected()) == 1
-	}, "clipboard item injected")
+		return br.getPasteClipboardCalls() == 1
+	}, "clipboard item pasted")
 
 	orderMu.Lock()
 	gotOrder := append([]string(nil), order...)
 	orderMu.Unlock()
 	if len(gotOrder) != 1 || gotOrder[0] != "before_inject" {
-		t.Fatalf("expected BeforeInject to run before InjectText, got %v", gotOrder)
+		t.Fatalf("expected BeforeInject to run before platform paste, got %v", gotOrder)
 	}
 }
 

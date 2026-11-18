@@ -132,9 +132,7 @@ func writeClipboardMedia(m engine.ClipboardMedia) error {
 // pasteClipboardMediaAsync writes the media to the clipboard and, where the bridge supports it,
 // sends the paste shortcut; otherwise it leaves it on the clipboard and tells the user.
 //
-// The optional callback runs synchronously only after the clipboard write succeeds. Keeping the
-// callback before the bridge goroutine preserves the asynchronous paste behavior while allowing
-// callers to record an item use without reporting failed writes as successful actions.
+// The optional callback runs only after both the clipboard write and platform paste succeed.
 func (c *AppController) pasteClipboardMediaAsync(m engine.ClipboardMedia, onWritten ...func()) {
 	c.pasteClipboardMediaAsyncWithWriter(m, writeClipboardMedia, firstCallback(onWritten))
 }
@@ -151,9 +149,6 @@ func (c *AppController) pasteClipboardMediaAsyncWithWriter(m engine.ClipboardMed
 		c.ShowToastOrHUD(err.Error())
 		return
 	}
-	if onWritten != nil {
-		onWritten()
-	}
 	paster, ok := br.(bridge.MediaPaster)
 	if !ok || paster == nil {
 		c.ShowToastOrHUD(i18n.T("clipboard.media.paste_unsupported"))
@@ -164,7 +159,13 @@ func (c *AppController) pasteClipboardMediaAsyncWithWriter(m engine.ClipboardMed
 		if beforeInject != nil {
 			beforeInject(ctx)
 		}
-		_ = paster.PasteClipboard(ctx)
+		if err := paster.PasteClipboard(ctx); err != nil {
+			c.ShowToastOrHUD(err.Error())
+			return
+		}
+		if onWritten != nil {
+			onWritten()
+		}
 	}()
 }
 

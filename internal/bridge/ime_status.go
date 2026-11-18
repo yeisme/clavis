@@ -51,7 +51,7 @@ func DescribeIMERuleTarget(r config.IMERule) string {
 }
 
 // MediaPaster is implemented by bridges that can paste whatever is on the system clipboard
-// into the focused app (Windows: Ctrl+V). Optional; type-asserted by the controller.
+// into the focused app (macOS: Cmd+V; Windows: Ctrl+V). Optional; type-asserted by the controller.
 type MediaPaster interface {
 	// PasteClipboard ignores the current clipboard sequence as a self-write (so the history
 	// poller does not re-record the item) and sends the platform paste shortcut.

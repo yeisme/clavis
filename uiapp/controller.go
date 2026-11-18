@@ -823,18 +823,19 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 		c.injectTextAsync(eff.Text, 0, 0)
 
 	case engine.EffectPasteClipboardItem:
+		itemID := eff.ClipboardID
 		if eff.ClipboardMedia != nil && eff.ClipboardMedia.IsMedia() {
-			itemID := eff.ClipboardID
 			c.pasteClipboardMediaAsync(*eff.ClipboardMedia, func() {
 				if itemID != "" {
 					c.recordItemUse("clipboard:" + itemID)
 				}
 			})
 		} else {
-			c.injectTextAsync(eff.ClipboardContent, 0, 0)
-			if eff.ClipboardID != "" {
-				c.recordItemUse("clipboard:" + eff.ClipboardID)
-			}
+			c.pasteClipboardTextAsync(eff.ClipboardContent, func() {
+				if itemID != "" {
+					c.recordItemUse("clipboard:" + itemID)
+				}
+			})
 		}
 
 	case engine.EffectCopyText:
@@ -1914,6 +1915,39 @@ func (c *AppController) writeClipboardText(text string) error {
 		return nil
 	}
 	return errors.New("app not ready")
+}
+
+// pasteClipboardTextAsync writes the selected text to the system clipboard and
+// then asks the optional platform bridge to send Cmd+V/Ctrl+V. The callback is
+// invoked only after both operations succeed, so failed writes or unsupported
+// paste capabilities cannot be recorded as successful item use.
+func (c *AppController) pasteClipboardTextAsync(text string, onPasted func()) {
+	c.mu.Lock()
+	br := c.Bridge
+	beforeInject := c.BeforeInject
+	c.mu.Unlock()
+	if err := c.writeClipboardText(text); err != nil {
+		c.ShowToastOrHUD(err.Error())
+		return
+	}
+	paster, ok := br.(bridge.MediaPaster)
+	if !ok || paster == nil {
+		c.ShowToastOrHUD(i18n.T("clipboard.media.paste_unsupported"))
+		return
+	}
+	go func() {
+		ctx := context.Background()
+		if beforeInject != nil {
+			beforeInject(ctx)
+		}
+		if err := paster.PasteClipboard(ctx); err != nil {
+			c.ShowToastOrHUD(err.Error())
+			return
+		}
+		if onPasted != nil {
+			onPasted()
+		}
+	}()
 }
 
 // activateClipboardItem executes the single-click domain contract. Pinning is
