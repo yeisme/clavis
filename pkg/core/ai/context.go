@@ -1,13 +1,16 @@
 package ai
 
 import (
+	"regexp"
+	"strings"
+
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
-	"strings"
 )
 
 // ContextPolicy is the single allowlist for ambient context sent to a model.
-// Empty fields are omitted; callers can therefore apply least privilege per request.
+// An all-zero policy means legacy callers keep the old behavior; an explicit
+// non-zero policy owns every ambient field it permits.
 type ContextPolicy struct {
 	IncludeGlossary     bool `json:"includeGlossary"`
 	IncludeApp          bool `json:"includeApp"`
@@ -17,10 +20,9 @@ type ContextPolicy struct {
 	IncludeMCPResources bool `json:"includeMCPResources"`
 	MaxSelectionRunes   int  `json:"maxSelectionRunes,omitempty"`
 	MaxClipboardRunes   int  `json:"maxClipboardRunes,omitempty"`
+	MaxMCPResourceRunes int  `json:"maxMCPResourceRunes,omitempty"`
 }
 
-// ContextBundle is sanitized request context. MCPResources are caller-provided summaries,
-// never transport payloads or authorization headers.
 type ContextBundle struct {
 	Glossary     []config.GlossaryTerm `json:"glossary,omitempty"`
 	AppName      string                `json:"appName,omitempty"`
@@ -51,7 +53,42 @@ func trimRunes(s string, max int) string {
 	return s
 }
 
-// ApplyContextPolicy turns all ambient values into a deterministic message set.
+var (
+	mcpPrivateKeyPattern = regexp.MustCompile(`(?is)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----`)
+	mcpBearerPattern     = regexp.MustCompile(`(?i)(\b(?:authorization\s*:\s*bearer|bearer)\s+)[^\s,;]+`)
+	mcpSecretPattern     = regexp.MustCompile(`(?i)(\b(?:api[_-]?key|access[_-]?token|token|secret|password|passwd)\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&]+)`)
+)
+
+func sanitizeMCPResource(raw string, maxRunes int) string {
+	if maxRunes <= 0 {
+		maxRunes = 2048
+	}
+	clean := mcpPrivateKeyPattern.ReplaceAllString(raw, "[REDACTED PRIVATE KEY]")
+	clean = mcpBearerPattern.ReplaceAllString(clean, "${1}[REDACTED]")
+	clean = mcpSecretPattern.ReplaceAllString(clean, "${1}[REDACTED]")
+	return strings.TrimSpace(trimRunes(clean, maxRunes))
+}
+
+func sanitizeMCPResources(resources []string, maxRunes int) []string {
+	const maxResources = 32
+	const maxTotalRunes = 16384
+	out := make([]string, 0, len(resources))
+	total := 0
+	for _, raw := range resources {
+		if len(out) >= maxResources || total >= maxTotalRunes {
+			break
+		}
+		clean := sanitizeMCPResource(raw, maxRunes)
+		if clean == "" {
+			continue
+		}
+		clean = trimRunes(clean, maxTotalRunes-total)
+		out = append(out, clean)
+		total += len([]rune(clean))
+	}
+	return out
+}
+
 func ApplyContextPolicy(policy ContextPolicy, bundle ContextBundle, system string, developer string, user string) MessageSet {
 	var context []string
 	if policy.IncludeApp && bundle.AppName != "" {
@@ -67,13 +104,15 @@ func ApplyContextPolicy(policy ContextPolicy, bundle ContextBundle, system strin
 		context = append(context, "Clipboard:\n"+trimRunes(bundle.Clipboard, policy.MaxClipboardRunes))
 	}
 	if policy.IncludeMCPResources && len(bundle.MCPResources) > 0 {
-		context = append(context, "MCP resources:\n"+strings.Join(bundle.MCPResources, "\n"))
+		if resources := sanitizeMCPResources(bundle.MCPResources, policy.MaxMCPResourceRunes); len(resources) > 0 {
+			context = append(context, "MCP resources:\n"+strings.Join(resources, "\n"))
+		}
 	}
 	if policy.IncludeGlossary && len(bundle.Glossary) > 0 {
 		var terms []string
-		for _, t := range bundle.Glossary {
-			if t.Term != "" {
-				terms = append(terms, t.Term+": "+t.Hint)
+		for _, term := range bundle.Glossary {
+			if term.Term != "" {
+				terms = append(terms, term.Term+": "+term.Hint)
 			}
 		}
 		if len(terms) > 0 {
@@ -81,7 +120,7 @@ func ApplyContextPolicy(policy ContextPolicy, bundle ContextBundle, system strin
 		}
 	}
 	if len(context) > 0 {
-		system = strings.TrimSpace(system + "\n\n<context>\n" + strings.Join(context, "\n") + "\n</context>")
+		system = strings.TrimSpace(system+"\n\n<context>\n"+strings.Join(context, "\n")+"\n</context>")
 	}
 	out := MessageSet{}
 	if strings.TrimSpace(system) != "" {
