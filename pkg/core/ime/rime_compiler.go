@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -176,11 +177,18 @@ func CompileRimeDictFiles(paths []string, out string) (*Lexicon, error) {
 	return l, nil
 }
 
+// dictCompilerVersion is part of the cache key. Bump it whenever the compiled .clvdict
+// layout or the parsing rules change: without it, a dictionary compiled by an older
+// compiler keeps being served from ~/.cache after the compiler is fixed, and the stale
+// entries look like a parsing bug that cannot be reproduced.
+const dictCompilerVersion = 2
+
 func LoadOrCompileDicts(paths []string, cacheDir string) (*Lexicon, error) {
 	if len(paths) == 0 {
 		return StarterLexicon(), nil
 	}
 	h := sha256.New()
+	fmt.Fprintf(h, "compiler=%d\x00", dictCompilerVersion)
 	var numBuf [16]byte
 	for _, p := range paths {
 		st, err := os.Stat(p)
