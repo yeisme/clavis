@@ -76,6 +76,12 @@ func (s Solution) Key() string { return s.PackageID + "/" + s.ID + "@" + s.Versi
 // ParseCatalog verifies catalog and solution metadata. Any failure returns nil;
 // use LoadCatalog for the body and sidecar existence checks before making it usable.
 func ParseCatalog(data []byte) (*Catalog, []Diagnostic) {
+	return parseCatalog(data, false)
+}
+
+// Snapshot refresh accepts a verified empty catalog as an upstream revocation.
+// Keep the public T1 parser's non-empty distribution contract unchanged.
+func parseCatalog(data []byte, allowEmpty bool) (*Catalog, []Diagnostic) {
 	var c Catalog
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, []Diagnostic{diagnostic(InvalidJSON, "catalog.json", "invalid catalog JSON")}
@@ -83,7 +89,7 @@ func ParseCatalog(data []byte) (*Catalog, []Diagnostic) {
 	if c.SchemaVersion != SchemaVersion {
 		return nil, []Diagnostic{diagnostic(UnsupportedSchema, "schema_version", "unsupported catalog schema")}
 	}
-	if c.Repository.ID == "" || len(c.Solutions) == 0 {
+	if c.Repository.ID == "" || (!allowEmpty && len(c.Solutions) == 0) {
 		return nil, []Diagnostic{diagnostic(InvalidCatalog, "catalog.json", "repository ID and solutions are required")}
 	}
 	var diagnostics []Diagnostic
