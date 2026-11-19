@@ -137,12 +137,22 @@ type Engine struct {
 	emitLocalFn  func(string) bool
 	segAlts      [][]string
 	comboBuf     []string
+	// Scratch for sentence candidates (addSentenceCandidates); reused across keystrokes.
+	firstWord   string
+	firstWordFn func(string) bool
+	composeTop  []string
+	composeBuf  []byte
+	spill       []Candidate
 }
 
 const (
 	maxRawLen     = 64
 	maxCandidates = 60
 	maxAltCombos  = 24
+	// maxComposeSyls bounds the phrase length tried at each position of a sentence
+	// candidate. Longer phrases starting at the first syllable still come from the
+	// prefix-phrase tier.
+	maxComposeSyls = 8
 )
 
 func clampCandidateCount(n int) int {
@@ -717,6 +727,9 @@ func (e *Engine) buildCandidates() {
 	if e.emitLocalFn == nil {
 		e.emitLocalFn = e.emitLocalCandidate
 	}
+	if e.firstWordFn == nil {
+		e.firstWordFn = e.captureFirstWord
+	}
 	uf := e.opts.UserFrequency
 	e.resetSeen()
 	e.emitCap = 0
@@ -728,6 +741,7 @@ func (e *Engine) buildCandidates() {
 	}
 
 	// 1. Words covering all syllables, then 2. words covering a prefix (longest first).
+	fullCovered := false
 	for n := len(segs); n >= 2; n-- {
 		tierStart := len(e.cands)
 		var customScores map[string]int32
@@ -760,6 +774,9 @@ func (e *Engine) buildCandidates() {
 				e.addCandidate(w, len(segs), true)
 			}
 		}
+		if n == len(segs) {
+			fullCovered = len(e.cands) > 0
+		}
 	}
 
 	if len(segs) == 1 && len(e.ai) > 0 {
@@ -769,8 +786,10 @@ func (e *Engine) buildCandidates() {
 	}
 
 	// 3. Single-syllable words and characters for the first segment.
+	singlesStart := -1
 	if len(e.cands) < maxCandidates {
 		tierStart := len(e.cands)
+		singlesStart = tierStart
 		var customScores map[string]int32
 		if uf != nil && len(segs) == 1 {
 			if custom := uf.CustomWordsForPrefix(segs[0]); len(custom) > 0 {
@@ -813,6 +832,121 @@ func (e *Engine) buildCandidates() {
 			rankTierByUserBoost(e.cands[tierStart:], uf, segs[0], e.prevCommit, customScores)
 		}
 	}
+
+	// 4. Sentence candidates reaching the later syllables (3+ syllables, no whole-input word).
+	if len(segs) >= 3 && !fullCovered && singlesStart >= 0 && singlesStart < len(e.cands) {
+		e.spliceSentenceCandidates(singlesStart)
+	}
+}
+
+// spliceSentenceCandidates caps the first segment's singles at one page (CandidateCount)
+// ahead of the sentence candidates; the remaining singles follow them instead of being
+// dropped. The singles tier is otherwise uncapped, so ye'shu'gen produced 60 "ye"
+// characters and nothing that reached shu or gen. Inputs of one or two syllables never get
+// here, so their lists are unchanged.
+func (e *Engine) spliceSentenceCandidates(singlesStart int) {
+	head := e.cands[singlesStart].Text
+	cut := min(singlesStart+e.opts.CandidateCount, len(e.cands))
+	e.spill = append(e.spill[:0], e.cands[cut:]...)
+	e.cands = e.cands[:cut]
+	e.addSentenceCandidates(head)
+	for _, c := range e.spill {
+		if len(e.cands) >= maxCandidates {
+			break
+		}
+		e.cands = append(e.cands, c) // already marked seen by the singles tier
+	}
+	clear(e.spill)
+	e.spill = e.spill[:0]
+}
+
+// addSentenceCandidates adds, for k = len(segs) down to 2, the forward-maximum-match
+// composition of segs[:k]: at each position the longest dictionary phrase, else that
+// syllable's top single (head for the first one, so a user-boosted first character carries
+// over). A sentence candidate covers k syllables, so choosing it commits that much and the
+// rest keeps composing. Compositions that equal a word already listed are skipped; at most
+// CandidateCount are added.
+func (e *Engine) addSentenceCandidates(head string) {
+	segs := e.segs
+	const width = maxComposeSyls + 1 // row[0]: top single; row[l]: top l-syllable phrase
+	need := len(segs) * width
+	if cap(e.composeTop) < need {
+		e.composeTop = make([]string, need)
+	}
+	e.composeTop = e.composeTop[:need]
+	clear(e.composeTop)
+	for i := range segs {
+		row := e.composeTop[i*width : (i+1)*width]
+		if i == 0 {
+			row[0] = head
+		} else {
+			row[0] = e.firstSingle(segs[i])
+		}
+		for l := 2; l <= min(maxComposeSyls, len(segs)-i); l++ {
+			row[l] = e.firstPhrase(segs[i : i+l])
+		}
+	}
+	added := 0
+	for k := len(segs); k >= 2 && added < e.opts.CandidateCount && len(e.cands) < maxCandidates; k-- {
+		buf := e.composeBuf[:0]
+		complete := true
+		for i := 0; i < k; {
+			row := e.composeTop[i*width : (i+1)*width]
+			step := 0
+			for l := min(maxComposeSyls, k-i); l >= 2; l-- {
+				if row[l] != "" {
+					buf = append(buf, row[l]...)
+					step = l
+					break
+				}
+			}
+			if step == 0 {
+				if row[0] == "" {
+					complete = false
+					break
+				}
+				buf = append(buf, row[0]...)
+				step = 1
+			}
+			i += step
+		}
+		e.composeBuf = buf
+		if !complete {
+			continue
+		}
+		before := len(e.cands)
+		e.addCandidate(string(buf), k, false)
+		if len(e.cands) > before {
+			added++
+		}
+	}
+}
+
+func (e *Engine) captureFirstWord(w string) bool {
+	e.firstWord = w
+	return false
+}
+
+func (e *Engine) firstPhrase(segs []string) string {
+	e.firstWord = ""
+	for _, d := range e.dicts {
+		d.LookupPhrases(segs, e.firstWordFn)
+		if e.firstWord != "" {
+			break
+		}
+	}
+	return e.firstWord
+}
+
+func (e *Engine) firstSingle(seg string) string {
+	e.firstWord = ""
+	for _, d := range e.dicts {
+		d.LookupSingle(seg, e.firstWordFn)
+		if e.firstWord != "" {
+			break
+		}
+	}
+	return e.firstWord
 }
 
 func (e *Engine) expandSegmentAlts(segs []string) [][]string {
