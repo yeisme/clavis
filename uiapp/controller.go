@@ -177,6 +177,13 @@ type uiViewState struct {
 	// the Capsule UI thread.
 	mediaPreview       mediaPreviewState
 	mediaPreviewHandle ui.Handle
+
+	// Pointer hover selection is tracked as index+1 (0 means none) so the zero
+	// value needs no initialisation. hoverSuppressed records the row a keyboard
+	// move stepped away from: the pointer resting there must not undo it until
+	// the pointer enters another row.
+	hoverRow        int
+	hoverSuppressed int
 }
 
 // AppController coordinates Clavis state, host integration, AI streaming,
@@ -684,8 +691,39 @@ func (c *AppController) AppIconBitmap(appPath string) *ui.Bitmap {
 }
 
 // Dispatch reduces an event on the CapsuleStateMachine and executes any emitted effects.
+// hoverSelect moves the selection to the row under the pointer. Hovering only
+// selects: it never confirms the item, so moving the pointer cannot copy, paste
+// or delete anything. A keyboard step away from the hovered row marks that row
+// suppressed so a resting pointer cannot undo arrow-key navigation; entering a
+// different row clears the suppression.
+func (a *AppController) hoverSelect(index int) {
+	if index < 0 {
+		return
+	}
+	a.mu.Lock()
+	if a.uiState.hoverSuppressed == index+1 || a.uiState.hoverRow == index+1 {
+		a.mu.Unlock()
+		return
+	}
+	a.uiState.hoverRow = index + 1
+	a.uiState.hoverSuppressed = 0
+	a.mu.Unlock()
+	a.Dispatch(engine.Event{Type: engine.EventHoverItem, Index: index})
+}
+
 func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 	c.mu.Lock()
+	// Keyboard navigation wins over a resting pointer: the row under the pointer
+	// must not pull the selection back until the pointer enters another row.
+	switch ev.Type {
+	case engine.EventSelectNext, engine.EventSelectPrevious:
+		if c.uiState.hoverRow != 0 {
+			c.uiState.hoverSuppressed = c.uiState.hoverRow
+		}
+	case engine.EventOpenOmnibox, engine.EventSwitchTab, engine.EventUpdateQuery, engine.EventBackspace:
+		c.uiState.hoverRow = 0
+		c.uiState.hoverSuppressed = 0
+	}
 	if ev.Type == engine.EventOpenLeader || ev.Type == engine.EventOpenOmnibox {
 		c.ensureInstalledAppsSyncedLocked()
 		// A new foreground capsule establishes a new output target. Workflow and

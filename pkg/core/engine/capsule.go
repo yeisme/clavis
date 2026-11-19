@@ -213,20 +213,23 @@ func NewInitialState() State {
 type EventType string
 
 const (
-	EventActivateClipboardItem          EventType = "activate_clipboard_item"
-	EventOpenLeader                     EventType = "open_leader"
-	EventOpenOmnibox                    EventType = "open_omnibox"
-	EventUpdateContext                  EventType = "update_context"
-	EventSetClipboardEntries            EventType = "set_clipboard_entries"
-	EventSetClipboardSearchResults      EventType = "set_clipboard_search_results"
-	EventSetInstalledApps               EventType = "set_installed_apps"
-	EventSetFrecencyScores              EventType = "set_frecency_scores"
-	EventSetListeningPorts              EventType = "set_listening_ports"
-	EventLeaderKeyPress                 EventType = "leader_key_press"
-	EventUpdateQuery                    EventType = "update_query"
-	EventSwitchTab                      EventType = "switch_tab"
-	EventSelectNext                     EventType = "select_next"
-	EventSelectPrevious                 EventType = "select_previous"
+	EventActivateClipboardItem     EventType = "activate_clipboard_item"
+	EventOpenLeader                EventType = "open_leader"
+	EventOpenOmnibox               EventType = "open_omnibox"
+	EventUpdateContext             EventType = "update_context"
+	EventSetClipboardEntries       EventType = "set_clipboard_entries"
+	EventSetClipboardSearchResults EventType = "set_clipboard_search_results"
+	EventSetInstalledApps          EventType = "set_installed_apps"
+	EventSetFrecencyScores         EventType = "set_frecency_scores"
+	EventSetListeningPorts         EventType = "set_listening_ports"
+	EventLeaderKeyPress            EventType = "leader_key_press"
+	EventUpdateQuery               EventType = "update_query"
+	EventSwitchTab                 EventType = "switch_tab"
+	EventSelectNext                EventType = "select_next"
+	EventSelectPrevious            EventType = "select_previous"
+	// EventHoverItem selects the item under the pointer without confirming it.
+	// Hovering is selection only: it must never emit copy, paste or delete.
+	EventHoverItem                      EventType = "hover_item"
 	EventConfirmSelection               EventType = "confirm_selection"
 	EventConfirmSecondarySelection      EventType = "confirm_secondary_selection"
 	EventSelectAndConfirmIndex          EventType = "select_and_confirm_index"
@@ -624,6 +627,19 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		if state.SelectedIndex > 0 {
 			next.SelectedIndex = state.SelectedIndex - 1
 		}
+		return next, nil
+
+	case EventHoverItem:
+		// Pointer hover moves the selection so the preview and the keyboard
+		// cursor agree. It deliberately produces no effects: only a click or
+		// Enter confirms the item.
+		if state.Phase != PhaseOmnibox || event.Index < 0 || event.Index >= len(state.OmniboxItems) {
+			return next, nil
+		}
+		if state.SelectedIndex == event.Index {
+			return next, nil
+		}
+		next.SelectedIndex = event.Index
 		return next, nil
 
 	case EventActivateClipboardItem:

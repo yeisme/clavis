@@ -631,6 +631,13 @@ func (a *AppController) renderOmniboxView(
 							}
 						})
 
+						// Pointer hover selects the row so the preview follows the
+						// mouse immediately; the row is confirmed only by a click,
+						// Enter or an explicit action.
+						if row.Hovered() {
+							a.hoverSelect(i)
+						}
+
 						if row.RowDoubleClicked() {
 							a.SelectIndex(i)
 							a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
