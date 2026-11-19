@@ -38,6 +38,7 @@ type syllableEntry struct{ keyOff, keyLen, first, count uint32 }
 type wordRecord struct {
 	textOff, textLen, pyOff, pyLen uint32
 	freq                           int32
+	ordinal                        uint32
 }
 
 // Lexicon is an immutable dictionary. The two indexes contain offsets only;
@@ -68,6 +69,7 @@ var clvMagic = [4]byte{'C', 'L', 'V', 'D'}
 type lexItem struct {
 	pinyin, word string
 	freq         int32
+	ordinal      uint32
 }
 
 func canonicalKey(s string) string { return strings.ReplaceAll(strings.ToLower(s), " ", "") }
@@ -79,12 +81,16 @@ func buildLexicon(items []lexItem) *Lexicon {
 		}
 		return ki < kj
 	})
-	// deduplicate exact key/word, preserving the strongest weight.
+	// deduplicate exact key/word, preserving the strongest weight and the
+	// first record's source position for stable exports.
 	out := items[:0]
 	for _, it := range items {
 		if len(out) > 0 && canonicalKey(out[len(out)-1].pinyin) == canonicalKey(it.pinyin) && out[len(out)-1].word == it.word {
 			if it.freq > out[len(out)-1].freq {
 				out[len(out)-1].freq = it.freq
+			}
+			if it.ordinal < out[len(out)-1].ordinal {
+				out[len(out)-1].ordinal = it.ordinal
 			}
 			continue
 		}
@@ -100,7 +106,7 @@ func buildLexicon(items []lexItem) *Lexicon {
 	}
 	syOff := uint32(clvHeaderSize)
 	wrOff := syOff + uint32(len(keys))*16
-	strOff := wrOff + uint32(len(items))*20
+	strOff := wrOff + uint32(len(items))*24
 	total := int(strOff)
 	for _, k := range keys {
 		total += len(k)
@@ -110,7 +116,7 @@ func buildLexicon(items []lexItem) *Lexicon {
 	}
 	image := make([]byte, total)
 	copy(image[:4], clvMagic[:])
-	binary.LittleEndian.PutUint16(image[4:], 1)
+	binary.LittleEndian.PutUint16(image[4:], 2)
 	binary.LittleEndian.PutUint32(image[8:], uint32(len(keys)))
 	binary.LittleEndian.PutUint32(image[12:], uint32(len(items)))
 	binary.LittleEndian.PutUint32(image[16:], syOff)
@@ -134,7 +140,7 @@ func buildLexicon(items []lexItem) *Lexicon {
 			po := cursor
 			copy(image[cursor:], w.pinyin)
 			cursor += uint32(len(w.pinyin))
-			words[wi] = wordRecord{to, uint32(len(w.word)), po, uint32(len(w.pinyin)), w.freq}
+			words[wi] = wordRecord{to, uint32(len(w.word)), po, uint32(len(w.pinyin)), w.freq, w.ordinal}
 			wi++
 		}
 		syll[i] = syllableEntry{ko, uint32(len(k)), uint32(first), uint32(wi - first)}
@@ -145,12 +151,13 @@ func buildLexicon(items []lexItem) *Lexicon {
 		binary.LittleEndian.PutUint32(image[base+12:], uint32(wi-first))
 	}
 	for i, w := range words {
-		base := int(wrOff) + i*20
+		base := int(wrOff) + i*24
 		binary.LittleEndian.PutUint32(image[base:], w.textOff)
 		binary.LittleEndian.PutUint32(image[base+4:], w.textLen)
 		binary.LittleEndian.PutUint32(image[base+8:], w.pyOff)
 		binary.LittleEndian.PutUint32(image[base+12:], w.pyLen)
 		binary.LittleEndian.PutUint32(image[base+16:], uint32(w.freq))
+		binary.LittleEndian.PutUint32(image[base+20:], w.ordinal)
 	}
 	return &Lexicon{image: image, syllables: syll, words: words}
 }
@@ -159,13 +166,13 @@ func LoadClvDict(data []byte) (*Lexicon, error) {
 	if len(data) < clvHeaderSize || !bytes.Equal(data[:4], clvMagic[:]) {
 		return nil, errors.New("ime: invalid CLVD header")
 	}
-	if binary.LittleEndian.Uint16(data[4:]) != 1 {
+	if binary.LittleEndian.Uint16(data[4:]) != 2 {
 		return nil, errors.New("ime: unsupported CLVD version")
 	}
 	ns, nw := binary.LittleEndian.Uint32(data[8:]), binary.LittleEndian.Uint32(data[12:])
 	so, wo := binary.LittleEndian.Uint32(data[16:]), binary.LittleEndian.Uint32(data[20:])
 	total := binary.LittleEndian.Uint32(data[28:])
-	if total > uint32(len(data)) || so+ns*16 > uint32(len(data)) || wo+nw*20 > uint32(len(data)) {
+	if total > uint32(len(data)) || so+ns*16 > uint32(len(data)) || wo+nw*24 > uint32(len(data)) {
 		return nil, errors.New("ime: truncated CLVD")
 	}
 	image := append([]byte(nil), data[:total]...)
@@ -179,8 +186,8 @@ func LoadClvDict(data []byte) (*Lexicon, error) {
 		}
 	}
 	for i := range words {
-		b := int(wo) + i*20
-		words[i] = wordRecord{binary.LittleEndian.Uint32(image[b:]), binary.LittleEndian.Uint32(image[b+4:]), binary.LittleEndian.Uint32(image[b+8:]), binary.LittleEndian.Uint32(image[b+12:]), int32(binary.LittleEndian.Uint32(image[b+16:]))}
+		b := int(wo) + i*24
+		words[i] = wordRecord{binary.LittleEndian.Uint32(image[b:]), binary.LittleEndian.Uint32(image[b+4:]), binary.LittleEndian.Uint32(image[b+8:]), binary.LittleEndian.Uint32(image[b+12:]), int32(binary.LittleEndian.Uint32(image[b+16:])), binary.LittleEndian.Uint32(image[b+20:])}
 		if int(words[i].textOff+words[i].textLen) > len(image) || int(words[i].pyOff+words[i].pyLen) > len(image) {
 			return nil, errors.New("ime: invalid CLVD record")
 		}
@@ -386,6 +393,6 @@ func (b *lexBuilder) add(py, w, f string) {
 		n, _ := strconv.ParseInt(f, 10, 32)
 		// Keep syllable separators in the value area for initialism lookup;
 		// the sorted index uses canonicalKey and remains compact.
-		b.items = append(b.items, lexItem{strings.ToLower(strings.TrimSpace(py)), w, int32(n)})
+		b.items = append(b.items, lexItem{pinyin: strings.ToLower(strings.TrimSpace(py)), word: w, freq: int32(n), ordinal: uint32(len(b.items))})
 	}
 }

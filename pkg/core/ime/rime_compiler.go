@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -20,6 +21,7 @@ func CompileRimeDict(r io.Reader) (*Lexicon, error) {
 	scan.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var items []lexItem
 	decidedHeader := false
+	var ordinal uint32
 	inHeader := false
 	firstLine := true
 	for scan.Scan() {
@@ -74,7 +76,8 @@ func CompileRimeDict(r io.Reader) (*Lexicon, error) {
 		if py == "" {
 			continue
 		}
-		items = append(items, lexItem{py, word, freq})
+		items = append(items, lexItem{pinyin: py, word: word, freq: freq, ordinal: ordinal})
+		ordinal++
 	}
 	if e := scan.Err(); e != nil {
 		return nil, e
@@ -130,6 +133,7 @@ func CompileRimeDictFiles(paths []string, out string) (*Lexicon, error) {
 		return nil, errors.New("ime: no dictionary paths")
 	}
 	var all []lexItem
+	var ordinalBase uint32
 	for _, p := range paths {
 		f, e := os.Open(p)
 		if e != nil {
@@ -156,8 +160,15 @@ func CompileRimeDictFiles(paths []string, out string) (*Lexicon, error) {
 		if e != nil {
 			return nil, e
 		}
-		for _, w := range l.words {
-			all = append(all, lexItem{l.pinyin(w), l.text(w), w.freq})
+		var localMax uint32
+		for i, w := range l.words {
+			if i == 0 || w.ordinal > localMax {
+				localMax = w.ordinal
+			}
+			all = append(all, lexItem{pinyin: l.pinyin(w), word: l.text(w), freq: w.freq, ordinal: ordinalBase + w.ordinal})
+		}
+		if len(l.words) > 0 {
+			ordinalBase += localMax + 1
 		}
 	}
 	if len(all) == 0 {
@@ -181,7 +192,47 @@ func CompileRimeDictFiles(paths []string, out string) (*Lexicon, error) {
 // layout or the parsing rules change: without it, a dictionary compiled by an older
 // compiler keeps being served from ~/.cache after the compiler is fixed, and the stale
 // entries look like a parsing bug that cannot be reproduced.
-const dictCompilerVersion = 2
+const dictCompilerVersion = 3
+
+// ExportRimeDict writes l as a simple Rime TSV dictionary. Records are emitted
+// in their source order, while l's lookup index remains canonical-key sorted.
+func ExportRimeDict(w io.Writer, l *Lexicon) error {
+	if w == nil {
+		return errors.New("ime: nil Rime dictionary writer")
+	}
+	if l == nil {
+		return errors.New("ime: nil lexicon")
+	}
+	write := func(s string) error {
+		n, err := io.WriteString(w, s)
+		if err != nil {
+			return err
+		}
+		if n != len(s) {
+			return io.ErrShortWrite
+		}
+		return nil
+	}
+	if err := write("---\nname: clavis\n...\n"); err != nil {
+		return err
+	}
+	order := make([]int, len(l.words))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		return l.words[order[i]].ordinal < l.words[order[j]].ordinal
+	})
+	for _, i := range order {
+		word := l.text(l.words[i])
+		pinyin := l.pinyin(l.words[i])
+		line := word + "\t" + pinyin + "\t" + strconv.FormatInt(int64(l.words[i].freq), 10) + "\n"
+		if err := write(line); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func LoadOrCompileDicts(paths []string, cacheDir string) (*Lexicon, error) {
 	if len(paths) == 0 {
