@@ -38,6 +38,16 @@ Status: `inferred` 设计决策 + `observed` 事实基线。基线 HEAD `21ac2db
 | maturity | exploratory 84、beta 3、first-support 1 |
 | locale | en 87、zh-CN 77（中文为人工审阅层，不进编译 digest） |
 | input type | string 707、enum 232、integer 8（另定义 boolean/number） |
+| media（`discovery[].media`，solution 级聚合） | text 46 条次、image 39、video 12、3d 5、audio 5、code 2、spoken_dialogue 1、multimodal 1；**纯 `media=[text]` 的 solution 只有 21 条** |
+
+**默认导入判据（2026-11-19 用真实目录修正，原方案作废）**
+
+原先写「默认只导入文本类 + `maturity≥beta`」，实测该组合只剩 **1 条**（且是唯一违反 locale 规范的 `graph/longform.generic.v2`：只有 zh-CN、5 个领域 role、无 `main`）——等于不建库。修正为：
+
+1. **过滤门用 `media`**，不用 `maturity`：只默认导入 solution 级 `media=[text]` 的 **21 条**；含 image/video/3d/audio 的（67 条）默认不导入，交给 eikona/scaena。
+2. **`maturity` 只做 UI 徽章**（exploratory 84 / beta 3 / first-support 1），不做准入。84/88 是 exploratory，拿它当门等于全排除。
+3. **`rights` 全是 `internal`** 说明这是自用资产库——「实验性」在这里不等于「不能用」；外发时按 §5 的 rights 表处理。
+4. **`discovery[]` 是搜索索引**（88 个 solution 按 role×locale 展开成 113 条），字段只有 `{package_id,solution_id,role,locale,title,summary,media}`，**不含 path/digest**。搜索走 discovery、导入走 solutions，不要把 discovery 当列表渲染（否则列表会出现 113 条重复项）。
 
 ### 1.2 Clavis 侧（`observed`）
 
@@ -119,6 +129,23 @@ templates/
 - 安装/更新走 staging → 复算 → rename：先写 `templates/.staging/<id>/`，全部通过后原子 rename 到最终目录，失败保留 last-known-good。这是 `template-registry ui-template install` 的同一语义，复刻而不是另发明。
 - 目录刷新失败保留上一份快照，并在设置页标注「快照时间 / 已过期 N 天」。
 
+### 4.1 四级 digest 的实际算法（2026-11-19 已验证可复刻）
+
+Clavis 不引入 `github.com/yeisme/promptrepo` 依赖（未公开分发，且会破坏纯 stdlib 纪律），因此必须自己实现。以下算法已用**真实目录 + SDK 双向对照**验证：SDK 算出的值与文件自声明值一致，且不依赖 SDK 的手写序列化也能复现同一结果。
+
+统一形态：**清字段 → 排序 → Go `encoding/json.Marshal`（无缩进、HTML 转义 `<` `>` `&`）→ sha256 → `sha256:<64hex 小写>`**。
+
+| 级别 | 清空/排序规则 | 字段顺序 | 验证 |
+| --- | --- | --- | --- |
+| catalog | `Digest=""`；`Discovery=nil`（omitempty 故整字段省略）；`GeneratedAt` 零值序列化为 `"0001-01-01T00:00:00Z"`；`Solutions` 按 `package_id + "/" + id + "@" + version` 升序 | `schema_version, repository, generated_at, digest, solutions` | 真实 catalog 复算 = 自声明 `sha256:dc15b9e5…` ✓ |
+| solution | `Digest=""`；`RepositoryID=""`；`tags/capabilities/templates` 为 omitempty | `package_id, id, version, digest, category, tags, capabilities, rights, maturity, locales, templates` | 抽样 12/12 匹配 ✓ |
+| template | 无规范化，直接 sha256(正文原始字节) | — | `main.en.md` 3979 字节复算匹配 ✓ |
+| contract | `Digest=""`；`Permissions` 排序后写入；`Inputs` 按 `Name` 排序；`permissions/inputs` 均 omitempty | `schema_version, package_id, solution_id, version, role, locale, template_path, template_digest, digest, license, permissions, inputs`；input 内部字段 `name, type, required, default, examples, enum, regex, min, max, min_length, max_length, labels, descriptions, sensitivity` | 4/4 合同样本匹配 ✓ |
+
+**绑定关系（必须校验）**：`contract.template_digest` == `catalog` 中该 `role+locale` 的 `template.digest` == `sha256(正文原始字节)`；已实测一致。注意 `solution.digest` 是**独立的一层**，既不等于 `template.digest` 也不等于 `contract.digest`，三者不可混用。
+
+踩坑记录：Go 的 `json.Marshal` 按 **struct 字段声明序**输出，不是字母序——用「排序后再序列化」的直觉去做会算出完全不同的 digest（这也是我第一次尝试三种规范化全部失败的原因）。
+
 ## 5. 权限与隐私
 
 | 字段 | 值 | Clavis 行为 |
@@ -196,7 +223,7 @@ herdr 不是模板运行时，是**发布与派发通道**：
 | 风险 | 缓解 / 回退 |
 | --- | --- |
 | 自研解析与 SDK 语义漂移（Preview 的 fail-closed 规则是隐式知识） | 把 7 条规则写成表驱动测试，fixture 直接取官方 catalog 片段；不一致即测试红，不靠人读文档 |
-| 目录含 82 条 `internal` + 84 条 `exploratory`，全量导入会污染键盘入口 | 默认只导入「文本类 + maturity≥beta」子集（约 12 条），其余手动勾选；图片/视频/3D 类（57 条）默认不导入，交给 eikona/scaena |
+| 目录含 82 条 `internal` + 84 条 `exploratory`，全量导入会污染键盘入口 | 过滤门用 `media`：只默认导入 solution 级 `media=[text]` 的 21 条（实测数字），图片/视频/3D/音频类 67 条默认不导入交给 eikona/scaena；`maturity` 只做徽章不做准入（详见 §1.1 的默认导入判据） |
 | 正文进日志（隐私红线） | 渲染结果只在返回值与显式上屏路径出现；审计白名单字段 + 单测正则断言 |
 | `kind=number` 改共享层（两平台） | 先只加校验器不改 TOML 形状（number 用 text 存），等两平台验证后再落字段 |
 | 覆盖层与本地手写模板 ID 撞车 | 导入 ID 加前缀 `pr:`；UI 冲突时报错不猜测 |
