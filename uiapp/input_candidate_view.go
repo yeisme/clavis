@@ -34,10 +34,10 @@ const (
 	// A page wider than the max cuts its longest candidates (candidateTextCap) instead of
 	// widening the window past a short line of text.
 	candidatePanelMinWidth = 160
-	candSingleMinWidth    = 120
+	candSingleMinWidth     = 120
 	// candCommittedInkMix pulls the committed pinyin run toward muted: 0 = pure text,
 	// 1 = pure muted.
-	candCommittedInkMix = 0.35
+	candCommittedInkMix    = 0.35
 	candidatePanelMaxWidth = 448
 
 	// Vertical list geometry (must stay in 1:1 lockstep with renderVerticalCandidatePanel).
