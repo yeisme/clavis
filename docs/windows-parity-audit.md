@@ -1,4 +1,5 @@
 # Windows parity audit (darwin vs windows)
+基线 `c1f0c58`（Wave 0 清账时的 HEAD）。
 
 Scope: `internal/bridge/bridge_darwin.go` vs `internal/bridge/bridge_windows.go` (+ `winime*.go`),
 and the shared `internal/bridge/{bridge,engines}.go`, `uiapp/`, `main.go`, `pkg/core/`.

@@ -2,6 +2,10 @@
 
 Clavis is a keyboard-first, non-activating floating **Capsule** launcher and productivity assistant built with **Go + MyGo v0.9.0** (`mygo/ui`, `plugins/glass`, `plugins/sfsymbols`, `plugins/sqlite`, and `plugins/permissionflow`). It combines a mnemonic Leader key tree, fuzzy Omnibox search, multi-protocol AI profiles with multi-turn follow-up, smart context-aware IME switching with a cursor-side floating pill, tap-hold keymap remapping with a Vim-style navigation layer, inline snippet expansion, domain-glossary normalization, local SQLite FTS5 clipboard history, and window management.
 
+## 输入法定位（第二输入法）
+
+Clavis 输入法工作在「系统输入法为英文」的前提下。中文由 Clavis 接管；切到系统中文输入法时 Clavis 自动让位。它不提供内联组字、不支持提权窗口，因此不适合作为唯一中文输入法。
+
 ## Feature Matrix
 
 | Area | Capabilities |
@@ -33,10 +37,12 @@ clavis/
 ├── mygo.json               # MyGo v0.9.0 bundle manifest, NSIS installer config & macOS privacy usage descriptions
 ├── resources/icon.png      # High-craft squircle application icon (512x512 RGBA PNG)
 ├── resources/icon.ico      # Multi-entry Windows icon (16–256px PNG entries)
+├── cmd/clavis-imk/         # IMK 宿主未实现，仅 -smoke-check
 ├── uiapp/                  # Native MyGo UI & controller (AppController, CapsuleView, IMEPillView, SettingsView, SVG/SF Symbols)
 ├── internal/
 │   ├── apps/               # Installed application discovery & Retina icon cache (MyGoAppProvider + MockAppProvider)
 │   ├── bridge/             # Zero-CGo OS host bridges (purego on macOS, x/sys/windows on Windows, Linux fallback)
+│   ├── daemon/             # Resident daemon lifecycle and wiring
 │   ├── secrets/            # OS Keychain / Credential Manager / Secret Service via mygo.Secrets (+ per-profile env fallback)
 │   ├── storage/            # Local clipboard persistence via mygo/plugins/sqlite + FTS5
 │   └── watcher/            # Debounced TOML config hot-reloader (mygo.WatchFiles + polling fallback)
@@ -107,7 +113,7 @@ On first launch, Clavis automatically creates `~/.config/clavis/` with default T
 
 | File | Purpose |
 | --- | --- |
-| `config.toml` | `[trigger]`, `[appearance]` (`language`, `animations`, `show_preview_pane`, `visual_preset`, `stage_intensity`, `oblique_rows`, `glass_clarity`), `[ai]` + `[[ai.profiles]]` (`deepseek` default, `ollama`, `claude`, `gemini`), `[clipboard]`, `[ime]` (`lock_ascii_on_leader`, `show_floating_pill`, `switch_delay_ms`), and `[keymap]` + `[[keymap.remaps]]` settings. Raw API keys (`api_key`) are rejected—store keys in the OS credential store via **Settings → AI & Keychain** or the profile's `api_key_env_var` (`DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`). An OpenAI-compatible profile may set `reasoning_effort` (e.g. `"low"`) to cap a reasoning model's thinking before the first token. |
+| `config.toml` | `[trigger]`, `[appearance]` (`language`, `animations`, `show_preview_pane`, `visual_preset`, `stage_intensity`, `oblique_rows`, `glass_clarity`), `[ai]` + `[[ai.profiles]]` (`deepseek` default, `ollama`, `claude`, `gemini`), `[clipboard]`, `[ime]` (`lock_ascii_on_leader`, `show_floating_pill`, `switch_delay_ms`), `[input_engine]` (`enabled`, `mode`, `scheme`, `candidate_count`, `fuzzy_pinyin`, `custom_dict_paths`, `user_learning`, `shift_toggle_ascii`), and `[keymap]` + `[[keymap.remaps]]` settings. Raw API keys (`api_key`) are rejected—store keys in the OS credential store via **Settings → AI & Keychain** or the profile's `api_key_env_var` (`DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`). An OpenAI-compatible profile may set `reasoning_effort` (e.g. `"low"`) to cap a reasoning model's thinking before the first token. |
 | `leader.toml` | Recursive `[[nodes]]` key tree supporting `group`, `ai_rewrite`, `window`, `cli`, `open_app`, `switch_tab`, `snippet`, `toggle_ime`, and `normalize_glossary`. Editable visually under **Settings → Leader Tree**. |
 | `snippets.toml` | `[[snippets]]` inline expansion triggers, content templates, `word_boundary`, and optional `app_bundle_ids` / `process_names` scoping. Editable visually under **Settings → Snippets**. |
 | `glossary.toml` | `[[terms]]` canonical terms, `aliases`, `hint`, and `category` used for AI prompt injection and local `normalize_glossary` replacement. Editable visually under **Settings → Glossary & Clipboard**. |

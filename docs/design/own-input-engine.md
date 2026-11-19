@@ -1,4 +1,5 @@
 # 设计：Clavis 自建输入引擎（Windows 优先）
+基线 `c1f0c58`（Wave 0 清账时的 HEAD）。
 
 基线 `458d7fe`。配置节 `[input_engine]` 早已存在（`pkg/core/config/main_config.go:1044-1138`，默认 `enabled=false`、`mode="inline_hook"`、`candidate_count=7`、`shift_toggle_ascii=true`；校验 `pkg/core/config/validator.go:315-322`，`candidate_count` 3..9）。本设计沿用该节。
 
