@@ -3,6 +3,7 @@ package uiapp
 import (
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
@@ -33,6 +34,7 @@ const (
 	// A page wider than the max cuts its longest candidates (candidateTextCap) instead of
 	// widening the window past a short line of text.
 	candidatePanelMinWidth = 160
+	candSingleMinWidth    = 120
 	candidatePanelMaxWidth = 448
 
 	// Vertical list geometry (must stay in 1:1 lockstep with renderVerticalCandidatePanel).
@@ -80,7 +82,13 @@ func PreferredCandidatePanelSizeFor(v inputengine.View, cfg config.AppearanceCon
 // in the middle to the width the candidates need.
 func preferredHorizontalCandidateSize(v inputengine.View) (width, height int) {
 	w := naturalHorizontalCandidateWidth(v)
-	return min(max(w, candidatePanelMinWidth), candidatePanelMaxWidth), candidatePanelHeight
+	// A single candidate does not need the full minimum: the fixed floor left a lone
+	// character rattling in a 160px box.
+	floor := candidatePanelMinWidth
+	if len(v.Candidates) <= 1 {
+		floor = candSingleMinWidth
+	}
+	return min(max(w, floor), candidatePanelMaxWidth), candidatePanelHeight
 }
 
 // naturalHorizontalCandidateWidth is the strip's width with every candidate uncut.
@@ -392,12 +400,24 @@ func renderCandidateCellContent(c *ui.Context, theme *ui.Theme, index int, cand 
 }
 
 func candidateNavText(v inputengine.View) string {
-	nav := ""
+	if !v.HasPrev && !v.HasNext {
+		return ""
+	}
+	// The window shows one page and nothing else says how many there are, so a typist who
+	// typed eight letters had no cue that the sentence answer sat on page 2 of 9.
+	arrows := ""
 	if v.HasPrev {
-		nav += "‹"
+		arrows += "‹ "
 	}
 	if v.HasNext {
-		nav += "›"
+		arrows += "›"
 	}
-	return nav
+	label := strconv.Itoa(v.Page + 1)
+	if v.PageCount > 1 {
+		label += "/" + strconv.Itoa(v.PageCount)
+	}
+	if arrows == "" {
+		return label
+	}
+	return strings.TrimSpace(arrows) + " " + label
 }

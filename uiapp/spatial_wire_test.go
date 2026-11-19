@@ -82,7 +82,7 @@ func TestCandidatePanelBothOrientationsAndExactSizing(t *testing.T) {
 		InputCandidateViewFor(c, v, horizCfg)
 	}, hw, hh)
 	th.Frame()
-	if !th.HasText(v.Preedit) || !th.HasText("✦") || !th.HasText("‹›") {
+	if !th.HasText(v.Preedit) || !th.HasText("✦") || !th.HasText("‹") || !th.HasText("›") {
 		t.Fatalf("horizontal candidate panel missing expected markers; texts=%v", th.Texts())
 	}
 	r1h, ok1 := th.Find("你好世界")
@@ -109,7 +109,7 @@ func TestCandidatePanelBothOrientationsAndExactSizing(t *testing.T) {
 		InputCandidateViewFor(c, v, vertCfg)
 	}, vw, vh)
 	tv.Frame()
-	if !tv.HasText(v.Preedit) || !tv.HasText("✦") || !tv.HasText("‹›") {
+	if !tv.HasText(v.Preedit) || !tv.HasText("✦") || !tv.HasText("‹") || !tv.HasText("›") {
 		t.Fatalf("vertical candidate panel missing expected markers; texts=%v", tv.Texts())
 	}
 	r1v, ok1 := tv.Find("你好世界")

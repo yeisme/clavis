@@ -80,8 +80,12 @@ type View struct {
 	Candidates []Candidate
 	Selected   int // index within Candidates
 	Page       int
-	HasPrev    bool
-	HasNext    bool
+	// PageCount is the number of candidate pages for this composition. The candidate window
+	// shows one page at a time, so without it the UI cannot tell a typist that eight more
+	// pages exist ("也数根" used to sit on page 2 of 9 with nothing on screen saying so).
+	PageCount int
+	HasPrev   bool
+	HasNext   bool
 }
 
 // UserCandidate is a learned user word surfaced by a UserFrequencyProvider.
@@ -471,6 +475,9 @@ func (e *Engine) View() View {
 	}
 	v.HasPrev = e.page > 0
 	v.HasNext = end < len(e.cands)
+	if n := len(e.cands); n > 0 {
+		v.PageCount = (n + e.opts.CandidateCount - 1) / e.opts.CandidateCount
+	}
 	return v
 }
 
