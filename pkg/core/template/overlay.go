@@ -100,8 +100,12 @@ func (l *Library) SaveOverlay(solution, role, locale string, b []byte) []Diagnos
 	if err != nil {
 		return []Diagnostic{diagnostic(DanglingReference, stem, "overlay requires an installed import")}
 	}
-	if _, err = decodeRecord(metadata, stem); err != nil {
+	record, err := decodeRecord(metadata, stem)
+	if err != nil {
 		return []Diagnostic{err.(Diagnostic)}
+	}
+	if record.SolutionID != solution || record.Role != role || record.Locale != locale {
+		return []Diagnostic{diagnostic(AmbiguousIdentity, stem, "overlay identity does not match the installed variant")}
 	}
 	if err = l.atomicWrite("overlays/"+stem+".toml", b); err != nil {
 		return []Diagnostic{err.(Diagnostic)}

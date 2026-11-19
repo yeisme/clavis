@@ -87,7 +87,11 @@ func parseCatalog(data []byte, allowEmpty bool) (*Catalog, []Diagnostic) {
 		return nil, []Diagnostic{diagnostic(InvalidJSON, "catalog.json", "invalid catalog JSON")}
 	}
 	if c.SchemaVersion != SchemaVersion {
-		return nil, []Diagnostic{diagnostic(UnsupportedSchema, "schema_version", "unsupported catalog schema")}
+		code := UnsupportedSchema
+		if allowEmpty {
+			code = UnknownSchema
+		}
+		return nil, []Diagnostic{diagnostic(code, "schema_version", "unsupported catalog schema")}
 	}
 	if c.Repository.ID == "" || (!allowEmpty && len(c.Solutions) == 0) {
 		return nil, []Diagnostic{diagnostic(InvalidCatalog, "catalog.json", "repository ID and solutions are required")}

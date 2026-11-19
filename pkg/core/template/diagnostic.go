@@ -8,7 +8,7 @@ type Code string
 const (
 	InvalidJSON        Code = "invalid_json"
 	UnknownSchema      Code = "unknown_schema"
-	UnsupportedSchema  Code = UnknownSchema // Compatibility name used by T1.
+	UnsupportedSchema  Code = "unsupported_schema" // Public T1 parser code.
 	InvalidCatalog     Code = "invalid_catalog"
 	InvalidDigest      Code = "invalid_digest"
 	DigestMismatch     Code = "digest_mismatch"

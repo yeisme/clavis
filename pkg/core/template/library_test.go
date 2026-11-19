@@ -122,6 +122,49 @@ default = ""
 	}
 }
 
+func TestOverlayRejectsAmbiguousVariantIdentity(t *testing.T) {
+	l, root := newLibrary(t)
+	c := fixture(t)
+	s := &c.Solutions[0]
+	for i := range c.Discovery {
+		if c.Discovery[i].PackageID == s.PackageID && c.Discovery[i].SolutionID == s.ID {
+			c.Discovery[i].SolutionID = "demo-summary.dotted"
+		}
+	}
+	s.ID = "demo-summary.dotted"
+	dir := libraryFixture(t)
+	writeCatalog(t, dir, c)
+	// The fixture's sidecar binds a concrete solution ID; use a headerless variant here.
+	sidecar, _ := ContractPath(s.Templates[0])
+	if err := os.Remove(filepath.Join(dir, sidecar)); err != nil {
+		t.Fatal(err)
+	}
+	assertCode(t, l.Refresh(dir), DegradedNoContract)
+	assertCode(t, l.Import(dir, s.PackageID, s.ID, "main", "en", SourceFile), DegradedNoContract)
+	// Both tuples flatten to the same filename, but only one is installed.
+	ds := l.SaveOverlay("demo-summary", "dotted.main", "en", []byte("enabled = false"))
+	assertCode(t, ds, AmbiguousIdentity)
+	if _, err := os.Stat(filepath.Join(root, "overlays/demo-summary.dotted.main.en.toml")); !os.IsNotExist(err) {
+		t.Fatalf("overlay written through an ambiguous alias: %v", err)
+	}
+	noDiagnostics(t, l.SaveOverlay(s.ID, "main", "en", []byte("enabled = false")))
+}
+
+func TestCatalogSchemaDiagnosticKeepsT1Compatibility(t *testing.T) {
+	c := fixture(t)
+	c.SchemaVersion = "promptrepo.catalog.future"
+	dir := libraryFixture(t)
+	writeCatalog(t, dir, c)
+	data, err := os.ReadFile(filepath.Join(dir, "catalog.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ds := ParseCatalog(data)
+	assertCode(t, ds, Code("unsupported_schema"))
+	l, _ := newLibrary(t)
+	assertCode(t, l.Refresh(dir), Code("unknown_schema"))
+}
+
 func TestStrictOverlayKeys(t *testing.T) {
 	for _, raw := range []string{`body = "x"`, `Body = "x"`, `Title = "x"`, `version = "2"`, `digest = "x"`, `slots = []`, `[slot.x]
 required = true`, `[slot.x]
@@ -190,6 +233,12 @@ func TestOrphanRetainsPinCASAndOverlay(t *testing.T) {
 	raw, _ := os.ReadFile(filepath.Join(dir, "catalog.json"))
 	if c, ds := ParseCatalog(raw); c != nil || len(ds) == 0 {
 		t.Fatal("T1 nonempty contract changed")
+	}
+	writeCatalog(t, dir, fixture(t))
+	noDiagnostics(t, l.Refresh(dir))
+	restored := onlyItem(t, l)
+	if restored.Orphaned || restored.UpdateStatus != "current" || restored.Enabled || restored.Title != before.Title || *restored.Provenance != *before.Provenance {
+		t.Fatal("returning upstream variant lost the original pin or overlay")
 	}
 }
 
