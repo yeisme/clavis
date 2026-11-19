@@ -529,9 +529,9 @@ type darwinBridge struct {
 	// inlineForced bypasses the system-input-source gate: the user explicitly asked
 	// the own engine to take over Chinese typing while another IME stays active.
 	inlineForced atomic.Bool
-	ime           inputEngineState
-	shiftDown     bool
-	shiftHadKey   bool
+	ime          inputEngineState
+	shiftDown    bool
+	shiftHadKey  bool
 	// shiftToggle, when non-nil, is the pending bare-Shift ASCII toggle. It is
 	// deferred while the selection bar's double-shift is armed so that one
 	// double tap cannot both flip 中/英 and open the selection bar.

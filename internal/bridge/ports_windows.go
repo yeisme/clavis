@@ -38,8 +38,8 @@ func (b *windowsBridge) SetInlineIMEHandler(fn func(host.InlineKeyEvent) bool) {
 	b.inlineMu.Unlock()
 }
 func (b *windowsBridge) SetInlineIMEEnabled(v bool) { b.inlineEnabled.Store(v) }
-func (b *windowsBridge) SetInlineIMEForced(bool) {}
-func (b *windowsBridge) InlineIMEForced() bool     { return false }
+func (b *windowsBridge) SetInlineIMEForced(bool)    {}
+func (b *windowsBridge) InlineIMEForced() bool      { return false }
 func (b *windowsBridge) callInline(ev host.InlineKeyEvent) bool {
 	b.inlineMu.RLock()
 	fn := b.inlineHandler

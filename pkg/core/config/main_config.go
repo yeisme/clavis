@@ -11,15 +11,15 @@ import (
 
 // TriggerConfig configures global hotkeys and snippet expansion triggers.
 type TriggerConfig struct {
-	LeaderKey               string `json:"leaderKey"`
-	DoubleTapKey            string `json:"doubleTapKey"`
-	DoubleTapIntervalMs     int    `json:"doubleTapIntervalMs"`
-	CapsuleShortcut         string `json:"capsuleShortcut"`
-	ClipboardShortcut       string `json:"clipboardShortcut"`
+	LeaderKey           string `json:"leaderKey"`
+	DoubleTapKey        string `json:"doubleTapKey"`
+	DoubleTapIntervalMs int    `json:"doubleTapIntervalMs"`
+	CapsuleShortcut     string `json:"capsuleShortcut"`
+	ClipboardShortcut   string `json:"clipboardShortcut"`
 	// InputEngineToggleShortcut flips the own input engine between forced Chinese
 	// takeover and auto mode. Empty disables the hotkey.
 	InputEngineToggleShortcut string `json:"inputEngineToggleShortcut"`
-	SnippetExpansionEnabled bool   `json:"snippetExpansionEnabled"`
+	SnippetExpansionEnabled   bool   `json:"snippetExpansionEnabled"`
 	// SnippetBackspaceUndo reverts an expansion when Backspace is the very
 	// next key, restoring the typed trigger (as espanso's undo_backspace).
 	SnippetBackspaceUndo bool `json:"snippetBackspaceUndo"`
@@ -31,15 +31,15 @@ type TriggerConfig struct {
 
 func DefaultTriggerConfig() TriggerConfig {
 	return TriggerConfig{
-		LeaderKey:               "right_option",
-		DoubleTapKey:            "right_command",
-		DoubleTapIntervalMs:     300,
-		CapsuleShortcut:         "option+space",
-		ClipboardShortcut:       "alt+shift+c",
+		LeaderKey:                 "right_option",
+		DoubleTapKey:              "right_command",
+		DoubleTapIntervalMs:       300,
+		CapsuleShortcut:           "option+space",
+		ClipboardShortcut:         "alt+shift+c",
 		InputEngineToggleShortcut: "ctrl+alt+;",
-		SnippetExpansionEnabled: true,
-		SnippetBackspaceUndo:    true,
-		LeaderRevealDelayMs:     DefaultLeaderRevealDelayMs,
+		SnippetExpansionEnabled:   true,
+		SnippetBackspaceUndo:      true,
+		LeaderRevealDelayMs:       DefaultLeaderRevealDelayMs,
 	}
 }
 
