@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -325,27 +324,22 @@ func inputEngineKeysForInline(ev host.InlineKeyEvent) ([]inputengine.Key, bool) 
 	}
 	name := strings.ToLower(ev.KeyName)
 	r, _ := utf8.DecodeRuneInString(ev.Rune)
-	if r != utf8.RuneError {
-		r = unicode.ToLower(r)
+	if ev.Rune == "" {
+		r = 0
 	}
 	k := inputengine.Key{Rune: r, Chord: chord}
+	// Prefer the layout-decoded Rune for character classification. KeyName is
+	// only a fallback for non-printable named keys; this keeps macOS aligned
+	// with the Windows ToUnicodeEx path when shifted symbols share a keycode.
 	switch {
-	case name == "space":
+	case r == ' ':
 		k.Kind = inputengine.KeySpace
-	case name == "return" || name == "enter":
+	case r == '\r' || r == '\n':
 		k.Kind = inputengine.KeyEnter
-	case name == "backspace" || name == "delete":
+	case r == '\b' || r == 0x7f:
 		k.Kind = inputengine.KeyBackspace
-	case name == "escape":
+	case r == 0x1b:
 		k.Kind = inputengine.KeyEscape
-	case name == "tab" || name == "left" || name == "right" || name == "up" || name == "down" || name == "home" || name == "end" || name == "pageup" || name == "pagedown" || (len(name) > 1 && name[0] == 'f'):
-		k.Kind = inputengine.KeyNavigation
-	case name == "'" || name == "quote":
-		k.Kind = inputengine.KeyApostrophe
-	case name == "-" || name == "minus":
-		k.Kind = inputengine.KeyPagePrev
-	case name == "=" || name == "equal":
-		k.Kind = inputengine.KeyPageNext
 	case r >= 'a' && r <= 'z':
 		k.Kind = inputengine.KeyLetter
 	case r >= '0' && r <= '9':
@@ -356,11 +350,23 @@ func inputEngineKeysForInline(ev host.InlineKeyEvent) ([]inputengine.Key, bool) 
 		k.Kind = inputengine.KeyPagePrev
 	case r == '=':
 		k.Kind = inputengine.KeyPageNext
+	case r >= 0x20:
+		k.Kind = inputengine.KeyOther
+	case name == "space":
+		k.Kind = inputengine.KeySpace
+	case name == "return" || name == "enter":
+		k.Kind = inputengine.KeyEnter
+	case name == "backspace" || name == "delete":
+		k.Kind = inputengine.KeyBackspace
+	case name == "escape":
+		k.Kind = inputengine.KeyEscape
+	case name == "tab" || name == "left" || name == "right" || name == "up" || name == "down" || name == "home" || name == "end" || name == "pageup" || name == "pagedown" || (len(name) > 1 && name[0] == 'f'):
+		k.Kind = inputengine.KeyNavigation
 	default:
 		if chord {
 			k.Kind = inputengine.KeyNavigation
 		} else {
-			return nil, false
+			k.Kind = inputengine.KeyOther
 		}
 	}
 	return []inputengine.Key{k}, true

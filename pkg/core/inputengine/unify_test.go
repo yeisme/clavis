@@ -280,8 +280,8 @@ func TestCandidateCountClamping(t *testing.T) {
 		}
 		if tc.want < 9 {
 			r := e.HandleKey(Key{Kind: KeyDigit, Rune: rune('0' + tc.want + 1)})
-			if !r.Consume || r.Commit != "" {
-				t.Fatalf("CandidateCount(%d) out-of-page digit committed: %+v", tc.in, r)
+			if r.Consume || r.Commit != "" {
+				t.Fatalf("CandidateCount(%d) out-of-page digit consumed or committed: %+v", tc.in, r)
 			}
 		}
 	}

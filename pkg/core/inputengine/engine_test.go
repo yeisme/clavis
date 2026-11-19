@@ -88,10 +88,10 @@ func TestStateMachineCommitKeys(t *testing.T) {
 	if r := e.HandleKey(Key{Kind: KeySpace}); r.Consume {
 		t.Fatal("idle space consumed")
 	}
-	// Out-of-range digit consumed, no commit.
+	// Out-of-range digit passes through, with no commit.
 	typeLetters(e, "ni")
-	if r := e.HandleKey(Key{Kind: KeyDigit, Rune: '9'}); !r.Consume || r.Commit != "" {
-		t.Fatalf("digit 9 > page size: %+v", r)
+	if r := e.HandleKey(Key{Kind: KeyDigit, Rune: '9'}); r.Consume || r.Commit != "" || e.Raw() != "ni" {
+		t.Fatalf("digit 9 > page size: %+v raw=%q", r, e.Raw())
 	}
 	// Digit picks candidate n.
 	want := e.View().Candidates[1].Text
@@ -221,7 +221,8 @@ func (d stubOnlyDict) LookupSingle(seg string, emit func(string) bool) {
 }
 
 func TestPunctuationNeverAutoCommitsAICandidate(t *testing.T) {
-	// Case 1: only AI candidate(s) exist -> punctuation commits nothing and keeps composing.
+	// Case 1: only AI candidate(s) exist -> punctuation commits raw letters plus itself.
+
 	e := New(Options{CandidateCount: 5, Dictionary: stubOnlyDict{}})
 	typeLetters(e, "nihao")
 	if !e.SetAICandidates("nihao", []string{"你好AI"}) {
@@ -230,8 +231,8 @@ func TestPunctuationNeverAutoCommitsAICandidate(t *testing.T) {
 	if v := e.View(); len(v.Candidates) != 1 || !v.Candidates[0].AI {
 		t.Fatalf("expected only AI candidate, got %+v", v.Candidates)
 	}
-	if r := e.HandleKey(Key{Kind: KeyOther, Rune: ','}); !r.Consume || r.Commit != "" || !e.View().Composing || e.Raw() != "nihao" {
-		t.Fatalf("punctuation with only AI candidate must commit nothing and keep composing, got res=%+v raw=%q", r, e.Raw())
+	if r := e.HandleKey(Key{Kind: KeyOther, Rune: ','}); !r.Consume || r.Commit != "nihao," || e.View().Composing || e.Raw() != "" {
+		t.Fatalf("punctuation with only AI candidate must commit raw plus rune, got res=%+v raw=%q", r, e.Raw())
 	}
 
 	// Case 2: AI candidate is cands[0] (full-length) while dict only has a partial single-char fallback ->

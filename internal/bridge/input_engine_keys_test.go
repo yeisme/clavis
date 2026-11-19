@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/pkg/core/ime"
 	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
@@ -43,6 +44,64 @@ func TestEngineKeyForVK(t *testing.T) {
 		if ok != c.ok || (ok && k.Kind != c.kind) || k.Chord != c.chord {
 			t.Fatalf("case %d (vk=%#x %q): got %+v ok=%v", i, c.vk, c.text, k, ok)
 		}
+	}
+}
+
+func TestInputEngineInlineRuneMapping(t *testing.T) {
+	cases := []struct {
+		name  string
+		run   string
+		kind  inputengine.KeyKind
+		chord bool
+	}{
+		{name: "quote", run: `"`, kind: inputengine.KeyOther},
+		{name: "minus", run: "_", kind: inputengine.KeyOther},
+		{name: ",", run: "'", kind: inputengine.KeyApostrophe},
+		{name: "comma", run: ",", kind: inputengine.KeyOther},
+		{name: "period", run: ".", kind: inputengine.KeyOther},
+		{name: "equal", run: "=", kind: inputengine.KeyPageNext},
+		{name: "space", run: " ", kind: inputengine.KeySpace},
+		{name: "left", run: "", kind: inputengine.KeyNavigation},
+		{name: "unknown", run: "", kind: inputengine.KeyOther},
+		{name: "unknown chord", run: "", kind: inputengine.KeyNavigation, chord: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mods := []string(nil)
+			if tc.chord {
+				mods = []string{"cmd"}
+			}
+			k, ok := inputEngineKeyForInline(host.InlineKeyEvent{KeyName: tc.name, Rune: tc.run, Modifiers: mods})
+			if !ok || k.Kind != tc.kind || k.Chord != tc.chord {
+				t.Fatalf("inline %s/%q chord=%v = %+v, ok=%v; want %v", tc.name, tc.run, tc.chord, k, ok, tc.kind)
+			}
+		})
+	}
+}
+
+func TestInputEngineRuneKindsAgreeAcrossPlatforms(t *testing.T) {
+	cases := []struct {
+		name string
+		run  string
+		vk   uint16
+	}{
+		{name: "quote", run: `"`, vk: 0xDE},
+		{name: "minus", run: "_", vk: 0xBD},
+		{name: "apostrophe", run: "'", vk: 0xDE},
+		{name: "comma", run: ",", vk: 0xBC},
+		{name: "period", run: ".", vk: 0xBE},
+		{name: "equal", run: "=", vk: 0xBB},
+		{name: "space", run: " ", vk: ieVKSpace},
+		{name: "left", run: "", vk: 0x25},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inline, inlineOK := inputEngineKeyForInline(host.InlineKeyEvent{KeyName: tc.name, Rune: tc.run})
+			windows, windowsOK := engineKeyForVK(tc.vk, tc.run, false)
+			if !inlineOK || !windowsOK || inline.Kind != windows.Kind {
+				t.Fatalf("rune %q: inline=%+v/%v windows=%+v/%v", tc.run, inline, inlineOK, windows, windowsOK)
+			}
+		})
 	}
 }
 
