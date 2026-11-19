@@ -1,6 +1,7 @@
 package uiapp
 
 import (
+	"slices"
 	"strconv"
 
 	"github.com/egoist/mygo/plugins/glass"
@@ -11,43 +12,53 @@ import (
 
 // Candidate window for the own input engine (docs/design/own-input-engine.md §4). Shown with
 // ShowInactive so it never takes focus from the target app.
+//
+// It changes on every keystroke, so it stays quiet: one surface, a hairline between the
+// pinyin and the candidates, small muted digits, and a single solid accent fill on the
+// chosen candidate. No keycaps, shadows or motion. The candidates set the width; the preedit
+// never widens the window and is cut in the middle instead.
 
 const (
 	candidatePanelRadius = 10
 
 	// Horizontal strip geometry (must stay in 1:1 lockstep with renderHorizontalCandidatePanel).
-	candHorizPadX        = 12
-	candHorizPadY        = 8
-	candHorizRowGap      = 6
-	candPreeditHeight    = 16
-	candHorizStripHeight = 34
-	candidatePanelHeight = candHorizPadY*2 + candPreeditHeight + candHorizRowGap + candHorizStripHeight // 72
+	candHorizPadX        = 6
+	candHorizPadY        = 6
+	candHorizRowGap      = 4
+	candPreeditHeight    = 18
+	candHairline         = 1
+	candHorizStripHeight = 30
+	candidatePanelHeight = candHorizPadY*2 + candPreeditHeight + candHorizRowGap*2 + candHairline + candHorizStripHeight // 69
 
+	// A page wider than the max cuts its longest candidates (candidateTextCap) instead of
+	// widening the window past a short line of text.
 	candidatePanelMinWidth = 160
-	candidatePanelMaxWidth = 760
+	candidatePanelMaxWidth = 448
 
 	// Vertical list geometry (must stay in 1:1 lockstep with renderVerticalCandidatePanel).
-	candVertPadX          = 10
-	candVertPadY          = 8
-	candVertGap           = 4
+	candVertPadX          = 6
+	candVertPadY          = 6
+	candVertGap           = 2
 	candVertPreeditHeight = 18
-	candVertRowHeight     = 34
-	candVertRowPadX       = 6
-	candVertNavHeight     = 18
+	candVertRowHeight     = 28
+	candVertNavHeight     = 16
 	candVertMinWidth      = 148
-	candVertMaxWidth      = 420
+	candVertMaxWidth      = 320
 	candVertMinHeight     = 56
 	candVertMaxHeight     = 460
 
-	// Shared cell metrics for TactileKeycap3D + candidate text + optional AI ✦ chip.
-	candKeycapWidth    = 30
-	candInnerGap       = 6
-	candCellPadX       = 6
-	candHorizItemGap   = 10
-	candRuneWidth      = 10 // per Latin width unit at FontSize 15
-	candAIMarkerWidth  = 28
-	candNavBadgeWidth  = 34
+	// Cell metrics shared by both orientations: digit, candidate text, optional AI ✦.
+	candCellPadX       = 8
+	candDigitWidth     = 8 // widest digit at typeMeta
+	candInnerGap       = 4
+	candHorizItemGap   = 2
+	candCJKWidth       = 16 // one CJK character at FontSize 15
+	candLatinWidth     = 9  // one Latin character at FontSize 15
+	candAIMarkerWidth  = 10 // ✦ at typeMicro
+	candNavWidth       = 18
 	candModeBadgeWidth = 28
+	// candMinTextCap keeps at least a character and the ellipsis of a cut candidate.
+	candMinTextCap = 2 * candCJKWidth
 )
 
 // PreferredCandidatePanelSize estimates the panel size for v using the active
@@ -65,44 +76,61 @@ func PreferredCandidatePanelSizeFor(v inputengine.View, cfg config.AppearanceCon
 	return preferredHorizontalCandidateSize(v)
 }
 
+// The preedit takes no part in either estimate: however long the pinyin gets, it is cut
+// in the middle to the width the candidates need.
 func preferredHorizontalCandidateSize(v inputengine.View) (width, height int) {
-	preeditW := candHorizPadX*2 + textWidthUnits(v.Preedit)*8 + candModeBadgeWidth
-	stripW := candHorizPadX * 2
-	for i, cand := range v.Candidates {
-		if i > 0 {
-			stripW += candHorizItemGap
-		}
-		cellW := candCellPadX*2 + candKeycapWidth + candInnerGap + textWidthUnits(cand.Text)*candRuneWidth
-		if cand.AI {
-			cellW += candAIMarkerWidth
-		}
-		stripW += cellW
-	}
-	if v.HasPrev || v.HasNext {
-		if len(v.Candidates) > 0 {
-			stripW += candHorizItemGap
-		}
-		stripW += candNavBadgeWidth
-	}
-	w := max(preeditW, stripW)
+	w := naturalHorizontalCandidateWidth(v)
 	return min(max(w, candidatePanelMinWidth), candidatePanelMaxWidth), candidatePanelHeight
 }
 
-func preferredVerticalCandidateSize(v inputengine.View) (width, height int) {
-	w := candVertPadX*2 + candVertRowPadX*2 + textWidthUnits(v.Preedit)*8 + candModeBadgeWidth
-	for _, cand := range v.Candidates {
-		rowW := candVertPadX*2 + candVertRowPadX*2 + candKeycapWidth + candInnerGap + textWidthUnits(cand.Text)*candRuneWidth
-		if cand.AI {
-			rowW += candAIMarkerWidth
+// naturalHorizontalCandidateWidth is the strip's width with every candidate uncut.
+func naturalHorizontalCandidateWidth(v inputengine.View) int {
+	w := candHorizPadX * 2
+	for i, cand := range v.Candidates {
+		if i > 0 {
+			w += candHorizItemGap
 		}
-		w = max(w, rowW)
+		w += candidateCellWidth(cand)
 	}
-	if v.HasPrev || v.HasNext {
-		w = max(w, candVertPadX*2+64)
+	if candidateNavText(v) != "" {
+		w += candHorizItemGap*2 + candNavWidth // gaps around the spacer that pins it right
 	}
-	w = min(max(w, candVertMinWidth), candVertMaxWidth)
+	return w
+}
 
-	h := candVertPadY*2 + candVertPreeditHeight
+// candidateTextCap is the width the candidate texts are cut to when the page is wider than
+// the panel may grow, 0 when it fits. The longest texts give up room first, down to one
+// common cap, and short ones keep their full width: shrinking every cell a little instead
+// would end each of them, a two-character word included, with an ellipsis.
+func candidateTextCap(v inputengine.View) int {
+	excess := naturalHorizontalCandidateWidth(v) - candidatePanelMaxWidth
+	if excess <= 0 {
+		return 0
+	}
+	widths := make([]int, len(v.Candidates))
+	for i, cand := range v.Candidates {
+		widths[i] = candidateTextWidth(cand.Text)
+	}
+	slices.SortFunc(widths, func(a, b int) int { return b - a })
+	sum := 0
+	for k := 1; k <= len(widths); k++ {
+		sum += widths[k-1]
+		capW := (sum - excess) / k // cutting the k longest to capW frees at least excess
+		if k == len(widths) || capW >= widths[k] {
+			return max(capW, candMinTextCap)
+		}
+	}
+	return candMinTextCap
+}
+
+func preferredVerticalCandidateSize(v inputengine.View) (width, height int) {
+	w := 0
+	for _, cand := range v.Candidates {
+		w = max(w, candidateCellWidth(cand))
+	}
+	w = min(max(w+candVertPadX*2, candVertMinWidth), candVertMaxWidth)
+
+	h := candVertPadY*2 + candVertPreeditHeight + candVertGap + candHairline
 	if len(v.Candidates) > 0 {
 		h += len(v.Candidates) * (candVertGap + candVertRowHeight)
 	}
@@ -111,6 +139,27 @@ func preferredVerticalCandidateSize(v inputengine.View) (width, height int) {
 	}
 	h = min(max(h, candVertMinHeight), candVertMaxHeight)
 	return w, h
+}
+
+// candidateCellWidth is the natural width of one cell (a vertical row has the same parts).
+func candidateCellWidth(cand inputengine.Candidate) int {
+	w := candCellPadX*2 + candDigitWidth + candInnerGap + candidateTextWidth(cand.Text)
+	if cand.AI {
+		w += candInnerGap + candAIMarkerWidth
+	}
+	return w
+}
+
+func candidateTextWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		if runeWidthUnits(r) == 2 {
+			w += candCJKWidth
+		} else {
+			w += candLatinWidth
+		}
+	}
+	return w
 }
 
 // CandidateLabel is the visible text of one cell ("1 你好", AI suggestions marked ✦).
@@ -130,15 +179,14 @@ func InputCandidateView(c *ui.Context, v inputengine.View) {
 
 // InputCandidateViewFor renders the cursor-side IME candidate panel for cfg.
 // Typing stays on the fast non-shader path: GlassSurface handles backdrop
-// material (with opaque ReduceTransparency fallback) and TactileKeycap3D adds
-// spring keycap depth only when Spatial3DEnabled permits.
+// material (with opaque ReduceTransparency fallback); the content itself is
+// opaque ink and fills and never animates.
 func InputCandidateViewFor(c *ui.Context, v inputengine.View, cfg config.AppearanceConfig) {
 	theme := resolveAppearanceTheme(c, cfg.Theme)
 	c.SetTheme(theme)
 	prefs := c.Preferences()
 	profile := appMotionProfile(c, cfg)
 	DisableAnimationsFor(c, profile)
-	effCfg := effectiveSpatialAppearance(c, cfg)
 
 	if !prefs.ReduceTransparency {
 		c.Root().Radius(candidatePanelRadius)
@@ -155,9 +203,9 @@ func InputCandidateViewFor(c *ui.Context, v inputengine.View, cfg config.Appeara
 
 	box.Children(func() {
 		if vertical {
-			renderVerticalCandidatePanel(c, theme, v, effCfg)
+			renderVerticalCandidatePanel(c, theme, v)
 		} else {
-			renderHorizontalCandidatePanel(c, theme, v, effCfg)
+			renderHorizontalCandidatePanel(c, theme, v)
 		}
 	})
 }
@@ -187,48 +235,65 @@ func applyCandidatePanelSurface(c *ui.Context, box ui.Element, theme *ui.Theme, 
 	}
 }
 
-func renderHorizontalCandidatePanel(c *ui.Context, theme *ui.Theme, v inputengine.View, effCfg config.AppearanceConfig) {
-	ui.Row(c).FillWidth().Height(candPreeditHeight).AlignItems(ui.Center).Children(func() {
-		ui.Text(c, v.Preedit).FontSize(12).TextColor(theme.TextMuted).SingleLine().Grow(1)
-		renderCandidateModeBadge(c, theme, v.ASCII)
-	})
+func renderHorizontalCandidatePanel(c *ui.Context, theme *ui.Theme, v inputengine.View) {
+	renderCandidatePreedit(c, theme, v, candPreeditHeight)
+	ui.Box(c).FillWidth().Height(candHairline).Background(hairline(theme))
 
+	textCap := candidateTextCap(v)
 	ui.Row(c).FillWidth().Height(candHorizStripHeight).Gap(candHorizItemGap).AlignItems(ui.Center).Children(func() {
 		for i, cand := range v.Candidates {
 			active := i == v.Selected
 			cell := ui.Row(c).
 				Key("cand-h-"+strconv.Itoa(i)).
 				Height(candHorizStripHeight).
-				Padding(2, candCellPadX).
-				Radius(8).
+				Padding(0, candCellPadX).
+				Radius(radiusKeycap).
 				Gap(candInnerGap).
-				AlignItems(ui.Center)
+				AlignItems(ui.Center).
+				Shrink(1).
+				MinWidth(0)
 			if active {
-				cell.Background(withAlpha(theme.Accent, 0.12))
+				cell.Background(theme.Accent)
 			}
 			idx, item := i, cand
 			cell.Children(func() {
-				renderCandidateCellContent(c, theme, idx, item, active, effCfg, false)
+				renderCandidateCellContent(c, theme, idx, item, active, false, textCap)
 			})
 		}
 		if nav := candidateNavText(v); nav != "" {
-			ui.Box(c).Height(candHorizStripHeight).MinWidth(candNavBadgeWidth).Center().Children(func() {
-				ui.Text(c, nav).FontSize(13).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+			ui.Box(c).Grow(1)
+			ui.Box(c).Width(candNavWidth).Height(candHorizStripHeight).Shrink(0).Center().Children(func() {
+				ui.Text(c, nav).FontSize(typeLabel).TextColor(theme.TextMuted).SingleLine()
 			})
 		}
 	})
 }
 
-func renderVerticalCandidatePanel(c *ui.Context, theme *ui.Theme, v inputengine.View, effCfg config.AppearanceConfig) {
+// renderCandidatePreedit is the pinyin line: muted, cut in the middle when it is longer
+// than the candidates are wide, with the 中/英 badge at its end.
+func renderCandidatePreedit(c *ui.Context, theme *ui.Theme, v inputengine.View, height float32) {
 	ui.Row(c).
 		FillWidth().
-		Height(candVertPreeditHeight).
-		Padding(0, candVertRowPadX).
+		Height(height).
+		Padding(0, 0, 0, candCellPadX).
+		Gap(candInnerGap).
 		AlignItems(ui.Center).
 		Children(func() {
-			ui.Text(c, v.Preedit).FontSize(12).TextColor(theme.TextMuted).SingleLine().Grow(1)
+			ui.Text(c, v.Preedit).
+				FontSize(typeLabel).
+				TextColor(theme.TextMuted).
+				SingleLine().
+				TruncateMiddle().
+				Grow(1).
+				Shrink(1).
+				MinWidth(0)
 			renderCandidateModeBadge(c, theme, v.ASCII)
 		})
+}
+
+func renderVerticalCandidatePanel(c *ui.Context, theme *ui.Theme, v inputengine.View) {
+	renderCandidatePreedit(c, theme, v, candVertPreeditHeight)
+	ui.Box(c).FillWidth().Height(candHairline).Background(hairline(theme))
 
 	renderRows := func() {
 		for i, cand := range v.Candidates {
@@ -237,22 +302,21 @@ func renderVerticalCandidatePanel(c *ui.Context, theme *ui.Theme, v inputengine.
 				Key("cand-v-"+strconv.Itoa(i)).
 				FillWidth().
 				Height(candVertRowHeight).
-				Padding(2, candVertRowPadX).
-				Radius(8).
+				Padding(0, candCellPadX).
+				Radius(radiusKeycap).
 				Gap(candInnerGap).
 				AlignItems(ui.Center)
 			if active {
-				row.Background(withAlpha(theme.Accent, 0.14)).
-					Border(1, withAlpha(theme.Accent, 0.35))
+				row.Background(theme.Accent)
 			}
 			idx, item := i, cand
 			row.Children(func() {
-				renderCandidateCellContent(c, theme, idx, item, active, effCfg, true)
+				renderCandidateCellContent(c, theme, idx, item, active, true, 0)
 			})
 		}
 	}
 
-	naturalH := candVertPadY*2 + candVertPreeditHeight + len(v.Candidates)*(candVertGap+candVertRowHeight)
+	naturalH := candVertPadY*2 + candVertPreeditHeight + candVertGap + candHairline + len(v.Candidates)*(candVertGap+candVertRowHeight)
 	if v.HasPrev || v.HasNext {
 		naturalH += candVertGap + candVertNavHeight
 	}
@@ -268,11 +332,11 @@ func renderVerticalCandidatePanel(c *ui.Context, theme *ui.Theme, v inputengine.
 		ui.Row(c).
 			FillWidth().
 			Height(candVertNavHeight).
-			Padding(0, candVertRowPadX).
+			Padding(0, candCellPadX).
 			AlignItems(ui.Center).
 			Justify(ui.End).
 			Children(func() {
-				ui.Text(c, nav).FontSize(13).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+				ui.Text(c, nav).FontSize(typeLabel).TextColor(theme.TextMuted).SingleLine()
 			})
 	}
 }
@@ -297,43 +361,33 @@ func candidateModeLabel(ascii bool) string {
 	return "中"
 }
 
-func renderCandidateCellContent(
-	c *ui.Context,
-	theme *ui.Theme,
-	index int,
-	cand inputengine.Candidate,
-	active bool,
-	effCfg config.AppearanceConfig,
-	growText bool,
-) {
-	TactileKeycap3D(c, strconv.Itoa(index+1), active, active, effCfg)
-
-	t := ui.Text(c, cand.Text).FontSize(15).SingleLine()
+// renderCandidateCellContent draws one candidate: a small muted digit, the text (cut to
+// textCap when non-zero), and ✦ for an AI suggestion. On the chosen cell everything takes
+// AccentText over the solid accent fill, so the choice reads at a glance without changing
+// any width.
+func renderCandidateCellContent(c *ui.Context, theme *ui.Theme, index int, cand inputengine.Candidate, active, growText bool, textCap int) {
+	digitInk, textInk, markInk := theme.TextMuted, theme.Text, theme.Accent
 	if active {
-		t.TextColor(theme.Accent).FontWeight(700)
-	} else {
-		t.TextColor(theme.Text).FontWeight(500)
+		digitInk, textInk, markInk = theme.AccentText, theme.AccentText, theme.AccentText
 	}
+	ui.Text(c, strconv.Itoa(index+1)).
+		FontSize(typeMeta).
+		FontWeight(500).
+		TextColor(digitInk).
+		SingleLine().
+		MinWidth(candDigitWidth).
+		Shrink(0)
+
+	t := ui.Text(c, cand.Text).FontSize(15).TextColor(textInk).SingleLine().Shrink(1).MinWidth(0)
 	if growText {
 		t.Grow(1)
 	}
+	if textCap > 0 {
+		t.MaxWidth(float32(textCap))
+	}
 
 	if cand.AI {
-		aiBg := withAlpha(theme.Accent, 0.16)
-		aiBorder := withAlpha(theme.Accent, 0.38)
-		if active {
-			aiBg = withAlpha(theme.Accent, 0.24)
-			aiBorder = withAlpha(theme.Accent, 0.55)
-		}
-		ui.Box(c).
-			Padding(1, 5).
-			Radius(999).
-			Background(aiBg).
-			Border(1, aiBorder).
-			Center().
-			Children(func() {
-				ui.Text(c, "✦").FontSize(11).FontWeight(700).TextColor(theme.Accent).SingleLine()
-			})
+		ui.Text(c, "✦").FontSize(typeMicro).TextColor(markInk).SingleLine().MinWidth(candAIMarkerWidth).Shrink(0)
 	}
 }
 

@@ -62,7 +62,7 @@ func TestCandidatePanelBothOrientationsAndExactSizing(t *testing.T) {
 	if vh <= hh || vw >= hw {
 		t.Fatalf("vertical size = %dx%d vs horizontal %dx%d: expected taller, narrower list", vw, vh, hw, hh)
 	}
-	wantVertH := candVertPadY*2 + candVertPreeditHeight + len(v.Candidates)*(candVertGap+candVertRowHeight) + candVertGap + candVertNavHeight
+	wantVertH := candVertPadY*2 + candVertPreeditHeight + candVertGap + candHairline + len(v.Candidates)*(candVertGap+candVertRowHeight) + candVertGap + candVertNavHeight
 	if vh != wantVertH {
 		t.Fatalf("vertical height = %d, want exact %d", vh, wantVertH)
 	}
@@ -147,14 +147,13 @@ func TestCandidatePanelAccessibilityAndPresetDegradation(t *testing.T) {
 		shaders     bool
 		orientation string
 		prefs       ui.Preferences
-		wantInstant bool
 	}{
-		{"spatial3d-reduce-motion", "spatial_3d", "auto", true, "horizontal", ui.Preferences{ReduceMotion: true}, true},
-		{"spatial3d-reduce-transparency", "spatial_3d", "full", true, "vertical", ui.Preferences{ReduceTransparency: true}, false},
-		{"spatial3d-animations-off", "spatial_3d", "off", true, "horizontal", ui.Preferences{}, true},
-		{"liquid-glass-reduced", "liquid_glass", "reduced", true, "vertical", ui.Preferences{}, true},
-		{"classic-preset", "classic", "full", false, "horizontal", ui.Preferences{}, true},
-		{"shaders-disabled", "spatial_3d", "full", false, "vertical", ui.Preferences{}, false},
+		{"spatial3d-reduce-motion", "spatial_3d", "auto", true, "horizontal", ui.Preferences{ReduceMotion: true}},
+		{"spatial3d-reduce-transparency", "spatial_3d", "full", true, "vertical", ui.Preferences{ReduceTransparency: true}},
+		{"spatial3d-animations-off", "spatial_3d", "off", true, "horizontal", ui.Preferences{}},
+		{"liquid-glass-reduced", "liquid_glass", "reduced", true, "vertical", ui.Preferences{}},
+		{"classic-preset", "classic", "full", false, "horizontal", ui.Preferences{}},
+		{"shaders-disabled", "spatial_3d", "full", false, "vertical", ui.Preferences{}},
 	}
 
 	for _, tc := range cases {
@@ -175,21 +174,13 @@ func TestCandidatePanelAccessibilityAndPresetDegradation(t *testing.T) {
 				t.Fatal("candidate frame image is nil")
 			}
 
-			// Move selection to candidate 2 (an AI candidate) and re-render.
+			// Move selection to candidate 2 (an AI candidate) and re-render. The selection
+			// moves on every arrow key, so it switches at once in every preset: no keycap
+			// spring or other frames left pending.
 			cur.Selected = 1
 			tt.Frame()
-			if tc.wantInstant && tt.FramePending() {
-				t.Fatalf("%s must not leave pending keycap spring frames", tc.name)
-			}
-			if !tc.wantInstant {
-				if !tt.FramePending() {
-					t.Fatalf("%s expected active 3D keycap spring frame on selection change", tc.name)
-				}
-				tt.Advance(2 * time.Second)
-				tt.Frame()
-				if tt.FramePending() {
-					t.Fatalf("%s keycap spring did not settle", tc.name)
-				}
+			if tt.FramePending() {
+				t.Fatalf("%s left frames pending after a selection change", tc.name)
 			}
 			if tc.prefs.ReduceTransparency {
 				// Center pixel of opaque fallback surface must be fully opaque.

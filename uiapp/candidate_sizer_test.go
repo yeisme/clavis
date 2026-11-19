@@ -1,6 +1,7 @@
 package uiapp
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
@@ -102,5 +103,143 @@ func TestCandidatePanelSizerVerticalAndCaps(t *testing.T) {
 	}
 	if got := roundUpTo(128, 32); got != 128 {
 		t.Fatalf("roundUpTo(128,32) = %d", got)
+	}
+}
+
+func typedView(raw string) inputengine.View {
+	e := inputengine.New(inputengine.Options{})
+	for _, r := range raw {
+		e.HandleKey(inputengine.Key{Kind: inputengine.KeyLetter, Rune: r})
+	}
+	return e.View()
+}
+
+// The body is a short line of text: real first pages sit in the 360–480 band (they were
+// 608–640 wide with the 760 cap), and nothing on the page can push past the cap.
+func TestCandidatePanelWidthBand(t *testing.T) {
+	if candidatePanelMaxWidth < 360 || candidatePanelMaxWidth > 480 || candidatePanelMaxWidth%candidateWidthStep != 0 {
+		t.Fatalf("horizontal cap %d: want a %dpx step within 360..480", candidatePanelMaxWidth, candidateWidthStep)
+	}
+	cfg := config.DefaultAppearanceConfig()
+	cfg.CandidateBarOrientation = "horizontal"
+	for _, tc := range []struct {
+		raw          string
+		natural, win int
+	}{
+		{"yeshugen", 354, 384},
+		{"nihao", 370, 384},
+		{"woshiyeshugen", 354, 384},
+		{"zhonghuarenmingongheguo", 448, 448},
+	} {
+		v := typedView(tc.raw)
+		var s CandidatePanelSizer
+		w, h := PreferredCandidatePanelSizeFor(v, cfg)
+		sw, sh := s.Next(v, cfg)
+		if w != tc.natural || sw != tc.win || h != candidatePanelHeight || sh != candidatePanelHeight {
+			t.Errorf("%s: preferred %dx%d, window %dx%d; want %dx%d and %dx%d",
+				tc.raw, w, h, sw, sh, tc.natural, candidatePanelHeight, tc.win, candidatePanelHeight)
+		}
+	}
+}
+
+// However long the pinyin gets, the panel keeps the width its candidates need: the preedit
+// is cut in the middle and the 中/英 badge stays whole and inside.
+func TestCandidatePanelLongPreeditDoesNotWiden(t *testing.T) {
+	long := strings.Repeat("wo'shi'ye'shu'gen'", 6) + "a"
+	for _, orientation := range []string{"horizontal", "vertical"} {
+		cfg := config.DefaultAppearanceConfig()
+		cfg.CandidateBarOrientation = orientation
+		ws, hs := PreferredCandidatePanelSizeFor(composing("a", "啊", "阿"), cfg)
+		v := composing(long, "啊", "阿")
+		w, h := PreferredCandidatePanelSizeFor(v, cfg)
+		if w != ws || h != hs {
+			t.Fatalf("%s: long preedit resized the panel %dx%d -> %dx%d", orientation, ws, hs, w, h)
+		}
+		tt := ui.NewTester(func(c *ui.Context) { InputCandidateViewFor(c, v, cfg) }, w, h)
+		tt.Frame()
+		pre, ok := tt.Find(long)
+		badge, okBadge := tt.Find("中")
+		if !ok || !okBadge {
+			t.Fatalf("%s: preedit or badge missing: %v", orientation, tt.Texts())
+		}
+		if pre.X+pre.W > badge.X+0.5 || badge.X+badge.W > float32(w) {
+			t.Fatalf("%s: preedit %+v runs into badge %+v (panel width %d)", orientation, pre, badge, w)
+		}
+	}
+}
+
+// A page wider than the cap cuts its longest candidates to one common width; the short
+// ones (a two-character word, single characters) keep every character.
+func TestCandidatePanelOverflowCutsLongestFirst(t *testing.T) {
+	cfg := config.DefaultAppearanceConfig()
+	cfg.CandidateBarOrientation = "horizontal"
+	v := composing("zhong'hua", "中华人民共和国万岁", "中华人民共和国", "中华人民", "中华", "中", "种", "重")
+	v.HasNext = true
+	v.ASCII = true // badge 英, so the candidate 中 is the only 中 on screen
+	w, h := PreferredCandidatePanelSizeFor(v, cfg)
+	if w != candidatePanelMaxWidth {
+		t.Fatalf("overflowing page width = %d, want the cap %d", w, candidatePanelMaxWidth)
+	}
+	// The 9-, 7- and 4-character words are cut to one width; 中华 and the singles are not.
+	textCap := candidateTextCap(v)
+	if textCap < candidateTextWidth("中华") || textCap >= candidateTextWidth("中华人民") {
+		t.Fatalf("text cap = %d, want within [%d, %d)", textCap, candidateTextWidth("中华"), candidateTextWidth("中华人民"))
+	}
+	tt := ui.NewTester(func(c *ui.Context) { InputCandidateViewFor(c, v, cfg) }, w, h)
+	tt.Frame()
+	for _, cand := range v.Candidates {
+		r, ok := tt.Find(cand.Text)
+		if !ok {
+			t.Fatalf("candidate %q missing: %v", cand.Text, tt.Texts())
+		}
+		assertRectWithin(t, cand.Text, r, w, h)
+		chars := float32(len([]rune(cand.Text)))
+		if full := chars * 14; candidateTextWidth(cand.Text) <= textCap && r.W < full {
+			t.Fatalf("%q was cut to %.1f although it fits the cap %d", cand.Text, r.W, textCap)
+		}
+		if r.W > float32(textCap)+0.5 {
+			t.Fatalf("%q is %.1f wide, over the cap %d", cand.Text, r.W, textCap)
+		}
+	}
+	// An AI suggestion that overflows is the only one cut.
+	ai := composing("shu'ru'fa", "输入法", "书如法", "输入", "舒", "输")
+	ai.Candidates = append(ai.Candidates, inputengine.Candidate{Text: "输入法候选窗", AI: true})
+	ai.HasPrev, ai.HasNext = true, true
+	if got := candidateTextCap(ai); got < candidateTextWidth("书如法") || got >= candidateTextWidth("输入法候选窗") {
+		t.Fatalf("AI page text cap = %d, want only 输入法候选窗 cut", got)
+	}
+}
+
+// The chosen candidate is a solid accent fill (not a faint tint), in both orientations;
+// the others have none.
+func TestCandidateSelectionIsSolidAccent(t *testing.T) {
+	for _, orientation := range []string{"horizontal", "vertical"} {
+		cfg := config.DefaultAppearanceConfig()
+		cfg.CandidateBarOrientation = orientation
+		v := composing("ni'hao", "你好", "你", "尼", "泥")
+		v.Selected = 2
+		w, h := PreferredCandidatePanelSizeFor(v, cfg)
+		var accent ui.Color
+		tt := ui.NewTester(func(c *ui.Context) {
+			InputCandidateViewFor(c, v, cfg)
+			accent = c.Theme().Accent
+		}, w, h)
+		tt.Frame()
+		img := tt.Image()
+		beside := func(digit string) (r, g, b uint8) {
+			rect, ok := tt.Find(digit)
+			if !ok {
+				t.Fatalf("%s: digit %s missing: %v", orientation, digit, tt.Texts())
+			}
+			px := img.RGBAAt(int(rect.X)-4, int(rect.Y+rect.H/2)) // the cell's own padding
+			return px.R, px.G, px.B
+		}
+		near := func(a, b uint8) bool { d := int(a) - int(b); return d >= -2 && d <= 2 }
+		if r, g, b := beside("3"); !near(r, accent.R) || !near(g, accent.G) || !near(b, accent.B) {
+			t.Fatalf("%s: chosen cell = %d,%d,%d, want the accent %d,%d,%d", orientation, r, g, b, accent.R, accent.G, accent.B)
+		}
+		if r, g, b := beside("1"); near(r, accent.R) && near(g, accent.G) && near(b, accent.B) {
+			t.Fatalf("%s: an unchosen cell is filled with the accent", orientation)
+		}
 	}
 }
