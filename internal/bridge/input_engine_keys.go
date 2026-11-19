@@ -328,6 +328,12 @@ func inputEngineKeysForInline(ev host.InlineKeyEvent) ([]inputengine.Key, bool) 
 		r = 0
 	}
 	k := inputengine.Key{Rune: r, Chord: chord}
+	switch name {
+	case "up":
+		k.NavDir = inputengine.NavUp
+	case "down":
+		k.NavDir = inputengine.NavDown
+	}
 	// Prefer the layout-decoded Rune for character classification. KeyName is
 	// only a fallback for non-printable named keys; this keeps macOS aligned
 	// with the Windows ToUnicodeEx path when shifted symbols share a keycode.

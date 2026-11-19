@@ -9,8 +9,23 @@ import (
 	"github.com/egoist/mygo"
 
 	"github.com/yeisme/clavis/internal/bridge"
+	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/host"
 )
+
+func TestInputEngineDisabledDoesNotSetUpHook(t *testing.T) {
+	cfg := config.DefaultInputEngineConfig()
+	if cfg.Enabled {
+		t.Fatal("default input engine config must be disabled")
+	}
+	host := &stubInputEngineBridge{}
+	if got := (&desktopApp{}).setupInputEngine(context.Background(), host, cfg, nil); got != nil {
+		t.Fatal("disabled input engine must not create UI or configure a hook")
+	}
+	if host.configured {
+		t.Fatal("disabled input engine configured the hook")
+	}
+}
 
 func TestCandidatePanelBelowCaretAndFlip(t *testing.T) {
 	displays := []mygo.Display{{Bounds: mygo.Rectangle{Width: 1920, Height: 1080}, WorkArea: mygo.Rectangle{Width: 1920, Height: 1040}}}
@@ -63,10 +78,18 @@ func TestAIDebouncerDropsStale(t *testing.T) {
 
 type stubInputEngineBridge struct {
 	bridge.HostService
-	fgStatus bridge.ForegroundIMEStatus
-	fgOK     bool
-	snap     host.ContextSnapshot
+	fgStatus   bridge.ForegroundIMEStatus
+	configured bool
+	fgOK       bool
+	snap       host.ContextSnapshot
 }
+
+func (s *stubInputEngineBridge) ConfigureInputEngine(config.InputEngineConfig) {
+	s.configured = true
+}
+
+func (s *stubInputEngineBridge) SetInputEngineViewHandler(func(bridge.InputEngineView)) {}
+func (s *stubInputEngineBridge) SetInputEngineAICandidates(string, []string)            {}
 
 func (s *stubInputEngineBridge) ForegroundIMEStatus() (bridge.ForegroundIMEStatus, bool) {
 	return s.fgStatus, s.fgOK

@@ -114,6 +114,53 @@ func TestPartialCommitKeepsRemainder(t *testing.T) {
 	}
 }
 
+func TestCandidateHighlightMovement(t *testing.T) {
+	e := New(Options{CandidateCount: 3})
+	typeLetters(e, "shi")
+	if got := e.View().Selected; got != 0 {
+		t.Fatalf("initial selection = %d, want 0", got)
+	}
+	last := len(e.View().Candidates) - 1
+	for want := 1; want <= last; want++ {
+		if r := e.HandleKey(Key{Kind: KeyNavigation, NavDir: NavDown}); !r.Consume || !r.Changed {
+			t.Fatalf("down %d: %+v", want, r)
+		}
+		if got := e.View().Selected; got != want {
+			t.Fatalf("down %d selected = %d, want %d", want, got, want)
+		}
+	}
+	if r := e.HandleKey(Key{Kind: KeyNavigation, NavDir: NavDown}); !r.Consume || !r.Changed || e.View().Selected != last {
+		t.Fatalf("down at end: %+v selected=%d want=%d", r, e.View().Selected, last)
+	}
+	for want := last - 1; want >= 0; want-- {
+		if r := e.HandleKey(Key{Kind: KeyNavigation, NavDir: NavUp}); !r.Consume || !r.Changed {
+			t.Fatalf("up %d: %+v", want, r)
+		}
+		if got := e.View().Selected; got != want {
+			t.Fatalf("up %d selected = %d, want %d", want, got, want)
+		}
+	}
+	if r := e.HandleKey(Key{Kind: KeyNavigation, NavDir: NavUp}); !r.Consume || !r.Changed || e.View().Selected != 0 {
+		t.Fatalf("up at start: %+v selected=%d", r, e.View().Selected)
+	}
+	if e.Raw() != "shi" {
+		t.Fatalf("directional navigation changed raw to %q", e.Raw())
+	}
+
+	e.HandleKey(Key{Kind: KeyPageNext})
+	if v := e.View(); v.Page != 1 || v.Selected != 0 {
+		t.Fatalf("page next view = page %d selected %d, want page 1 selected 0", v.Page, v.Selected)
+	}
+	e.HandleKey(Key{Kind: KeyNavigation, NavDir: NavDown})
+	if got := e.View().Selected; got != 1 {
+		t.Fatalf("second-page down selected = %d, want 1", got)
+	}
+	e.HandleKey(Key{Kind: KeyPagePrev})
+	if got := e.View().Selected; got != 0 {
+		t.Fatalf("page prev selected = %d, want 0", got)
+	}
+}
+
 func TestPagingAndPunctuation(t *testing.T) {
 	e := New(Options{CandidateCount: 3})
 	typeLetters(e, "shi")

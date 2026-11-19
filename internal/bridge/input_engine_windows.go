@@ -117,6 +117,12 @@ func (b *windowsBridge) inputEngineHandleKey(vk uint16, scan uint32, isDown bool
 	if !ok {
 		return false
 	}
+	switch vk {
+	case vkUp:
+		key.NavDir = inputengine.NavUp
+	case vkDown:
+		key.NavDir = inputengine.NavDown
+	}
 	res := b.ime.commits.handleKey(eng, key, b.ime.userLearning.Load())
 	if res.Commit != "" {
 		sendWinUnicodeText(res.Commit)

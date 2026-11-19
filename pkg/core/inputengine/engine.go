@@ -15,6 +15,16 @@ import (
 // KeyKind classifies a key for the composition state machine (§4).
 type KeyKind int
 
+// NavDirection is the optional direction carried by a KeyNavigation event.
+// A zero direction preserves the legacy navigation behavior (reset and pass).
+type NavDirection uint8
+
+const (
+	NavNone NavDirection = iota
+	NavUp
+	NavDown
+)
+
 const (
 	KeyOther      KeyKind = iota // printable char not otherwise listed (Rune set)
 	KeyLetter                    // a-z (Rune lower-case); upper-case comes as KeyOther
@@ -42,6 +52,8 @@ const (
 type Key struct {
 	Kind KeyKind
 	Rune rune
+	// NavDir optionally requests candidate selection movement for KeyNavigation.
+	NavDir NavDirection
 	// Chord is true when Ctrl/Alt/Win is held: the engine resets and lets the shortcut through.
 	Chord bool
 }
@@ -280,6 +292,9 @@ func (e *Engine) HandleKey(k Key) Result {
 	e.shiftAlone = false
 
 	composing := e.raw != ""
+	if k.Kind == KeyNavigation && k.NavDir != NavNone && composing && !k.Chord {
+		return e.moveSelection(k.NavDir)
+	}
 	if k.Chord || k.Kind == KeyNavigation {
 		if composing {
 			e.clear()
@@ -374,6 +389,28 @@ func (e *Engine) HandleKey(k Key) Result {
 		}
 		return Result{Consume: true, Commit: top, Changed: true}
 	}
+}
+
+// moveSelection changes the highlight within the current candidate page. Directional
+// navigation deliberately never changes the page or composition; clamping still reports a
+// change so the platform can consume the requested navigation event consistently.
+func (e *Engine) moveSelection(dir NavDirection) Result {
+	start := e.page * e.opts.CandidateCount
+	end := min(start+e.opts.CandidateCount, len(e.cands))
+	pageLen := end - start
+	if pageLen > 0 {
+		switch dir {
+		case NavUp:
+			if e.sel > 0 {
+				e.sel--
+			}
+		case NavDown:
+			if e.sel+1 < pageLen {
+				e.sel++
+			}
+		}
+	}
+	return Result{Consume: true, Changed: true}
 }
 
 // selectIndex commits the idx-th candidate on the current page. A candidate covering only a

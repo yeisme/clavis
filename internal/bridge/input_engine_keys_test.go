@@ -35,6 +35,8 @@ func TestEngineKeyForVK(t *testing.T) {
 		{0x08, "\b", false, inputengine.KeyBackspace, true},
 		{0x1B, "\x1b", false, inputengine.KeyEscape, true},
 		{0x25, "", false, inputengine.KeyNavigation, true}, // Left
+		{0x26, "", false, inputengine.KeyNavigation, true}, // Up
+		{0x28, "", false, inputengine.KeyNavigation, true}, // Down
 		{0x09, "\t", false, inputengine.KeyNavigation, true},
 		{0x74, "", false, inputengine.KeyNavigation, true}, // F5
 		{0xDC, "", false, 0, false},                        // dead key / no text
@@ -53,6 +55,7 @@ func TestInputEngineInlineRuneMapping(t *testing.T) {
 		run   string
 		kind  inputengine.KeyKind
 		chord bool
+		dir   inputengine.NavDirection
 	}{
 		{name: "quote", run: `"`, kind: inputengine.KeyOther},
 		{name: "minus", run: "_", kind: inputengine.KeyOther},
@@ -62,6 +65,8 @@ func TestInputEngineInlineRuneMapping(t *testing.T) {
 		{name: "equal", run: "=", kind: inputengine.KeyPageNext},
 		{name: "space", run: " ", kind: inputengine.KeySpace},
 		{name: "left", run: "", kind: inputengine.KeyNavigation},
+		{name: "up", run: "", kind: inputengine.KeyNavigation, dir: inputengine.NavUp},
+		{name: "down", run: "", kind: inputengine.KeyNavigation, dir: inputengine.NavDown},
 		{name: "unknown", run: "", kind: inputengine.KeyOther},
 		{name: "unknown chord", run: "", kind: inputengine.KeyNavigation, chord: true},
 	}
@@ -72,7 +77,7 @@ func TestInputEngineInlineRuneMapping(t *testing.T) {
 				mods = []string{"cmd"}
 			}
 			k, ok := inputEngineKeyForInline(host.InlineKeyEvent{KeyName: tc.name, Rune: tc.run, Modifiers: mods})
-			if !ok || k.Kind != tc.kind || k.Chord != tc.chord {
+			if !ok || k.Kind != tc.kind || k.NavDir != tc.dir || k.Chord != tc.chord {
 				t.Fatalf("inline %s/%q chord=%v = %+v, ok=%v; want %v", tc.name, tc.run, tc.chord, k, ok, tc.kind)
 			}
 		})

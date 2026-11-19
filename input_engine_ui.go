@@ -35,6 +35,9 @@ type inputEngineUI struct {
 }
 
 func (a *desktopApp) setupInputEngine(ctx context.Context, br bridge.HostService, cfg config.InputEngineConfig, suggest suggestFunc) *inputEngineUI {
+	if !cfg.Enabled {
+		return nil
+	}
 	h, ok := br.(bridge.InputEngineHost)
 	if !ok {
 		return nil

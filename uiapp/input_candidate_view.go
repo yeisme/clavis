@@ -40,13 +40,14 @@ const (
 	candVertMaxHeight     = 460
 
 	// Shared cell metrics for TactileKeycap3D + candidate text + optional AI ✦ chip.
-	candKeycapWidth   = 30
-	candInnerGap      = 6
-	candCellPadX      = 6
-	candHorizItemGap  = 10
-	candRuneWidth     = 10 // per Latin width unit at FontSize 15
-	candAIMarkerWidth = 28
-	candNavBadgeWidth = 34
+	candKeycapWidth    = 30
+	candInnerGap       = 6
+	candCellPadX       = 6
+	candHorizItemGap   = 10
+	candRuneWidth      = 10 // per Latin width unit at FontSize 15
+	candAIMarkerWidth  = 28
+	candNavBadgeWidth  = 34
+	candModeBadgeWidth = 28
 )
 
 // PreferredCandidatePanelSize estimates the panel size for v using the active
@@ -65,7 +66,7 @@ func PreferredCandidatePanelSizeFor(v inputengine.View, cfg config.AppearanceCon
 }
 
 func preferredHorizontalCandidateSize(v inputengine.View) (width, height int) {
-	preeditW := candHorizPadX*2 + textWidthUnits(v.Preedit)*8
+	preeditW := candHorizPadX*2 + textWidthUnits(v.Preedit)*8 + candModeBadgeWidth
 	stripW := candHorizPadX * 2
 	for i, cand := range v.Candidates {
 		if i > 0 {
@@ -88,7 +89,7 @@ func preferredHorizontalCandidateSize(v inputengine.View) (width, height int) {
 }
 
 func preferredVerticalCandidateSize(v inputengine.View) (width, height int) {
-	w := candVertPadX*2 + candVertRowPadX*2 + textWidthUnits(v.Preedit)*8
+	w := candVertPadX*2 + candVertRowPadX*2 + textWidthUnits(v.Preedit)*8 + candModeBadgeWidth
 	for _, cand := range v.Candidates {
 		rowW := candVertPadX*2 + candVertRowPadX*2 + candKeycapWidth + candInnerGap + textWidthUnits(cand.Text)*candRuneWidth
 		if cand.AI {
@@ -188,7 +189,8 @@ func applyCandidatePanelSurface(c *ui.Context, box ui.Element, theme *ui.Theme, 
 
 func renderHorizontalCandidatePanel(c *ui.Context, theme *ui.Theme, v inputengine.View, effCfg config.AppearanceConfig) {
 	ui.Row(c).FillWidth().Height(candPreeditHeight).AlignItems(ui.Center).Children(func() {
-		ui.Text(c, v.Preedit).FontSize(12).TextColor(theme.TextMuted).SingleLine()
+		ui.Text(c, v.Preedit).FontSize(12).TextColor(theme.TextMuted).SingleLine().Grow(1)
+		renderCandidateModeBadge(c, theme, v.ASCII)
 	})
 
 	ui.Row(c).FillWidth().Height(candHorizStripHeight).Gap(candHorizItemGap).AlignItems(ui.Center).Children(func() {
@@ -224,7 +226,8 @@ func renderVerticalCandidatePanel(c *ui.Context, theme *ui.Theme, v inputengine.
 		Padding(0, candVertRowPadX).
 		AlignItems(ui.Center).
 		Children(func() {
-			ui.Text(c, v.Preedit).FontSize(12).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, v.Preedit).FontSize(12).TextColor(theme.TextMuted).SingleLine().Grow(1)
+			renderCandidateModeBadge(c, theme, v.ASCII)
 		})
 
 	renderRows := func() {
@@ -272,6 +275,26 @@ func renderVerticalCandidatePanel(c *ui.Context, theme *ui.Theme, v inputengine.
 				ui.Text(c, nav).FontSize(13).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
 			})
 	}
+}
+
+func renderCandidateModeBadge(c *ui.Context, theme *ui.Theme, ascii bool) {
+	label := candidateModeLabel(ascii)
+	ui.Box(c).
+		MinWidth(candModeBadgeWidth).
+		Padding(space1, space6).
+		Radius(radiusPill).
+		Background(withAlpha(theme.TextMuted, 0.12)).
+		Center().
+		Children(func() {
+			ui.Text(c, label).FontSize(typeMeta).FontWeight(700).TextColor(theme.TextMuted).SingleLine()
+		})
+}
+
+func candidateModeLabel(ascii bool) string {
+	if ascii {
+		return "英"
+	}
+	return "中"
 }
 
 func renderCandidateCellContent(

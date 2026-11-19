@@ -3,6 +3,7 @@ package uiapp
 import (
 	"testing"
 
+	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
@@ -18,6 +19,35 @@ func composing(preedit string, words ...string) inputengine.View {
 // TestCandidatePanelSizerOnlyGrowsWithinComposition pins the anti-jitter
 // rule: typing more pinyin may shorten the candidates, but the panel keeps
 // its widest size (in 32px buckets) until the composition ends.
+func TestCandidateModeLabel(t *testing.T) {
+	if got := candidateModeLabel(false); got != "中" {
+		t.Fatalf("non-ASCII mode label = %q, want 中", got)
+	}
+	if got := candidateModeLabel(true); got != "英" {
+		t.Fatalf("ASCII mode label = %q, want 英", got)
+	}
+
+	for _, orientation := range []string{"horizontal", "vertical"} {
+		cfg := config.DefaultAppearanceConfig()
+		cfg.CandidateBarOrientation = orientation
+		v := composing("ni", "你", "呢")
+		wCN, hCN := PreferredCandidatePanelSizeFor(v, cfg)
+		v.ASCII = true
+		wEN, hEN := PreferredCandidatePanelSizeFor(v, cfg)
+		if wCN != wEN || hCN != hEN {
+			t.Fatalf("%s mode indicator changed panel geometry: CN=%dx%d EN=%dx%d", orientation, wCN, hCN, wEN, hEN)
+		}
+		for ascii, want := range map[bool]string{false: "中", true: "英"} {
+			v.ASCII = ascii
+			tt := ui.NewTester(func(c *ui.Context) { InputCandidateViewFor(c, v, cfg) }, wCN, hCN)
+			tt.Frame()
+			if !tt.HasText(want) {
+				t.Fatalf("%s ASCII=%v frame missing mode label %q: texts=%v", orientation, ascii, want, tt.Texts())
+			}
+		}
+	}
+}
+
 func TestCandidatePanelSizerOnlyGrowsWithinComposition(t *testing.T) {
 	cfg := config.DefaultAppearanceConfig()
 	cfg.CandidateBarOrientation = "horizontal"
