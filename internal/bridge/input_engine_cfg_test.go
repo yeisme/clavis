@@ -28,8 +28,6 @@ func TestInputEngineConfigEqualSkipsUnchangedRebuild(t *testing.T) {
 		"dicts":       func(c *config.InputEngineConfig) { c.CustomDictPaths = []string{"/tmp/b.dict.yaml"} },
 		"learning":    func(c *config.InputEngineConfig) { c.UserLearning = !c.UserLearning },
 		"enabled":     func(c *config.InputEngineConfig) { c.Enabled = !c.Enabled },
-		"mixed":       func(c *config.InputEngineConfig) { c.MixedEnglish = !c.MixedEnglish },
-		"autopair":    func(c *config.InputEngineConfig) { c.AutoPairPunctuation = !c.AutoPairPunctuation },
 		"shifttoggle": func(c *config.InputEngineConfig) { c.ShiftToggleASCII = !c.ShiftToggleASCII },
 		"mode":        func(c *config.InputEngineConfig) { c.Mode = "native_imk" },
 		"imksocket":   func(c *config.InputEngineConfig) { c.IMKSocketPath = "/tmp/x.sock" },
@@ -41,6 +39,17 @@ func TestInputEngineConfigEqualSkipsUnchangedRebuild(t *testing.T) {
 		mutate(&changed)
 		if inputEngineConfigEqual(base, changed) {
 			t.Errorf("%s change not detected — reload would skip a needed rebuild", name)
+		}
+	}
+
+	for name, mutate := range map[string]func(*config.InputEngineConfig){
+		"mixed":    func(c *config.InputEngineConfig) { c.MixedEnglish = !c.MixedEnglish },
+		"autopair": func(c *config.InputEngineConfig) { c.AutoPairPunctuation = !c.AutoPairPunctuation },
+	} {
+		unchanged := base
+		mutate(&unchanged)
+		if !inputEngineConfigEqual(base, unchanged) {
+			t.Errorf("%s parse-compatibility field must not trigger a rebuild", name)
 		}
 	}
 

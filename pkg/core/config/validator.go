@@ -340,8 +340,19 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 			Message: fmt.Sprintf("stage_intensity %v is outside 0..1; clamped to %v", main.Appearance.StageIntensity, clamped),
 		})
 	}
-	if main.InputEngine.Mode != "" && main.InputEngine.Mode != "inline_hook" && main.InputEngine.Mode != "native_imk" && main.InputEngine.Mode != "dual" && main.InputEngine.Mode != "off" {
+	if main.InputEngine.Mode != "inline_hook" && main.InputEngine.Mode != "off" {
 		issues = append(issues, ValidationIssue{File: file, KeyPath: "input_engine.mode", Severity: SeverityError, Message: "unsupported input engine mode"})
+	} else if main.InputEngine.legacyModeMigrated {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "input_engine.mode", Severity: SeverityWarning,
+			Message: "input_engine.mode used legacy native_imk/dual; migrated to inline_hook",
+		})
+	}
+	if strings.TrimSpace(main.InputEngine.IMKSocketPath) != "" {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "input_engine.imk_socket_path", Severity: SeverityWarning,
+			Message: "input_engine.imk_socket_path is not wired; only inline_hook is effective",
+		})
 	}
 	if main.InputEngine.Scheme != "" && main.InputEngine.Scheme != "quanpin" && main.InputEngine.Scheme != "xiaohe" && main.InputEngine.Scheme != "ziranma" && main.InputEngine.Scheme != "microsoft" && main.InputEngine.Scheme != "sogou" && main.InputEngine.Scheme != "pinyin_plus" {
 		issues = append(issues, ValidationIssue{File: file, KeyPath: "input_engine.scheme", Severity: SeverityError, Message: "unsupported input engine scheme"})

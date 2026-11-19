@@ -1175,23 +1175,25 @@ func (c IMEConfig) toTOML() *toml.Table {
 
 // InputEngineConfig configures Clavis' built-in input engine.
 //
-// MixedEnglish and AutoPairPunctuation are deprecated and have no effect:
-// the engine never read mixed_english or auto_pair_punctuation, and they are
-// no longer read from or written to config.toml (docs/design/
-// own-input-engine.md, §11). The fields stay until internal/bridge's
-// inputEngineConfigEqual stops comparing them.
+// MixedEnglish and AutoPairPunctuation are retained for parse compatibility
+// only. They have no effect and are not read from or written to config.toml
+// (docs/design/own-input-engine.md, §11).
 type InputEngineConfig struct {
 	Enabled             bool     `json:"enabled"`
 	Mode                string   `json:"mode"`
 	Scheme              string   `json:"scheme"`
 	CandidateCount      int      `json:"candidateCount"`
-	MixedEnglish        bool     `json:"mixedEnglish"`        // Deprecated: no effect.
-	AutoPairPunctuation bool     `json:"autoPairPunctuation"` // Deprecated: no effect.
+	MixedEnglish        bool     `json:"mixedEnglish"`        // Parse compatibility only; no effect.
+	AutoPairPunctuation bool     `json:"autoPairPunctuation"` // Parse compatibility only; no effect.
 	ShiftToggleASCII    bool     `json:"shiftToggleASCII"`
 	FuzzyPinyin         []string `json:"fuzzyPinyin"`
 	CustomDictPaths     []string `json:"customDictPaths"`
 	UserLearning        bool     `json:"userLearning"`
 	IMKSocketPath       string   `json:"imkSocketPath"`
+
+	// legacyModeMigrated is decoder provenance for old native IMK/dual values.
+	// It is intentionally not serialized: effective mode is always inline_hook.
+	legacyModeMigrated bool
 }
 
 func DefaultInputEngineConfig() InputEngineConfig {
@@ -1210,7 +1212,16 @@ func decodeInputEngineConfig(tbl *toml.Table, path string) (InputEngineConfig, e
 	if s, ok, e := optionalString(tbl, "mode", path); e != nil {
 		return c, e
 	} else if ok {
-		c.Mode = s
+		switch s {
+		case "native_imk", "dual":
+			// These modes were persisted by older versions, but the native IMK
+			// host is not implemented. Keep loading the config with the only
+			// effective implementation and retain provenance for a warning.
+			c.Mode = "inline_hook"
+			c.legacyModeMigrated = true
+		default:
+			c.Mode = s
+		}
 	}
 	if s, ok, e := optionalString(tbl, "scheme", path); e != nil {
 		return c, e

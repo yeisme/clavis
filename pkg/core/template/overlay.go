@@ -1,52 +1,97 @@
 package template
 
 import (
-	"bytes"
 	"strings"
 
-	"github.com/BurntSushi/toml"
+	coretoml "github.com/yeisme/clavis/pkg/core/toml"
 )
 
 // Overlay is the entire writable surface: five scalar/list fields plus
 // slot.<name>.default. Pointers distinguish omitted from false, empty or [].
 type Overlay struct {
-	Trigger      *string                `toml:"trigger"`
-	Title        *string                `toml:"title"`
-	Category     *string                `toml:"category"`
-	AppBundleIDs *[]string              `toml:"app_bundle_ids"`
-	Slot         map[string]SlotDefault `toml:"slot"`
-	Enabled      *bool                  `toml:"enabled"`
+	Trigger      *string
+	Title        *string
+	Category     *string
+	AppBundleIDs *[]string
+	Slot         map[string]SlotDefault
+	Enabled      *bool
 }
 
 func ParseOverlay(b []byte) (Overlay, []Diagnostic) {
-	var o Overlay
 	bad := func() (Overlay, []Diagnostic) {
 		return Overlay{}, []Diagnostic{diagnostic(InvalidOverlay, "overlay", "only trigger, title, category, app_bundle_ids, slot.<name>.default and enabled are writable")}
 	}
-	md, err := toml.NewDecoder(bytes.NewReader(b)).Decode(&o)
-	if err != nil || len(md.Undecoded()) != 0 {
+	tbl, err := coretoml.Parse(string(b))
+	if err != nil {
 		return bad()
 	}
-	for _, key := range md.Keys() {
-		allowed := false
-		if len(key) == 1 {
-			switch key[0] {
-			case "trigger", "title", "category", "app_bundle_ids", "enabled", "slot":
-				allowed = true
+	var o Overlay
+	for _, key := range tbl.SortedKeys() {
+		value, _ := tbl.Get(key)
+		switch key {
+		case "trigger":
+			v, ok := value.AsString()
+			if !ok {
+				return bad()
 			}
-		}
-		if len(key) == 2 && key[0] == "slot" {
-			allowed = validSlotName(key[1])
-		}
-		if len(key) == 3 && key[0] == "slot" && validSlotName(key[1]) && key[2] == "default" {
-			allowed = true
-		}
-		if !allowed {
-			return bad()
-		}
-	}
-	for name, s := range o.Slot {
-		if !validSlotName(name) || s.Default == nil {
+			o.Trigger = &v
+		case "title":
+			v, ok := value.AsString()
+			if !ok {
+				return bad()
+			}
+			o.Title = &v
+		case "category":
+			v, ok := value.AsString()
+			if !ok {
+				return bad()
+			}
+			o.Category = &v
+		case "enabled":
+			v, ok := value.AsBool()
+			if !ok {
+				return bad()
+			}
+			o.Enabled = &v
+		case "app_bundle_ids":
+			values, ok := value.AsArray()
+			if !ok {
+				return bad()
+			}
+			ids := make([]string, len(values))
+			for i, item := range values {
+				ids[i], ok = item.AsString()
+				if !ok {
+					return bad()
+				}
+			}
+			o.AppBundleIDs = &ids
+		case "slot":
+			slots, ok := value.AsTable()
+			if !ok {
+				return bad()
+			}
+			o.Slot = make(map[string]SlotDefault, len(slots.Entries))
+			for _, name := range slots.SortedKeys() {
+				if !validSlotName(name) {
+					return bad()
+				}
+				entry, _ := slots.Get(name)
+				slot, ok := entry.AsTable()
+				if !ok || len(slot.Entries) != 1 {
+					return bad()
+				}
+				def, ok := slot.Get("default")
+				if !ok {
+					return bad()
+				}
+				v, ok := def.AsString()
+				if !ok {
+					return bad()
+				}
+				o.Slot[name] = SlotDefault{Default: &v}
+			}
+		default:
 			return bad()
 		}
 	}

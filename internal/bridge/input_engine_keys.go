@@ -27,8 +27,6 @@ func inputEngineConfigEqual(a, b config.InputEngineConfig) bool {
 		a.Mode == b.Mode &&
 		a.Scheme == b.Scheme &&
 		a.CandidateCount == b.CandidateCount &&
-		a.MixedEnglish == b.MixedEnglish &&
-		a.AutoPairPunctuation == b.AutoPairPunctuation &&
 		a.ShiftToggleASCII == b.ShiftToggleASCII &&
 		a.UserLearning == b.UserLearning &&
 		a.IMKSocketPath == b.IMKSocketPath &&
@@ -74,7 +72,7 @@ const (
 // preserving the zero-overhead disabled default. When user_learning is false, UserFrequency
 // is forced to nil so learning stays completely inert.
 func inputEngineOptionsFromConfig(cfg config.InputEngineConfig, cacheDir string, userFreq inputengine.UserFrequencyProvider) (inputengine.Options, bool) {
-	if !cfg.Enabled || (cfg.Mode != "" && cfg.Mode != "inline_hook" && cfg.Mode != "dual") {
+	if !cfg.Enabled || (cfg.Mode != "" && cfg.Mode != "inline_hook") {
 		return inputengine.Options{}, false
 	}
 	resolvedCache := strings.TrimSpace(cacheDir)
