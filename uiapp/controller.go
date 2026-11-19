@@ -1341,6 +1341,40 @@ func FormatInputSourceStatus(info host.InputSourceInfo) string {
 	return name + " · " + label
 }
 
+// toggleInlineIMEForced flips the own input engine between forced Chinese takeover and
+// auto mode. Forced mode exists because the engine deliberately stands down whenever a
+// non-ASCII system input source (Apple Pinyin, Sogou, Squirrel …) is active; without an
+// override the engine would be unreachable on a Mac whose system IME is Chinese.
+//
+// The hotkey consumes the key, so the active system IME never sees it: no double preedit.
+// Feedback goes through the same IME pill the keymap layer uses, because the candidate
+// panel only exists while composing.
+func (c *AppController) toggleInlineIMEForced() {
+	br, ok := c.Bridge.(bridge.InlineIMEForcer)
+	if !ok || br == nil {
+		return
+	}
+	next := !br.InlineIMEForced()
+	br.SetInlineIMEForced(next)
+
+	label := "中式输入 · 关"
+	if next {
+		label = "中式输入 · 开"
+	}
+	c.mu.Lock()
+	pillCb := c.OnShowIMEPill
+	onRepaint := c.OnRepaint
+	cfg := c.ConfigStore.Current()
+	c.mu.Unlock()
+
+	if pillCb != nil && cfg.Main.IME.ShowFloatingPill {
+		pillCb(label, nil)
+	}
+	if onRepaint != nil {
+		onRepaint()
+	}
+}
+
 // NotifyIMESwitchFailed records an IME switch the bridge could not apply and surfaces it in the
 // HUD/pill and the settings diagnostics card, so failures are never silent.
 func (c *AppController) NotifyIMESwitchFailed(err error) {
@@ -3315,6 +3349,10 @@ func (c *AppController) HandleTriggerEvent(ev host.TriggerEvent) {
 			Tab:     config.TabClipboard,
 			Context: &capCtx,
 		})
+
+	case host.TriggerInputEngineToggle:
+		c.toggleInlineIMEForced()
+		return
 
 	case host.TriggerSnippetKey:
 		// Any typed key ends the window in which Backspace undoes the last

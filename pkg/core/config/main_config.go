@@ -16,6 +16,9 @@ type TriggerConfig struct {
 	DoubleTapIntervalMs     int    `json:"doubleTapIntervalMs"`
 	CapsuleShortcut         string `json:"capsuleShortcut"`
 	ClipboardShortcut       string `json:"clipboardShortcut"`
+	// InputEngineToggleShortcut flips the own input engine between forced Chinese
+	// takeover and auto mode. Empty disables the hotkey.
+	InputEngineToggleShortcut string `json:"inputEngineToggleShortcut"`
 	SnippetExpansionEnabled bool   `json:"snippetExpansionEnabled"`
 	// SnippetBackspaceUndo reverts an expansion when Backspace is the very
 	// next key, restoring the typed trigger (as espanso's undo_backspace).
@@ -33,6 +36,7 @@ func DefaultTriggerConfig() TriggerConfig {
 		DoubleTapIntervalMs:     300,
 		CapsuleShortcut:         "option+space",
 		ClipboardShortcut:       "alt+shift+c",
+		InputEngineToggleShortcut: "ctrl+alt+;",
 		SnippetExpansionEnabled: true,
 		SnippetBackspaceUndo:    true,
 		LeaderRevealDelayMs:     DefaultLeaderRevealDelayMs,
@@ -76,6 +80,11 @@ func decodeTriggerConfig(tbl *toml.Table, path string) (TriggerConfig, error) {
 	} else if ok {
 		cfg.ClipboardShortcut = s
 	}
+	if s, ok, err := optionalString(tbl, "input_engine_toggle_shortcut", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.InputEngineToggleShortcut = s
+	}
 	if b, ok, err := optionalBool(tbl, "snippet_expansion_enabled", path); err != nil {
 		return cfg, err
 	} else if ok {
@@ -101,6 +110,9 @@ func (c TriggerConfig) toTOML() *toml.Table {
 	t.Set("double_tap_interval_ms", toml.IntVal(int64(c.DoubleTapIntervalMs)))
 	t.Set("capsule_shortcut", toml.StringVal(c.CapsuleShortcut))
 	t.Set("clipboard_shortcut", toml.StringVal(c.ClipboardShortcut))
+	if c.InputEngineToggleShortcut != "" {
+		t.Set("input_engine_toggle_shortcut", toml.StringVal(c.InputEngineToggleShortcut))
+	}
 	t.Set("snippet_expansion_enabled", toml.BoolVal(c.SnippetExpansionEnabled))
 	t.Set("snippet_backspace_undo", toml.BoolVal(c.SnippetBackspaceUndo))
 	t.Set("leader_reveal_delay_ms", toml.IntVal(int64(c.LeaderRevealDelayMs)))

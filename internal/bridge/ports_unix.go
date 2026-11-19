@@ -44,6 +44,13 @@ func (b *darwinBridge) SetInlineIMEHandler(fn func(host.InlineKeyEvent) bool) {
 	b.inlineMu.Unlock()
 }
 func (b *darwinBridge) SetInlineIMEEnabled(v bool) { b.inlineEnabled.Store(v) }
+
+// SetInlineIMEForced makes the own engine take over Chinese typing even while a
+// non-ASCII system input source (Apple Pinyin, Sogou, Squirrel …) is active.
+func (b *darwinBridge) SetInlineIMEForced(v bool) { b.inlineForced.Store(v) }
+
+// InlineIMEForced reports whether forced takeover is on.
+func (b *darwinBridge) InlineIMEForced() bool { return b.inlineForced.Load() }
 func (b *darwinBridge) callInline(ev host.InlineKeyEvent) bool {
 	b.inlineMu.RLock()
 	fn := b.inlineHandler
@@ -70,6 +77,9 @@ func (b *darwinBridge) isIMKInputSource() bool {
 // The gate is only consulted on the typing hot path when the engine is enabled, and
 // CurrentInputSource is a cached Carbon read, so this stays off the AX/IPC path.
 func (b *darwinBridge) inlineIMEGate() bool {
+	if b.inlineForced.Load() {
+		return true
+	}
 	cur, err := b.CurrentInputSource(context.Background())
 	if err != nil {
 		// Unknown input source: fail closed. Typing through the system IME still works;

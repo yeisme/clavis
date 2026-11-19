@@ -36,6 +36,15 @@ type HostService interface {
 
 // ExtendedHostService contains optional low-latency and process-management capabilities.
 // It is intentionally separate so existing embedders of HostService remain source-compatible.
+// InlineIMEForcer is the optional capability for platforms whose own input engine can be
+// forced to take over Chinese typing while another IME stays active. It is a separate,
+// narrow interface on purpose: adding methods to ExtendedHostService silently breaks every
+// embedder and mock that satisfies it by assertion.
+type InlineIMEForcer interface {
+	SetInlineIMEForced(forced bool)
+	InlineIMEForced() bool
+}
+
 type ExtendedHostService interface {
 	HostService
 	CommitText(ctx context.Context, text string, deleteCount int, cursorBackOffset int) error
@@ -147,6 +156,8 @@ type triggerRouter struct {
 	hasCapsuleHotkey   bool
 	clipboardHotkey    Hotkey
 	hasClipboardHotkey bool
+	imeToggleHotkey    Hotkey
+	hasIMEToggleHotkey bool
 }
 
 func newTriggerRouter(cfg config.TriggerConfig) *triggerRouter {
@@ -182,6 +193,13 @@ func (r *triggerRouter) UpdateConfig(cfg config.TriggerConfig) {
 	} else {
 		r.clipboardHotkey = Hotkey{}
 		r.hasClipboardHotkey = false
+	}
+	if hk, err := ParseHotkey(cfg.InputEngineToggleShortcut); err == nil {
+		r.imeToggleHotkey = hk
+		r.hasIMEToggleHotkey = true
+	} else {
+		r.imeToggleHotkey = Hotkey{}
+		r.hasIMEToggleHotkey = false
 	}
 }
 
@@ -249,6 +267,8 @@ func (r *triggerRouter) HandleKeyDownWithIME(
 	hasHK := r.hasCapsuleHotkey
 	clipHK := r.clipboardHotkey
 	hasClipHK := r.hasClipboardHotkey
+	imeHK := r.imeToggleHotkey
+	hasIMEHK := r.hasIMEToggleHotkey
 	snippetEnabled := r.cfg.SnippetExpansionEnabled
 	r.mu.RUnlock()
 
@@ -268,6 +288,17 @@ func (r *triggerRouter) HandleKeyDownWithIME(
 		return []host.TriggerEvent{{
 			Kind:        host.TriggerClipboardToggle,
 			Key:         clipHK.Key,
+			Modifiers:   append([]string(nil), modifiers...),
+			TimestampMs: nowMs,
+		}}, true
+	}
+
+	// Checked before the snippet branch: the toggle must work even while a secure
+	// field is focused, so it never depends on snippet state.
+	if hasIMEHK && imeHK.Matches(key, modifiers) {
+		return []host.TriggerEvent{{
+			Kind:        host.TriggerInputEngineToggle,
+			Key:         imeHK.Key,
 			Modifiers:   append([]string(nil), modifiers...),
 			TimestampMs: nowMs,
 		}}, true

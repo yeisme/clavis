@@ -526,6 +526,9 @@ type darwinBridge struct {
 	inlineMu      sync.RWMutex
 	inlineHandler func(host.InlineKeyEvent) bool
 	inlineEnabled atomic.Bool
+	// inlineForced bypasses the system-input-source gate: the user explicitly asked
+	// the own engine to take over Chinese typing while another IME stays active.
+	inlineForced atomic.Bool
 	ime           inputEngineState
 	shiftDown     bool
 	shiftHadKey   bool

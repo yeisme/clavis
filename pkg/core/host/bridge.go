@@ -125,6 +125,9 @@ const (
 	TriggerSnippetReset    TriggerKind = "snippet_reset"
 	// TriggerSelectionQuickBar opens the floating selection action bar.
 	TriggerSelectionQuickBar TriggerKind = "selection_quick_bar"
+	// TriggerInputEngineToggle flips the own input engine between forced Chinese
+	// takeover and auto mode (auto = only when the system input source is ASCII).
+	TriggerInputEngineToggle TriggerKind = "input_engine_toggle"
 	// TriggerInPlaceOptimize rewrites the focused field's draft into an upgraded prompt.
 	TriggerInPlaceOptimize TriggerKind = "in_place_optimize"
 )

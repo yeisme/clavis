@@ -19,6 +19,8 @@ func (b *linuxBridge) CommitText(ctx context.Context, text string, d, c int) err
 }
 func (b *linuxBridge) SetInlineIMEHandler(func(host.InlineKeyEvent) bool) {}
 func (b *linuxBridge) SetInlineIMEEnabled(bool)                           {}
+func (b *linuxBridge) SetInlineIMEForced(bool)                            {}
+func (b *linuxBridge) InlineIMEForced() bool                              { return false }
 func (b *linuxBridge) FastCaretAnchor(ctx context.Context) (host.CursorAnchor, error) {
 	return host.CursorAnchor{}, unsupported(ctx)
 }
