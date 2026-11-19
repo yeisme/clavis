@@ -35,6 +35,9 @@ const (
 	// widening the window past a short line of text.
 	candidatePanelMinWidth = 160
 	candSingleMinWidth    = 120
+	// candCommittedInkMix pulls the committed pinyin run toward muted: 0 = pure text,
+	// 1 = pure muted.
+	candCommittedInkMix = 0.35
 	candidatePanelMaxWidth = 448
 
 	// Vertical list geometry (must stay in 1:1 lockstep with renderVerticalCandidatePanel).
@@ -290,9 +293,13 @@ func renderCandidatePreedit(c *ui.Context, theme *ui.Theme, v inputengine.View, 
 			// The highlighted candidate may commit one syllable or the whole sentence;
 			// underlining the syllables it would take makes Enter predictable.
 			if head, tail := splitPreedit(v.Preedit, v.SelectedConsumed); head != "" && tail != "" {
+				// Four contrast levels, weakest first: page indicator < pending pinyin <
+				// committed pinyin < candidate text < selection fill. The committed run sits
+				// between text and muted so it reads stronger than the rest of the pinyin but
+				// never competes with the candidate it describes.
 				ui.Text(c, head).
 					FontSize(typeLabel).
-					TextColor(theme.Text).
+					TextColor(theme.Text.Mix(theme.TextMuted, candCommittedInkMix)).
 					SingleLine().
 					Underline().
 					Shrink(1).
