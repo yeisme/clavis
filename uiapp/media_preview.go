@@ -274,6 +274,6 @@ func (a *AppController) requestOriginalBitmap(path string, p *mediaPreviewState)
 		return bmp
 	}
 	p.loading = true
-	a.loadOriginalBitmapAsync(path)
+	a.scheduleOriginalBitmap(path)
 	return nil
 }

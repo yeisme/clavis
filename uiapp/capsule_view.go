@@ -543,8 +543,15 @@ func (a *AppController) renderOmniboxView(
 			if selectedIdx >= len(items) {
 				selectedIdx = len(items) - 1
 			}
+			// Only scroll when the selection left the viewport. Pointer hover
+			// and arrow keys inside the visible rows must not move the list:
+			// scrolling under a resting pointer makes rows slide beneath it and
+			// re-trigger hover, which reads as jitter.
 			if a.uiState.lastSelectedIdx != selectedIdx || a.uiState.lastTab != state.OmniboxTab {
-				a.uiState.listState.ScrollIntoView(selectedIdx)
+				first, last := a.uiState.listState.Visible()
+				if first > last || selectedIdx < first || selectedIdx > last {
+					a.uiState.listState.ScrollIntoView(selectedIdx)
+				}
 			}
 			a.uiState.listState.Selected = &selectedIdx
 			a.uiState.listState.Label = func(row int) string {

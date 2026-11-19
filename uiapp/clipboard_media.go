@@ -10,6 +10,7 @@ import (
 	"image/png"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/transfer"
@@ -235,6 +236,38 @@ func (c *AppController) decodeOriginalBitmap(path string) *ui.Bitmap {
 	c.originalCache[path] = bmp
 	c.mu.Unlock()
 	return bmp
+}
+
+// originalPreviewDwell is how long the selection must rest on an item before
+// its original image is decoded. Sweeping the pointer across rows therefore
+// decodes one image instead of one per row, and stale requests never win.
+const originalPreviewDwell = 120 * time.Millisecond
+
+// scheduleOriginalBitmap decodes path once the selection has rested on it for
+// originalPreviewDwell. A newer call cancels the pending one.
+func (c *AppController) scheduleOriginalBitmap(path string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return
+	}
+	c.mu.Lock()
+	if c.originalTimer != nil {
+		c.originalTimer.Stop()
+		c.originalTimer = nil
+	}
+	c.originalGen++
+	gen := c.originalGen
+	c.originalPath = path
+	c.originalTimer = time.AfterFunc(originalPreviewDwell, func() {
+		c.mu.Lock()
+		stale := c.originalGen != gen
+		c.mu.Unlock()
+		if stale {
+			return
+		}
+		c.loadOriginalBitmapAsync(path)
+	})
+	c.mu.Unlock()
 }
 
 func (c *AppController) loadOriginalBitmapAsync(path string) {

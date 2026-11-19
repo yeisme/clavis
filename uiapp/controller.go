@@ -235,6 +235,11 @@ type AppController struct {
 	thumbCache      map[string]*ui.Bitmap
 	originalCache   map[string]*ui.Bitmap
 	originalLoading map[string]bool
+	// originalTimer coalesces original-image decoding while the pointer sweeps
+	// across rows: only the item it settles on is decoded.
+	originalTimer *time.Timer
+	originalPath  string
+	originalGen   uint64
 
 	// Leader temporary ASCII IME lock state
 	preLeaderIMESourceID string
