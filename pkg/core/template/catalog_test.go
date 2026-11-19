@@ -124,7 +124,7 @@ func TestCanonicalRulesAndNoMutation(t *testing.T) {
 func TestMarshalFieldOrderOmissionsAndHTMLEscaping(t *testing.T) {
 	s := Solution{PackageID: "demo", ID: "x", Version: "1", Category: "text", Rights: "MIT", Maturity: "test", Locales: map[string]Locale{"en": {Title: "<>&"}}, RepositoryID: "runtime"}
 	actual, err := CanonicalSolutionDigest(s)
-	const canonical = `{"package_id":"demo","id":"x","version":"1","digest":"","category":"text","rights":"MIT","maturity":"test","locales":{"en":{"title":"\u003c\u003e\u0026","summary":"","usage":""}}}`
+	const canonical = `{"package_id":"demo","id":"x","version":"1","digest":"","category":"text","rights":"MIT","maturity":"test","locales":{"en":{"title":"\u003c\u003e\u0026","summary":""}}}`
 	if err != nil || actual != Digest([]byte(canonical)) {
 		t.Fatalf("field order / omitempty / HTML escaping differs: %s %v", actual, err)
 	}

@@ -54,10 +54,14 @@ type Solution struct {
 	RepositoryID string            `json:"repository_id,omitempty"`
 }
 
+// Locale mirrors promptrepo.LocalizedText exactly: usage and aliases are optional, and
+// the real catalog relies on it (15 locales omit usage, 40 carry aliases). Dropping the
+// omitempty tags or the Aliases field silently breaks every digest in the catalog.
 type Locale struct {
-	Title   string `json:"title"`
-	Summary string `json:"summary"`
-	Usage   string `json:"usage"`
+	Title   string   `json:"title"`
+	Summary string   `json:"summary"`
+	Usage   string   `json:"usage,omitempty"`
+	Aliases []string `json:"aliases,omitempty"`
 }
 
 type Template struct {
