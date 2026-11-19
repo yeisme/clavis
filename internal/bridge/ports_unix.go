@@ -54,6 +54,44 @@ func (b *darwinBridge) isIMKInputSource() bool {
 	cur, e := b.CurrentInputSource(context.Background())
 	return e == nil && cur.ID == "com.yeisme.clavis.inputmethod"
 }
+
+// inlineIMEGate decides whether the own input engine may consume a key on macOS.
+//
+// The engine auto-commits candidates and injects text itself, so it must never run
+// while another IME owns composition: that produces two competing preedits. Two
+// independent signals are required, cheapest first:
+//
+//  1. Our own IMK input source is active → the IMK helper owns typing, stand down.
+//  2. The active input source is not ASCII-capable (Apple Pinyin, Squirrel, Sogou …)
+//     → the system IME is composing, stand down even if no marked text is visible yet
+//     (marked-text detection needs Accessibility and returns false without it, which
+//     is exactly the case where we would otherwise double-compose).
+//
+// The gate is only consulted on the typing hot path when the engine is enabled, and
+// CurrentInputSource is a cached Carbon read, so this stays off the AX/IPC path.
+func (b *darwinBridge) inlineIMEGate() bool {
+	cur, err := b.CurrentInputSource(context.Background())
+	if err != nil {
+		// Unknown input source: fail closed. Typing through the system IME still works;
+		// silently taking over would corrupt composition we cannot observe.
+		return false
+	}
+	return inlineIMEGateFor(cur)
+}
+
+// inlineIMEGateFor is the pure decision behind inlineIMEGate, split out so the rule is
+// unit-testable without a real Carbon/TCC environment.
+func inlineIMEGateFor(cur host.InputSourceInfo) bool {
+	if cur.ID == "com.yeisme.clavis.inputmethod" {
+		return false
+	}
+	// On Windows-style sources one input source covers both scripts and Mode is the live
+	// signal; macOS reports script by input source, so IsASCII is authoritative there.
+	if cur.Mode != "" {
+		return cur.Mode == host.InputModeASCII
+	}
+	return cur.IsASCII
+}
 func (b *darwinBridge) FastCaretAnchor(ctx context.Context) (host.CursorAnchor, error) {
 	if err := ctx.Err(); err != nil {
 		return host.CursorAnchor{}, err

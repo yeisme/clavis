@@ -908,7 +908,7 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 				b.shiftDown = true
 				b.shiftHadKey = false
 			}
-			if !isDown && b.shiftDown && !b.shiftHadKey && b.inlineEnabled.Load() && !isSecureEventInputEnabled() && !b.isIMKInputSource() {
+			if !isDown && b.shiftDown && !b.shiftHadKey && b.inlineEnabled.Load() && !isSecureEventInputEnabled() && b.inlineIMEGate() {
 				b.shiftDown = false
 				// With double-shift selection armed, the first tap must wait out the
 				// double-tap window before it flips 中/英; otherwise one gesture would
@@ -983,7 +983,7 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 		if !hasNonShiftModifier(mods) && b.router.mayNeedMarkedText(unicodeStr) {
 			imeComposing = darwinHasMarkedText()
 		}
-		if b.inlineEnabled.Load() && !isSecureEventInputEnabled() && !b.isIMKInputSource() {
+		if b.inlineEnabled.Load() && !isSecureEventInputEnabled() && b.inlineIMEGate() {
 			if b.callInline(host.InlineKeyEvent{KeyName: keyName, Rune: unicodeStr, KeyCode: keyCode, Modifiers: mods, IsDown: true, TimestampMs: nowMs}) {
 				return 0
 			}
@@ -2861,7 +2861,7 @@ func (b *darwinBridge) deferShiftToggle(ev host.InlineKeyEvent) {
 		b.shiftMu.Lock()
 		b.shiftToggle = nil
 		b.shiftMu.Unlock()
-		if b.inlineEnabled.Load() && !isSecureEventInputEnabled() && !b.isIMKInputSource() {
+		if b.inlineEnabled.Load() && !isSecureEventInputEnabled() && b.inlineIMEGate() {
 			_ = b.callInline(ev)
 		}
 	})
