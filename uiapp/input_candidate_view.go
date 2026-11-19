@@ -287,14 +287,34 @@ func renderCandidatePreedit(c *ui.Context, theme *ui.Theme, v inputengine.View, 
 		Gap(candInnerGap).
 		AlignItems(ui.Center).
 		Children(func() {
-			ui.Text(c, v.Preedit).
-				FontSize(typeLabel).
-				TextColor(theme.TextMuted).
-				SingleLine().
-				TruncateMiddle().
-				Grow(1).
-				Shrink(1).
-				MinWidth(0)
+			// The highlighted candidate may commit one syllable or the whole sentence;
+			// underlining the syllables it would take makes Enter predictable.
+			if head, tail := splitPreedit(v.Preedit, v.SelectedConsumed); head != "" && tail != "" {
+				ui.Text(c, head).
+					FontSize(typeLabel).
+					TextColor(theme.Text).
+					SingleLine().
+					Underline().
+					Shrink(1).
+					MinWidth(0)
+				ui.Text(c, tail).
+					FontSize(typeLabel).
+					TextColor(theme.TextMuted).
+					SingleLine().
+					TruncateMiddle().
+					Grow(1).
+					Shrink(1).
+					MinWidth(0)
+			} else {
+				ui.Text(c, v.Preedit).
+					FontSize(typeLabel).
+					TextColor(theme.TextMuted).
+					SingleLine().
+					TruncateMiddle().
+					Grow(1).
+					Shrink(1).
+					MinWidth(0)
+			}
 			renderCandidateModeBadge(c, theme, v.ASCII)
 		})
 }
@@ -397,6 +417,19 @@ func renderCandidateCellContent(c *ui.Context, theme *ui.Theme, index int, cand 
 	if cand.AI {
 		ui.Text(c, "✦").FontSize(typeMicro).TextColor(markInk).SingleLine().MinWidth(candAIMarkerWidth).Shrink(0)
 	}
+}
+
+// splitPreedit divides the segmented pinyin after the first n syllables. head is empty when
+// n does not isolate a proper prefix (0, or every syllable), so callers render one plain run.
+func splitPreedit(preedit string, n int) (head, tail string) {
+	if n <= 0 || preedit == "" {
+		return "", preedit
+	}
+	segs := strings.Split(preedit, "'")
+	if n >= len(segs) {
+		return "", preedit
+	}
+	return strings.Join(segs[:n], "'"), strings.Join(segs[n:], "'")
 }
 
 func candidateNavText(v inputengine.View) string {

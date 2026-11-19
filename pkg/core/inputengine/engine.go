@@ -84,8 +84,12 @@ type View struct {
 	// shows one page at a time, so without it the UI cannot tell a typist that eight more
 	// pages exist ("也数根" used to sit on page 2 of 9 with nothing on screen saying so).
 	PageCount int
-	HasPrev   bool
-	HasNext   bool
+	// SelectedConsumed is how many leading syllables the highlighted candidate commits.
+	// The pinyin line marks those syllables so a typist can see whether Enter takes one
+	// syllable or the whole sentence before pressing it.
+	SelectedConsumed int
+	HasPrev          bool
+	HasNext          bool
 }
 
 // UserCandidate is a learned user word surfaced by a UserFrequencyProvider.
@@ -475,6 +479,9 @@ func (e *Engine) View() View {
 	}
 	v.HasPrev = e.page > 0
 	v.HasNext = end < len(e.cands)
+	if abs := e.page*e.opts.CandidateCount + e.sel; abs >= 0 && abs < len(e.cands) {
+		v.SelectedConsumed = e.cands[abs].consumed
+	}
 	if n := len(e.cands); n > 0 {
 		v.PageCount = (n + e.opts.CandidateCount - 1) / e.opts.CandidateCount
 	}
