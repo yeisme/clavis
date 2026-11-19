@@ -1,0 +1,153 @@
+{
+  "schema_version": "promptrepo.catalog.v0.1",
+  "repository": {
+    "id": "synthetic-demo",
+    "name": "Synthetic catalog",
+    "default_locale": "en",
+    "taxonomy_version": "demo.v1"
+  },
+  "generated_at": "2026-11-19T00:00:00Z",
+  "digest": "sha256:d39ed3783b52786faed23719b43f7efdca0dbd5d4391ed39cff437aaa41c093e",
+  "discovery": [
+    {
+      "package_id": "demo/writing",
+      "solution_id": "demo-summary",
+      "role": "main",
+      "locale": "en",
+      "title": "demo-summary",
+      "summary": "Synthetic index",
+      "media": [
+        "text"
+      ]
+    },
+    {
+      "package_id": "demo/code",
+      "solution_id": "demo-review",
+      "role": "main",
+      "locale": "en",
+      "title": "demo-review",
+      "summary": "Synthetic index",
+      "media": [
+        "text"
+      ]
+    },
+    {
+      "package_id": "demo/writing",
+      "solution_id": "demo-outline",
+      "role": "main",
+      "locale": "en",
+      "title": "demo-outline",
+      "summary": "Synthetic index",
+      "media": [
+        "text"
+      ]
+    }
+  ],
+  "solutions": [
+    {
+      "package_id": "demo/writing",
+      "id": "demo-summary",
+      "version": "1.0.0",
+      "digest": "sha256:024159c20c4a0d780d4eb79baa98052c4cdb6ca9b65ea2820746a2d4816555b7",
+      "category": "writing",
+      "tags": [
+        "synthetic"
+      ],
+      "capabilities": [
+        "text"
+      ],
+      "rights": "MIT",
+      "maturity": "exploratory",
+      "locales": {
+        "en": {
+          "title": "demo-summary",
+          "summary": "Synthetic <example> & demo",
+          "usage": "Testing only"
+        },
+        "zh-CN": {
+          "title": "演示",
+          "summary": "虚构测试",
+          "usage": "仅测试"
+        }
+      },
+      "templates": [
+        {
+          "role": "main",
+          "locale": "en",
+          "path": "solutions/writing/demo-summary/prompts/main.en.md",
+          "digest": "sha256:4da5f4c115b35de5eecefa47e3b7605b70399218be146c96b81f93bec5acc868"
+        }
+      ]
+    },
+    {
+      "package_id": "demo/code",
+      "id": "demo-review",
+      "version": "1.0.0",
+      "digest": "sha256:7463b8e9364afbf66997906ab555340e6a0be5a39d7bde41f948a98186895b5f",
+      "category": "code",
+      "tags": [
+        "synthetic"
+      ],
+      "capabilities": [
+        "text"
+      ],
+      "rights": "MIT",
+      "maturity": "exploratory",
+      "locales": {
+        "en": {
+          "title": "demo-review",
+          "summary": "Synthetic <example> & demo",
+          "usage": "Testing only"
+        },
+        "zh-CN": {
+          "title": "演示",
+          "summary": "虚构测试",
+          "usage": "仅测试"
+        }
+      },
+      "templates": [
+        {
+          "role": "main",
+          "locale": "en",
+          "path": "solutions/code/demo-review/prompts/main.en.md",
+          "digest": "sha256:7c9c0b57717ed1e59da23da0fc211c920844e53435a902bddf668eb3b0cbd05e"
+        }
+      ]
+    },
+    {
+      "package_id": "demo/writing",
+      "id": "demo-outline",
+      "version": "1.0.0",
+      "digest": "sha256:802491632f6195dd1420111c39a4245942cb2709c19f4d7833b7629e4f7beabc",
+      "category": "writing",
+      "tags": [
+        "synthetic"
+      ],
+      "capabilities": [
+        "text"
+      ],
+      "rights": "MIT",
+      "maturity": "exploratory",
+      "locales": {
+        "en": {
+          "title": "demo-outline",
+          "summary": "Synthetic <example> & demo",
+          "usage": "Testing only"
+        },
+        "zh-CN": {
+          "title": "演示",
+          "summary": "虚构测试",
+          "usage": "仅测试"
+        }
+      },
+      "templates": [
+        {
+          "role": "main",
+          "locale": "en",
+          "path": "solutions/writing/demo-outline/prompts/main.en.md",
+          "digest": "sha256:a53b57c9cd6225ea7f41d3a2fc1210aea7f97dc5abffbb7003d6903a9a6a20b2"
+        }
+      ]
+    }
+  ]
+}
