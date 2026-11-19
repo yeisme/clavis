@@ -67,8 +67,10 @@ type Result struct {
 
 // Candidate is one selectable item.
 type Candidate struct {
-	Text     string
-	consumed int  // number of leading segments this candidate covers
+	Text string
+	// Consumed is how many leading syllables picking this candidate commits. The UI reads
+	// it to tell a whole-phrase answer from a single character.
+	Consumed int
 	AI       bool // from the async AI source (shown with a marker)
 }
 
@@ -390,7 +392,7 @@ func (e *Engine) HandleKey(k Key) Result {
 			if e.cands[i].AI {
 				continue
 			}
-			if autoCand == nil && e.cands[i].consumed >= len(e.segs) {
+			if autoCand == nil && e.cands[i].Consumed >= len(e.segs) {
 				autoCand = &e.cands[i]
 			}
 		}
@@ -446,13 +448,13 @@ func (e *Engine) selectIndex(idx int) Result {
 	}
 	c := e.cands[abs]
 	e.prevCommit = c.Text
-	if c.consumed >= len(e.segs) {
+	if c.Consumed >= len(e.segs) {
 		e.clear()
 		return Result{Consume: true, Commit: c.Text, Changed: true}
 	}
-	rem := e.segs[c.consumed:]
-	if e.shuangpin && c.consumed < len(e.rawSegs) {
-		rem = e.rawSegs[c.consumed:]
+	rem := e.segs[c.Consumed:]
+	if e.shuangpin && c.Consumed < len(e.rawSegs) {
+		rem = e.rawSegs[c.Consumed:]
 	}
 	e.raw = strings.Join(rem, "'")
 	e.ai = nil
@@ -480,7 +482,7 @@ func (e *Engine) View() View {
 	v.HasPrev = e.page > 0
 	v.HasNext = end < len(e.cands)
 	if abs := e.page*e.opts.CandidateCount + e.sel; abs >= 0 && abs < len(e.cands) {
-		v.SelectedConsumed = e.cands[abs].consumed
+		v.SelectedConsumed = e.cands[abs].Consumed
 	}
 	if n := len(e.cands); n > 0 {
 		v.PageCount = (n + e.opts.CandidateCount - 1) / e.opts.CandidateCount
@@ -690,7 +692,7 @@ func (e *Engine) addCandidate(text string, consumed int, isAI bool) bool {
 	if !e.markSeen(text) {
 		return true
 	}
-	e.cands = append(e.cands, Candidate{Text: text, consumed: consumed, AI: isAI})
+	e.cands = append(e.cands, Candidate{Text: text, Consumed: consumed, AI: isAI})
 	return len(e.cands) < maxCandidates
 }
 

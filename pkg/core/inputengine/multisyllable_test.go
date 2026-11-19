@@ -126,14 +126,14 @@ func TestSentenceCandidatesFollowFirstPage(t *testing.T) {
 			// The remaining sentence candidates (shorter ones) follow the page.
 			for i, want := range tc.sentences[1:] {
 				c := e.cands[tc.page+i]
-				if c.Text != want || c.consumed != len(e.segs)-(i+1) {
-					t.Fatalf("slot %d = %q/%d, want %q/%d; all: %v", tc.page+i, c.Text, c.consumed, want, len(e.segs)-(i+1), allTexts(e))
+				if c.Text != want || c.Consumed != len(e.segs)-(i+1) {
+					t.Fatalf("slot %d = %q/%d, want %q/%d; all: %v", tc.page+i, c.Text, c.Consumed, want, len(e.segs)-(i+1), allTexts(e))
 				}
 			}
 			// The first syllable's characters past the first page are still all there, in order.
 			var rest []string
 			for _, c := range e.cands {
-				if c.consumed == 1 {
+				if c.Consumed == 1 {
 					rest = append(rest, c.Text)
 				}
 			}
@@ -186,10 +186,10 @@ func TestShortInputsKeepTheirCandidates(t *testing.T) {
 			}
 			singlesStarted := false
 			for i, c := range e.cands {
-				if c.consumed == 1 {
+				if c.Consumed == 1 {
 					singlesStarted = true
 				} else if singlesStarted {
-					t.Fatalf("candidate %d %q/%d after the single characters: %v", i, c.Text, c.consumed, allTexts(e))
+					t.Fatalf("candidate %d %q/%d after the single characters: %v", i, c.Text, c.Consumed, allTexts(e))
 				}
 			}
 		})
@@ -200,12 +200,12 @@ func TestShortInputsKeepTheirCandidates(t *testing.T) {
 func TestWholeInputWordSkipsSentenceCandidates(t *testing.T) {
 	e := New(Options{})
 	typeLetters(e, "zhonghuarenmingongheguo")
-	if e.cands[0].Text != "中华人民共和国" || e.cands[0].consumed != len(e.segs) {
-		t.Fatalf("first = %q/%d", e.cands[0].Text, e.cands[0].consumed)
+	if e.cands[0].Text != "中华人民共和国" || e.cands[0].Consumed != len(e.segs) {
+		t.Fatalf("first = %q/%d", e.cands[0].Text, e.cands[0].Consumed)
 	}
 	for _, c := range e.cands[1:] {
-		if c.consumed != 1 {
-			t.Fatalf("unexpected %q/%d: %v", c.Text, c.consumed, allTexts(e))
+		if c.Consumed != 1 {
+			t.Fatalf("unexpected %q/%d: %v", c.Text, c.Consumed, allTexts(e))
 		}
 	}
 }

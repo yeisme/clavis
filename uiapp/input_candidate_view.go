@@ -414,6 +414,12 @@ func renderCandidateCellContent(c *ui.Context, theme *ui.Theme, index int, cand 
 		Shrink(0)
 
 	t := ui.Text(c, cand.Text).FontSize(15).TextColor(textInk).SingleLine().Shrink(1).MinWidth(0)
+	// A multi-syllable candidate is a different kind of answer from a single character: it
+	// commits a whole phrase. Told apart by weight alone — a badge or icon here would be
+	// noise in a window that repaints on every keystroke.
+	if cand.Consumed > 1 {
+		t.FontWeight(500)
+	}
 	if growText {
 		t.Grow(1)
 	}
