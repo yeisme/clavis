@@ -126,9 +126,12 @@ func TestCandidatePanelWidthBand(t *testing.T) {
 		raw          string
 		natural, win int
 	}{
-		{"yeshugen", 354, 384},
+		// A1 promotes the whole-input sentence onto page 1, so the widest cell is now a
+		// sentence ("也数根" / "我是也数根") instead of a single character. The page grows a
+		// little but stays inside the 360..480 band; before A1 these were 354 (both inputs).
+		{"yeshugen", 386, 416},
 		{"nihao", 370, 384},
-		{"woshiyeshugen", 354, 384},
+		{"woshiyeshugen", 418, 448},
 		{"zhonghuarenmingongheguo", 448, 448},
 	} {
 		v := typedView(tc.raw)

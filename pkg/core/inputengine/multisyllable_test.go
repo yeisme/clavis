@@ -114,13 +114,20 @@ func TestSentenceCandidatesFollowFirstPage(t *testing.T) {
 			if len(e.cands) > maxCandidates {
 				t.Fatalf("%d candidates, cap is %d", len(e.cands), maxCandidates)
 			}
-			if got := texts(e.View()); !slices.Equal(got, singles[:tc.page]) {
-				t.Fatalf("first page = %v, want the first page of %q alone: %v", got, tc.first, singles[:tc.page])
+			// Page 1 keeps the top single in slot 1 (the number-key habit), promotes the
+			// best whole-input sentence into slot 2, then continues with the remaining
+			// singles — the one pushed off the page end stays reachable behind them.
+			wantPage := make([]string, 0, tc.page)
+			wantPage = append(wantPage, singles[0], tc.sentences[0])
+			wantPage = append(wantPage, singles[1:tc.page-1]...)
+			if got := texts(e.View()); !slices.Equal(got, wantPage) {
+				t.Fatalf("first page = %v, want [top single, best sentence, rest of pages singles]: %v", got, wantPage)
 			}
-			for i, want := range tc.sentences {
+			// The remaining sentence candidates (shorter ones) follow the page.
+			for i, want := range tc.sentences[1:] {
 				c := e.cands[tc.page+i]
-				if c.Text != want || c.consumed != len(e.segs)-i {
-					t.Fatalf("slot %d = %q/%d, want %q/%d; all: %v", tc.page+i, c.Text, c.consumed, want, len(e.segs)-i, allTexts(e))
+				if c.Text != want || c.consumed != len(e.segs)-(i+1) {
+					t.Fatalf("slot %d = %q/%d, want %q/%d; all: %v", tc.page+i, c.Text, c.consumed, want, len(e.segs)-(i+1), allTexts(e))
 				}
 			}
 			// The first syllable's characters past the first page are still all there, in order.

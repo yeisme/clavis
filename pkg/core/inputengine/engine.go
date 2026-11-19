@@ -844,12 +844,40 @@ func (e *Engine) buildCandidates() {
 // dropped. The singles tier is otherwise uncapped, so ye'shu'gen produced 60 "ye"
 // characters and nothing that reached shu or gen. Inputs of one or two syllables never get
 // here, so their lists are unchanged.
+//
+// The best whole-input sentence candidate is then promoted onto page 1, right behind the
+// top single. Appending it after the page made it invisible: the panel only shows one page,
+// so a typist saw seven "ye" characters and had no cue that a sentence answer existed two
+// pages away. Slot 1 keeps the top single so the existing number-key habit still works, and
+// the single displaced from the page tail returns to the spill list, so no character is
+// lost.
 func (e *Engine) spliceSentenceCandidates(singlesStart int) {
 	head := e.cands[singlesStart].Text
 	cut := min(singlesStart+e.opts.CandidateCount, len(e.cands))
 	e.spill = append(e.spill[:0], e.cands[cut:]...)
 	e.cands = e.cands[:cut]
+
+	before := len(e.cands)
 	e.addSentenceCandidates(head)
+	if len(e.cands) > before && cut-singlesStart > 1 {
+		// Take the best whole-input sentence out of the appended block, then shift the page
+		// tail one slot right and drop it into slot 2. The single pushed off the page end
+		// goes to the spill list, so it stays reachable on a later page.
+		promoted := e.cands[before]
+		copy(e.cands[before:], e.cands[before+1:])
+		e.cands = e.cands[:len(e.cands)-1]
+
+		page := e.cands[singlesStart:cut]
+		displaced := page[len(page)-1]
+		// The displaced single belonged before the spill block, so it goes to its head to
+		// keep the first syllable's characters in frequency order.
+		e.spill = append(e.spill, Candidate{})
+		copy(e.spill[1:], e.spill[:len(e.spill)-1])
+		e.spill[0] = displaced
+		copy(page[2:], page[1:len(page)-1])
+		page[1] = promoted
+	}
+
 	for _, c := range e.spill {
 		if len(e.cands) >= maxCandidates {
 			break
