@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "out": "build",
   "macos": {
-    "signingIdentity": "-",
+    "signingIdentity": "Clavis Local Signing",
     "infoPlist": {
       "LSUIElement": true,
       "NSAccessibilityUsageDescription": "Clavis needs Accessibility permission to resolve cursor position, manage windows, and inject expanded snippets or AI output.",
