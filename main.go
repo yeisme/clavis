@@ -540,9 +540,36 @@ func (a *desktopApp) start() {
 	a.goBG(func(bgCtx context.Context) { a.runClipboardPoller(bgCtx) })
 	a.goBG(a.watchPermissions)
 	go a.refreshPermissionsAsync()
-	if planOnboarding(dataDir, hadData, time.Now()) {
+	// The guide is also the permission flow. A machine that finished the guide without
+	// granting Accessibility/Input Monitoring would otherwise never be asked again: the
+	// marker says done, so every later launch is silent and the keyboard features stay
+	// dead with no explanation. Re-show the guide while a required grant is missing.
+	if planOnboarding(dataDir, hadData, time.Now()) || a.missingRequiredPermissions() {
 		a.showOnboarding()
 	}
+}
+
+// missingRequiredPermissions reports whether a grant the keyboard features depend on is
+// still absent. It is best-effort: an unavailable bridge or a query error counts as
+// "not missing", so a transient failure never nags the user with a guide.
+func (a *desktopApp) missingRequiredPermissions() bool {
+	br := a.hostBridge
+	if br == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	status, err := br.Permissions(ctx)
+	if err != nil {
+		return false
+	}
+	return permissionsRequiredMissing(status)
+}
+
+// permissionsRequiredMissing is the pure rule behind missingRequiredPermissions, kept
+// separable so the launch-time guide decision stays unit-testable without a bridge.
+func permissionsRequiredMissing(status host.PermissionStatus) bool {
+	return !status.Accessibility || !status.InputMonitoring
 }
 
 // closeHides is the close handler of a window that only hides: Clavis lives
