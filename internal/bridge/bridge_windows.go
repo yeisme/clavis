@@ -387,6 +387,9 @@ func (b *windowsBridge) UpdateKeymapConfig(cfg config.KeymapConfig) {
 	if b.keymapEngine != nil {
 		b.keymapEngine.UpdateConfig(cfg)
 	}
+	if b.triggers != nil {
+		b.triggers.setKeyBindings(cfg.Bindings)
+	}
 	b.mu.Lock()
 	b.lastLayer = ""
 	b.mu.Unlock()
@@ -704,6 +707,17 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 
 	if isDown {
 		keyNameForTrigger := winVKToKeyName(vk)
+		if b.triggers != nil && keyNameForTrigger != "" {
+			if action, ok := b.triggers.bindingFor(keyNameForTrigger, winActiveModifiers(), b.cachedFrontmostProcessName()); ok {
+				b.emitTriggerEvents([]host.TriggerEvent{{
+					Kind:        host.TriggerKeyBinding,
+					Action:      action,
+					Key:         keyNameForTrigger,
+					TimestampMs: nowMs,
+				}})
+				return 1
+			}
+		}
 		if b.triggers != nil && b.triggers.shortcutMatches(keyNameForTrigger, winActiveModifiers()) && !b.hookSecureInput(time.Now()) {
 			b.emitTriggerEvents([]host.TriggerEvent{optimizeEvent(nowMs)})
 			return 1

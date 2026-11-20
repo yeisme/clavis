@@ -574,6 +574,9 @@ func (b *darwinBridge) UpdateKeymapConfig(cfg config.KeymapConfig) {
 	if b.keymapEngine != nil {
 		b.keymapEngine.UpdateConfig(cfg)
 	}
+	if b.triggers != nil {
+		b.triggers.setKeyBindings(cfg.Bindings)
+	}
 	b.mu.Lock()
 	b.lastLayer = ""
 	b.mu.Unlock()
@@ -984,6 +987,20 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 		}
 		keyName := darwinKeyCodeToName(keyCode)
 		mods := darwinFlagsToModifiers(flags)
+		// Configured keymap bindings win over the built-in optimize chord so a user who
+		// rebinds it is not shadowed by the default.
+		if b.triggers != nil && keyName != "" && !isSecureEventInputEnabled() {
+			if action, ok := b.triggers.bindingFor(keyName, mods, b.cachedFrontmostBundleID()); ok {
+				b.emitTriggerEvents([]host.TriggerEvent{{
+					Kind:        host.TriggerKeyBinding,
+					Action:      action,
+					Key:         keyName,
+					Modifiers:   mods,
+					TimestampMs: nowMs,
+				}})
+				return 0
+			}
+		}
 		if b.triggers != nil && b.triggers.shortcutMatches(keyName, mods) && !isSecureEventInputEnabled() {
 			b.emitTriggerEvents([]host.TriggerEvent{optimizeEvent(nowMs)})
 			return 0

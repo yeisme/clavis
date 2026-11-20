@@ -85,6 +85,13 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 		})
 	}
 
+	for _, err := range ValidateKeyBindings(main.Keymap.Bindings) {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "keymap.bindings", Severity: SeverityError,
+			Message: err.Error(),
+		})
+	}
+
 	shortcut := strings.TrimSpace(main.Trigger.CapsuleShortcut)
 	if shortcut == "" {
 		issues = append(issues, ValidationIssue{
@@ -789,4 +796,57 @@ func IsHexColor(s string) bool {
 		}
 	}
 	return true
+}
+
+// KnownKeyBindingActions lists the action IDs a [[keymap.bindings]] entry may name. Keeping
+// this closed means a typo fails the load instead of producing a key that silently does
+// nothing — the hardest kind of bug to notice.
+var KnownKeyBindingActions = map[string]bool{
+	"ai_optimize":  true, // rewrite the focused draft in place
+	"ai_continue":  true, // suggest sentences that could follow the caret
+	"ai_explain":   true,
+	"ai_translate": true,
+	"ai_polish":    true,
+	"toggle_ime":   true,
+}
+
+// chordHasNonShiftModifier reports whether a chord string carries command, option or control.
+func chordHasNonShiftModifier(chord string) bool {
+	for _, part := range strings.Split(chord, "+") {
+		switch strings.ToLower(strings.TrimSpace(part)) {
+		case "cmd", "command", "super", "opt", "option", "alt", "ctrl", "control":
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateKeyBindings rejects bindings that cannot work: unknown action, chord without a
+// modifier (would steal plain typing), or the same chord bound to two different actions.
+func ValidateKeyBindings(bindings []KeyBinding) []error {
+	var errs []error
+	owner := map[string]string{}
+	for i, b := range bindings {
+		action := strings.ToLower(strings.TrimSpace(b.Action))
+		if !KnownKeyBindingActions[action] {
+			errs = append(errs, fmt.Errorf("keymap.bindings[%d]: unknown action %q", i, b.Action))
+		}
+		for _, chord := range b.Keys {
+			norm := strings.ToLower(strings.TrimSpace(chord))
+			if norm == "" {
+				errs = append(errs, fmt.Errorf("keymap.bindings[%d]: empty key", i))
+				continue
+			}
+			// A chord must carry a non-shift modifier: a bare key would shadow typing.
+			if !chordHasNonShiftModifier(norm) {
+				errs = append(errs, fmt.Errorf("keymap.bindings[%d]: %q needs command, option or control", i, chord))
+			}
+			if prev, ok := owner[norm]; ok && prev != action {
+				errs = append(errs, fmt.Errorf("keymap.bindings[%d]: %q is bound to both %q and %q", i, chord, prev, action))
+				continue
+			}
+			owner[norm] = action
+		}
+	}
+	return errs
 }

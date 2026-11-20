@@ -130,11 +130,16 @@ const (
 	TriggerInputEngineToggle TriggerKind = "input_engine_toggle"
 	// TriggerInPlaceOptimize rewrites the focused field's draft into an upgraded prompt.
 	TriggerInPlaceOptimize TriggerKind = "in_place_optimize"
+	// TriggerKeyBinding fires when a [[keymap.bindings]] chord matches. The action ID travels
+	// in TriggerEvent.Action, so one trigger kind serves every binding.
+	TriggerKeyBinding TriggerKind = "key_binding"
 )
 
 // TriggerEvent describes a global hotkey or keystroke event captured by the host.
 type TriggerEvent struct {
-	Kind        TriggerKind      `json:"kind"`
+	Kind TriggerKind `json:"kind"`
+	// Action is the binding's action ID for TriggerKeyBinding events.
+	Action      string           `json:"action,omitempty"`
 	Key         string           `json:"key,omitempty"`
 	Rune        string           `json:"rune,omitempty"`
 	Modifiers   []string         `json:"modifiers,omitempty"`

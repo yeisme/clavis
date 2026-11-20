@@ -410,6 +410,12 @@ type AIConfig struct {
 	KeychainAccount string      `json:"keychainAccount"`
 	APIKeyEnvVar    string      `json:"apiKeyEnvVar,omitempty"`
 	Profiles        []AIProfile `json:"profiles"`
+	// ContinueEnabled turns on the "guess the next sentence" action. Off by default: it uploads
+	// the user's unfinished text, which is more sensitive than a pinyin string.
+	ContinueEnabled bool `json:"continueEnabled"`
+	// ContinueDisclosed records that the one-time "this sends your text" notice was shown, so
+	// it is not repeated on every use.
+	ContinueDisclosed bool `json:"continueDisclosed"`
 }
 
 func DefaultAIConfig() AIConfig {
@@ -752,6 +758,17 @@ func decodeAIConfig(tbl *toml.Table, path string) (AIConfig, error) {
 		hasFlatField = true
 	}
 
+	if b, ok, err := optionalBool(tbl, "continue_enabled", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.ContinueEnabled = b
+	}
+	if b, ok, err := optionalBool(tbl, "continue_disclosed", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.ContinueDisclosed = b
+	}
+
 	profileTables, hasProfiles, err := optionalTableArray(tbl, "profiles", path)
 	if err != nil {
 		return cfg, err
@@ -852,6 +869,12 @@ func (c AIConfig) toTOML() *toml.Table {
 	t.Set("system_prompt", toml.StringVal(c.SystemPrompt))
 	t.Set("keychain_account", toml.StringVal(c.KeychainAccount))
 	t.Set("api_key_env_var", toml.StringVal(c.APIKeyEnvVar))
+	if c.ContinueEnabled {
+		t.Set("continue_enabled", toml.BoolVal(true))
+	}
+	if c.ContinueDisclosed {
+		t.Set("continue_disclosed", toml.BoolVal(true))
+	}
 	if len(c.Profiles) > 0 {
 		vals := make([]toml.Value, len(c.Profiles))
 		for i, p := range c.Profiles {
@@ -863,6 +886,18 @@ func (c AIConfig) toTOML() *toml.Table {
 }
 
 // KeyRemapRule defines a low-level tap/hold or direct key remap rule.
+// KeyBinding maps a modifier chord to a named action. Unlike KeyRemapRule (which remaps one
+// key to another key), a binding runs a Clavis action and never re-synthesises input.
+type KeyBinding struct {
+	// Keys are the chords that fire the action, e.g. "ctrl+option+return". Several may be
+	// listed for the same action.
+	Keys []string `json:"keys"`
+	// Action is an entry from the AI/action registry ("ai_optimize", "ai_continue", ...).
+	Action string `json:"action"`
+	// AppBundleIDs limits the binding to those apps; empty means everywhere.
+	AppBundleIDs []string `json:"appBundleIds,omitempty"`
+}
+
 type KeyRemapRule struct {
 	From         string   `json:"from"`
 	Tap          string   `json:"tap,omitempty"`
@@ -919,6 +954,9 @@ type KeymapConfig struct {
 	CapsLockHold       string         `json:"capsLockHold"`
 	NavLayerEnabled    bool           `json:"navLayerEnabled"`
 	Remaps             []KeyRemapRule `json:"remaps"`
+	// Bindings run Clavis actions on a chord. This is what lets the AI actions be reachable
+	// from a key the user picks, instead of the one chord that used to be hard-coded.
+	Bindings []KeyBinding `json:"bindings"`
 }
 
 func DefaultKeymapConfig() KeymapConfig {
@@ -929,6 +967,12 @@ func DefaultKeymapConfig() KeymapConfig {
 		CapsLockHold:       "nav",
 		NavLayerEnabled:    true,
 		Remaps:             []KeyRemapRule{},
+		// Ship one binding so the capability is discoverable instead of hidden behind a chord
+		// nobody knows about. Users can rebind or remove it.
+		Bindings: []KeyBinding{
+			{Keys: []string{"ctrl+option+return"}, Action: "ai_continue"},
+			{Keys: []string{"ctrl+option+o"}, Action: "ai_optimize"},
+		},
 	}
 }
 
@@ -977,7 +1021,53 @@ func decodeKeymapConfig(tbl *toml.Table, path string) (KeymapConfig, error) {
 		}
 		cfg.Remaps = remaps
 	}
+	bindTables, hasBindings, err := optionalTableArray(tbl, "bindings", path)
+	if err != nil {
+		return cfg, err
+	}
+	if hasBindings {
+		bindings := make([]KeyBinding, 0, len(bindTables))
+		for i, bt := range bindTables {
+			b, err := decodeKeyBinding(bt, fmt.Sprintf("%s.bindings[%d]", path, i))
+			if err != nil {
+				return cfg, err
+			}
+			bindings = append(bindings, b)
+		}
+		cfg.Bindings = bindings
+	}
 	return cfg, nil
+}
+
+// decodeKeyBinding reads one [[keymap.bindings]] entry.
+func decodeKeyBinding(tbl *toml.Table, path string) (KeyBinding, error) {
+	var b KeyBinding
+	keys, ok, err := optionalStringArray(tbl, "keys", path)
+	if err != nil {
+		return b, err
+	}
+	if !ok || len(keys) == 0 {
+		if single, okSingle, errSingle := optionalString(tbl, "key", path); errSingle != nil {
+			return b, errSingle
+		} else if okSingle && strings.TrimSpace(single) != "" {
+			keys = []string{single}
+		}
+	}
+	if len(keys) == 0 {
+		return b, fmt.Errorf("%s: keys is required (e.g. keys = [\"ctrl+option+return\"])", path)
+	}
+	action, err := requiredString(tbl, "action", path)
+	if err != nil {
+		return b, err
+	}
+	b.Keys = keys
+	b.Action = strings.TrimSpace(action)
+	if apps, okApps, errApps := optionalStringArray(tbl, "apps", path); errApps != nil {
+		return b, errApps
+	} else if okApps {
+		b.AppBundleIDs = apps
+	}
+	return b, nil
 }
 
 func (c KeymapConfig) toTOML() *toml.Table {
@@ -993,6 +1083,33 @@ func (c KeymapConfig) toTOML() *toml.Table {
 			vals[i] = toml.TableVal(r.toTOML())
 		}
 		t.Set("remaps", toml.ArrayVal(vals))
+	}
+	if len(c.Bindings) > 0 {
+		vals := make([]toml.Value, len(c.Bindings))
+		for i, b := range c.Bindings {
+			vals[i] = toml.TableVal(b.toTOML())
+		}
+		t.Set("bindings", toml.ArrayVal(vals))
+	}
+	return t
+}
+
+func (b KeyBinding) toTOML() *toml.Table {
+	t := toml.NewTable()
+	if len(b.Keys) > 0 {
+		vals := make([]toml.Value, len(b.Keys))
+		for i, k := range b.Keys {
+			vals[i] = toml.StringVal(k)
+		}
+		t.Set("keys", toml.ArrayVal(vals))
+	}
+	t.Set("action", toml.StringVal(b.Action))
+	if len(b.AppBundleIDs) > 0 {
+		vals := make([]toml.Value, len(b.AppBundleIDs))
+		for i, a := range b.AppBundleIDs {
+			vals[i] = toml.StringVal(a)
+		}
+		t.Set("apps", toml.ArrayVal(vals))
 	}
 	return t
 }

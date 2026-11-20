@@ -23,6 +23,9 @@ type triggerRuntime struct {
 	// without it the engine can never engage while a non-ASCII system IME is active.
 	rightShift *DoubleTapDetector
 	leftDown   atomic.Bool
+	// bindings maps a modifier chord to an action ID ([[keymap.bindings]]). Unlike remaps,
+	// these never synthesise input: they run a Clavis action and consume the chord.
+	bindings []keyBindingEntry
 }
 
 func newTriggerRuntime() *triggerRuntime {
@@ -45,6 +48,68 @@ func (r *triggerRuntime) shortcutMatches(key string, mods []string) bool {
 	h := r.shortcut.Load()
 	return h != nil && h.Matches(key, mods)
 }
+type keyBindingEntry struct {
+	hotkey       Hotkey
+	action       string
+	appBundleIDs []string
+}
+
+// setKeyBindings compiles the configured chords. Invalid chords are skipped here because
+// config validation already reported them; failing the hot path over a bad chord would break
+// typing.
+func (r *triggerRuntime) setKeyBindings(bindings []config.KeyBinding) {
+	compiled := make([]keyBindingEntry, 0, len(bindings))
+	for _, b := range bindings {
+		action := strings.ToLower(strings.TrimSpace(b.Action))
+		if action == "" {
+			continue
+		}
+		for _, chord := range b.Keys {
+			h, err := ParseHotkey(chord)
+			if err != nil {
+				continue
+			}
+			compiled = append(compiled, keyBindingEntry{
+				hotkey:       h,
+				action:       action,
+				appBundleIDs: b.AppBundleIDs,
+			})
+		}
+	}
+	r.mu.Lock()
+	r.bindings = compiled
+	r.mu.Unlock()
+}
+
+// bindingFor returns the action ID whose chord matches, honouring the per-app restriction.
+func (r *triggerRuntime) bindingFor(key string, modifiers []string, appBundleID string) (string, bool) {
+	r.mu.RLock()
+	bindings := r.bindings
+	r.mu.RUnlock()
+	for _, b := range bindings {
+		if !bindingAppMatches(b.appBundleIDs, appBundleID) {
+			continue
+		}
+		if b.hotkey.Matches(key, modifiers) {
+			return b.action, true
+		}
+	}
+	return "", false
+}
+
+func bindingAppMatches(ids []string, appBundleID string) bool {
+	if len(ids) == 0 {
+		return true
+	}
+	app := strings.TrimSpace(appBundleID)
+	for _, id := range ids {
+		if strings.EqualFold(strings.TrimSpace(id), app) {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *triggerRuntime) setSelection(c config.SelectionBarConfig) {
 	r.mu.Lock()
 	r.selection = c

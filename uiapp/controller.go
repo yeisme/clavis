@@ -1462,6 +1462,25 @@ func (c *AppController) toggleInlineIMEForced() {
 	}
 }
 
+// handleKeyBindingAction runs the action a [[keymap.bindings]] chord resolved to. The action
+// registry is closed set, so an unknown ID is a config bug reported at load time, not here.
+func (c *AppController) handleKeyBindingAction(action string) {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "ai_optimize":
+		go c.startInPlaceTransform(false, "optimize")
+	case "ai_explain":
+		go c.startInPlaceTransform(false, "explain")
+	case "ai_translate":
+		go c.startInPlaceTransform(false, "translate")
+	case "ai_polish":
+		go c.startInPlaceTransform(false, "polish")
+	case "ai_continue":
+		go c.startAIContinue()
+	case "toggle_ime":
+		c.toggleInlineIMEForced()
+	}
+}
+
 // NotifyIMESwitchFailed records an IME switch the bridge could not apply and surfaces it in the
 // HUD/pill and the settings diagnostics card, so failures are never silent.
 func (c *AppController) NotifyIMESwitchFailed(err error) {
@@ -3458,6 +3477,9 @@ func (c *AppController) HandleTriggerEvent(ev host.TriggerEvent) {
 
 	case host.TriggerInPlaceOptimize:
 		go c.startInPlaceTransform(false, "")
+
+	case host.TriggerKeyBinding:
+		c.handleKeyBindingAction(ev.Action)
 
 	case host.TriggerSelectionQuickBar:
 		go c.showSelectionQuickBar()
