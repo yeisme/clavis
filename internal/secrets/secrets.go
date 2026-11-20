@@ -31,6 +31,10 @@ const (
 	KeySourceNone     APIKeySource = "none"
 	KeySourceKeychain APIKeySource = "keychain"
 	KeySourceEnv      APIKeySource = "env"
+	// KeySourceFile means the key came from the 0600 keys file rather than the OS keychain.
+	// Preferred on macOS, where keychain ACLs are bound to a code signature and a rebuilt
+	// locally signed app re-prompts for authorisation on every read.
+	KeySourceFile APIKeySource = "file"
 )
 
 // DefaultEnvVarForProvider returns the canonical API key environment variable for a provider.

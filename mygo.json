@@ -10,7 +10,9 @@
       "LSUIElement": true,
       "NSAccessibilityUsageDescription": "Clavis needs Accessibility permission to resolve cursor position, manage windows, and inject expanded snippets or AI output.",
       "NSInputMonitoringUsageDescription": "Clavis needs Input Monitoring permission to detect global Leader keys, double-tap modifiers, and inline snippet triggers.",
-      "NSAppleEventsUsageDescription": "Clavis needs Apple Events permission to launch applications and inspect frontmost application context."
+      "NSAppleEventsUsageDescription": "Clavis needs Apple Events permission to launch applications and inspect frontmost application context.",
+      "NSSupportsSuddenTermination": false,
+      "NSSupportsAutomaticTermination": false
     }
   },
   "linux": {

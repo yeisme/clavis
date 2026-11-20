@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/yeisme/clavis/internal/bridge"
+	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
@@ -31,6 +32,15 @@ func hasSelfCheckFlag(args []string) bool {
 // and composition, permissions, and the macOS native input-method bundle.
 //
 // It is read-only: no config writes, no engine installation, no persistence.
+// mustLaunchAgentPath returns the keep-alive plist path, or "" when it cannot be resolved.
+func mustLaunchAgentPath() string {
+	p, err := bridge.LaunchAgentPath()
+	if err != nil {
+		return ""
+	}
+	return p
+}
+
 func runSelfCheck(w io.Writer) error {
 	cfgDir := resolveConfigDir()
 	fmt.Fprintf(w, "Clavis self-check (%s/%s)\n", runtime.GOOS, runtime.GOARCH)
@@ -87,6 +97,29 @@ func runSelfCheck(w io.Writer) error {
 		}
 	} else {
 		fmt.Fprintf(w, "permissions: query failed: %v\n", err)
+	}
+
+	// --- operational state ---------------------------------------------------
+	// These two lines answer the questions that cost the most time when they are missing:
+	// "is the app that should be handling my typing actually running?" and "where does the AI
+	// key come from?". Both failures look like unrelated bugs from the outside — the user just
+	// sees the system IME's candidate window and an unexplained authorisation dialog.
+	if runtime.GOOS == "darwin" {
+		fmt.Fprintf(w, "keep-alive agent: installed=%v path=%q\n", bridge.LaunchAgentInstalled(), mustLaunchAgentPath())
+	}
+	keysPath := secrets.DefaultKeysPath(cfgDir)
+	if info, err := os.Stat(keysPath); err == nil {
+		src := secrets.NewFileStore(keysPath)
+		// Probe the profile the user actually configured, not the default one.
+		probe := cfg.Main.AI.ActiveProfile()
+		if srcName, srcErr := src.ResolveAPIKeySource(probe.KeychainAccount); srcErr == nil && srcName != secrets.KeySourceNone {
+			fmt.Fprintf(w, "ai key source: %s (%s, mode %04o, account %q)\n",
+				srcName, keysPath, info.Mode().Perm(), probe.KeychainAccount)
+		} else {
+			fmt.Fprintf(w, "ai key source: file present but no key for %q (%s)\n", probe.KeychainAccount, keysPath)
+		}
+	} else {
+		fmt.Fprintf(w, "ai key source: none (%s missing)\n", keysPath)
 	}
 
 	// --- macOS native input method ------------------------------------------

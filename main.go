@@ -253,6 +253,27 @@ func seedConfiguredUserWords(ctx context.Context, cfgStore *config.ConfigStore, 
 	return true
 }
 
+// ensureLaunchAgent installs the launchd keep-alive job on first run and after the app moves
+// to a new path. Failures are non-fatal: the app still works, it just won't self-heal.
+func (a *desktopApp) ensureLaunchAgent() {
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		return
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil && resolved != "" {
+		exe = resolved
+	}
+	path, err := bridge.LaunchAgentPath()
+	if err != nil {
+		return
+	}
+	// Reinstall when the plist is missing or points at a stale executable path.
+	if data, readErr := os.ReadFile(path); readErr == nil && strings.Contains(string(data), exe) {
+		return
+	}
+	_, _ = bridge.InstallLaunchAgent(exe)
+}
+
 func (a *desktopApp) start() {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -262,6 +283,11 @@ func (a *desktopApp) start() {
 	if err != nil {
 		cfg = config.DefaultConfig()
 	}
+
+	// Keep the process alive. macOS terminates accessory apps it considers idle, and an input
+	// method that can vanish is not an input method: the user silently drops back to the system
+	// IME. KeepAlive restarts only after an abnormal exit, so Quit still means quit.
+	a.ensureLaunchAgent()
 	// Resolve the UI language before the first frame renders: an explicit
 	// [appearance].language wins; "auto" follows the OS preferred languages.
 	i18n.SetPreferredLanguagesProvider(mygo.App.PreferredLanguages)
@@ -304,7 +330,16 @@ func (a *desktopApp) start() {
 		clipStore = clipboard.NewMemoryStore(clipboard.NewPrivacyFilterFromConfig(cfg.Main.Clipboard))
 	}
 
-	secretStore := secrets.NewMyGoSecretsStore(keychainService)
+	// Keys live in a 0600 file, not the keychain. macOS binds a keychain item to the code
+	// signature that stored it; a rebuilt locally signed app no longer matches, so every read
+	// raised a SecurityAgent authorisation dialog — mid-typing, on the AI path. The keychain
+	// stays reachable only to migrate keys stored by an older build.
+	keychainStore := secrets.NewMyGoSecretsStore(keychainService)
+	fileStore := secrets.NewFileStore(secrets.DefaultKeysPath(cfgDir))
+	secretStore := &secrets.LayeredStore{File: fileStore, Keychain: keychainStore}
+	// Keychain fallback stays off: the key now lives in the 0600 file, and reading the
+	// keychain from the AI path is exactly what raised an authorisation dialog on every
+	// keystroke after this app was rebuilt. Migration was done once by hand.
 	appProvider := apps.NewMyGoAppProvider()
 	hostBridge := bridge.NewHostService(
 		bridge.WithTriggerConfig(cfg.Main.Trigger),
