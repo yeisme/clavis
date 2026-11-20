@@ -91,7 +91,7 @@ cp "$ROOT_DIR/LICENSE" "$ROOT_DIR/THIRD-PARTY.md" "$ZIP_STAGE/"
   find Clavis.app -type f -exec shasum -a 256 {} + | LC_ALL=C sort
 ) > "$APP.sha256"
 (
-  cd "$BUILD_DIR"
+  cd "$(dirname "$DMG")"
   shasum -a 256 "$(basename "$DMG")"
 ) > "$DMG.sha256"
 (
