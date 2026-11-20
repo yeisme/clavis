@@ -31,7 +31,15 @@ func inputEngineConfigEqual(a, b config.InputEngineConfig) bool {
 		a.UserLearning == b.UserLearning &&
 		a.IMKSocketPath == b.IMKSocketPath &&
 		slices.Equal(a.FuzzyPinyin, b.FuzzyPinyin) &&
-		slices.Equal(a.CustomDictPaths, b.CustomDictPaths)
+		slices.Equal(a.CustomDictPaths, b.CustomDictPaths) &&
+		slices.Equal(a.UserWords, b.UserWords) &&
+		a.AutoSeedFullName == b.AutoSeedFullName &&
+		a.SeededFullName == b.SeededFullName
+}
+
+// InputEngineBlocklistHost accepts the local blocklist without coupling the bridge to storage.
+type InputEngineBlocklistHost interface {
+	UpdateInputEngineBlockedWords(words []string)
 }
 
 // InputEngineCommit describes one committed candidate from the own input engine.

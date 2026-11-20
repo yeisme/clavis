@@ -114,6 +114,7 @@ type Options struct {
 	DictCacheDir     string                // optional cache dir for compiled .clvdict
 	Dictionary       Dictionary            // optional explicit dictionary override
 	UserFrequency    UserFrequencyProvider // optional RAM-only unigram/bigram booster (nil-safe)
+	BlockedWords     []string              // local user blocklist, removed before candidates are surfaced
 }
 
 // seenEntry tracks a deduplicated candidate text tagged with the active rebuild generation.
@@ -147,6 +148,7 @@ type Engine struct {
 	emitLocalFn  func(string) bool
 	segAlts      [][]string
 	comboBuf     []string
+	blocked      map[string]struct{}
 }
 
 const (
@@ -182,6 +184,7 @@ func New(opts Options) *Engine {
 	opts.CandidateCount = clampCandidateCount(opts.CandidateCount)
 	opts.Scheme = normalizeScheme(opts.Scheme)
 	opts.FuzzyPinyin = cleanFuzzyRules(opts.FuzzyPinyin)
+	opts.BlockedWords = cleanBlockedWords(opts.BlockedWords)
 	getLexicon() // build tables up front, not on the first keystroke inside the hook
 	dict := opts.Dictionary
 	if dict == nil {
@@ -204,6 +207,7 @@ func New(opts Options) *Engine {
 		segs:      make([]string, 0, 16),
 		rawSegs:   make([]string, 0, 16),
 		cands:     make([]Candidate, 0, maxCandidates),
+		blocked:   blockedWordSet(opts.BlockedWords),
 	}
 	e.emitLocalFn = e.emitLocalCandidate
 	return e
@@ -220,6 +224,43 @@ func cleanFuzzyRules(rules []string) []string {
 		}
 	}
 	return out
+}
+
+func cleanBlockedWords(words []string) []string {
+	seen := make(map[string]struct{}, len(words))
+	out := make([]string, 0, len(words))
+	for _, word := range words {
+		word = strings.TrimSpace(word)
+		if word == "" {
+			continue
+		}
+		if _, ok := seen[word]; ok {
+			continue
+		}
+		seen[word] = struct{}{}
+		out = append(out, word)
+	}
+	return out
+}
+
+func blockedWordSet(words []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(words))
+	for _, word := range words {
+		set[word] = struct{}{}
+	}
+	return set
+}
+
+// SetBlockedWords replaces the local user blocklist and rebuilds the current view.
+func (e *Engine) SetBlockedWords(words []string) {
+	e.mu.Lock()
+	e.blocked = blockedWordSet(cleanBlockedWords(words))
+	if len(e.segs) > 0 {
+		e.cands = e.cands[:0]
+		e.page, e.sel = 0, 0
+		e.buildCandidates()
+	}
+	e.mu.Unlock()
 }
 
 // CandidateCount returns the active clamped page size (3..9).
@@ -680,6 +721,9 @@ func (e *Engine) addCandidate(text string, consumed int, isAI bool) bool {
 	if text == "" {
 		return true
 	}
+	if _, blocked := e.blocked[text]; blocked {
+		return true
+	}
 	if len(e.cands) >= maxCandidates {
 		return false
 	}
@@ -867,7 +911,6 @@ func (e *Engine) orderFirstPageByCoverage() {
 	})
 }
 
-
 func (e *Engine) expandSegmentAlts(segs []string) [][]string {
 	if cap(e.segAlts) < len(segs) {
 		e.segAlts = make([][]string, len(segs))
@@ -958,6 +1001,9 @@ func joinCompact(segs []string) string {
 	}
 	return b.String()
 }
+
+// CompactReading exposes the engine's pinyin-key representation to storage and UI.
+func CompactReading(segs []string) string { return joinCompact(segs) }
 
 func rankTierByUserBoost(tier []Candidate, uf UserFrequencyProvider, pyKey, prevWord string, customFreq map[string]int32) {
 	type scored struct {

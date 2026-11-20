@@ -18,6 +18,7 @@ type inputEngineState struct {
 	viewFn       func(InputEngineView)
 	learnMu      sync.RWMutex
 	userFreq     inputengine.UserFrequencyProvider
+	blockedWords []string
 	onCommit     func(InputEngineCommit)
 	userLearning atomic.Bool
 	commits      inputEngineCommitTracker
@@ -35,9 +36,25 @@ type inputEngineState struct {
 func (st *inputEngineState) buildEngine(cfg config.InputEngineConfig) *inputengine.Engine {
 	st.learnMu.RLock()
 	uf := st.userFreq
+	blocked := append([]string(nil), st.blockedWords...)
 	st.learnMu.RUnlock()
 	st.userLearning.Store(cfg.UserLearning)
-	return newInputEngineFromConfig(cfg, st.cacheDir, uf)
+	eng := newInputEngineFromConfig(cfg, st.cacheDir, uf)
+	if eng != nil {
+		eng.SetBlockedWords(blocked)
+	}
+	return eng
+}
+
+func (st *inputEngineState) setBlockedWords(words []string) {
+	st.learnMu.Lock()
+	st.blockedWords = append(st.blockedWords[:0], words...)
+	eng := st.eng.Load()
+	st.learnMu.Unlock()
+	if eng != nil {
+		eng.SetBlockedWords(words)
+		st.notifyView()
+	}
 }
 
 func (st *inputEngineState) notifyView() {

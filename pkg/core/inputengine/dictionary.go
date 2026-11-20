@@ -54,12 +54,12 @@ func StarterDictionary() Dictionary {
 //
 // Embedded compiled rather than parsed: .clvdict loads without rebuilding indexes, keeping
 // startup flat. rime-ice carries easter-egg weights (19260817 and similar) on joke entries,
-// so the export keeps only 20000 <= weight < 600000 — see the metadata note.
+// so the export keeps only 20000 <= weight < 600000 and applies data/blocklist.txt.
 //
 //go:embed data/common.clvdict
 var commonClvDict []byte
 
-const commonClvDigest = "sha256:85355a5dd7178d7af4d0d2d2fbd964af458de59744b3fb982f4170e30a1bb746"
+const commonClvDigest = "sha256:86d7962f4bd037be31795f5390fec21a503db470361fba2c3105c28458a7f60c"
 
 var (
 	commonDictOnce sync.Once

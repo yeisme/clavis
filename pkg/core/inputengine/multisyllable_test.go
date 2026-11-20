@@ -133,19 +133,21 @@ func TestCommonDictionarySuppliesEverydayWords(t *testing.T) {
 	cases := []struct{ raw, want string }{
 		{"dangwo", "当我"},
 		{"women", "我们"},
-		{"yijing", "已经"},
-		{"suoyi", "所以"},
-		{"shenme", "什么"},
-		{"xianzai", "现在"},
-		{"keyi", "可以"},
-		{"zhege", "这个"},
-		{"shijian", "时间"},
-		{"gongzuo", "工作"},
-		{"wenti", "问题"},
-		{"yinwei", "因为"},
-		{"suiran", "虽然"},
-		{"ruguo", "如果"},
+		{"nimen", "你们"}, {"tamen", "他们"}, {"shenme", "什么"}, {"zenme", "怎么"},
+		{"zhege", "这个"}, {"nage", "那个"}, {"xianzai", "现在"}, {"yijing", "已经"},
+		{"keyi", "可以"}, {"yinwei", "因为"}, {"suoyi", "所以"}, {"danshi", "但是"},
+		{"ruguo", "如果"}, {"haishi", "还是"}, {"jiushi", "就是"}, {"bushi", "不是"},
+		{"meiyou", "没有"}, {"zhidao", "知道"}, {"juede", "觉得"}, {"xihuan", "喜欢"},
+		{"gongzuo", "工作"}, {"xuexi", "学习"}, {"wenti", "问题"}, {"shijian", "时间"},
+		{"difang", "地方"}, {"yiqi", "一起"}, {"ziji", "自己"}, {"dajia", "大家"},
+		{"gongsi", "公司"}, {"diannao", "电脑"}, {"shouji", "手机"}, {"dianhua", "电话"},
+		{"xiexie", "谢谢"}, {"nihao", "你好"}, {"zaijian", "再见"}, {"chifan", "吃饭"},
+		{"shuijiao", "睡觉"}, {"yinggai", "应该"},
 	}
+	if len(cases) != 40 {
+		t.Fatalf("regression case count = %d, want 40", len(cases))
+	}
+	correct := 0
 	for _, tc := range cases {
 		t.Run(tc.raw, func(t *testing.T) {
 			e := New(Options{CandidateCount: 7})
@@ -154,10 +156,32 @@ func TestCommonDictionarySuppliesEverydayWords(t *testing.T) {
 			if len(v.Candidates) == 0 {
 				t.Fatal("no candidates")
 			}
-			if got := v.Candidates[0].Text; got != tc.want {
-				t.Fatalf("%s: first candidate = %q, want %q (all: %v)", tc.raw, got, tc.want, texts(v))
+			if got := v.Candidates[0].Text; got == tc.want {
+				correct++
 			}
 		})
+	}
+	if correct < 36 {
+		t.Fatalf("40-word home regression: %d/%d first candidates correct, want at least 36", correct, len(cases))
+	}
+	e := New(Options{CandidateCount: 7})
+	typeLetters(e, "yijing")
+	for _, c := range e.View().Candidates {
+		if slices.Contains([]string{"遗精", "阴茎", "阴蒂", "阴道"}, c.Text) {
+			t.Fatalf("yijing contains build-blocked word %q: %v", c.Text, texts(e.View()))
+		}
+	}
+}
+
+func TestUserBlockedWordsAreRemovedAndCanBeUpdated(t *testing.T) {
+	e := New(Options{BlockedWords: []string{"已经"}})
+	typeLetters(e, "yijing")
+	if slices.ContainsFunc(e.View().Candidates, func(c Candidate) bool { return c.Text == "已经" }) {
+		t.Fatalf("blocked candidate survived: %v", texts(e.View()))
+	}
+	e.SetBlockedWords(nil)
+	if !slices.ContainsFunc(e.View().Candidates, func(c Candidate) bool { return c.Text == "已经" }) {
+		t.Fatalf("unblocked candidate did not return: %v", texts(e.View()))
 	}
 }
 

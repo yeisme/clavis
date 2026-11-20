@@ -1,10 +1,12 @@
 {
  "version": 1,
- "digest": "sha256:85355a5dd7178d7af4d0d2d2fbd964af458de59744b3fb982f4170e30a1bb746",
- "bytes": 2907446,
+ "digest": "sha256:86d7962f4bd037be31795f5390fec21a503db470361fba2c3105c28458a7f60c",
+ "bytes": 2906768,
  "source": "rime-ice cn_dicts/base.dict.yaml (https://github.com/iDvel/rime-ice)",
  "license": "Apache-2.0",
  "selection": "weight in [20000, 600000), pure-Han words only",
- "wordCount": 45921,
- "note": "weight >= 600000 excluded: rime-ice contains easter-egg entries (e.g. 19260817) that would sit on page 1"
+ "wordCount": 45909,
+ "note": "weight \u003e= 600000 excluded: rime-ice contains easter-egg entries (e.g. 19260817) that would sit on page 1",
+ "blacklist": "pkg/core/inputengine/data/blocklist.txt",
+ "weightFloorEvaluation": "30000 =\u003e 33105 words, 2081908 bytes, 39/40 first-candidate regression. Retained 20000 to preserve the 90% gate."
 }

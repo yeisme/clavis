@@ -25,6 +25,8 @@ func (b *windowsBridge) UpdateInputEngineLearning(userFreq inputengine.UserFrequ
 	b.ime.learnMu.Unlock()
 }
 
+func (b *windowsBridge) UpdateInputEngineBlockedWords(words []string) { b.ime.setBlockedWords(words) }
+
 // ConfigureInputEngine implements InputEngineHost.
 func (b *windowsBridge) ConfigureInputEngine(cfg config.InputEngineConfig) {
 	st := &b.ime

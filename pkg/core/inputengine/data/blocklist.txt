@@ -1,0 +1,22 @@
+# Clavis IME build-time candidate blocklist.
+# One exact Han word per line. Users may edit this file before rebuilding common.clvdict.
+遗精
+阴茎
+阴蒂
+阴道
+睾丸
+阴囊
+外阴
+阴唇
+阴毛
+阴部
+龟头
+阴核
+阴门
+阴户
+性器官
+性交
+手淫
+自慰
+乳房
+乳头
