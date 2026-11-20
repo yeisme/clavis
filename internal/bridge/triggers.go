@@ -66,6 +66,7 @@ func (r *triggerRuntime) doubleShift(mod string, down, other bool, now int64, co
 	}
 	return r.shift.HandleModifier(mod, down, other, now)
 }
+
 // rightShiftDouble reports a completed double tap on the right shift.
 func (r *triggerRuntime) rightShiftDouble(mod string, down, other bool, now int64) bool {
 	return r.rightShift.HandleModifier(mod, down, other, now)
