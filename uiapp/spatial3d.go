@@ -80,12 +80,23 @@ func TiltCard3D(c *ui.Context, key string, cfg config.AppearanceConfig, opts Til
 	return card
 }
 
+// StageContainer3D gives the capsule a shallow depth cue without tilting it.
+//
+// It used to rotate the whole surface (RotateY 5°, RotateX up to 1.5°). For a text surface that
+// is wrong: every label, row and hairline stops sitting on the horizontal axis, gaps read as
+// uneven, and the result looks like a broken layout rather than a depth effect — which is
+// exactly what it was reported as. Rotation also shifts colour ramps under perspective, adding
+// to the "the colours look off" complaint.
+//
+// The depth cue is kept in the Z translation only: it still separates the panel from the
+// desktop without moving a single glyph off-axis.
 func StageContainer3D(c *ui.Context, phaseKey string, stageIndex int, cfg config.AppearanceConfig, children func()) ui.Element {
 	stage := ui.Box(c).Fill().Key("stage-" + phaseKey)
 	if Spatial3DEnabled(c, cfg) {
 		stage.Perspective(860)
-		turn := stage.AnimateTo("stage-turn-"+phaseKey, float32(stageIndex), ui.Snappy)
-		stage.RotateY(turn * 5).RotateX(float32(math.Sin(float64(turn))) * 1.5).TranslateZ(8)
+		// AnimateTo still drives the enter transition; only the rotation is gone.
+		_ = stage.AnimateTo("stage-turn-"+phaseKey, float32(stageIndex), ui.Snappy)
+		stage.TranslateZ(6)
 	}
 	stage.Children(children)
 	return stage
