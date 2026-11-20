@@ -48,6 +48,7 @@ func (r *triggerRuntime) shortcutMatches(key string, mods []string) bool {
 	h := r.shortcut.Load()
 	return h != nil && h.Matches(key, mods)
 }
+
 type keyBindingEntry struct {
 	hotkey       Hotkey
 	action       string
