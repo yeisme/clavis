@@ -56,22 +56,47 @@ scripts/ime-test-prep.sh on      # 备份 config.toml 并置 [input_engine] enab
 
 | # | 用例 | 操作 | 期望 | 结果 |
 | --- | --- | --- | --- | --- |
-| A1 | 基本中文输入 | TextEdit 里打 `nihao` | 出候选窗，首候选「你好」，空格上屏「你好」 | ☐ |
-| A2 | 数字选词 | 打 `nihao` 后按 `3` | 上屏第 3 候选（不是「你好」） | ☐ |
-| A3 | 翻页 | 打 `zhongguo` 后按 `=` | 候选翻到第 2 页，页码变化；`-` 翻回 | ☐ |
-| A4 | **组字中打标点**（I1 修复项） | 打 `nihao` 后按 `,` | 先上屏「你好」再输出「,」；**不能出现标点先到、拼音后到或拼音变英文** | ☐ |
-| A5 | 大写字母 | 打 `nihao` 后按 `Shift+A` | 输出「你好A」；**不能变成小写 a**（I1 删了 unicode.ToLower） | ☐ |
-| A6 | **上下键移高亮**（I2 新增） | 打 `nihao` 后按 `↓` 两次再空格 | 高亮从第 1 项移到第 3 项，空格上屏的是第 3 项 | ☐ |
-| A7 | **中英角标**（I2 新增） | 打 `nihao` | 候选窗出现「中」角标；按 Shift 切到英文后变「英」 | ☐ |
-| A8 | 数字越界不吞键（I1 修复项） | 打 `nihao` 后按 `9`（候选只有 7 个） | 键应透传给应用（打出 `9`），不能静默丢失 | ☐ |
-| A9 | Esc 丢弃 | 打 `nihao` 后按 Esc | 组字消失，不上屏任何字 | ☐ |
-| A10 | 退格 | 打 `nihao` 后按 3 次退格 | 组字串变 `ni`，候选随之更新 | ☐ |
-| A11 | Shift 切中英 | 打 `zhong` 后按 Shift，再打 `wen` | 切换后 `wen` 按英文字面上屏；再按 Shift 能切回中文 | ☐ |
-| A12 | 四类应用连通 | Chrome / VSCode / Word / 飞书 各打一句「今天天气很好」 | 四次都正确上屏，无丢字、无乱序 | ☐ |
-| A13 | 密码框不接管 | Chrome 打开任意登录页，点密码框打 `nihao` | 输出英文字面 `nihao`，不弹候选窗 | ☐ |
-| A14 | 第三方中文输入法让位 | 切到系统「简体拼音」，打 `nihao` | Clavis **不接管**，由系统输入法出候选（不能双重组字） | ☐ |
-| A15 | 一键退回 | `scripts/ime-test-prep.sh off` + 重启 | 打字恢复系统默认行为，无残留拦截 | ☐ |
-| A16 | 候选窗定位 | 在屏幕四角与第二块屏（若接）分别呼出 | 候选窗贴光标下方，不出屏、不翻转异常 | ☐ |
+| A1 | 基本中文输入 | TextEdit 里打 `nihao` | 出候选窗，首候选「你好」，空格上屏「你好」 | ⊘ 阻塞：无可用 GUI 自动化 |
+| A2 | 数字选词 | 打 `nihao` 后按 `3` | 上屏第 3 候选（不是「你好」） | ⊘ 阻塞：无可用 GUI 自动化 |
+| A3 | 翻页 | 打 `zhongguo` 后按 `=` | 候选翻到第 2 页，页码变化；`-` 翻回 | ⊘ 阻塞：无可用 GUI 自动化 |
+| A4 | **组字中打标点**（I1 修复项） | 打 `nihao` 后按 `,` | 先上屏「你好」再输出「,」；**不能出现标点先到、拼音后到或拼音变英文** | ⊘ 阻塞：无可用 GUI 自动化 |
+| A5 | 大写字母 | 打 `nihao` 后按 `Shift+A` | 输出「你好A」；**不能变成小写 a**（I1 删了 unicode.ToLower） | ⊘ 阻塞：无可用 GUI 自动化 |
+| A6 | **上下键移高亮**（I2 新增） | 打 `nihao` 后按 `↓` 两次再空格 | 高亮从第 1 项移到第 3 项，空格上屏的是第 3 项 | ⊘ 阻塞：无可用 GUI 自动化 |
+| A7 | **中英角标**（I2 新增） | 打 `nihao` | 候选窗出现「中」角标；按 Shift 切到英文后变「英」 | ⊘ 阻塞：无可用 GUI 自动化 |
+| A8 | 数字越界不吞键（I1 修复项） | 打 `nihao` 后按 `9`（候选只有 7 个） | 键应透传给应用（打出 `9`），不能静默丢失 | ⊘ 阻塞：无可用 GUI 自动化 |
+| A9 | Esc 丢弃 | 打 `nihao` 后按 Esc | 组字消失，不上屏任何字 | ⊘ 阻塞：无可用 GUI 自动化 |
+| A10 | 退格 | 打 `nihao` 后按 3 次退格 | 组字串变 `ni`，候选随之更新 | ⊘ 阻塞：无可用 GUI 自动化 |
+| A11 | Shift 切中英 | 打 `zhong` 后按 Shift，再打 `wen` | 切换后 `wen` 按英文字面上屏；再按 Shift 能切回中文 | ⊘ 阻塞：无可用 GUI 自动化 |
+| A12 | 四类应用连通 | Chrome / VSCode / Word / 飞书 各打一句「今天天气很好」 | 四次都正确上屏，无丢字、无乱序 | ⊘ 阻塞：Word/飞书未做；GUI 自动化不可用 |
+| A13 | 密码框不接管 | Chrome 打开任意登录页，点密码框打 `nihao` | 输出英文字面 `nihao`，不弹候选窗 | ⊘ 阻塞：无可用 GUI 自动化 |
+| A14 | 第三方中文输入法让位 | 切到系统「简体拼音」，打 `nihao` | Clavis **不接管**，由系统输入法出候选（不能双重组字） | ⊘ 阻塞：无可用 GUI 自动化 |
+| A15 | 一键退回 | `scripts/ime-test-prep.sh off` + 重启 | 打字恢复系统默认行为，无残留拦截 | △ 部分：off 已验证；实际打字未验证 |
+| A16 | 候选窗定位 | 在屏幕四角与第二块屏（若接）分别呼出 | 候选窗贴光标下方，不出屏、不翻转异常 | ⊘ 阻塞：无可用 GUI 自动化/无第二屏证据 |
+
+## 3.1 本轮 I5 真机执行记录（2026-11-20）
+
+本轮已执行权限、自检、启用/还原流程，但未能可靠驱动桌面窗口：
+
+```text
+Clavis --self-check（授权前置）
+input engine: enabled=true mode="inline_hook" scheme="quanpin" candidates=7 learning=true
+input engine probe: typing "nihao" -> 你好 / 您好 / 你
+permissions: accessibility=true input-monitoring=true apple-events=true granted=true
+self-check ok
+
+scripts/ime-test-prep.sh off
+当前 [input_engine] enabled = false
+input engine: OFF
+input engine probe: typing "nihao" -> 你好 / 您好 / 你
+permissions: accessibility=true input-monitoring=true apple-events=true granted=true
+```
+
+执行环境问题：
+
+- 已用 `open build/darwin-arm64/Clavis.app` 并重启 Clavis；权限自检为 true，故不是 Accessibility/Input Monitoring 权限阻塞。
+- `System Events` 访问 TextEdit 窗口/按键时超时；`screencapture -x` 报 `could not create image from display`，当前会话没有可用的图形显示自动化通道。
+- 因此 A1–A14、A16 没有可采信的实际输出；A15 只验证了配置开关已 off 和离屏 probe 正常，不能把“系统默认打字恢复”写成通过。
+- 这属于测试环境/UI 自动化阻塞，不等于被测逻辑失败；权限与离屏引擎 probe 已通过，但真机候选窗、事件钩子和应用间行为仍未验收。
 
 ## 4. 失败项的处置
 
