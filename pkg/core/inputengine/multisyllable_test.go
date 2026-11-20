@@ -86,126 +86,99 @@ func TestMultiSyllableSegmentBySegment(t *testing.T) {
 	}
 }
 
-// With three or more syllables and no word for the whole input, the first syllable's
-// characters fill exactly one page, the sentence candidates (longest first) come next, and
-// the rest of those characters follow. Before, all 60 slots went to first-syllable
-// characters and nothing reached the later syllables.
-func TestSentenceCandidatesFollowFirstPage(t *testing.T) {
-	tests := []struct {
-		raw, first string
-		page       int
-		sentences  []string
-	}{
-		{"yeshugen", "ye", 7, []string{"也数根", "也数"}},
-		{"yeshugen", "ye", 5, []string{"也数根", "也数"}},
-		{"woshiyeshugen", "wo", 7, []string{"我是也数根", "我是也数", "我是也", "我是"}},
-		{"maishuren", "mai", 7, []string{"买数人", "买数"}},
-		// A word in the middle of the input (zhong'guo) is used whole.
-		{"woshizhongguoren", "wo", 7, []string{"我是中国人", "我是中国", "我是中", "我是"}},
+// The candidate list must only ever contain real dictionary words and single characters.
+// An earlier design spliced several syllables into a made-up string (longest phrase at each
+// position), which produced plausible-looking nonsense: 「我始终」 is a real word for
+// wo'shi'zhong, but gluing it into wo'shi'ye'shu'gen yielded 「我始终国人」, and ye'shu (页数)
+// plus gen gave 「页数根」. The common dictionary made those splices unnecessary.
+func TestCandidatesAreDictionaryWordsOrSingles(t *testing.T) {
+	cases := []struct{ raw string }{
+		{"yeshugen"}, {"woshiyeshugen"}, {"woshizhongguoren"}, {"maishuren"},
+		{"zhonghuarenmingongheguo"},
 	}
-	for _, tc := range tests {
+	for _, tc := range cases {
 		t.Run(tc.raw, func(t *testing.T) {
-			alone := New(Options{CandidateCount: tc.page})
-			typeLetters(alone, tc.first)
-			singles := allTexts(alone)
-
-			e := New(Options{CandidateCount: tc.page})
+			e := New(Options{CandidateCount: 7})
 			typeLetters(e, tc.raw)
-			if len(e.cands) > maxCandidates {
-				t.Fatalf("%d candidates, cap is %d", len(e.cands), maxCandidates)
+			n := len(e.segs)
+			seen := allTexts(e)
+			if len(seen) == 0 {
+				t.Fatal("no candidates")
 			}
-			// Page 1 keeps the top single in slot 1 (the number-key habit), promotes the
-			// best whole-input sentence into slot 2, then continues with the remaining
-			// singles — the one pushed off the page end stays reachable behind them.
-			wantPage := make([]string, 0, tc.page)
-			wantPage = append(wantPage, singles[0], tc.sentences[0])
-			wantPage = append(wantPage, singles[1:tc.page-1]...)
-			if got := texts(e.View()); !slices.Equal(got, wantPage) {
-				t.Fatalf("first page = %v, want [top single, best sentence, rest of pages singles]: %v", got, wantPage)
-			}
-			// The remaining sentence candidates (shorter ones) follow the page.
-			for i, want := range tc.sentences[1:] {
-				c := e.cands[tc.page+i]
-				if c.Text != want || c.Consumed != len(e.segs)-(i+1) {
-					t.Fatalf("slot %d = %q/%d, want %q/%d; all: %v", tc.page+i, c.Text, c.Consumed, want, len(e.segs)-(i+1), allTexts(e))
-				}
-			}
-			// The first syllable's characters past the first page are still all there, in order.
-			var rest []string
-			for _, c := range e.cands {
-				if c.Consumed == 1 {
-					rest = append(rest, c.Text)
-				}
-			}
-			if len(rest) <= tc.page || !slices.Equal(rest, singles[:len(rest)]) {
-				t.Fatalf("single characters = %v, want a prefix of %v", rest, singles)
-			}
-		})
-	}
-}
-
-// Choosing a sentence candidate commits the syllables it covers and leaves the rest composing.
-func TestSentenceCandidateLeavesRestComposing(t *testing.T) {
-	e := New(Options{})
-	typeLetters(e, "woshizhongguoren")
-	if r := pickAnywhere(t, e, "我是"); r.Commit != "我是" || e.View().Preedit != "zhong'guo'ren" {
-		t.Fatalf("pick 我是: %+v preedit=%q", r, e.View().Preedit)
-	}
-	if r := pickOnFirstPage(t, e, "中国"); r.Commit != "中国" || e.View().Preedit != "ren" {
-		t.Fatalf("pick 中国: %+v preedit=%q", r, e.View().Preedit)
-	}
-	if r := pickOnFirstPage(t, e, "人"); r.Commit != "人" || e.View().Composing {
-		t.Fatalf("pick 人: %+v view=%+v", r, e.View())
-	}
-
-	e = New(Options{})
-	typeLetters(e, "woshizhongguoren")
-	if r := pickAnywhere(t, e, "我是中国人"); r.Commit != "我是中国人" || e.View().Composing {
-		t.Fatalf("pick whole sentence: %+v view=%+v", r, e.View())
-	}
-}
-
-// One- and two-syllable lists are exactly what they were: words first, then the first
-// syllable's characters, nothing inserted.
-func TestShortInputsKeepTheirCandidates(t *testing.T) {
-	tests := []struct {
-		raw       string
-		firstPage []string
-	}{
-		{"nihao", []string{"你好", "你", "尼", "泥", "拟", "逆", "妮"}},
-		{"zhongguo", []string{"中国", "中", "种", "重", "众", "终", "钟"}},
-		{"shugen", []string{"数", "书", "术", "属", "述", "树", "输"}},
-		{"gen", []string{"根", "跟", "亘", "亙", "哏", "揯", "搄"}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.raw, func(t *testing.T) {
-			e := New(Options{})
-			typeLetters(e, tc.raw)
-			if got := texts(e.View()); !slices.Equal(got, tc.firstPage) {
-				t.Fatalf("first page = %v, want %v", got, tc.firstPage)
-			}
-			singlesStarted := false
+			// Every candidate covers 1..n syllables and is a plain Han string.
 			for i, c := range e.cands {
-				if c.Consumed == 1 {
-					singlesStarted = true
-				} else if singlesStarted {
-					t.Fatalf("candidate %d %q/%d after the single characters: %v", i, c.Text, c.Consumed, allTexts(e))
+				if c.Consumed < 1 || c.Consumed > n {
+					t.Fatalf("candidate %d %q reports Consumed=%d for %d syllables", i, c.Text, c.Consumed, n)
+				}
+				if strings.ContainsAny(c.Text, "' ") {
+					t.Fatalf("candidate %q looks like spliced pinyin, not a word", c.Text)
+				}
+			}
+			// A single syllable's worth of characters must never be outnumbered by wider
+			// candidates: page 1 starts with the widest coverage, then narrows.
+			for i := 1; i < len(e.cands) && i < 7; i++ {
+				if e.cands[i].Consumed > e.cands[i-1].Consumed {
+					t.Fatalf("page 1 not ordered by coverage: %q(%d) before %q(%d)",
+						e.cands[i-1].Text, e.cands[i-1].Consumed, e.cands[i].Text, e.cands[i].Consumed)
 				}
 			}
 		})
 	}
 }
 
-// A word for the whole input needs no sentence candidates.
-func TestWholeInputWordSkipsSentenceCandidates(t *testing.T) {
-	e := New(Options{})
-	typeLetters(e, "zhonghuarenmingongheguo")
-	if e.cands[0].Text != "中华人民共和国" || e.cands[0].Consumed != len(e.segs) {
-		t.Fatalf("first = %q/%d", e.cands[0].Text, e.cands[0].Consumed)
+// The everyday two-syllable words the 222-word starter list was missing now come from the
+// embedded common dictionary. This is the regression that started it all: 当我 must be the
+// first candidate for dangwo, not 当 alone.
+func TestCommonDictionarySuppliesEverydayWords(t *testing.T) {
+	cases := []struct{ raw, want string }{
+		{"dangwo", "当我"},
+		{"women", "我们"},
+		{"yijing", "已经"},
+		{"suoyi", "所以"},
+		{"shenme", "什么"},
+		{"xianzai", "现在"},
+		{"keyi", "可以"},
+		{"zhege", "这个"},
+		{"shijian", "时间"},
+		{"gongzuo", "工作"},
+		{"wenti", "问题"},
+		{"yinwei", "因为"},
+		{"suiran", "虽然"},
+		{"ruguo", "如果"},
 	}
-	for _, c := range e.cands[1:] {
-		if c.Consumed != 1 {
-			t.Fatalf("unexpected %q/%d: %v", c.Text, c.Consumed, allTexts(e))
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			e := New(Options{CandidateCount: 7})
+			typeLetters(e, tc.raw)
+			v := e.View()
+			if len(v.Candidates) == 0 {
+				t.Fatal("no candidates")
+			}
+			if got := v.Candidates[0].Text; got != tc.want {
+				t.Fatalf("%s: first candidate = %q, want %q (all: %v)", tc.raw, got, tc.want, texts(v))
+			}
+		})
+	}
+}
+
+// Short inputs must keep behaving as before: a whole-input word first, then that syllable's
+// characters. The common dictionary may add sibling words (您好 next to 你好) but must not
+// drop characters.
+func TestShortInputsStillOfferTheirCharacters(t *testing.T) {
+	for _, raw := range []string{"ni", "hao", "wo", "shi", "de"} {
+		e := New(Options{CandidateCount: 7})
+		typeLetters(e, raw)
+		if len(e.cands) == 0 {
+			t.Fatalf("%s: no candidates", raw)
+		}
+		singles := 0
+		for _, c := range e.cands {
+			if c.Consumed == 1 {
+				singles++
+			}
+		}
+		if singles == 0 {
+			t.Fatalf("%s: no single-character candidates: %v", raw, allTexts(e))
 		}
 	}
 }

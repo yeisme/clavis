@@ -147,12 +147,6 @@ type Engine struct {
 	emitLocalFn  func(string) bool
 	segAlts      [][]string
 	comboBuf     []string
-	// Scratch for sentence candidates (addSentenceCandidates); reused across keystrokes.
-	firstWord   string
-	firstWordFn func(string) bool
-	composeTop  []string
-	composeBuf  []byte
-	spill       []Candidate
 }
 
 const (
@@ -743,9 +737,6 @@ func (e *Engine) buildCandidates() {
 	if e.emitLocalFn == nil {
 		e.emitLocalFn = e.emitLocalCandidate
 	}
-	if e.firstWordFn == nil {
-		e.firstWordFn = e.captureFirstWord
-	}
 	uf := e.opts.UserFrequency
 	e.resetSeen()
 	e.emitCap = 0
@@ -849,149 +840,33 @@ func (e *Engine) buildCandidates() {
 		}
 	}
 
-	// 4. Sentence candidates reaching the later syllables (3+ syllables, no whole-input word).
-	if len(segs) >= 3 && !fullCovered && singlesStart >= 0 && singlesStart < len(e.cands) {
-		e.spliceSentenceCandidates(singlesStart)
+	// Sentence candidates (splicing several syllables into one made-up string) were removed
+	// once the common dictionary landed. They were a stopgap for a 222-word starter list:
+	// with only 213 two-character words the engine had nothing to offer for 3+ syllables, so
+	// it glued together the longest phrase at each position. That produced plausible-looking
+	// but wrong text — 「我始终」 is a real word for wo'shi'zhong, yet gluing it into
+	// wo'shi'ye'shu'gen yielded 「我始终国人」, and ye'shu (页数) plus gen gave 「页数根」.
+	// With ~46k real words the phrases a typist wants are dictionary entries, so the
+	// candidate list is now simply: full-input words, prefix words (longest first), singles.
+	if !fullCovered && singlesStart >= 0 && singlesStart < len(e.cands) {
+		e.orderFirstPageByCoverage()
 	}
 }
 
-// spliceSentenceCandidates caps the first segment's singles at one page (CandidateCount)
-// ahead of the sentence candidates; the remaining singles follow them instead of being
-// dropped. The singles tier is otherwise uncapped, so ye'shu'gen produced 60 "ye"
-// characters and nothing that reached shu or gen. Inputs of one or two syllables never get
-// here, so their lists are unchanged.
-//
-// The best whole-input sentence candidate is then promoted onto page 1, right behind the
-// top single. Appending it after the page made it invisible: the panel only shows one page,
-// so a typist saw seven "ye" characters and had no cue that a sentence answer existed two
-// pages away. Slot 1 keeps the top single so the existing number-key habit still works, and
-// the single displaced from the page tail returns to the spill list, so no character is
-// lost.
-func (e *Engine) spliceSentenceCandidates(singlesStart int) {
-	head := e.cands[singlesStart].Text
-	cut := min(singlesStart+e.opts.CandidateCount, len(e.cands))
-	e.spill = append(e.spill[:0], e.cands[cut:]...)
-	e.cands = e.cands[:cut]
-
-	before := len(e.cands)
-	e.addSentenceCandidates(head)
-	if len(e.cands) > before && cut-singlesStart > 1 {
-		// Take the best whole-input sentence out of the appended block, then shift the page
-		// tail one slot right and drop it into slot 2. The single pushed off the page end
-		// goes to the spill list, so it stays reachable on a later page.
-		promoted := e.cands[before]
-		copy(e.cands[before:], e.cands[before+1:])
-		e.cands = e.cands[:len(e.cands)-1]
-
-		page := e.cands[singlesStart:cut]
-		displaced := page[len(page)-1]
-		// The displaced single belonged before the spill block, so it goes to its head to
-		// keep the first syllable's characters in frequency order.
-		e.spill = append(e.spill, Candidate{})
-		copy(e.spill[1:], e.spill[:len(e.spill)-1])
-		e.spill[0] = displaced
-		copy(page[2:], page[1:len(page)-1])
-		page[1] = promoted
-	}
-
-	for _, c := range e.spill {
-		if len(e.cands) >= maxCandidates {
-			break
+// orderFirstPageByCoverage stable-sorts the first page by how many syllables each candidate
+// commits, widest first. Candidates beyond the page are untouched: they are reached by
+// paging, where weight order inside a coverage class still wins.
+func (e *Engine) orderFirstPageByCoverage() {
+	end := min(e.opts.CandidateCount, len(e.cands))
+	page := e.cands[:end]
+	slices.SortStableFunc(page, func(a, b Candidate) int {
+		if a.Consumed != b.Consumed {
+			return b.Consumed - a.Consumed // wider coverage first
 		}
-		e.cands = append(e.cands, c) // already marked seen by the singles tier
-	}
-	clear(e.spill)
-	e.spill = e.spill[:0]
+		return 0 // keep weight order within a class
+	})
 }
 
-// addSentenceCandidates adds, for k = len(segs) down to 2, the forward-maximum-match
-// composition of segs[:k]: at each position the longest dictionary phrase, else that
-// syllable's top single (head for the first one, so a user-boosted first character carries
-// over). A sentence candidate covers k syllables, so choosing it commits that much and the
-// rest keeps composing. Compositions that equal a word already listed are skipped; at most
-// CandidateCount are added.
-func (e *Engine) addSentenceCandidates(head string) {
-	segs := e.segs
-	const width = maxComposeSyls + 1 // row[0]: top single; row[l]: top l-syllable phrase
-	need := len(segs) * width
-	if cap(e.composeTop) < need {
-		e.composeTop = make([]string, need)
-	}
-	e.composeTop = e.composeTop[:need]
-	clear(e.composeTop)
-	for i := range segs {
-		row := e.composeTop[i*width : (i+1)*width]
-		if i == 0 {
-			row[0] = head
-		} else {
-			row[0] = e.firstSingle(segs[i])
-		}
-		for l := 2; l <= min(maxComposeSyls, len(segs)-i); l++ {
-			row[l] = e.firstPhrase(segs[i : i+l])
-		}
-	}
-	added := 0
-	for k := len(segs); k >= 2 && added < e.opts.CandidateCount && len(e.cands) < maxCandidates; k-- {
-		buf := e.composeBuf[:0]
-		complete := true
-		for i := 0; i < k; {
-			row := e.composeTop[i*width : (i+1)*width]
-			step := 0
-			for l := min(maxComposeSyls, k-i); l >= 2; l-- {
-				if row[l] != "" {
-					buf = append(buf, row[l]...)
-					step = l
-					break
-				}
-			}
-			if step == 0 {
-				if row[0] == "" {
-					complete = false
-					break
-				}
-				buf = append(buf, row[0]...)
-				step = 1
-			}
-			i += step
-		}
-		e.composeBuf = buf
-		if !complete {
-			continue
-		}
-		before := len(e.cands)
-		e.addCandidate(string(buf), k, false)
-		if len(e.cands) > before {
-			added++
-		}
-	}
-}
-
-func (e *Engine) captureFirstWord(w string) bool {
-	e.firstWord = w
-	return false
-}
-
-func (e *Engine) firstPhrase(segs []string) string {
-	e.firstWord = ""
-	for _, d := range e.dicts {
-		d.LookupPhrases(segs, e.firstWordFn)
-		if e.firstWord != "" {
-			break
-		}
-	}
-	return e.firstWord
-}
-
-func (e *Engine) firstSingle(seg string) string {
-	e.firstWord = ""
-	for _, d := range e.dicts {
-		d.LookupSingle(seg, e.firstWordFn)
-		if e.firstWord != "" {
-			break
-		}
-	}
-	return e.firstWord
-}
 
 func (e *Engine) expandSegmentAlts(segs []string) [][]string {
 	if cap(e.segAlts) < len(segs) {

@@ -121,11 +121,14 @@ func resolveCandidateStyle(s config.InputEngineStyleConfig) candidateStyle {
 	}
 	st.pageIndex = s.ShowPageIndicator
 	st.cellRadius = float32(clampf(float64(st.radius)/2, 2, 10))
-	// Metrics measured at the default 15pt (a CJK character is 15px, Latin about 8.4px) and
-	// rounded up, so estimates never undershoot what is drawn.
+	// Glyph estimates. A CJK glyph draws slightly narrower than its point size in this font
+	// (22pt draws about 20.9px), so the estimate sits just above the drawn width: close
+	// enough that waterFillCap decisions match what drawing does, high enough never to
+	// undershoot. Overestimating here is not harmless — an inflated width makes the cap
+	// check believe a candidate fits, and the cell then cuts it (页数 at 19pt was the case).
 	px := int(math.Round(float64(st.fontSize)))
-	st.cjk = px + 1
-	st.latin = int(math.Ceil(float64(st.fontSize) * 0.6))
+	st.cjk = px
+	st.latin = int(math.Ceil(float64(st.fontSize) * 0.55))
 	st.stripH = max(candHorizStripHeight, px+15)
 	st.rowH = max(candVertRowHeight, px+13)
 	return st
@@ -257,7 +260,10 @@ func waterFillCap(v inputengine.View, st candidateStyle, excess int) int {
 	sum := 0
 	for k := 1; k <= len(widths); k++ {
 		sum += widths[k-1]
-		capW := (sum - excess) / k // cutting the k longest to capW frees at least excess
+		// The -2 is slack: textWidth estimates glyphs from style metrics while drawing uses
+		// real font metrics, and a cap that lands exactly on a candidate's estimated width
+		// leaves it a pixel or two short when drawn (页数 at 19pt, medium weight).
+		capW := (sum-excess)/k - 2 // cutting the k longest to capW frees at least excess
 		if k == len(widths) || capW >= widths[k] {
 			return max(capW, minCap)
 		}

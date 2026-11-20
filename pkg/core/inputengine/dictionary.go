@@ -1,6 +1,9 @@
 package inputengine
 
 import (
+	"crypto/sha256"
+	_ "embed"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"sort"
@@ -43,10 +46,54 @@ func StarterDictionary() Dictionary {
 	return starterDict
 }
 
+// The common dictionary is a 45k-word Rime build compiled from rime-ice's base dictionary
+// (Apache-2.0, see data/common.meta.json for the exact selection rule) and embedded as the
+// already-compiled .clvdict form. It exists because the hand-written starter list is only
+// 222 words: everyday two-syllable words like 当我 were simply absent, so the engine fell
+// back to first-syllable characters and a typist saw 当/党/荡 with no way to get 我.
+//
+// Embedded compiled rather than parsed: .clvdict loads without rebuilding indexes, keeping
+// startup flat. rime-ice carries easter-egg weights (19260817 and similar) on joke entries,
+// so the export keeps only 20000 <= weight < 600000 — see the metadata note.
+//
+//go:embed data/common.clvdict
+var commonClvDict []byte
+
+const commonClvDigest = "sha256:85355a5dd7178d7af4d0d2d2fbd964af458de59744b3fb982f4170e30a1bb746"
+
+var (
+	commonDictOnce sync.Once
+	commonDict     Dictionary
+)
+
+// commonDictionary returns the embedded common-word layer, or nil when the artifact is
+// unusable. A digest mismatch is a build-integrity failure: panic rather than silently ship
+// a wrong dictionary.
+func commonDictionary() Dictionary {
+	commonDictOnce.Do(func() {
+		sum := sha256.Sum256(commonClvDict)
+		if got := "sha256:" + hex.EncodeToString(sum[:]); got != commonClvDigest {
+			panic("inputengine: embedded common dictionary digest mismatch: " + got)
+		}
+		l, err := ime.LoadClvDict(commonClvDict)
+		if err != nil || l == nil || l.Len() == 0 {
+			return
+		}
+		commonDict = newIMEDictionary(l, false)
+	})
+	return commonDict
+}
+
 func defaultDictionary() Dictionary {
 	defaultDictOnce.Do(func() {
 		if sl := ime.StarterLexicon(); sl != nil && sl.Len() > 0 {
-			defaultDict = ChainDictionaries(StarterDictionary(), UnihanDictionary())
+			// Order matters: the curated starter list first (it holds the highest-frequency
+			// pairs), then the broad common layer, then Unihan single characters as fallback.
+			if cd := commonDictionary(); cd != nil {
+				defaultDict = ChainDictionaries(StarterDictionary(), cd, UnihanDictionary())
+			} else {
+				defaultDict = ChainDictionaries(StarterDictionary(), UnihanDictionary())
+			}
 		} else {
 			defaultDict = UnihanDictionary()
 		}

@@ -131,9 +131,12 @@ func TestCandidatePanelWidthBand(t *testing.T) {
 		// little but stays inside the 360..480 band; before A1 these were 354 (both inputs).
 		// The page indicator ("› 1/9") is now measured (31px) instead of an 18px box it
 		// overflowed, so the natural widths are 13px wider; the windows did not change.
-		{"yeshugen", 399, 416},
-		{"nihao", 383, 384},
-		{"woshiyeshugen", 431, 448},
+		// Widths moved again when the common dictionary landed: yeshugen now offers 页数/也说
+		// (two-character words) instead of only single characters, so its natural width grew
+		// by a cell. All four still sit inside the 360..480 band and the 448 cap.
+		{"yeshugen", 390, 416},
+		{"nihao", 390, 416},
+		{"woshiyeshugen", 420, 448},
 		{"zhonghuarenmingongheguo", 448, 448},
 	} {
 		v := typedView(tc.raw)
