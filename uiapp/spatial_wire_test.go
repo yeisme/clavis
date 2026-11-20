@@ -48,7 +48,7 @@ func TestCandidatePanelBothOrientationsAndExactSizing(t *testing.T) {
 
 	horizCfg := config.DefaultAppearanceConfig()
 	horizCfg.CandidateBarOrientation = "horizontal"
-	hw, hh := PreferredCandidatePanelSizeFor(v, horizCfg)
+	hw, hh := PreferredCandidatePanelSizeFor(v, panelOf(horizCfg))
 	if hh != candidatePanelHeight {
 		t.Fatalf("horizontal height = %d, want %d", hh, candidatePanelHeight)
 	}
@@ -58,7 +58,7 @@ func TestCandidatePanelBothOrientationsAndExactSizing(t *testing.T) {
 
 	vertCfg := config.DefaultAppearanceConfig()
 	vertCfg.CandidateBarOrientation = "vertical"
-	vw, vh := PreferredCandidatePanelSizeFor(v, vertCfg)
+	vw, vh := PreferredCandidatePanelSizeFor(v, panelOf(vertCfg))
 	if vh <= hh || vw >= hw {
 		t.Fatalf("vertical size = %dx%d vs horizontal %dx%d: expected taller, narrower list", vw, vh, hw, hh)
 	}
@@ -79,7 +79,7 @@ func TestCandidatePanelBothOrientationsAndExactSizing(t *testing.T) {
 
 	// Render horizontal panel at PreferredCandidatePanelSizeFor and verify geometry.
 	th := ui.NewTester(func(c *ui.Context) {
-		InputCandidateViewFor(c, v, horizCfg)
+		InputCandidateViewFor(c, v, panelOf(horizCfg))
 	}, hw, hh)
 	th.Frame()
 	if !th.HasText(v.Preedit) || !th.HasText("✦") || !th.HasText("‹") || !th.HasText("›") {
@@ -106,7 +106,7 @@ func TestCandidatePanelBothOrientationsAndExactSizing(t *testing.T) {
 
 	// Render vertical panel at PreferredCandidatePanelSizeFor and verify geometry.
 	tv := ui.NewTester(func(c *ui.Context) {
-		InputCandidateViewFor(c, v, vertCfg)
+		InputCandidateViewFor(c, v, panelOf(vertCfg))
 	}, vw, vh)
 	tv.Frame()
 	if !tv.HasText(v.Preedit) || !tv.HasText("✦") || !tv.HasText("‹") || !tv.HasText("›") {
@@ -165,9 +165,9 @@ func TestCandidatePanelAccessibilityAndPresetDegradation(t *testing.T) {
 			cfg.CandidateBarOrientation = tc.orientation
 
 			cur := v
-			w, h := PreferredCandidatePanelSizeFor(cur, cfg)
+			w, h := PreferredCandidatePanelSizeFor(cur, panelOf(cfg))
 			tt := ui.NewTesterWith(func(c *ui.Context) {
-				InputCandidateViewFor(c, cur, cfg)
+				InputCandidateViewFor(c, cur, panelOf(cfg))
 			}, w, h, ui.TesterOptions{Preferences: tc.prefs})
 			tt.Frame()
 			if tt.Image() == nil {
@@ -437,9 +437,9 @@ func TestCaptureSpatialWireScreenshots(t *testing.T) {
 		cfg.CandidateBarOrientation = spec.orient
 		cfg.VisualPreset = spec.preset
 		cfg.Theme = spec.theme
-		w, h := PreferredCandidatePanelSizeFor(v, cfg)
+		w, h := PreferredCandidatePanelSizeFor(v, panelOf(cfg))
 		tt := ui.NewTesterWith(func(c *ui.Context) {
-			InputCandidateViewFor(c, v, cfg)
+			InputCandidateViewFor(c, v, panelOf(cfg))
 		}, w, h, ui.TesterOptions{Dark: spec.dark, Preferences: spec.prefs})
 		tt.Frame()
 		tt.Advance(500 * time.Millisecond)

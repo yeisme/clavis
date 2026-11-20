@@ -19,8 +19,9 @@ import (
 )
 
 // Own input engine UI glue (docs/design/own-input-engine.md, route B): candidate panel shown
-// with ShowInactive under the caret, plus the debounced async AI suggestion loop. Only active
-// when the bridge implements bridge.InputEngineHost (Windows) and [input_engine] enabled=true.
+// with ShowInactive under the caret, plus the debounced async AI suggestion loop. Active when
+// [input_engine] enabled=true and the bridge implements bridge.InputEngineHost (both the
+// darwin and the Windows bridge do). The panel's look is [input_engine.style].
 
 const candidatePanelGap = 4.0
 
@@ -48,7 +49,9 @@ func (a *desktopApp) setupInputEngine(ctx context.Context, br bridge.HostService
 	u.panel = mygo.NewWindow(mygo.WindowOptions{
 		Title: "Clavis Input", Width: w, Height: hgt,
 		Panel: true, Hidden: true, Frameless: true, Transparent: true,
-		Vibrancy: mygo.VibrancyGlass, CornerRadius: 10, DisableResize: true,
+		// The window mask is fixed at creation; the content follows [input_engine.style]
+		// live, so a changed radius needs a restart to reach the native corners.
+		Vibrancy: mygo.VibrancyGlass, CornerRadius: uiapp.CandidatePanelCornerRadius(), DisableResize: true,
 		AlwaysOnTop: true, SkipTaskbar: true,
 		Content: ui.View(func(c *ui.Context) {
 			if v := u.view.Load(); v != nil {
@@ -72,7 +75,7 @@ func (u *inputEngineUI) onView(ctx context.Context, v bridge.InputEngineView) {
 			u.panel.Hide()
 			return
 		}
-		pw, ph := u.sizer.Next(cur.View, uiapp.CandidateAppearance())
+		pw, ph := u.sizer.Next(cur.View, uiapp.CurrentCandidatePanelConfig())
 		bounds := computeCandidatePanelBounds(cur.Anchor, mygo.Screen.CursorScreenPoint(),
 			bridge.Size{Width: float64(pw), Height: float64(ph)}, mygo.Screen.Displays())
 		u.panel.SetBounds(bounds)

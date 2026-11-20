@@ -344,10 +344,11 @@ func NewAppController(opts Options) *AppController {
 		cfgStore = config.NewConfigStore(cfgDir)
 	}
 	cfg := cfgStore.Current()
-	// The candidate window reads its appearance from a package global; publish
-	// it now, not on the first Capsule frame, which may be long after the
-	// first composition.
+	// The candidate window reads its appearance and [input_engine.style] from
+	// package globals; publish them now, not on the first Capsule frame, which
+	// may be long after the first composition.
 	SetCandidateAppearance(cfg.Main.Appearance)
+	SetCandidateStyle(cfg.Main.InputEngine.Style)
 
 	clipStore := opts.ClipboardStore
 	if clipStore == nil {
@@ -3709,6 +3710,7 @@ func (c *AppController) UpdateMainConfig(mutate func(main *config.MainConfig)) e
 
 	updated := c.ConfigStore.Current()
 	SetCandidateAppearance(updated.Main.Appearance)
+	SetCandidateStyle(updated.Main.InputEngine.Style)
 	c.mu.Lock()
 	c.StateMachine.SetConfig(updated)
 	if c.AIClient != nil {
@@ -3981,6 +3983,7 @@ func (c *AppController) ReloadConfig() bool {
 	if ok {
 		c.StateMachine.SetConfig(cfg)
 		SetCandidateAppearance(cfg.Main.Appearance)
+		SetCandidateStyle(cfg.Main.InputEngine.Style)
 		if c.Snippets != nil {
 			c.Snippets.UpdateSnippets(cfg.Snippets.Items)
 		}

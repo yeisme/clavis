@@ -3,7 +3,6 @@ package uiapp
 import (
 	"sync"
 
-	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
 
@@ -25,7 +24,9 @@ type CandidatePanelSizer struct {
 
 // Next returns the panel size for v: never smaller than what this
 // composition has shown so far, never larger than the orientation's cap.
-func (s *CandidatePanelSizer) Next(v inputengine.View, cfg config.AppearanceConfig) (width, height int) {
+// cfg's style only feeds parameters into PreferredCandidatePanelSizeFor; the
+// steps and caps here are the same for every style.
+func (s *CandidatePanelSizer) Next(v inputengine.View, cfg CandidatePanelConfig) (width, height int) {
 	w, h := PreferredCandidatePanelSizeFor(v, cfg)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -34,7 +35,7 @@ func (s *CandidatePanelSizer) Next(v inputengine.View, cfg config.AppearanceConf
 		return w, h
 	}
 	maxW := candidatePanelMaxWidth
-	if isCandidateVertical(cfg) {
+	if isCandidateVertical(cfg.Appearance) {
 		maxW = candVertMaxWidth
 	}
 	w = min(roundUpTo(w, candidateWidthStep), maxW)

@@ -32,15 +32,15 @@ func TestCandidateModeLabel(t *testing.T) {
 		cfg := config.DefaultAppearanceConfig()
 		cfg.CandidateBarOrientation = orientation
 		v := composing("ni", "你", "呢")
-		wCN, hCN := PreferredCandidatePanelSizeFor(v, cfg)
+		wCN, hCN := PreferredCandidatePanelSizeFor(v, panelOf(cfg))
 		v.ASCII = true
-		wEN, hEN := PreferredCandidatePanelSizeFor(v, cfg)
+		wEN, hEN := PreferredCandidatePanelSizeFor(v, panelOf(cfg))
 		if wCN != wEN || hCN != hEN {
 			t.Fatalf("%s mode indicator changed panel geometry: CN=%dx%d EN=%dx%d", orientation, wCN, hCN, wEN, hEN)
 		}
 		for ascii, want := range map[bool]string{false: "中", true: "英"} {
 			v.ASCII = ascii
-			tt := ui.NewTester(func(c *ui.Context) { InputCandidateViewFor(c, v, cfg) }, wCN, hCN)
+			tt := ui.NewTester(func(c *ui.Context) { InputCandidateViewFor(c, v, panelOf(cfg)) }, wCN, hCN)
 			tt.Frame()
 			if !tt.HasText(want) {
 				t.Fatalf("%s ASCII=%v frame missing mode label %q: texts=%v", orientation, ascii, want, tt.Texts())
@@ -54,15 +54,15 @@ func TestCandidatePanelSizerOnlyGrowsWithinComposition(t *testing.T) {
 	cfg.CandidateBarOrientation = "horizontal"
 	var s CandidatePanelSizer
 
-	w1, h1 := s.Next(composing("shu", "输", "书", "数", "树", "熟"), cfg)
+	w1, h1 := s.Next(composing("shu", "输", "书", "数", "树", "熟"), panelOf(cfg))
 	if w1%candidateWidthStep != 0 && w1 != candidatePanelMaxWidth {
 		t.Fatalf("width %d is not on a %dpx step", w1, candidateWidthStep)
 	}
-	wide, _ := s.Next(composing("shu'ru'fa", "输入法", "书如法", "输入", "舒", "输", "输入法候选窗"), cfg)
+	wide, _ := s.Next(composing("shu'ru'fa", "输入法", "书如法", "输入", "舒", "输", "输入法候选窗"), panelOf(cfg))
 	if wide < w1 {
 		t.Fatalf("width shrank while growing content: %d -> %d", w1, wide)
 	}
-	narrow, h3 := s.Next(composing("shu'ru'fa'h", "输入法"), cfg)
+	narrow, h3 := s.Next(composing("shu'ru'fa'h", "输入法"), panelOf(cfg))
 	if narrow != wide {
 		t.Fatalf("width shrank within one composition: %d -> %d", wide, narrow)
 	}
@@ -71,8 +71,8 @@ func TestCandidatePanelSizerOnlyGrowsWithinComposition(t *testing.T) {
 	}
 
 	// Composition over: the next one starts from its own content size.
-	s.Next(inputengine.View{}, cfg)
-	fresh, _ := s.Next(composing("a", "啊"), cfg)
+	s.Next(inputengine.View{}, panelOf(cfg))
+	fresh, _ := s.Next(composing("a", "啊"), panelOf(cfg))
 	if fresh >= wide {
 		t.Fatalf("a new composition kept the old width %d (got %d)", wide, fresh)
 	}
@@ -83,8 +83,8 @@ func TestCandidatePanelSizerVerticalAndCaps(t *testing.T) {
 	cfg.CandidateBarOrientation = "vertical"
 	var s CandidatePanelSizer
 
-	_, tall := s.Next(composing("ni", "你", "呢", "泥", "尼", "拟", "逆", "腻"), cfg)
-	_, short := s.Next(composing("nih", "你好"), cfg)
+	_, tall := s.Next(composing("ni", "你", "呢", "泥", "尼", "拟", "逆", "腻"), panelOf(cfg))
+	_, short := s.Next(composing("nih", "你好"), panelOf(cfg))
 	if short != tall {
 		t.Fatalf("vertical height shrank within a composition: %d -> %d", tall, short)
 	}
@@ -94,7 +94,7 @@ func TestCandidatePanelSizerVerticalAndCaps(t *testing.T) {
 	for i := 0; i < 9; i++ {
 		long = append(long, "很长很长很长很长很长很长很长的候选")
 	}
-	w, _ := s.Next(composing("hen", long...), cfg)
+	w, _ := s.Next(composing("hen", long...), panelOf(cfg))
 	if w > candVertMaxWidth {
 		t.Fatalf("width %d exceeds the vertical cap %d", w, candVertMaxWidth)
 	}
@@ -129,15 +129,17 @@ func TestCandidatePanelWidthBand(t *testing.T) {
 		// A1 promotes the whole-input sentence onto page 1, so the widest cell is now a
 		// sentence ("也数根" / "我是也数根") instead of a single character. The page grows a
 		// little but stays inside the 360..480 band; before A1 these were 354 (both inputs).
-		{"yeshugen", 386, 416},
-		{"nihao", 370, 384},
-		{"woshiyeshugen", 418, 448},
+		// The page indicator ("› 1/9") is now measured (31px) instead of an 18px box it
+		// overflowed, so the natural widths are 13px wider; the windows did not change.
+		{"yeshugen", 399, 416},
+		{"nihao", 383, 384},
+		{"woshiyeshugen", 431, 448},
 		{"zhonghuarenmingongheguo", 448, 448},
 	} {
 		v := typedView(tc.raw)
 		var s CandidatePanelSizer
-		w, h := PreferredCandidatePanelSizeFor(v, cfg)
-		sw, sh := s.Next(v, cfg)
+		w, h := PreferredCandidatePanelSizeFor(v, panelOf(cfg))
+		sw, sh := s.Next(v, panelOf(cfg))
 		if w != tc.natural || sw != tc.win || h != candidatePanelHeight || sh != candidatePanelHeight {
 			t.Errorf("%s: preferred %dx%d, window %dx%d; want %dx%d and %dx%d",
 				tc.raw, w, h, sw, sh, tc.natural, candidatePanelHeight, tc.win, candidatePanelHeight)
@@ -152,13 +154,13 @@ func TestCandidatePanelLongPreeditDoesNotWiden(t *testing.T) {
 	for _, orientation := range []string{"horizontal", "vertical"} {
 		cfg := config.DefaultAppearanceConfig()
 		cfg.CandidateBarOrientation = orientation
-		ws, hs := PreferredCandidatePanelSizeFor(composing("a", "啊", "阿"), cfg)
+		ws, hs := PreferredCandidatePanelSizeFor(composing("a", "啊", "阿"), panelOf(cfg))
 		v := composing(long, "啊", "阿")
-		w, h := PreferredCandidatePanelSizeFor(v, cfg)
+		w, h := PreferredCandidatePanelSizeFor(v, panelOf(cfg))
 		if w != ws || h != hs {
 			t.Fatalf("%s: long preedit resized the panel %dx%d -> %dx%d", orientation, ws, hs, w, h)
 		}
-		tt := ui.NewTester(func(c *ui.Context) { InputCandidateViewFor(c, v, cfg) }, w, h)
+		tt := ui.NewTester(func(c *ui.Context) { InputCandidateViewFor(c, v, panelOf(cfg)) }, w, h)
 		tt.Frame()
 		pre, ok := tt.Find(long)
 		badge, okBadge := tt.Find("中")
@@ -179,7 +181,7 @@ func TestCandidatePanelOverflowCutsLongestFirst(t *testing.T) {
 	v := composing("zhong'hua", "中华人民共和国万岁", "中华人民共和国", "中华人民", "中华", "中", "种", "重")
 	v.HasNext = true
 	v.ASCII = true // badge 英, so the candidate 中 is the only 中 on screen
-	w, h := PreferredCandidatePanelSizeFor(v, cfg)
+	w, h := PreferredCandidatePanelSizeFor(v, panelOf(cfg))
 	if w != candidatePanelMaxWidth {
 		t.Fatalf("overflowing page width = %d, want the cap %d", w, candidatePanelMaxWidth)
 	}
@@ -188,7 +190,7 @@ func TestCandidatePanelOverflowCutsLongestFirst(t *testing.T) {
 	if textCap < candidateTextWidth("中华") || textCap >= candidateTextWidth("中华人民") {
 		t.Fatalf("text cap = %d, want within [%d, %d)", textCap, candidateTextWidth("中华"), candidateTextWidth("中华人民"))
 	}
-	tt := ui.NewTester(func(c *ui.Context) { InputCandidateViewFor(c, v, cfg) }, w, h)
+	tt := ui.NewTester(func(c *ui.Context) { InputCandidateViewFor(c, v, panelOf(cfg)) }, w, h)
 	tt.Frame()
 	for _, cand := range v.Candidates {
 		r, ok := tt.Find(cand.Text)
@@ -221,10 +223,10 @@ func TestCandidateSelectionIsSolidAccent(t *testing.T) {
 		cfg.CandidateBarOrientation = orientation
 		v := composing("ni'hao", "你好", "你", "尼", "泥")
 		v.Selected = 2
-		w, h := PreferredCandidatePanelSizeFor(v, cfg)
+		w, h := PreferredCandidatePanelSizeFor(v, panelOf(cfg))
 		var accent ui.Color
 		tt := ui.NewTester(func(c *ui.Context) {
-			InputCandidateViewFor(c, v, cfg)
+			InputCandidateViewFor(c, v, panelOf(cfg))
 			accent = c.Theme().Accent
 		}, w, h)
 		tt.Frame()

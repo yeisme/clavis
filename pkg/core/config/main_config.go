@@ -31,11 +31,11 @@ type TriggerConfig struct {
 
 func DefaultTriggerConfig() TriggerConfig {
 	return TriggerConfig{
-		LeaderKey:                 "right_option",
-		DoubleTapKey:              "right_command",
-		DoubleTapIntervalMs:       300,
-		CapsuleShortcut:           "option+space",
-		ClipboardShortcut:         "alt+shift+c",
+		LeaderKey:           "right_option",
+		DoubleTapKey:        "right_command",
+		DoubleTapIntervalMs: 300,
+		CapsuleShortcut:     "option+space",
+		ClipboardShortcut:   "alt+shift+c",
 		// Empty by default: the input-mode toggle now has dedicated gestures (double-tap
 		// right shift, or the candidate pill), so it no longer takes a chord away from the
 		// user's shortcut budget. Set a value here to opt back in to a hotkey.
@@ -1193,6 +1193,8 @@ type InputEngineConfig struct {
 	CustomDictPaths     []string `json:"customDictPaths"`
 	UserLearning        bool     `json:"userLearning"`
 	IMKSocketPath       string   `json:"imkSocketPath"`
+	// Style is [input_engine.style], the candidate window's look.
+	Style InputEngineStyleConfig `json:"style"`
 
 	// legacyModeMigrated is decoder provenance for old native IMK/dual values.
 	// It is intentionally not serialized: effective mode is always inline_hook.
@@ -1200,7 +1202,92 @@ type InputEngineConfig struct {
 }
 
 func DefaultInputEngineConfig() InputEngineConfig {
-	return InputEngineConfig{Mode: "inline_hook", Scheme: "quanpin", CandidateCount: 7, MixedEnglish: true, AutoPairPunctuation: true, ShiftToggleASCII: true, FuzzyPinyin: []string{}, CustomDictPaths: []string{}, UserLearning: true}
+	return InputEngineConfig{Mode: "inline_hook", Scheme: "quanpin", CandidateCount: 7, MixedEnglish: true, AutoPairPunctuation: true, ShiftToggleASCII: true, FuzzyPinyin: []string{}, CustomDictPaths: []string{}, UserLearning: true, Style: DefaultInputEngineStyleConfig()}
+}
+
+// Candidate window style presets ([input_engine.style] preset).
+const (
+	CandidateStyleNative = "native" // system material, solid accent selection
+	CandidateStyleGlass  = "glass"  // Liquid Glass, tinted selection
+	CandidateStyleFlat   = "flat"   // opaque, borderless, underlined selection
+	CandidateStyleCustom = "custom" // plain surface built from the fields
+)
+
+// Selection looks ([input_engine.style] selected_style). All three keep the cell's size.
+const (
+	CandidateSelectedFill      = "fill"
+	CandidateSelectedTint      = "tint"
+	CandidateSelectedUnderline = "underline"
+)
+
+// InputEngineStyleConfig is [input_engine.style]: how the candidate window looks. Only the
+// candidate window reads it. [appearance] keeps the light/dark mode and the orientation
+// (a layout choice); its visual preset no longer restyles the candidate window.
+//
+// preset picks a whole look; every other field overrides the preset when set, and 0 or ""
+// means "the preset's value". The style only feeds parameters (padding, font size, page
+// indicator) into the panel's size formula, so the window still sizes to fit under any
+// combination.
+type InputEngineStyleConfig struct {
+	Preset            string  `json:"preset"`            // native | glass | flat | custom
+	Radius            float64 `json:"radius"`            // window corner radius, DIPs (2..24)
+	Padding           float64 `json:"padding"`           // inner padding, DIPs (2..16)
+	FontSize          float64 `json:"fontSize"`          // candidate text size, points (12..22)
+	Opacity           float64 `json:"opacity"`           // surface fill opacity (0..1]; text stays opaque
+	Accent            string  `json:"accent"`            // "#RRGGBB"; "" follows the system accent
+	SelectedStyle     string  `json:"selectedStyle"`     // fill | tint | underline
+	ShowPageIndicator bool    `json:"showPageIndicator"` // "‹ › 2/9" at the end of the strip
+}
+
+func DefaultInputEngineStyleConfig() InputEngineStyleConfig {
+	return InputEngineStyleConfig{Preset: CandidateStyleNative, ShowPageIndicator: true}
+}
+
+func decodeInputEngineStyleConfig(tbl *toml.Table, path string) (InputEngineStyleConfig, error) {
+	c := DefaultInputEngineStyleConfig()
+	if tbl == nil {
+		return c, nil
+	}
+	// Ordered, so the first bad key reported is always the same one.
+	for _, f := range []struct {
+		key string
+		dst *string
+	}{{"preset", &c.Preset}, {"accent", &c.Accent}, {"selected_style", &c.SelectedStyle}} {
+		if s, ok, e := optionalString(tbl, f.key, path); e != nil {
+			return c, e
+		} else if ok {
+			*f.dst = strings.TrimSpace(s)
+		}
+	}
+	for _, f := range []struct {
+		key string
+		dst *float64
+	}{{"radius", &c.Radius}, {"padding", &c.Padding}, {"font_size", &c.FontSize}, {"opacity", &c.Opacity}} {
+		if v, ok, e := optionalFloat(tbl, f.key, path); e != nil {
+			return c, e
+		} else if ok {
+			*f.dst = v
+		}
+	}
+	if b, ok, e := optionalBool(tbl, "show_page_indicator", path); e != nil {
+		return c, e
+	} else if ok {
+		c.ShowPageIndicator = b
+	}
+	return c, nil
+}
+
+func (c InputEngineStyleConfig) toTOML() *toml.Table {
+	t := toml.NewTable()
+	t.Set("preset", toml.StringVal(c.Preset))
+	t.Set("radius", toml.FloatVal(c.Radius))
+	t.Set("padding", toml.FloatVal(c.Padding))
+	t.Set("font_size", toml.FloatVal(c.FontSize))
+	t.Set("opacity", toml.FloatVal(c.Opacity))
+	t.Set("accent", toml.StringVal(c.Accent))
+	t.Set("selected_style", toml.StringVal(c.SelectedStyle))
+	t.Set("show_page_indicator", toml.BoolVal(c.ShowPageIndicator))
+	return t
 }
 func decodeInputEngineConfig(tbl *toml.Table, path string) (InputEngineConfig, error) {
 	c := DefaultInputEngineConfig()
@@ -1261,6 +1348,13 @@ func decodeInputEngineConfig(tbl *toml.Table, path string) (InputEngineConfig, e
 	} else if ok {
 		c.IMKSocketPath = s
 	}
+	styleTbl, _, e := optionalTable(tbl, "style", path)
+	if e != nil {
+		return c, e
+	}
+	if c.Style, e = decodeInputEngineStyleConfig(styleTbl, joinPath(path, "style")); e != nil {
+		return c, e
+	}
 	return c, nil
 }
 func (c InputEngineConfig) toTOML() *toml.Table {
@@ -1274,6 +1368,7 @@ func (c InputEngineConfig) toTOML() *toml.Table {
 	t.Set("custom_dict_paths", stringsToTOMLArray(c.CustomDictPaths))
 	t.Set("user_learning", toml.BoolVal(c.UserLearning))
 	t.Set("imk_socket_path", toml.StringVal(c.IMKSocketPath))
+	t.Set("style", toml.TableVal(c.Style.toTOML()))
 	return t
 }
 

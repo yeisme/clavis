@@ -236,8 +236,8 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, m
 	for _, orientation := range []string{"horizontal", "vertical"} {
 		app := appearance
 		app.CandidateBarOrientation = orientation
-		cw, ch := PreferredCandidatePanelSizeFor(view, app)
-		shoot("11-candidates-"+orientation, func(c *ui.Context) { InputCandidateViewFor(c, view, app) }, cw, ch, 2, nil)
+		cw, ch := PreferredCandidatePanelSizeFor(view, panelOf(app))
+		shoot("11-candidates-"+orientation, func(c *ui.Context) { InputCandidateViewFor(c, view, panelOf(app)) }, cw, ch, 2, nil)
 	}
 
 	f.ctrl.OpenSettings(SettingsTabGeneral)

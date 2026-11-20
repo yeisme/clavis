@@ -241,6 +241,19 @@ custom_dict_paths = []
 user_learning = true
 imk_socket_path = ""
 
+# Candidate window look; read only by the candidate window ([appearance] keeps
+# light/dark and candidate_bar_orientation). preset: native | glass | flat | custom.
+# Every other field overrides the preset; 0 or "" keeps the preset's value.
+[input_engine.style]
+preset = "native"
+radius = 0               # corner radius, 2..24
+padding = 0              # inner padding, 2..16
+font_size = 0            # candidate text size, 12..22
+opacity = 0              # surface fill opacity, 0..1 (text always stays opaque)
+accent = ""              # "#0A84FF"; empty follows the system accent
+selected_style = ""      # fill | tint | underline
+show_page_indicator = true
+
 [selection_bar]
 enabled = true
 trigger_mode = "double_shift"

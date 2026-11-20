@@ -25,9 +25,9 @@ func TestCandidatePanelRendersAcrossPresets(t *testing.T) {
 			cfg := config.DefaultAppearanceConfig()
 			cfg.VisualPreset = preset
 			cfg.CandidateBarOrientation = orientation
-			w, h := PreferredCandidatePanelSizeFor(v, cfg)
+			w, h := PreferredCandidatePanelSizeFor(v, panelOf(cfg))
 			tester := ui.NewTester(func(c *ui.Context) {
-				InputCandidateViewFor(c, v, cfg)
+				InputCandidateViewFor(c, v, panelOf(cfg))
 			}, w, h)
 			tester.Frame()
 			if !tester.HasText(v.Preedit) && !tester.HasText("wo'shi'ye'shu'gen") {

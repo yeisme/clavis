@@ -360,6 +360,7 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 	if main.InputEngine.CandidateCount < 3 || main.InputEngine.CandidateCount > 9 {
 		issues = append(issues, ValidationIssue{File: file, KeyPath: "input_engine.candidate_count", Severity: SeverityError, Message: "candidate_count must be within 3..9"})
 	}
+	issues = append(issues, validateInputEngineStyle(file, main.InputEngine.Style)...)
 	if main.SelectionBar.TriggerMode != "" && main.SelectionBar.TriggerMode != "auto_select" && main.SelectionBar.TriggerMode != "double_shift" && main.SelectionBar.TriggerMode != "disabled" {
 		issues = append(issues, ValidationIssue{File: file, KeyPath: "selection_bar.trigger_mode", Severity: SeverityError, Message: "unsupported selection trigger mode"})
 	}
@@ -730,4 +731,62 @@ func isValidHTTPURL(raw string) bool {
 	}
 	scheme := strings.ToLower(u.Scheme)
 	return (scheme == "http" || scheme == "https") && u.Host != ""
+}
+
+// Ranges of the numeric [input_engine.style] fields; 0 means "the preset's value".
+const (
+	StyleRadiusMin, StyleRadiusMax     = 2.0, 24.0
+	StylePaddingMin, StylePaddingMax   = 2.0, 16.0
+	StyleFontSizeMin, StyleFontSizeMax = 12.0, 22.0
+)
+
+// validateInputEngineStyle checks [input_engine.style]. Unknown names are errors, like every
+// other enum in this file. Out-of-range numbers only change looks and are clamped where the
+// candidate window reads them, so they warn instead of blocking the load.
+func validateInputEngineStyle(file string, s InputEngineStyleConfig) []ValidationIssue {
+	var issues []ValidationIssue
+	key := func(k string) string { return "input_engine.style." + k }
+	switch s.Preset {
+	case "", CandidateStyleNative, CandidateStyleGlass, CandidateStyleFlat, CandidateStyleCustom:
+	default:
+		issues = append(issues, ValidationIssue{File: file, KeyPath: key("preset"), Severity: SeverityError, Message: "unsupported candidate style preset (native, glass, flat or custom)"})
+	}
+	switch s.SelectedStyle {
+	case "", CandidateSelectedFill, CandidateSelectedTint, CandidateSelectedUnderline:
+	default:
+		issues = append(issues, ValidationIssue{File: file, KeyPath: key("selected_style"), Severity: SeverityError, Message: "unsupported selected_style (fill, tint or underline)"})
+	}
+	if s.Accent != "" && !IsHexColor(s.Accent) {
+		issues = append(issues, ValidationIssue{File: file, KeyPath: key("accent"), Severity: SeverityError, Message: "accent must be a #RGB or #RRGGBB color, or empty for the system accent"})
+	}
+	for _, f := range []struct {
+		name     string
+		v        float64
+		min, max float64
+	}{{"radius", s.Radius, StyleRadiusMin, StyleRadiusMax}, {"padding", s.Padding, StylePaddingMin, StylePaddingMax}, {"font_size", s.FontSize, StyleFontSizeMin, StyleFontSizeMax}, {"opacity", s.Opacity, 0, 1}} {
+		switch {
+		case math.IsNaN(f.v) || math.IsInf(f.v, 0):
+			issues = append(issues, ValidationIssue{File: file, KeyPath: key(f.name), Severity: SeverityError, Message: f.name + " must be a finite number"})
+		case f.v != 0 && (f.v < f.min || f.v > f.max):
+			issues = append(issues, ValidationIssue{
+				File: file, KeyPath: key(f.name), Severity: SeverityWarning,
+				Message: fmt.Sprintf("%s %v is outside %v..%v (0 = preset value); clamped", f.name, f.v, f.min, f.max),
+			})
+		}
+	}
+	return issues
+}
+
+// IsHexColor reports whether s is "#RGB" or "#RRGGBB".
+func IsHexColor(s string) bool {
+	if len(s) != 4 && len(s) != 7 || s[0] != '#' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
 }
