@@ -92,6 +92,19 @@ func capsuleStageIndex(phase engine.CapsulePhase) (int, bool) {
 // applyCapsuleCardSurface applies Liquid Glass (with opaque accessibility
 // fallback) to the Capsule card, or preserves the exact pre-spatial surface for
 // the "classic" preset.
+// glassBodyTint is the wash laid over the native material behind panel text. 0.92 keeps the
+// surface recognisably glass at its edges while pushing the body close to opaque, which is what
+// text legibility needs; Apple's materials guidance likewise keeps content backplates opaque.
+func glassBodyTint(theme *ui.Theme) ui.Color {
+	if theme == nil {
+		return ui.RGBA(0, 0, 0, 0)
+	}
+	if theme.Dark {
+		return theme.Background.Alpha(0.92)
+	}
+	return theme.Background.Alpha(0.94)
+}
+
 func applyCapsuleCardSurface(c *ui.Context, card ui.Element, theme *ui.Theme, cfg config.AppearanceConfig) ui.Element {
 	prefs := c.Preferences()
 	radius := NormalizeCornerRadius(cfg)
@@ -114,9 +127,17 @@ func applyCapsuleCardSurface(c *ui.Context, card ui.Element, theme *ui.Theme, cf
 		return card
 	}
 
+	// Tint the glass toward the theme background so the desktop behind cannot read through the
+	// body text. Without it a terminal behind the panel shows through between glyphs, which was
+	// reported as "the text bleeds together / colours look wrong" — the glyphs were competing
+	// with whatever sat behind them rather than with each other.
+	//
+	// Not fully opaque: the outer edge keeps the material's translucency, which is the look the
+	// brief asks for ("glass for the floating surface"), while the reading area stays legible.
 	GlassSurface(c, card, cfg, GlassOpts{
 		Native: c.Vibrancy(),
 		Radius: radius,
+		Tint:   glassBodyTint(c.Theme()),
 	})
 	if prefs.HighContrast {
 		card.Border(1.5, theme.Border)
