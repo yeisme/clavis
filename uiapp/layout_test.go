@@ -71,16 +71,18 @@ func TestPreferredCapsuleSizeOmniboxDerivation(t *testing.T) {
 	}
 }
 
-func TestLeaderHeightFitsCardsForAllCounts(t *testing.T) {
+// The Leader menu lists one action per row (see docs/design/leader-panel-visual-research.md),
+// so height grows one row at a time rather than two cards at a time.
+func TestLeaderHeightFitsRowsForAllCounts(t *testing.T) {
 	for nodes := 1; nodes <= 24; nodes++ {
-		rows := (nodes + 1) / 2
-		want := min(max(leaderChromeHeight+rows*leaderRowHeight, leaderMinHeight), leaderMaxHeight)
+		want := min(max(leaderChromeHeight+nodes*leaderRowHeight, leaderMinHeight), leaderMaxHeight)
 		if got := leaderHeightFor(nodes); got != want {
 			t.Fatalf("nodes=%d height=%d, want %d", nodes, got, want)
 		}
 	}
-	if leaderHeightFor(1) != leaderHeightFor(2) || leaderHeightFor(3) != leaderHeightFor(4) {
-		t.Fatal("Leader height should not leave an empty half row")
+	// Each extra action must add a row's worth of height until the cap is reached.
+	if leaderHeightFor(2) <= leaderHeightFor(1) {
+		t.Fatal("a second action must make the menu taller")
 	}
 }
 

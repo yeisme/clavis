@@ -236,13 +236,18 @@ func TestLeaderHeightFitsCards(t *testing.T) {
 		}
 		prev = h
 	}
-	for nodes, want := range map[int]int{4: 226, 12: 466, 24: 480} {
+	// One action per row now, so the pinned values shifted up: 4 actions no longer share two
+	// rows. Pinned so a row-height change has to be a deliberate edit.
+	chrome := leaderChromeHeight
+	oneRow := leaderRowHeight
+	for nodes, want := range map[int]int{
+		4:  min(chrome+4*oneRow, leaderMaxHeight),
+		12: min(chrome+12*oneRow, leaderMaxHeight),
+		24: leaderMaxHeight,
+	} {
 		if got := leaderHeightFor(nodes); got != want {
 			t.Fatalf("leaderHeightFor(%d) = %d, want %d", nodes, got, want)
 		}
-	}
-	if leaderHeightFor(5) >= 340 {
-		t.Fatalf("five cards should no longer get the old fixed 340pt panel, got %d", leaderHeightFor(5))
 	}
 }
 

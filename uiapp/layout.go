@@ -116,11 +116,11 @@ const (
 	omniboxChrome float32 = 16 // list padding and dividers not covered by row tokens
 )
 
-// Leader menu metrics: the chrome surrounds a two-column grid of cards. Keep
-// each term named so a card or footer density change has an obvious derivation.
+// Leader menu metrics: the chrome surrounds a single-column list of action rows. Keep each
+// term named so a row or footer density change has an obvious derivation.
 const (
-	leaderCardHeight   = 52           // card content and vertical padding in the Leader grid
-	leaderGridGap      = int(space8)  // grid gap between the two-column Leader cards
+	leaderCardHeight   = 44           // one action row: 20pt keycap plus vertical padding
+	leaderGridGap      = int(space4)  // vertical gap between action rows
 	leaderDivider      = 1            // each divider consumes one DIP in the menu chrome
 	leaderBodyPadding  = int(space12) // padding between the header and card grid
 	leaderFooterGap    = int(space16) // breathing room before the footer row
@@ -129,14 +129,14 @@ const (
 		leaderDivider + leaderFooterGap + leaderFooterHeight + int(space16) // header, dividers, padding and footer spacing
 	leaderRowHeight = leaderCardHeight + leaderGridGap // one card plus its grid gap
 	leaderMinHeight = 172                              // minimum that keeps the header, one card row and footer usable
-	leaderMaxHeight = 480                              // maximum before a long Leader menu relies on scrolling
+	leaderMaxHeight = 520                              // maximum before a long Leader menu relies on scrolling
 )
 
-// leaderHeightFor fits the Leader menu to its cards (two per row) instead of
-// a fixed height, so a short menu doesn't trail an empty half panel and a
-// long one grows until it scrolls.
+// leaderHeightFor fits the Leader menu to its action rows (one per row) instead of a fixed
+// height, so a short menu doesn't trail an empty half panel and a long one grows until it
+// scrolls. One action per row matches how Raycast, Linear and VS Code present command lists.
 func leaderHeightFor(nodes int) int {
-	rows := (nodes + 1) / 2
+	rows := nodes
 	if rows < 1 {
 		rows = 1
 	}

@@ -294,33 +294,39 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 				})
 				return
 			}
-			ui.Grid(c).Columns(2).Gap(space8).FillWidth().Children(func() {
-				for idx, node := range state.LeaderNodes {
+			// One action per row, not a 2x2 card grid. Raycast, Linear, Notion and VS Code all
+			// present command entries as a scannable vertical list, and VS Code's own UX guide
+			// requires clear names with the shortcut shown as supporting information. A grid also
+			// forced four visual weights (keycap, icon, label, group count) into one row of a
+			// 180pt card. See docs/design/leader-panel-visual-research.md §最小改动清单 (1).
+			ui.Column(c).FillWidth().Gap(float32(leaderGridGap)).Children(func() {
+				for _, node := range state.LeaderNodes {
 					n := node
 					isGroup := n.Action.Type == config.ActionGroup
 					clicked := false
-					TiltCard3D(c, fmt.Sprintf("leader:%d:%s", idx, n.Key), effectiveSpatialAppearance(c, a.Config().Main.Appearance), TiltCardOpts{
-						Width: 180, Height: 70, Radius: radiusCard, Accent: theme.Accent, Interactive: true,
-					}, func() {
-						button := ui.ButtonBase(c).FillWidth().FillHeight().Padding(space8, space10).Radius(radiusCard).FocusRing(false)
-						if button.Hovered() {
-							button.Background(selectionFill(theme)).Border(1, selectionEdge(theme))
-						} else {
-							button.Background(tileFill(theme)).Border(1, hairline(theme))
-						}
-						button.Children(func() {
-							ui.Row(c).FillWidth().Gap(space10).AlignItems(ui.Center).Children(func() {
-								leaderKeycap(c, theme, n.Key)
-								renderSemanticIcon(c, n.Icon, IconSize16, theme.TextMuted)
-								ui.Text(c, i18n.DisplayLabel(n.Label)).FontSize(typeBody).FontWeight(500).TextColor(theme.Text).SingleLine().Grow(1).Shrink(1)
-								if isGroup {
-									ui.Text(c, strconv.Itoa(len(n.Action.Children))).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
-									renderSemanticIcon(c, "chevron.right", 12, theme.TextMuted)
-								}
-							})
+					button := ui.ButtonBase(c).
+						FillWidth().
+						Height(float32(leaderCardHeight)).
+						Padding(space0, space12).
+						Radius(radiusRow).
+						FocusRing(false)
+					if button.Hovered() {
+						button.Background(selectionFill(theme)).Border(space1, selectionEdge(theme))
+					} else {
+						button.Background(tileFill(theme)).Border(space1, hairline(theme))
+					}
+					button.Children(func() {
+						ui.Row(c).FillWidth().Gap(space10).AlignItems(ui.Center).Children(func() {
+							leaderKeycap(c, theme, n.Key)
+							renderSemanticIcon(c, n.Icon, IconSize16, theme.TextMuted)
+							ui.Text(c, i18n.DisplayLabel(n.Label)).FontSize(typeBody).FontWeight(500).TextColor(theme.Text).SingleLine().Grow(1).Shrink(1)
+							if isGroup {
+								ui.Text(c, strconv.Itoa(len(n.Action.Children))).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+								renderSemanticIcon(c, "chevron.right", 12, theme.TextMuted)
+							}
 						})
-						clicked = button.Clicked()
 					})
+					clicked = button.Clicked()
 
 					if clicked {
 						a.Dispatch(engine.Event{Type: engine.EventLeaderKeyPress, Key: n.Key})
@@ -348,18 +354,13 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 
 // leaderKeycap is the Leader menu's mnemonic key: a larger accent keycap, the
 // one thing to press on each card.
+// leaderKeycap renders the letter that triggers a leader node. Neutral on purpose: a 24px
+// square carrying an accent fill, an accent border, an accent shadow and accent text stacked
+// four layers of the same hue, which read as "washed out blue" and out-shouted the label it was
+// annotating. The accent belongs to the selected row, not to every keycap in the grid. This now
+// matches kitKeycap's quiet tone, which is the established neutral keycap in the design kit.
 func leaderKeycap(c *ui.Context, theme *ui.Theme, key string) {
-	bg := surfaceBase(theme)
-	ui.Box(c).
-		Size(24, 24).
-		Radius(radiusChip).
-		Center().
-		Background(theme.Accent.Alpha(alphaSubtle)).
-		Border(1, theme.Accent.Alpha(0.42)).
-		Shadow(0, 1, 0, 0, theme.Accent.Alpha(0.28)).
-		Children(func() {
-			ui.Text(c, key).FontSize(typeBody).FontWeight(700).TextColor(accentInk(theme, bg)).SingleLine()
-		})
+	kitKeycap(c, theme, key, keyToneQuiet)
 }
 
 func (a *AppController) handleLeaderInput(ev ui.InputEvent) bool {
