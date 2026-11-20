@@ -4,7 +4,6 @@ import (
 	"maps"
 	"strings"
 
-	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
@@ -320,21 +319,7 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 		root.Radius(radius)
 	}
 
-	card := applyTextLocale(ui.Column(c).Fill().Radius(radius).Clip())
-	if !prefs.ReduceTransparency {
-		card.Material(glass.Glass{Native: c.Vibrancy()})
-		if prefs.HighContrast {
-			card.Border(1.5, theme.Border)
-		} else {
-			card.Border(space1, withAlpha(theme.Border, alphaHalf))
-		}
-	} else {
-		borderW := float32(1)
-		if prefs.HighContrast {
-			borderW = 1.5
-		}
-		card.Background(theme.Background).Border(borderW, theme.Border)
-	}
+	card := kitFloatingShell(c, theme, applyTextLocale(ui.Column(c).Fill().Radius(radius).Clip()), cfg.Main.Appearance)
 
 	// Window-level primary+Enter commits from anywhere; Escape closes.
 	c.OnWindowShortcut(primaryMod(), ui.KeyEnter, func() {
@@ -342,49 +327,18 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 	})
 
 	card.Children(func() {
-		// Header
-		ui.Row(c).FillWidth().Padding(space10, space14).Gap(8).AlignItems(ui.Center).Children(func() {
-			ui.Row(c).
-				Padding(space2, space8).
-				Radius(radiusChip).
-				Gap(5).
-				AlignItems(ui.Center).
-				Background(withAlpha(theme.Accent, alphaSubtle)).
-				Children(func() {
-					renderSemanticIcon(c, "wand.and.stars", 13, theme.Accent)
-					ui.Text(c, i18n.T("prompts.composer_title")).FontSize(typeLabel).FontWeight(700).TextColor(theme.Accent).SingleLine()
-				})
-
-			ui.Text(c, tpl.Title).FontSize(typeBody).FontWeight(600).TextColor(theme.Text).SingleLine()
-
+		// Header: the shared dialog title bar. The template is the title, the
+		// composer kind its secondary line; trigger and app are neutral meta.
+		kitDialogHeader(c, theme, "wand.and.stars", tpl.Title, i18n.T("prompts.composer_title"), func() {
 			if tpl.Trigger != "" {
-				ui.Box(c).
-					Padding(space2, space6).
-					Radius(radiusKeycap).
-					Background(theme.Surface).
-					Border(1, withAlpha(theme.Border, alphaStrong)).
-					Children(func() {
-						ui.Text(c, tpl.Trigger).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
-					})
+				kitMetaChip(c, theme, tpl.Trigger)
 			}
-
-			ui.Spacer(c)
-
 			if appCtx.AppName != "" {
-				ui.Box(c).
-					Padding(space2, space6).
-					Radius(radiusKeycap).
-					Background(theme.Surface).
-					Border(1, withAlpha(theme.Border, alphaStrong)).
-					Children(func() {
-						ui.Text(c, appCtx.AppName).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
-					})
+				kitMetaChip(c, theme, appCtx.AppName)
 			}
 		})
 
-		ui.Divider(c)
-
-		body := ui.Column(c).FillWidth().Grow(1).Padding(space12, space14).Gap(10)
+		body := kitDialogBody(c)
 		if len(slots) == 0 {
 			body.Bind(&a.promptUI.rootHandle).Focusable().AutoFocus().FocusRing(false)
 			if needFocusSync {
@@ -444,14 +398,14 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 						isActive := slotIdx == activeSlotIdx
 
 						ui.Column(c).Key("prompt-slot:" + sl.Name).FillWidth().Gap(space4).Children(func() {
+							// The active slot shows through its field's focus ring or
+							// accent edge; the label row carries only the neutral
+							// "required" tag (a lone accent tick there read as a caret).
 							kitControlRow(c, theme, label, func() {
-								if isActive {
-									ui.Box(c).Width(space1).Height(space12).Background(theme.Accent)
-								}
 								if sl.Required {
 									ui.Box(c).Padding(space1, space4).Radius(radius4).
-										Background(theme.Accent.Alpha(alphaSubtle)).Children(func() {
-										ui.Text(c, i18n.T("prompts.required_badge")).FontSize(typeMicro).FontWeight(600).TextColor(theme.Accent).SingleLine()
+										Background(tileFill(theme)).Border(space1, hairline(theme)).Children(func() {
+										ui.Text(c, i18n.T("prompts.required_badge")).FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
 									})
 								}
 							})
@@ -633,19 +587,10 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 			})
 		})
 
-		ui.Divider(c)
-		ui.Row(c).FillWidth().Padding(space8, space14).Gap(8).AlignItems(ui.Center).Children(func() {
-			if ui.PrimaryButton(c, i18n.T("prompts.insert")).Clicked() {
-				a.CommitPromptComposer()
-			}
-			if ui.Button(c, i18n.T("common.copy")).Clicked() {
-				a.CopyPromptComposer()
-			}
-			ui.Spacer(c)
-			ui.Text(c, i18n.T("prompts.footer.hint")).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
-			if ui.Button(c, i18n.T("prompts.cancel")).Clicked() {
-				a.ClosePromptComposer()
-			}
-		})
+		kitDialogFooter(c, theme, i18n.T("prompts.footer.hint"),
+			dialogAction{Label: i18n.T("common.copy"), OnClick: func() { a.CopyPromptComposer() }},
+			dialogAction{Label: i18n.T("prompts.cancel"), OnClick: a.ClosePromptComposer},
+			dialogAction{Label: i18n.T("prompts.insert"), Primary: true, OnClick: func() { a.CommitPromptComposer() }},
+		)
 	})
 }

@@ -229,6 +229,8 @@ var enTable = map[string]string{
 	"clipboard.row.date":                "%d/%d",
 	"clipboard.row.date_year":           "%[2]d/%[3]d/%[1]d",
 	"clipboard.row.lines":               "%d lines",
+	"selection.action.optimize":         "Optimize",
+	"selection.action.explain":          "Explain",
 	"clipboard.media.image":             "Image",
 	"clipboard.media.image_dims":        "Image %d×%d",
 	"clipboard.media.file":              "File",

@@ -293,6 +293,25 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, m
 		shoot(sec.name, f.ctrl.SettingsView, 960, 900, 1.5, nil)
 	}
 
+	// The two other floating dialogs: the prompt composer (header, slots,
+	// preview, footer buttons) and the selection action bar.
+	composerTpl := config.PromptTemplate{
+		ID: "snap-review", Trigger: "/cr", Title: "代码审查 Code Review",
+		Template: "请审查以下 {{language}} 代码，重点关注{{focus}}。\n\n代码：\n{{code}}",
+		Slots: []config.PromptSlot{
+			{Name: "language", Label: "语言 Language", Kind: "select", Options: []string{"Go", "TypeScript", "Python"}, Default: "Go"},
+			{Name: "focus", Label: "关注点 Focus", Kind: "text", Default: "并发安全"},
+			{Name: "code", Label: "代码 Code", Kind: "text", Required: true},
+		},
+	}
+	f.ctrl.OpenPromptComposer(composerTpl, engine.CapsuleContext{AppName: "Visual Studio Code"})
+	cw, ch := PreferredPromptComposerPanelSize(len(composerTpl.Slots))
+	shoot("20-prompt-composer", f.ctrl.PromptComposerView, cw, ch, 2, nil)
+	f.ctrl.ClosePromptComposer()
+	selBar := SelectionBarPayload{Text: "func main() {}", Actions: []string{"optimize_prompt", "explain", "translate", "polish", "copy"}}
+	bw, bh := SelectionBarSize(selBar)
+	shoot("21-selection-bar", func(c *ui.Context) { SelectionBarView(c, selBar, appearance) }, bw, bh, 2, nil)
+
 	// The first-run guide, from a fresh Mac to a working Leader key, its
 	// smallest window, and Windows.
 	guide := func(goos string) func(c *ui.Context) {

@@ -65,6 +65,10 @@ func TestTokenContrast(t *testing.T) {
 			{"secondary line on chosen omnibox row", secondaryInk(theme), rowSelectionFill(theme).Over(bg), minTextContrast},
 			{"matched runes on chosen omnibox row", theme.Text, matchMark(theme).Over(rowSelectionFill(theme).Over(bg)), minTextContrast},
 			{"selection bar on chosen omnibox row", rowSelectionBar(theme), rowSelectionFill(theme).Over(bg), minGlyphContrast},
+			// Dialog skeleton: meta chips and the required tag are neutral
+			// tiles; their secondary text still clears 4.5:1.
+			{"secondary text on a meta chip", secondaryInk(theme), tileFill(theme).Over(bg), minTextContrast},
+			{"secondary text on a meta chip over the glass body", secondaryInk(theme), tileFill(theme).Over(glassBodyTint(theme).Over(bg)), minTextContrast},
 			{"pill EN segment", theme.Background, theme.Text.Alpha(0.88).Over(bg), minTextContrast},
 			{"diff insertion", theme.Text, diffInsertMark(theme).Over(theme.Surface), minTextContrast},
 			{"diff deletion", diffDeleteInk(theme, theme.Surface), diffDeleteMark(theme).Over(theme.Surface), minTextContrast},

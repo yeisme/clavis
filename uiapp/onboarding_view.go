@@ -138,7 +138,7 @@ func (a *AppController) renderOnboarding(c *ui.Context, goos string) {
 
 	applyTextLocale(ui.Column(c).Fill().Background(theme.Background)).Children(func() {
 		ui.Scroll(c).FillWidth().Grow(1).Children(func() {
-			ui.Column(c).FillWidth().Padding(space16, space16).Gap(space12).Children(func() {
+			ui.Column(c).FillWidth().Padding(dialogPadY, dialogPadX).Gap(space12).Children(func() {
 				renderOnboardingHeader(c, theme)
 				ui.Row(c).FillWidth().Gap(space10).AlignItems(ui.Start).Children(func() {
 					renderOnboardingRail(c, theme, granted, st.leaderSeen, ready)
@@ -476,18 +476,17 @@ func firstSnippetTrigger(cfg config.ClavisConfig) string {
 }
 
 func renderOnboardingFooter(c *ui.Context, theme *ui.Theme, a *AppController, hooks OnboardingHooks, ready bool) {
-	ui.Box(c).FillWidth().Height(space1).Background(hairline(theme))
-	ui.Row(c).FillWidth().Padding(space12, space16+8).Gap(space10).AlignItems(ui.Center).Children(func() {
-		ui.Text(c, i18n.T("onboarding.footer.reopen")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().Grow(1).Shrink(1)
-		if ui.Button(c, i18n.T("onboarding.footer.settings")).Key("onboarding-settings").Clicked() {
-			a.OpenSettings(SettingsTabGeneral)
-		}
-		// Until the permissions and keyboard monitor are ready, the action is
-		// visibly disabled rather than merely looking secondary.
-		if ui.PrimaryButton(c, i18n.T("onboarding.footer.start")).Key("onboarding-start").Disabled(!ready).Clicked() && hooks.Finish != nil {
-			hooks.Finish()
-		}
-	})
+	// The shared dialog footer: hint leading, buttons trailing, the primary
+	// last. Until the permissions and keyboard monitor are ready, the primary
+	// is visibly disabled rather than merely looking secondary.
+	kitDialogFooter(c, theme, i18n.T("onboarding.footer.reopen"),
+		dialogAction{Label: i18n.T("onboarding.footer.settings"), Key: "onboarding-settings", OnClick: func() { a.OpenSettings(SettingsTabGeneral) }},
+		dialogAction{Label: i18n.T("onboarding.footer.start"), Key: "onboarding-start", Primary: true, Disabled: !ready, OnClick: func() {
+			if hooks.Finish != nil {
+				hooks.Finish()
+			}
+		}},
+	)
 }
 
 // shortcutKeyLabels names the keys of a shortcut as the keyboard in front of

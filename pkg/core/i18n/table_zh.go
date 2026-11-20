@@ -230,6 +230,8 @@ var zhTable = map[string]string{
 	"clipboard.row.date":                "%d月%d日",
 	"clipboard.row.date_year":           "%d年%d月%d日",
 	"clipboard.row.lines":               "%d 行",
+	"selection.action.optimize":         "优化",
+	"selection.action.explain":          "解释",
 	"clipboard.media.image":             "图片",
 	"clipboard.media.image_dims":        "图片 %d×%d",
 	"clipboard.media.file":              "文件",

@@ -127,6 +127,27 @@ edit plus the layout tests:
 - Leader height `= 106 + ⌈n/2⌉ × 60`, clamped `[172, 480]`
 - AI streaming `520` (multi-turn `580`); HUD `headerHeight + space16 = 56`
 
+### Dialog skeleton
+
+`uiapp/kit_dialog.go` gives the prompt composer, the first-run guide and the
+selection bar one skeleton:
+
+- **Shell.** `kitFloatingShell`: glass only at the edge, the body washed with
+  `glassBodyTint`, and a hairline. Reduce Transparency gives an opaque
+  background; Increase Contrast a 1.5px border.
+- **Title bar.** `kitDialogHeader`: `headerHeight` tall, with a neutral icon,
+  a `typeTitle`/600 title, a secondary line and `kitMetaChip` meta, then a
+  hairline.
+- **Body.** `kitDialogBody`: `dialogPadY 12` × `dialogPadX 14`, `cardGap`.
+- **Footer.** `kitDialogFooter`: a hairline, then `footerHeight` tall. The hint
+  takes the leading space. Buttons sit at the trailing edge in macOS order:
+  others, then Cancel, then the primary last.
+
+No accent fills sit in title bars, chips or tags. The selection bar sizes each
+action to its label (`PreferredSelectionBarWidth` uses the view's own metrics).
+`TestDialogsShareOneSkeleton` and `TestSelectionBarFitsItsLabels` check this on
+real renders.
+
 ## Accessibility
 
 - **Contrast is derived, not chosen.** `accentInk`/`accentGlyph`/`matchMark`/

@@ -236,8 +236,10 @@ func rowSelectionBarRect(r ui.Rect) ui.Rect {
 }
 
 // secondaryInk is the color of secondary lines (row subtitles, clipboard
-// source and time): the theme's muted text, pushed toward the text color
-// until it reads at 4.5:1 on the chosen row's tint, the worst case.
+// source and time, dialog hints and meta chips): the theme's muted text,
+// pushed toward the text color until it reads at 4.5:1 on both places it
+// lands — the chosen row's tint and a neutral tile. With a yellow accent the
+// tint is the lighter of the two, so the tile is the binding case.
 func secondaryInk(t *ui.Theme) ui.Color { return derivedPalette(t).secondaryInk }
 
 // hairline is the low-contrast separator/border used on glass surfaces.
@@ -373,7 +375,7 @@ func derivedPalette(t *ui.Theme) palette {
 		selectedTileGlyph: computeSelectedTileGlyph(t),
 		accentInk:         readableOn(t.Accent, t.Text, bg, minTextContrast),
 		accentGlyph:       readableOn(t.Accent, t.Text, bg, minGlyphContrast),
-		secondaryInk:      readableOn(t.TextMuted, t.Text, rowSelectionFill(t).Over(bg), minTextContrast),
+		secondaryInk:      readableOnAll(t.TextMuted, t.Text, minTextContrast, rowSelectionFill(t).Over(bg), tileFill(t).Over(bg)),
 		selectionBar:      readableOn(t.Accent, t.Text, rowSelectionFill(t).Over(bg), minGlyphContrast),
 	}
 	paletteCache.valid, paletteCache.key, paletteCache.p = true, key, p
@@ -386,6 +388,25 @@ func readableOn(c, toward, bg ui.Color, min float64) ui.Color {
 	for step := 0; step <= 10; step++ {
 		cand := c.Mix(toward, float32(step)/10)
 		if contrastRatio(cand, bg) >= min {
+			return cand
+		}
+	}
+	return toward
+}
+
+// readableOnAll is readableOn for a color that lands on several
+// backgrounds: the first blend that clears min on every one of them.
+func readableOnAll(c, toward ui.Color, min float64, bgs ...ui.Color) ui.Color {
+	for step := 0; step <= 10; step++ {
+		cand := c.Mix(toward, float32(step)/10)
+		ok := true
+		for _, bg := range bgs {
+			if contrastRatio(cand, bg) < min {
+				ok = false
+				break
+			}
+		}
+		if ok {
 			return cand
 		}
 	}
