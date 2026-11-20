@@ -271,6 +271,32 @@ func (s *LearningStore) DeleteLearnedWord(ctx context.Context, pinyinKey, word s
 	s.mu.Unlock()
 	return nil
 }
+
+// UnpinIMEWord clears the pinned flag for every reading of word while retaining
+// its learned frequency and recency.
+func (s *LearningStore) UnpinIMEWord(ctx context.Context, word string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := s.db.Execute(ctx, `UPDATE ime_user_lexicon SET pinned=0 WHERE word=?`, word); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	for k, v := range s.lex {
+		if k.word == word {
+			v.pinned = false
+			s.lex[k] = v
+		}
+	}
+	s.mu.Unlock()
+	return nil
+}
 func (s *LearningStore) Stats(ctx context.Context) (LexiconStats, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {

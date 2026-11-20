@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -212,6 +213,46 @@ func newDesktopApp() *desktopApp {
 	return &desktopApp{}
 }
 
+// seedConfiguredUserWords loads pinned configured words once the learning store is ready.
+// The full-name lookup is best effort and never delays startup beyond its short timeout.
+func seedConfiguredUserWords(ctx context.Context, cfgStore *config.ConfigStore, cfg config.ClavisConfig, store *storage.LearningStore) bool {
+	if store == nil {
+		return cfg.Main.InputEngine.SeededFullName
+	}
+	storage.InjectUserWords(ctx, store, cfg.Main.InputEngine.UserWords)
+	if !cfg.Main.InputEngine.AutoSeedFullName || cfg.Main.InputEngine.SeededFullName {
+		return cfg.Main.InputEngine.SeededFullName
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	name, err := exec.CommandContext(lookupCtx, "id", "-F").Output()
+	name = []byte(strings.TrimSpace(string(name)))
+	if err != nil || !storage.HasHanzi(string(name)) {
+		return false
+	}
+	if len(storage.InjectUserWords(lookupCtx, store, []string{string(name)})) > 0 {
+		return false
+	}
+	updated := cfg.Main
+	updated.InputEngine.SeededFullName = true
+	seen := false
+	for _, word := range updated.InputEngine.UserWords {
+		if strings.TrimSpace(word) == string(name) {
+			seen = true
+			break
+		}
+	}
+	if !seen {
+		updated.InputEngine.UserWords = append(updated.InputEngine.UserWords, string(name))
+	}
+	if cfgStore != nil {
+		if err := cfgStore.SaveMain(updated); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func (a *desktopApp) start() {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -254,6 +295,10 @@ func (a *desktopApp) start() {
 				learningWriter = storage.NewLearningWriter(ls, storage.LearningWriterOptions{})
 			}
 		}
+	}
+	if learningStore != nil {
+		seedConfiguredUserWords(ctx, cfgStore, cfg, learningStore)
+		cfg = cfgStore.Current()
 	}
 	if clipStore == nil {
 		clipStore = clipboard.NewMemoryStore(clipboard.NewPrivacyFilterFromConfig(cfg.Main.Clipboard))
@@ -964,8 +1009,12 @@ func (a *desktopApp) applyRuntimeConfig(cfg config.ClavisConfig) {
 	a.mu.Lock()
 	br := a.hostBridge
 	sqliteStore := a.sqliteStore
+	learningStore := a.learningStore
 	sup := a.supervisor
 	a.mu.Unlock()
+	if learningStore != nil {
+		storage.InjectUserWords(context.Background(), learningStore, cfg.Main.InputEngine.UserWords)
+	}
 	if updater, ok := br.(dynamicBridgeUpdater); ok {
 		updater.UpdateTriggerConfig(cfg.Main.Trigger)
 		updater.UpdateKeymapConfig(cfg.Main.Keymap)

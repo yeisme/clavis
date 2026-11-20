@@ -1191,6 +1191,9 @@ type InputEngineConfig struct {
 	ShiftToggleASCII    bool     `json:"shiftToggleASCII"`
 	FuzzyPinyin         []string `json:"fuzzyPinyin"`
 	CustomDictPaths     []string `json:"customDictPaths"`
+	UserWords           []string `json:"userWords"`
+	AutoSeedFullName    bool     `json:"autoSeedFullName"`
+	SeededFullName      bool     `json:"seededFullName"`
 	UserLearning        bool     `json:"userLearning"`
 	IMKSocketPath       string   `json:"imkSocketPath"`
 	// Style is [input_engine.style], the candidate window's look.
@@ -1202,7 +1205,7 @@ type InputEngineConfig struct {
 }
 
 func DefaultInputEngineConfig() InputEngineConfig {
-	return InputEngineConfig{Mode: "inline_hook", Scheme: "quanpin", CandidateCount: 7, MixedEnglish: true, AutoPairPunctuation: true, ShiftToggleASCII: true, FuzzyPinyin: []string{}, CustomDictPaths: []string{}, UserLearning: true, Style: DefaultInputEngineStyleConfig()}
+	return InputEngineConfig{Mode: "inline_hook", Scheme: "quanpin", CandidateCount: 7, MixedEnglish: true, AutoPairPunctuation: true, ShiftToggleASCII: true, FuzzyPinyin: []string{}, CustomDictPaths: []string{}, UserWords: []string{}, AutoSeedFullName: true, UserLearning: true, Style: DefaultInputEngineStyleConfig()}
 }
 
 // Candidate window style presets ([input_engine.style] preset).
@@ -1338,6 +1341,21 @@ func decodeInputEngineConfig(tbl *toml.Table, path string) (InputEngineConfig, e
 	} else if ok {
 		c.CustomDictPaths = a
 	}
+	if a, ok, e := optionalStringArray(tbl, "user_words", path); e != nil {
+		return c, e
+	} else if ok {
+		c.UserWords = a
+	}
+	if b, ok, e := optionalBool(tbl, "auto_seed_full_name", path); e != nil {
+		return c, e
+	} else if ok {
+		c.AutoSeedFullName = b
+	}
+	if b, ok, e := optionalBool(tbl, "seeded_full_name", path); e != nil {
+		return c, e
+	} else if ok {
+		c.SeededFullName = b
+	}
 	if b, ok, e := optionalBool(tbl, "user_learning", path); e != nil {
 		return c, e
 	} else if ok {
@@ -1366,6 +1384,15 @@ func (c InputEngineConfig) toTOML() *toml.Table {
 	t.Set("shift_toggle_ascii", toml.BoolVal(c.ShiftToggleASCII))
 	t.Set("fuzzy_pinyin", stringsToTOMLArray(c.FuzzyPinyin))
 	t.Set("custom_dict_paths", stringsToTOMLArray(c.CustomDictPaths))
+	if len(c.UserWords) > 0 {
+		t.Set("user_words", stringsToTOMLArray(c.UserWords))
+	}
+	if !c.AutoSeedFullName {
+		t.Set("auto_seed_full_name", toml.BoolVal(false))
+	}
+	if c.SeededFullName {
+		t.Set("seeded_full_name", toml.BoolVal(true))
+	}
 	t.Set("user_learning", toml.BoolVal(c.UserLearning))
 	t.Set("imk_socket_path", toml.StringVal(c.IMKSocketPath))
 	t.Set("style", toml.TableVal(c.Style.toTOML()))
