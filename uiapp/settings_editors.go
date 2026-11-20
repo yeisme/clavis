@@ -28,6 +28,11 @@ type settingsEditorState struct {
 	// "clipboard_shortcut") whose recorder waits for the next modifier+key chord.
 	recordingShortcut string
 
+	// "my words" editor: the draft being typed and the last validation message. They live in
+	// the shared settings editor state so a repaint cannot drop what the user typed.
+	myWordDraft string
+	myWordError string
+
 	// leader tree editor.
 	leaderSelected []string
 	leaderDraft    config.LeaderNode

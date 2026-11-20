@@ -816,4 +816,12 @@ var enTable = map[string]string{
 	"settings.input_engine.user_learning_help":   "Reorders candidates by what you pick; the data stays on this device",
 	"settings.input_engine.fuzzy":                "Fuzzy Pinyin",
 	"settings.input_engine.fuzzy_help":           "Treats easily confused initials or finals as the same, as z and zh",
+	"settings.card.user_words":                   "My words",
+	"settings.user_words.help":                   "These words always come first for their pinyin, regardless of how often you use them. Good for names, companies and jargon.",
+	"settings.user_words.empty":                  "Nothing yet. Once added, typing its pinyin shows it first.",
+	"settings.user_words.add":                    "Add",
+	"settings.user_words.remove":                 "Remove",
+	"settings.user_words.too_short":              "Enter at least two characters. Pinning a single character would outrank every other candidate for that syllable.",
+	"settings.user_words.unknown_reading":        "No pinyin reading found for this word, so it could not be typed.",
+	"settings.user_words.duplicate":              "That word is already in the list.",
 }

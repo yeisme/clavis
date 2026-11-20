@@ -64,6 +64,7 @@ func (a *AppController) renderInputEngineCard(c *ui.Context, theme *ui.Theme, cf
 				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.InputEngine.UserLearning = v })
 			}
 			a.renderFuzzyPinyin(c, theme, ie.FuzzyPinyin)
+			a.renderUserWordsCard(c, theme, cfg)
 		})
 	})
 }

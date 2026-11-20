@@ -274,6 +274,14 @@ func buildLexicon() *lexicon {
 
 // wordReadings returns the space-joined readings of w (first reading per char, plus the
 // second for polyphones such as 觉/得/行 so "juede" and "jiaode" both hit).
+// ReadingsFor exposes the syllable readings of a word to callers outside this package (the
+// settings UI shows them so a polyphone is visible before it surprises anyone, and storage needs
+// the same list to pin every reading). Returns nil when a character has no known reading, which
+// also means the word cannot be pinned usefully.
+func ReadingsFor(w string) []string {
+	return wordReadings(w)
+}
+
 func wordReadings(w string) []string {
 	var opts [][]string
 	for _, r := range w {

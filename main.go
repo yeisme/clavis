@@ -1083,6 +1083,33 @@ func (a *desktopApp) applySavedConfig() {
 	cfg := ctrl.Config()
 	a.applyRuntimeConfig(cfg)
 	a.syncFallbackShortcuts(cfg.Main.Trigger)
+	// Re-apply "my words" after any config save: the settings page edits the config, and this is
+	// the one place that owns the learning store, so additions get pinned and removals get
+	// unpinned here rather than in the UI layer.
+	a.resyncUserWords(cfg)
+}
+
+// resyncUserWords pins every configured word and unpins words that were removed, so editing the
+// list takes effect without a restart.
+func (a *desktopApp) resyncUserWords(cfg config.ClavisConfig) {
+	a.mu.Lock()
+	store := a.learningStore
+	a.mu.Unlock()
+	if store == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	keep := make(map[string]bool, len(cfg.Main.InputEngine.UserWords))
+	for _, w := range cfg.Main.InputEngine.UserWords {
+		keep[w] = true
+	}
+	for _, pinned := range store.PinnedIMEWords(ctx) {
+		if !keep[pinned] {
+			_ = store.UnpinIMEWord(ctx, pinned)
+		}
+	}
+	storage.InjectUserWords(ctx, store, cfg.Main.InputEngine.UserWords)
 }
 
 // syncLanguageFromConfig re-resolves the UI language after a config change

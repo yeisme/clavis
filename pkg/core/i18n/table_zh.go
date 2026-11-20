@@ -817,4 +817,12 @@ var zhTable = map[string]string{
 	"settings.input_engine.user_learning_help":   "按你的选词调整候选顺序，数据只保存在本机",
 	"settings.input_engine.fuzzy":                "模糊音",
 	"settings.input_engine.fuzzy_help":           "把容易混淆的声母或韵母当作相同，如 z 与 zh",
+	"settings.card.user_words":                   "我的词",
+	"settings.user_words.help":                   "这里的词打拼音就排第一位，不受使用频率影响。适合人名、公司、术语。",
+	"settings.user_words.empty":                  "还没有添加。加进来后打拼音第一个就是它。",
+	"settings.user_words.add":                    "添加",
+	"settings.user_words.remove":                 "移除",
+	"settings.user_words.too_short":              "至少输入两个字。单个字会把那个音节的其它候选全压下去。",
+	"settings.user_words.unknown_reading":        "查不到这个词的拼音，无法用拼音打到。",
+	"settings.user_words.duplicate":              "这个词已经在列表里了。",
 }

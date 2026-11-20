@@ -297,6 +297,24 @@ func (s *LearningStore) UnpinIMEWord(ctx context.Context, word string) error {
 	s.mu.Unlock()
 	return nil
 }
+// PinnedIMEWords lists the words currently pinned to the top of the candidate list. The settings
+// page uses it to unpin words the user removed from the config: without that, a removed word
+// keeps outranking everything for its pinyin until the database is wiped.
+func (s *LearningStore) PinnedIMEWords(ctx context.Context) []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []string
+	for k, v := range s.lex {
+		if v.pinned {
+			out = append(out, k.word)
+		}
+	}
+	return out
+}
+
 func (s *LearningStore) Stats(ctx context.Context) (LexiconStats, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
