@@ -911,6 +911,17 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 		// bar. That also frees the dedicated toggle from stealing a chord like ctrl+alt+;.
 		if strings.HasSuffix(modName, "shift") {
 			right := modName == "right_shift"
+			// Double-tapping the right shift flips forced Chinese takeover. This is the
+			// only entry point when [trigger] input_engine_toggle_shortcut is empty (the
+			// default), and forced mode is what lets the engine run while a non-ASCII
+			// system input source is active.
+			if right && b.triggers != nil && b.triggers.rightShiftDouble(modName, isDown, otherDown, nowMs) {
+				b.cancelShiftToggle()
+				b.emitTriggerEvents([]host.TriggerEvent{{Kind: host.TriggerInputEngineToggle, TimestampMs: nowMs}})
+				b.shiftDown = false
+				b.shiftSide = ""
+				return 0
+			}
 			if !right {
 				if b.triggers != nil && b.triggers.doubleShift(modName, isDown, otherDown, nowMs, false) {
 					// A completed double tap belongs to the selection bar: cancel the

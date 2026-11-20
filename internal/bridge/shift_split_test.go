@@ -66,3 +66,31 @@ func TestShiftSideIsRememberedSoLeftPlusRightTapDoesNotToggle(t *testing.T) {
 		t.Fatal("an empty side must not toggle")
 	}
 }
+
+// With the toggle hotkey defaulting to empty, a double tap on the right shift is the only
+// way into forced Chinese takeover. Without it the engine can never engage while a
+// non-ASCII system input source is active, and the whole input method looks dead.
+func TestRightShiftDoubleTapDrivesTheToggle(t *testing.T) {
+	r := newTriggerRuntime()
+	var fired bool
+	for i := 0; i < 2; i++ {
+		if r.rightShiftDouble("right_shift", true, false, int64(i*50)) {
+			fired = true
+		}
+		if r.rightShiftDouble("right_shift", false, false, int64(i*50+10)) {
+			fired = true
+		}
+	}
+	if !fired {
+		t.Fatal("two quick right-shift taps must produce the toggle")
+	}
+
+	// The left shift must never drive it.
+	r2 := newTriggerRuntime()
+	for i := 0; i < 2; i++ {
+		r2.rightShiftDouble("left_shift", true, false, int64(i*50))
+		if r2.rightShiftDouble("left_shift", false, false, int64(i*50+10)) {
+			t.Fatal("left shift must not drive the input-mode toggle")
+		}
+	}
+}

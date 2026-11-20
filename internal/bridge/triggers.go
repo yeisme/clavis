@@ -17,11 +17,19 @@ type triggerRuntime struct {
 	mu        sync.RWMutex
 	selection config.SelectionBarConfig
 	shift     *DoubleTapDetector
-	leftDown  atomic.Bool
+	// rightShift owns the input-mode takeover toggle. It exists so the toggle has an entry
+	// point that does not cost a chord: with [trigger] input_engine_toggle_shortcut left
+	// empty, a double tap on the right shift is the only way into forced Chinese mode, and
+	// without it the engine can never engage while a non-ASCII system IME is active.
+	rightShift *DoubleTapDetector
+	leftDown   atomic.Bool
 }
 
 func newTriggerRuntime() *triggerRuntime {
-	r := &triggerRuntime{shift: NewDoubleTapDetector("shift", 300)}
+	r := &triggerRuntime{
+		shift:      NewDoubleTapDetector("shift", 300),
+		rightShift: NewDoubleTapDetector("right_shift", 300),
+	}
 	r.selection = config.DefaultSelectionBarConfig()
 	return r
 }
@@ -58,6 +66,11 @@ func (r *triggerRuntime) doubleShift(mod string, down, other bool, now int64, co
 	}
 	return r.shift.HandleModifier(mod, down, other, now)
 }
+// rightShiftDouble reports a completed double tap on the right shift.
+func (r *triggerRuntime) rightShiftDouble(mod string, down, other bool, now int64) bool {
+	return r.rightShift.HandleModifier(mod, down, other, now)
+}
+
 func (r *triggerRuntime) autoSelectMouseDown() { r.leftDown.Store(true) }
 func (r *triggerRuntime) autoSelectMouseUp() bool {
 	return r.leftDown.Swap(false)

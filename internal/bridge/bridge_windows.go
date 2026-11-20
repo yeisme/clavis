@@ -682,6 +682,12 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 		// serve both purposes.
 		isShiftKey := vk == vkShift || vk == vkLShift || vk == vkRShift
 		isRightShift := vk == vkRShift || modName == "right_shift"
+		// Double-tapping the right shift flips forced Chinese takeover — the same gesture as
+		// macOS, and the only entry point when the toggle hotkey is left empty.
+		if b.triggers != nil && isRightShift && b.triggers.rightShiftDouble(modName, isDown, winOtherModifiersDown(vk), nowMs) {
+			b.emitTriggerEvents([]host.TriggerEvent{{Kind: host.TriggerInputEngineToggle, TimestampMs: nowMs}})
+			return 1
+		}
 		if b.triggers != nil && isShiftKey && !isRightShift && b.triggers.doubleShift(modName, isDown, winOtherModifiersDown(vk), nowMs, b.hookIMEComposing(time.Now())) {
 			b.emitTriggerEvents([]host.TriggerEvent{selectionEvent(nowMs)})
 			return 1
