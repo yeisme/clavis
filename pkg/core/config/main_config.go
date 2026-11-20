@@ -1195,7 +1195,20 @@ type InputEngineConfig struct {
 	AutoSeedFullName    bool     `json:"autoSeedFullName"`
 	SeededFullName      bool     `json:"seededFullName"`
 	UserLearning        bool     `json:"userLearning"`
-	IMKSocketPath       string   `json:"imkSocketPath"`
+	// ForceTakeover starts with the engine owning Chinese input even when the system input
+	// source is not ASCII. Persisted because the gesture that mirrors it (double-tap right
+	// shift) is otherwise lost on every launch, and on a Mac whose system IME is Chinese the
+	// engine stays unreachable until the user re-enables it.
+	ForceTakeover bool `json:"forceTakeover"`
+	// AutoTakeover engages the engine automatically whenever a non-ASCII system input source
+	// becomes active, so the user never has to tap anything to get Clavis input. Off by
+	// default: silently taking over from another IME is surprising.
+	AutoTakeover bool `json:"autoTakeover"`
+	// LockSystemSource switches the system input source to ASCII while the engine is in
+	// takeover. Without it the system IME keeps producing its own candidate window on top of
+	// Clavis', which is the main way the two fight each other.
+	LockSystemSource bool   `json:"lockSystemSource"`
+	IMKSocketPath    string `json:"imkSocketPath"`
 	// Style is [input_engine.style], the candidate window's look.
 	Style InputEngineStyleConfig `json:"style"`
 
@@ -1205,7 +1218,7 @@ type InputEngineConfig struct {
 }
 
 func DefaultInputEngineConfig() InputEngineConfig {
-	return InputEngineConfig{Mode: "inline_hook", Scheme: "quanpin", CandidateCount: 7, MixedEnglish: true, AutoPairPunctuation: true, ShiftToggleASCII: true, FuzzyPinyin: []string{}, CustomDictPaths: []string{}, UserWords: []string{}, AutoSeedFullName: true, UserLearning: true, Style: DefaultInputEngineStyleConfig()}
+	return InputEngineConfig{Mode: "inline_hook", Scheme: "quanpin", CandidateCount: 7, MixedEnglish: true, AutoPairPunctuation: true, ShiftToggleASCII: true, FuzzyPinyin: []string{}, CustomDictPaths: []string{}, UserWords: []string{}, AutoSeedFullName: true, AutoTakeover: true, LockSystemSource: true, UserLearning: true, Style: DefaultInputEngineStyleConfig()}
 }
 
 // Candidate window style presets ([input_engine.style] preset).
@@ -1356,6 +1369,21 @@ func decodeInputEngineConfig(tbl *toml.Table, path string) (InputEngineConfig, e
 	} else if ok {
 		c.SeededFullName = b
 	}
+	if b, ok, e := optionalBool(tbl, "force_takeover", path); e != nil {
+		return c, e
+	} else if ok {
+		c.ForceTakeover = b
+	}
+	if b, ok, e := optionalBool(tbl, "auto_takeover", path); e != nil {
+		return c, e
+	} else if ok {
+		c.AutoTakeover = b
+	}
+	if b, ok, e := optionalBool(tbl, "lock_system_source", path); e != nil {
+		return c, e
+	} else if ok {
+		c.LockSystemSource = b
+	}
 	if b, ok, e := optionalBool(tbl, "user_learning", path); e != nil {
 		return c, e
 	} else if ok {
@@ -1392,6 +1420,15 @@ func (c InputEngineConfig) toTOML() *toml.Table {
 	}
 	if c.SeededFullName {
 		t.Set("seeded_full_name", toml.BoolVal(true))
+	}
+	if c.ForceTakeover {
+		t.Set("force_takeover", toml.BoolVal(true))
+	}
+	if !c.AutoTakeover {
+		t.Set("auto_takeover", toml.BoolVal(false))
+	}
+	if !c.LockSystemSource {
+		t.Set("lock_system_source", toml.BoolVal(false))
 	}
 	t.Set("user_learning", toml.BoolVal(c.UserLearning))
 	t.Set("imk_socket_path", toml.StringVal(c.IMKSocketPath))

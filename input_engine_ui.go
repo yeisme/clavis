@@ -65,6 +65,13 @@ func (a *desktopApp) setupInputEngine(ctx context.Context, br bridge.HostService
 	})
 	u.panel.OnClose(a.closeHides(u.panel.Hide))
 	h.SetInputEngineViewHandler(func(v bridge.InputEngineView) { u.onView(ctx, v) })
+	// Restore the persisted takeover state before the engine is built, so a relaunch lands in
+	// the mode the user left. Without this the engine is unreachable on every fresh launch
+	// whenever the system IME is Chinese: the gate stands down and the double-tap has to be
+	// rediscovered each time.
+	if f, ok := br.(bridge.InlineIMEForcer); ok && f != nil {
+		f.SetInlineIMEForced(cfg.ForceTakeover)
+	}
 	h.ConfigureInputEngine(cfg)
 	return u
 }

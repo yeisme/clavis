@@ -67,6 +67,11 @@ const (
 	AITestError   AITestStatus = "error"
 )
 
+// imeSwitchTimeout bounds the cross-process work done when Clavis moves the system input
+// source. It is deliberately short: this runs off the input path but still in response to a
+// user gesture, and a hung TIS call must not leave the app waiting.
+const imeSwitchTimeout = 2 * time.Second
+
 // IMEState is the single source of truth for what the input method is doing.
 // The system input source, Clavis takeover, and engine ASCII mode collapse into
 // four externally meaningful states for the pill and other UI surfaces.
@@ -1440,6 +1445,12 @@ func (c *AppController) toggleInlineIMEForced() {
 	cfg := c.ConfigStore.Current()
 	c.mu.Unlock()
 
+	// Persist the choice: the gesture is easy to forget, and losing it on every relaunch is
+	// why the engine felt dead after a restart. A failed write must not block the toggle.
+	if next != cfg.Main.InputEngine.ForceTakeover {
+		_ = c.UpdateMainConfig(func(m *config.MainConfig) { m.InputEngine.ForceTakeover = next })
+	}
+
 	if cfg.Main.IME.ShowFloatingPill {
 		c.showIMEPillState(nil)
 	}
@@ -1467,8 +1478,29 @@ func (c *AppController) NotifyIMESwitch(info host.InputSourceInfo, anchor *host.
 	if info.ID != "" || info.Name != "" {
 		c.activeInputSource = info
 	}
+	wasTakeover := false
+	if f, ok := c.Bridge.(bridge.InlineIMEForcer); ok && f != nil {
+		wasTakeover = f.InlineIMEForced()
+	}
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
+
+	// The user just switched the system input source by hand. Two behaviours keep the two IMEs
+	// from fighting:
+	//   1. auto_takeover: a non-ASCII source means "I want Chinese", so the engine engages
+	//      without the user having to discover the double-tap.
+	//   2. lock_system_source: once the engine owns input, push the system source back to ASCII
+	//      so the system IME stops drawing its own candidate window on top of ours.
+	if f, ok := c.Bridge.(bridge.InlineIMEForcer); ok && f != nil && cfg.Main.InputEngine.Enabled {
+		switch {
+		case cfg.Main.InputEngine.AutoTakeover && !info.IsASCII && !wasTakeover:
+			// Engine takes over, then the source is locked below on the next event.
+			f.SetInlineIMEForced(true)
+			_ = c.UpdateMainConfig(func(m *config.MainConfig) { m.InputEngine.ForceTakeover = true })
+		case cfg.Main.InputEngine.LockSystemSource && wasTakeover && !info.IsASCII:
+			go c.lockSystemSourceToASCII()
+		}
+	}
 
 	if cfg.Main.IME.ShowFloatingPill {
 		c.showIMEPillState(anchor)
@@ -1533,6 +1565,25 @@ func (c *AppController) maybeLockASCIIForLeader() {
 
 	if cfg.Main.IME.ShowFloatingPill {
 		c.showIMEPillState(nil)
+	}
+}
+
+// lockSystemSourceToASCII pushes the system input source to ASCII while the engine owns
+// Chinese input. Two IMEs both drawing candidates for the same keystrokes is the worst of the
+// conflict modes; the engine cannot suppress the system IME's window by itself, so the source
+// is moved out of the way. LockTemporaryASCII remembers the previous source, so the user's
+// choice is restorable rather than overwritten.
+func (c *AppController) lockSystemSourceToASCII() {
+	c.mu.Lock()
+	br := c.Bridge
+	c.mu.Unlock()
+	if br == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), imeSwitchTimeout)
+	defer cancel()
+	if _, _, err := br.LockTemporaryASCII(ctx); err != nil {
+		return // bridges without temporary-lock support simply keep the source as-is
 	}
 }
 
