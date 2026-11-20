@@ -532,6 +532,10 @@ type darwinBridge struct {
 	ime          inputEngineState
 	shiftDown    bool
 	shiftHadKey  bool
+	// shiftSide remembers which shift is actually held ("left_shift"/"right_shift").
+	// shiftDown alone is not enough: pressing left, then tapping right, used to look like a
+	// single right-shift tap and flipped 中/英 by accident.
+	shiftSide string
 	// shiftToggle, when non-nil, is the pending bare-Shift ASCII toggle. It is
 	// deferred while the selection bar's double-shift is armed so that one
 	// double tap cannot both flip 中/英 and open the selection bar.
@@ -914,15 +918,18 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 					b.cancelShiftToggle()
 					b.emitTriggerEvents([]host.TriggerEvent{selectionEvent(nowMs)})
 					b.shiftDown = false
+					b.shiftSide = ""
 					return 0
 				}
 			}
 			if isDown {
 				b.shiftDown = true
 				b.shiftHadKey = false
+				b.shiftSide = modName
 			}
-			if right && !isDown && b.shiftDown && !b.shiftHadKey && b.inlineEnabled.Load() && !isSecureEventInputEnabled() && b.inlineIMEGate() {
+			if right && !isDown && b.shiftDown && b.shiftSide == "right_shift" && !b.shiftHadKey && b.inlineEnabled.Load() && !isSecureEventInputEnabled() && b.inlineIMEGate() {
 				b.shiftDown = false
+				b.shiftSide = ""
 				// With double-shift selection armed, the first tap must wait out the
 				// double-tap window before it flips 中/英; otherwise one gesture would
 				// both switch the input mode and open the selection bar.
@@ -935,6 +942,7 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 			}
 			if !isDown {
 				b.shiftDown = false
+				b.shiftSide = ""
 			}
 		}
 		if modName == "" {

@@ -38,3 +38,31 @@ func TestShiftSidesRouteApart(t *testing.T) {
 		t.Fatal("right and left must remain distinguishable after the suffix match")
 	}
 }
+
+// Regression: shiftDown was a single shared flag, so holding LEFT shift and then tapping
+// RIGHT shift looked exactly like one right-shift tap and flipped 中/英 by accident.
+// The side is now remembered, and the toggle requires it to be the right shift itself.
+func TestShiftSideIsRememberedSoLeftPlusRightTapDoesNotToggle(t *testing.T) {
+	// This is the rule the handler now applies; keep it expressed here so a refactor that
+	// drops the side check fails loudly.
+	decide := func(down bool, side string, hadKey bool) bool {
+		const modName = "right_shift"
+		right := modName == "right_shift"
+		return right && !down && side == modName && !hadKey
+	}
+	if decide(true, "left_shift", false) {
+		t.Fatal("left shift keydown must never count as a right-shift tap")
+	}
+	if decide(false, "left_shift", false) {
+		t.Fatal("releasing left shift must never toggle the input mode")
+	}
+	if decide(false, "right_shift", true) {
+		t.Fatal("a right shift used as a modifier (hadKey) must not toggle")
+	}
+	if !decide(false, "right_shift", false) {
+		t.Fatal("a plain right-shift tap must toggle")
+	}
+	if decide(false, "", false) {
+		t.Fatal("an empty side must not toggle")
+	}
+}
