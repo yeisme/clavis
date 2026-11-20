@@ -67,6 +67,31 @@ const (
 	AITestError   AITestStatus = "error"
 )
 
+// IMEState is the single source of truth for what the input method is doing.
+// The system input source, Clavis takeover, and engine ASCII mode collapse into
+// four externally meaningful states for the pill and other UI surfaces.
+type IMEState int
+
+const (
+	IMEStateASCII IMEState = iota
+	IMEStateSystemCJK
+	IMEStateTakeoverCJK
+	IMEStateTakeoverASCII
+)
+
+func (s IMEState) Label() string {
+	switch s {
+	case IMEStateSystemCJK:
+		return i18n.T("ime.state.system_cjk")
+	case IMEStateTakeoverCJK:
+		return i18n.T("ime.state.takeover_cjk")
+	case IMEStateTakeoverASCII:
+		return i18n.T("ime.state.takeover_ascii")
+	default:
+		return i18n.T("ime.state.ascii")
+	}
+}
+
 // ClipboardSearcher narrows clipboard querying to Search so AppController can
 // route Clipboard tab queries to SQLite FTS5 (or MemoryStore fallback) without
 // coupling pkg/core/engine to storage.
@@ -315,6 +340,7 @@ type AppController struct {
 	monitorRunning    bool
 	recoveryCount     int
 	activeInputSource host.InputSourceInfo
+	inputEngineASCII  bool
 	lastIMEError      string
 	cachedBundleID    string
 	cachedProcessName string
@@ -753,10 +779,9 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 		prev.Phase != engine.PhaseHidden &&
 		prev.Phase != engine.PhaseHUD &&
 		c.OnShowIMEPill != nil {
-		pillCb := c.OnShowIMEPill
 		onRepaint := c.OnRepaint
 		c.mu.Unlock()
-		pillCb(ev.Message, nil)
+		c.showPillNotice(ev.Message, nil)
 		if onRepaint != nil {
 			onRepaint()
 		}
@@ -904,14 +929,13 @@ func (c *AppController) ShowToastOrHUD(message string) {
 
 	c.mu.Lock()
 	phase := c.StateMachine.State().Phase
-	pillCb := c.OnShowIMEPill
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
 
 	cfg := c.ConfigStore.Current()
 	capsuleOpen := phase != engine.PhaseHidden
-	if pillCb != nil && (capsuleOpen || cfg.Main.IME.ShowFloatingPill) {
-		pillCb(msg, nil)
+	if c.hasPillSink() && (capsuleOpen || cfg.Main.IME.ShowFloatingPill) {
+		c.showPillNotice(msg, nil)
 		if onRepaint != nil {
 			onRepaint()
 		}
@@ -919,6 +943,59 @@ func (c *AppController) ShowToastOrHUD(message string) {
 	}
 
 	c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: msg})
+}
+
+// IMEState returns the cached externally visible IME state. It never asks the
+// bridge for the current source, keeping source IPC out of repaint and hook paths.
+func (c *AppController) IMEState() IMEState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	sourceASCII := c.activeInputSource.IsASCII
+	forced := false
+	if br, ok := c.Bridge.(bridge.InlineIMEForcer); ok && br != nil {
+		forced = br.InlineIMEForced()
+	}
+	if forced {
+		if c.inputEngineASCII {
+			return IMEStateTakeoverASCII
+		}
+		return IMEStateTakeoverCJK
+	}
+	if sourceASCII {
+		return IMEStateASCII
+	}
+	return IMEStateSystemCJK
+}
+
+// UpdateInputEngineMode caches the latest engine view mode for IMEState.
+func (c *AppController) UpdateInputEngineMode(ascii bool) {
+	c.mu.Lock()
+	c.inputEngineASCII = ascii
+	c.mu.Unlock()
+}
+
+func (c *AppController) showIMEPillState(anchor *host.CursorAnchor) {
+	c.mu.Lock()
+	cb := c.OnShowIMEPill
+	c.mu.Unlock()
+	if cb != nil {
+		cb(c.IMEState().Label(), anchor)
+	}
+}
+
+func (c *AppController) hasPillSink() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.OnShowIMEPill != nil
+}
+
+func (c *AppController) showPillNotice(message string, anchor *host.CursorAnchor) {
+	c.mu.Lock()
+	cb := c.OnShowIMEPill
+	c.mu.Unlock()
+	if cb != nil {
+		cb(message, anchor)
+	}
 }
 
 func stopKindLabel(kind runtimecoord.Kind) string {
@@ -1358,18 +1435,13 @@ func (c *AppController) toggleInlineIMEForced() {
 	next := !br.InlineIMEForced()
 	br.SetInlineIMEForced(next)
 
-	label := "中式输入 · 关"
-	if next {
-		label = "中式输入 · 开"
-	}
 	c.mu.Lock()
-	pillCb := c.OnShowIMEPill
 	onRepaint := c.OnRepaint
 	cfg := c.ConfigStore.Current()
 	c.mu.Unlock()
 
-	if pillCb != nil && cfg.Main.IME.ShowFloatingPill {
-		pillCb(label, nil)
+	if cfg.Main.IME.ShowFloatingPill {
+		c.showIMEPillState(nil)
 	}
 	if onRepaint != nil {
 		onRepaint()
@@ -1395,12 +1467,11 @@ func (c *AppController) NotifyIMESwitch(info host.InputSourceInfo, anchor *host.
 	if info.ID != "" || info.Name != "" {
 		c.activeInputSource = info
 	}
-	pillCb := c.OnShowIMEPill
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
 
-	if cfg.Main.IME.ShowFloatingPill && pillCb != nil {
-		pillCb(FormatIMEPillLabel(info), anchor)
+	if cfg.Main.IME.ShowFloatingPill {
+		c.showIMEPillState(anchor)
 	}
 	if onRepaint != nil {
 		onRepaint()
@@ -1413,12 +1484,11 @@ func (c *AppController) NotifyKeymapLayer(layer string) {
 	trimmed := strings.TrimSpace(layer)
 	c.mu.Lock()
 	c.activeKeymapLayer = trimmed
-	pillCb := c.OnShowIMEPill
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
 
-	if trimmed != "" && pillCb != nil && c.ConfigStore.Current().Main.IME.ShowFloatingPill {
-		pillCb("LAYER • "+strings.ToUpper(trimmed), nil)
+	if trimmed != "" && c.hasPillSink() && c.ConfigStore.Current().Main.IME.ShowFloatingPill {
+		c.showPillNotice("LAYER • "+strings.ToUpper(trimmed), nil)
 	}
 	if onRepaint != nil {
 		onRepaint()
@@ -1459,11 +1529,10 @@ func (c *AppController) maybeLockASCIIForLeader() {
 	c.imeLockedForCapsule = true
 	c.skipIMERestore = false
 	c.activeInputSource = asciiInfo
-	pillCb := c.OnShowIMEPill
 	c.mu.Unlock()
 
-	if cfg.Main.IME.ShowFloatingPill && pillCb != nil {
-		pillCb(FormatIMEPillLabel(asciiInfo), nil)
+	if cfg.Main.IME.ShowFloatingPill {
+		c.showIMEPillState(nil)
 	}
 }
 

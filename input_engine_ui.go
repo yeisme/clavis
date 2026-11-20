@@ -26,10 +26,11 @@ import (
 const candidatePanelGap = 4.0
 
 type inputEngineUI struct {
-	host  bridge.InputEngineHost
-	panel *mygo.Window
-	view  atomic.Pointer[bridge.InputEngineView]
-	ai    aiDebouncer
+	host       bridge.InputEngineHost
+	panel      *mygo.Window
+	controller *uiapp.AppController
+	view       atomic.Pointer[bridge.InputEngineView]
+	ai         aiDebouncer
 	// sizer keeps the panel from resizing on every keystroke: within one
 	// composition it only grows, in steps.
 	sizer uiapp.CandidatePanelSizer
@@ -43,7 +44,10 @@ func (a *desktopApp) setupInputEngine(ctx context.Context, br bridge.HostService
 	if !ok {
 		return nil
 	}
-	u := &inputEngineUI{host: h}
+	a.mu.Lock()
+	controller := a.controller
+	a.mu.Unlock()
+	u := &inputEngineUI{host: h, controller: controller}
 	u.ai = newInputEngineAIDebouncer(br, inputengine.AIDebounce, suggest, h.SetInputEngineAICandidates)
 	w, hgt := uiapp.PreferredCandidatePanelSize(inputengine.View{})
 	u.panel = mygo.NewWindow(mygo.WindowOptions{
@@ -66,6 +70,11 @@ func (a *desktopApp) setupInputEngine(ctx context.Context, br bridge.HostService
 }
 
 func (u *inputEngineUI) onView(ctx context.Context, v bridge.InputEngineView) {
+	// The controller owns the cached IME mode used by the pill state model.
+	// This callback is already off the hook thread.
+	if u.controller != nil {
+		u.controller.UpdateInputEngineMode(v.View.ASCII)
+	}
 	u.view.Store(&v)
 	u.ai.Changed(ctx, v.Raw, v.View.Composing)
 	mygo.RunOnMain(func() {

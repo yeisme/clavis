@@ -34,6 +34,7 @@ type mockBridge struct {
 	perms        host.PermissionStatus
 	inputSources []host.InputSourceInfo
 	currentIME   host.InputSourceInfo
+	inlineForced bool
 
 	windowCmds     []host.WindowCommand
 	injected       []injectedCall
@@ -55,6 +56,18 @@ type mockBridge struct {
 	imeModeCalls []config.IMEMode
 
 	pasteClipboardCalls int
+}
+
+func (m *mockBridge) SetInlineIMEForced(v bool) {
+	m.mu.Lock()
+	m.inlineForced = v
+	m.mu.Unlock()
+}
+
+func (m *mockBridge) InlineIMEForced() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.inlineForced
 }
 
 type injectedCall struct {
@@ -1123,8 +1136,8 @@ func TestLeader_LockASCIIOnLeaderAndRestoreOnDismissOrSkipOnToggle(t *testing.T)
 	if !curAfterOpen.IsASCII || curAfterOpen.ID != "com.apple.keylayout.ABC" {
 		t.Fatalf("expected ASCII lock on OpenLeader, got %+v", curAfterOpen)
 	}
-	if len(pillLabels) == 0 || pillLabels[0] != "EN" {
-		t.Fatalf("expected OnShowIMEPill('EN') on Leader ASCII lock, got %v", pillLabels)
+	if len(pillLabels) == 0 || pillLabels[0] != "ABC" {
+		t.Fatalf("expected OnShowIMEPill('ABC') on Leader ASCII lock, got %v", pillLabels)
 	}
 
 	// Dismissing Leader restores previous non-ASCII Pinyin IME
@@ -1755,8 +1768,8 @@ func TestLeader_TemporaryASCIILockAndRestoreOnOmniboxDowngrade(t *testing.T) {
 	if !afterLock.IsASCII || afterLock.ID != "com.apple.keylayout.ABC" {
 		t.Fatalf("expected temporary ASCII lock on Leader open, got %+v", afterLock)
 	}
-	if got := pills.all(); len(got) == 0 || got[0] != "EN" {
-		t.Fatalf("expected OnShowIMEPill('EN') on ASCII lock, got %v", got)
+	if got := pills.all(); len(got) == 0 || got[0] != "ABC" {
+		t.Fatalf("expected OnShowIMEPill('ABC') on ASCII lock, got %v", got)
 	}
 
 	// Pressing "/" downgrades Leader -> Actions Omnibox and must immediately restore the native IME.
