@@ -418,7 +418,9 @@ func candidateModeLabel(ascii bool) string {
 // AccentText; on a tint or underline the text keeps its ink and the digit takes the accent.
 // No selection changes any width.
 func renderCandidateCellContent(c *ui.Context, theme *ui.Theme, st candidateStyle, index int, cand inputengine.Candidate, active, growText bool, textCap int) {
-	digitInk, textInk, markInk := theme.TextMuted, theme.Text, theme.Accent
+	// The ✦ of an AI suggestion is told by its shape; on a resting cell it is
+	// muted like the digit, so the accent stays the selection's alone.
+	digitInk, textInk, markInk := theme.TextMuted, theme.Text, theme.TextMuted
 	if active {
 		switch st.selected {
 		case config.CandidateSelectedTint, config.CandidateSelectedUnderline:

@@ -167,6 +167,18 @@ real renders.
   3:1 against the tint, so a pale system accent still reads. Controls that use
   `selectionFill`/`selectionEdge` (Leader list, settings, segmented controls)
   keep their own style.
+- **On floating windows the accent marks selection only.** That covers the
+  chosen candidate (a solid fill, as in the native IME), the IME pill's live
+  segment and the chosen row.
+  - Neutral: the Leader brand chip, the layer and info icons in pills, and an
+    unselected AI candidate's ✦.
+  - Status icons keep their own colors (success, danger).
+  - `TestFloatingSurfacesKeepAccentForSelection` reads this off real renders.
+- **Candidate widths hold in Chinese.** Under `applyTextLocale` the Han face
+  draws 1.013–1.021 em a glyph. The CJK estimate therefore rounds `fontSize ×
+  1.025` up; a 1 em estimate made a full page shrink every word ("输入…").
+  `TestCandidateHorizontalCutsOnlyPlannedTexts` checks it at 1× and 2× in
+  both languages.
 - **Reduce Motion** → identity plan: no rotation, no slide, opacity only.
 - **Reduce Transparency** → opaque surface + border, shaders off.
 - **High Contrast** → no pitch, no specular, heavier borders.

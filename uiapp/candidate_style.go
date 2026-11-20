@@ -9,6 +9,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
 
@@ -128,11 +129,22 @@ func resolveCandidateStyle(s config.InputEngineStyleConfig) candidateStyle {
 	// check believe a candidate fits, and the cell then cuts it (页数 at 19pt was the case).
 	px := int(math.Round(float64(st.fontSize)))
 	st.cjk = px
+	// Under Chinese the panel draws through applyTextLocale's Han face, whose glyphs are
+	// wider than the em (measured 1.013–1.021 em from 12 to 24pt, against 0.95–0.993 em
+	// for the default face). A 1 em estimate then undershoots by ~0.3px a glyph; on a full
+	// page the strip ran a few px over the window and flex-shrink cut every word
+	// ("输入法" drew as "输入…"). Round that face up instead.
+	if i18n.IsChinese() {
+		st.cjk = int(math.Ceil(float64(st.fontSize) * cjkLocaleAdvance))
+	}
 	st.latin = int(math.Ceil(float64(st.fontSize) * 0.55))
 	st.stripH = max(candHorizStripHeight, px+15)
 	st.rowH = max(candVertRowHeight, px+13)
 	return st
 }
+
+// cjkLocaleAdvance bounds the Han face's glyph advance, in em, from above.
+const cjkLocaleAdvance = 1.025
 
 func finite(v float64) float64 {
 	if math.IsNaN(v) || math.IsInf(v, 0) {

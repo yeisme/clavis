@@ -4,8 +4,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
+	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
@@ -89,19 +89,17 @@ func renderIMEPill(c *ui.Context, label string) {
 	} else {
 		pill.Padding(space4, space12)
 	}
-	if !prefs.ReduceTransparency {
-		pill.Material(glass.Glass{Native: c.Vibrancy()})
-		pill.Border(1, theme.Border.Alpha(alphaHalf))
-	} else {
-		pill.Background(theme.Background).Border(1, theme.Border)
-	}
+	// The shared floating shell: glass at the edge, the body washed toward the
+	// theme background so the desktop cannot read through the label. The zero
+	// appearance keeps the pill's default glass clarity.
+	kitFloatingShell(c, theme, pill, config.AppearanceConfig{})
 
 	pill.Children(func() {
 		switch spec.kind {
 		case pillIMEState:
 			renderIMEModeSegments(c, theme, spec)
 		case pillLayer:
-			renderSemanticIcon(c, "square.3.layers.3d", 13, accentGlyph(theme, surfaceBase(theme)))
+			renderSemanticIcon(c, "square.3.layers.3d", typeBody, secondaryInk(theme))
 			ui.Text(c, i18n.Tf("pill.layer", spec.text)).FontSize(typeLabel).FontWeight(700).TextColor(theme.Text).SingleLine()
 		default:
 			icon, color := pillMessageIcon(theme, spec.text)
@@ -147,8 +145,8 @@ func pillMessageIcon(theme *ui.Theme, msg string) (string, ui.Color) {
 	case "xmark":
 		return "exclamationmark.triangle", readableOn(theme.Danger, theme.Text, bg, minGlyphContrast)
 	case "keyboard":
-		return "keyboard", accentGlyph(theme, bg)
+		return "keyboard", secondaryInk(theme)
 	default:
-		return "info.circle", accentGlyph(theme, bg)
+		return "info.circle", secondaryInk(theme)
 	}
 }

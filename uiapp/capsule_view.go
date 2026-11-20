@@ -167,10 +167,12 @@ func (a *AppController) renderCapsuleHeader(
 		case engine.PhaseLeader:
 			// Keep the brand in Leader only: Omnibox's query and tabs need the
 			// horizontal room, while Leader benefits from the orientation cue.
+			// Neutral, like every dialog title bar: the accent is reserved for
+			// the chosen row, focus and feedback.
 			ui.Row(c).Padding(space2, space8).Radius(radiusChip).Gap(space4).
-				AlignItems(ui.Center).Background(theme.Accent.Alpha(alphaSubtle)).Children(func() {
-				renderSemanticIcon(c, "command", typeBody, theme.Accent)
-				ui.Text(c, "Clavis").FontSize(typeLabel).FontWeight(700).TextColor(theme.Accent).SingleLine()
+				AlignItems(ui.Center).Background(tileFill(theme)).Children(func() {
+				renderSemanticIcon(c, "command", typeBody, secondaryInk(theme))
+				ui.Text(c, "Clavis").FontSize(typeLabel).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
 			})
 			crumbs := make([]string, 0, 1+len(state.LeaderBreadcrumbs))
 			crumbs = append(crumbs, i18n.T("leader.root"))
