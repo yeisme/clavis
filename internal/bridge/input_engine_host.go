@@ -111,8 +111,12 @@ func (st *inputEngineState) reset() bool {
 }
 
 func (st *inputEngineState) configure(cfg config.InputEngineConfig) (changed bool, eng *inputengine.Engine) {
+	return st.configureWithForce(cfg, false)
+}
+
+func (st *inputEngineState) configureWithForce(cfg config.InputEngineConfig, force bool) (changed bool, eng *inputengine.Engine) {
 	st.cfgMu.Lock()
-	if st.cfgApplied && inputEngineConfigEqual(st.lastCfg, cfg) {
+	if !force && st.cfgApplied && inputEngineConfigEqual(st.lastCfg, cfg) {
 		st.cfgMu.Unlock()
 		return false, st.eng.Load()
 	}

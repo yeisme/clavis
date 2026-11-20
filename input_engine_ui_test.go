@@ -87,6 +87,9 @@ type stubInputEngineBridge struct {
 func (s *stubInputEngineBridge) ConfigureInputEngine(config.InputEngineConfig) {
 	s.configured = true
 }
+func (s *stubInputEngineBridge) ReloadInputEngine(config.InputEngineConfig) {
+	s.configured = true
+}
 
 func (s *stubInputEngineBridge) SetInputEngineViewHandler(func(bridge.InputEngineView)) {}
 func (s *stubInputEngineBridge) SetInputEngineAICandidates(string, []string)            {}

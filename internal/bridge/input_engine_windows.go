@@ -29,8 +29,16 @@ func (b *windowsBridge) UpdateInputEngineBlockedWords(words []string) { b.ime.se
 
 // ConfigureInputEngine implements InputEngineHost.
 func (b *windowsBridge) ConfigureInputEngine(cfg config.InputEngineConfig) {
+	b.configureInputEngine(cfg, false)
+}
+
+func (b *windowsBridge) ReloadInputEngine(cfg config.InputEngineConfig) {
+	b.configureInputEngine(cfg, true)
+}
+
+func (b *windowsBridge) configureInputEngine(cfg config.InputEngineConfig, force bool) {
 	st := &b.ime
-	changed, eng := st.configure(cfg)
+	changed, eng := st.configureWithForce(cfg, force)
 	if !changed {
 		return
 	}

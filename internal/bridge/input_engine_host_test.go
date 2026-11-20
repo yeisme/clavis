@@ -101,4 +101,8 @@ func TestInputEngineConfigStateDedupes(t *testing.T) {
 	if !reflect.DeepEqual(st.lastCfg, cfg) {
 		t.Fatal("config not retained")
 	}
+	changed, _ = st.configureWithForce(cfg, true)
+	if !changed {
+		t.Fatal("forced configure should rebuild dictionary state")
+	}
 }

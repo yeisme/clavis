@@ -173,9 +173,8 @@ func LoadUserDictionary() (Dictionary, DictionaryStatus) {
 	dir := userDictionaryDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		status := DictionaryStatus{Source: "embedded", Path: "embedded", Count: embeddedDictionaryCount()}
-		status.Diagnostics = []string{fmt.Sprintf("user dictionary directory unavailable (%s): %v", dir, err)}
-		return defaultDictionary(), status
+		// An absent directory is the normal first-run state, not a load failure.
+		return defaultDictionary(), DictionaryStatus{Source: "embedded", Path: "embedded", Count: embeddedDictionaryCount()}
 	}
 	paths := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -185,9 +184,7 @@ func LoadUserDictionary() (Dictionary, DictionaryStatus) {
 	}
 	sort.Strings(paths)
 	if len(paths) == 0 {
-		status := DictionaryStatus{Source: "embedded", Path: "embedded", Count: embeddedDictionaryCount()}
-		status.Diagnostics = []string{fmt.Sprintf("no user dictionaries found in %s", dir)}
-		return defaultDictionary(), status
+		return defaultDictionary(), DictionaryStatus{Source: "embedded", Path: "embedded", Count: embeddedDictionaryCount()}
 	}
 	layers := make([]Dictionary, 0, len(paths))
 	loadedPaths := make([]string, 0, len(paths))

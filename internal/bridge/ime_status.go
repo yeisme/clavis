@@ -77,6 +77,8 @@ type InputEngineHost interface {
 	// ConfigureInputEngine (re)creates or disables the engine. Disabled → no engine object,
 	// the hook pays a single nil check.
 	ConfigureInputEngine(cfg config.InputEngineConfig)
+	// ReloadInputEngine forces dictionary resolution even when config fields are unchanged.
+	ReloadInputEngine(cfg config.InputEngineConfig)
 	// SetInputEngineViewHandler receives coalesced view updates off the hook thread.
 	SetInputEngineViewHandler(fn func(InputEngineView))
 	// SetInputEngineAICandidates appends async AI suggestions for raw; stale raw is ignored.

@@ -623,7 +623,7 @@ func (a *desktopApp) start() {
 			return
 		}
 		if h, ok := br.(bridge.InputEngineHost); ok {
-			h.ConfigureInputEngine(ctrl.Config().Main.InputEngine)
+			h.ReloadInputEngine(ctrl.Config().Main.InputEngine)
 		}
 	})
 	if err := dw.Start(ctx); err == nil {
