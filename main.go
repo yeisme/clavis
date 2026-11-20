@@ -1350,7 +1350,21 @@ func (a *desktopApp) handleRepaint() {
 	pillWin := a.imePillPanel
 	guideWin := a.onboardingWin
 	ctrl := a.controller
+	imeUI := a.inputUI
 	a.mu.Unlock()
+
+	// Floating surfaces must not stack. The quick panel is the primary surface while it is up:
+	// the candidate panel would otherwise paint over it, and the IME pill would report a mode
+	// that the panel has already suspended. Ordering is decided here, in one place, instead of
+	// each window guessing from its own visibility.
+	if imeUI != nil && capWin != nil {
+		quickUp := capWin.IsVisible() && ctrl != nil && ctrl.State().Phase != engine.PhaseHidden
+		imeUI.SetSuppressed(quickUp)
+		if quickUp && pillWin != nil && pillWin.IsVisible() {
+			a.stopIMEPillTimer()
+			pillWin.Hide()
+		}
+	}
 	if guideWin != nil && a.onboardingOpen.Load() {
 		guideWin.Invalidate()
 	}

@@ -34,6 +34,9 @@ type inputEngineUI struct {
 	// sizer keeps the panel from resizing on every keystroke: within one
 	// composition it only grows, in steps.
 	sizer uiapp.CandidatePanelSizer
+	// suppressed is set while another floating surface owns the screen (the quick panel).
+	// Two overlays for one keystroke is the conflict this guards against.
+	suppressed atomic.Bool
 }
 
 func (a *desktopApp) setupInputEngine(ctx context.Context, br bridge.HostService, cfg config.InputEngineConfig, suggest suggestFunc) *inputEngineUI {
@@ -86,7 +89,7 @@ func (u *inputEngineUI) onView(ctx context.Context, v bridge.InputEngineView) {
 	u.ai.Changed(ctx, v.Raw, v.View.Composing)
 	mygo.RunOnMain(func() {
 		cur := u.view.Load()
-		if cur == nil || !cur.View.Composing || len(cur.View.Candidates) == 0 && cur.View.Preedit == "" {
+		if u.suppressed.Load() || cur == nil || !cur.View.Composing || len(cur.View.Candidates) == 0 && cur.View.Preedit == "" {
 			u.sizer.Reset()
 			u.panel.Hide()
 			return
@@ -98,6 +101,22 @@ func (u *inputEngineUI) onView(ctx context.Context, v bridge.InputEngineView) {
 		u.panel.ShowInactive()
 		u.panel.Invalidate()
 	})
+}
+
+// SetSuppressed hides the candidate panel and keeps it hidden until cleared. The quick panel
+// uses it: while that surface is up, the candidate panel must not paint over it, and the
+// engine is suspended anyway so there is nothing to show.
+func (u *inputEngineUI) SetSuppressed(on bool) {
+	if u == nil {
+		return
+	}
+	was := u.suppressed.Swap(on)
+	if on && !was {
+		mygo.RunOnMain(func() {
+			u.sizer.Reset()
+			u.panel.Hide()
+		})
+	}
 }
 
 // computeCandidatePanelBounds puts the panel just below the caret, flipping above when it
