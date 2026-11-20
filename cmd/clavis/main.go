@@ -16,6 +16,7 @@ import (
 
 	"github.com/yeisme/clavis/pkg/core/automation"
 	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/ime"
 )
 
 // Run executes the command using args and streams output to stdout/stderr.
@@ -32,6 +33,9 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	configDir, jsonOutput, commandArgs, err := parseGlobalFlags(args)
 	if err != nil {
 		return err
+	}
+	if len(commandArgs) > 0 && commandArgs[0] == "compile-dict" {
+		return compileDict(stdout, stderr, commandArgs[1:])
 	}
 	if len(commandArgs) < 2 {
 		return usageError(stderr)
@@ -104,6 +108,44 @@ func parseGlobalFlags(args []string) (configDir string, jsonOutput bool, command
 	return configDir, jsonOutput, commandArgs, nil
 }
 
+func compileDict(stdout, stderr io.Writer, args []string) error {
+	if len(args) == 0 {
+		return errors.New("compile-dict requires an input .dict.yaml path")
+	}
+	input := args[0]
+	output := ""
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "-o", "--output":
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return errors.New("compile-dict: -o/--output requires a path")
+			}
+			output = args[i+1]
+			i++
+		case "--output=":
+			output = strings.TrimPrefix(args[i], "--output=")
+		default:
+			if strings.HasPrefix(args[i], "--output=") {
+				output = strings.TrimPrefix(args[i], "--output=")
+			} else {
+				return fmt.Errorf("compile-dict: unexpected argument %q", args[i])
+			}
+		}
+	}
+	if strings.TrimSpace(output) == "" {
+		return errors.New("compile-dict requires -o/--output")
+	}
+	lex, err := ime.CompileRimeDictFiles([]string{input}, output)
+	if err != nil {
+		return fmt.Errorf("compile-dict: %w", err)
+	}
+	if lex == nil {
+		return errors.New("compile-dict: compiler returned no lexicon")
+	}
+	_, err = fmt.Fprintf(stdout, "words=%d bytes=%d output=%s\n", lex.Len(), len(lex.Bytes()), output)
+	return err
+}
+
 func defaultConfigDir() string {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		return filepath.Join(home, ".config", "clavis")
@@ -115,7 +157,7 @@ func defaultConfigDir() string {
 }
 
 func usageError(w io.Writer) error {
-	err := errors.New("usage: clavis [--config-dir DIR] [--json] action list | workflow list | workflow plan WORKFLOW")
+	err := errors.New("usage: clavis [--config-dir DIR] [--json] action list | workflow list | workflow plan WORKFLOW | compile-dict INPUT -o OUTPUT")
 	if w != nil {
 		fmt.Fprintln(w, err)
 	}

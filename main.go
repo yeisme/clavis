@@ -167,6 +167,7 @@ type desktopApp struct {
 	supervisor           *daemon.ResidentSupervisor
 	frecencySyncer       *daemon.FrecencySyncer
 	configWatcher        *watcher.ConfigWatcher
+	dictionaryWatcher    *watcher.DictionaryWatcher
 	capsulePanel         *mygo.Window
 	promptPanel          *mygo.Window
 	imePillPanel         *mygo.Window
@@ -611,6 +612,23 @@ func (a *desktopApp) start() {
 	if err := cw.StartWatching(ctx); err == nil {
 		a.mu.Lock()
 		a.configWatcher = cw
+		a.mu.Unlock()
+	}
+	dw := watcher.NewDictionaryWatcher(watcher.UserDictionaryDir(), func() {
+		a.mu.Lock()
+		br := a.hostBridge
+		ctrl := a.controller
+		a.mu.Unlock()
+		if br == nil || ctrl == nil {
+			return
+		}
+		if h, ok := br.(bridge.InputEngineHost); ok {
+			h.ConfigureInputEngine(ctrl.Config().Main.InputEngine)
+		}
+	})
+	if err := dw.Start(ctx); err == nil {
+		a.mu.Lock()
+		a.dictionaryWatcher = dw
 		a.mu.Unlock()
 	}
 
@@ -1957,6 +1975,7 @@ func (a *desktopApp) shutdown() {
 		a.shuttingDown = true
 		cancel := a.cancel
 		cw := a.configWatcher
+		dw := a.dictionaryWatcher
 		sup := a.supervisor
 		ctrl := a.controller
 		sqliteStore := a.sqliteStore
@@ -1970,6 +1989,9 @@ func (a *desktopApp) shutdown() {
 		}
 		if cw != nil {
 			cw.Stop()
+		}
+		if dw != nil {
+			dw.Stop()
 		}
 		if sup != nil {
 			sup.Stop()

@@ -77,6 +77,11 @@ func runSelfCheck(w io.Writer) error {
 	if !ie.Enabled {
 		fmt.Fprintln(w, "input engine: OFF (set [input_engine] enabled = true to take over typing)")
 	}
+	_, dictStatus := inputengine.LoadDictionaryWithDiagnostics(ie.CustomDictPaths, "")
+	fmt.Fprintf(w, "dictionary: %s (%s) · %d\n", dictStatus.Source, dictStatus.Path, dictStatus.Count)
+	for _, diagnostic := range dictStatus.Diagnostics {
+		fmt.Fprintf(w, "dictionary diagnostic: %s\n", diagnostic)
+	}
 	probeInputEngine(w, ie)
 
 	// --- permissions ---------------------------------------------------------

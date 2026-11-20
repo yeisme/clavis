@@ -90,13 +90,15 @@ func inputEngineOptionsFromConfig(cfg config.InputEngineConfig, cacheDir string,
 	if !cfg.UserLearning {
 		userFreq = nil
 	}
+	// Resolve and index all dictionaries during ConfigureInputEngine, not in the
+	// hook's key path. The resulting Dictionary is immutable and lookup-only.
+	dict, _ := inputengine.LoadDictionaryWithDiagnostics(cfg.CustomDictPaths, resolvedCache)
 	return inputengine.Options{
 		CandidateCount:   cfg.CandidateCount,
 		ShiftToggleASCII: cfg.ShiftToggleASCII,
 		Scheme:           cfg.Scheme,
 		FuzzyPinyin:      slices.Clone(cfg.FuzzyPinyin),
-		CustomDictPaths:  slices.Clone(cfg.CustomDictPaths),
-		DictCacheDir:     resolvedCache,
+		Dictionary:       dict,
 		UserFrequency:    userFreq,
 	}, true
 }
