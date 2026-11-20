@@ -274,6 +274,9 @@ type AppController struct {
 	// Leader temporary ASCII IME lock state
 	preLeaderIMESourceID string
 	imeLockedForCapsule  bool
+	// preLeaderIMETakeover remembers whether the engine owned input before the quick panel
+	// opened, so the panel can suspend takeover and the close path can restore it.
+	preLeaderIMETakeover bool
 	// snippetUndo is the last inline expansion, revertible by an immediate
 	// Backspace (see snippet_undo.go).
 	snippetUndo    snippetUndoState
@@ -1554,11 +1557,21 @@ func (c *AppController) maybeLockASCIIForLeader() {
 		return
 	}
 
+	// Suspend engine takeover for the duration of the panel. Locking the system source alone
+	// does not stop the engine: it would keep consuming the key events the panel's search box
+	// needs, which is the most confusing of the two-IME failure modes.
+	takeoverSuspended := false
+	if f, ok := br.(bridge.InlineIMEForcer); ok && f != nil && f.InlineIMEForced() {
+		f.SetInlineIMEForced(false)
+		takeoverSuspended = true
+	}
+
 	c.mu.Lock()
 	if prevID != "" && c.preLeaderIMESourceID == "" {
 		c.preLeaderIMESourceID = prevID
 	}
 	c.imeLockedForCapsule = true
+	c.preLeaderIMETakeover = takeoverSuspended
 	c.skipIMERestore = false
 	c.activeInputSource = asciiInfo
 	c.mu.Unlock()
@@ -1623,13 +1636,29 @@ func (c *AppController) maybeRestoreLockedIME() {
 	locked := c.imeLockedForCapsule
 	skip := c.skipIMERestore
 	restoreID := strings.TrimSpace(c.preLeaderIMESourceID)
+	restoreTakeover := c.preLeaderIMETakeover
 	br := c.Bridge
 	c.imeLockedForCapsule = false
 	c.skipIMERestore = false
 	c.preLeaderIMESourceID = ""
+	c.preLeaderIMETakeover = false
 	c.mu.Unlock()
 
-	if !locked || skip || br == nil {
+	if !locked || br == nil {
+		return
+	}
+
+	// Restore engine takeover that was suspended when the panel opened, so closing the panel
+	// returns the user to the mode they were in rather than silently dropping to "no engine".
+	// This runs before the skip check: skip only means "do not put the system source back"
+	// (the user already changed it by hand), and leaving the engine off forever would be a
+	// much worse outcome than a stale input source.
+	if restoreTakeover {
+		if f, ok := br.(bridge.InlineIMEForcer); ok && f != nil && !f.InlineIMEForced() {
+			f.SetInlineIMEForced(true)
+		}
+	}
+	if skip {
 		return
 	}
 
