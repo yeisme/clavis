@@ -75,28 +75,38 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, m
 		return sseResponse("这段代码的作用是：", "\\n\\n1. 读取配置文件；", "\\n2. 校验字段并返回错误；", "\\n3. 原子写回磁盘。"), nil
 	}}
 	f := newInteractionFixture(t, doer)
-	f.record(t,
-		"https://github.com/yeisme/clavis/pull/12",
-		"git commit -m \"feat: 输入法候选窗\"",
-		"微信支付回调签名校验失败，请检查商户证书与 APIv3 密钥是否匹配，然后重新发起退款请求。",
-		"#3B82F6",
-		"SELECT id, content, kind FROM clipboard_items WHERE kind = 'image' ORDER BY updated_at DESC LIMIT 20;",
-	)
+	// Clipboard rows show "source · relative time · N lines": a fixed clock and
+	// back-dated captures keep that meta line identical from run to run.
+	snapNow := time.Date(2026, 11, 20, 15, 4, 0, 0, time.Local)
+	restoreClock := clipboardClock
+	clipboardClock = func() time.Time { return snapNow }
+	defer func() { clipboardClock = restoreClock }()
 	ctxRecord := context.Background()
 	mediaPath := filepath.Join(t.TempDir(), "preview.png")
 	if err := os.WriteFile(mediaPath, testPNG16(t), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := f.clips.Record(ctxRecord, clipboard.CaptureCandidate{
-		Content: "preview-media-deck", SourceAppName: "Photos", Timestamp: time.Now(),
-		Media: clipboard.Media{Kind: clipboard.KindImage, BlobSHA: "deck-sha", MediaPath: mediaPath, ThumbPath: mediaPath, Width: 1920, Height: 1080, ByteSize: 2400000},
-	}); err != nil {
-		t.Fatal(err)
+	for _, clip := range []clipboard.CaptureCandidate{
+		{Content: "https://github.com/yeisme/clavis/pull/12", SourceAppName: "Safari", Timestamp: snapNow.AddDate(0, 0, -4)},
+		{Content: "preview-media-deck", SourceAppName: "Photos", Timestamp: snapNow.Add(-26 * time.Hour),
+			Media: clipboard.Media{Kind: clipboard.KindImage, BlobSHA: "deck-sha", MediaPath: mediaPath, ThumbPath: mediaPath, Width: 1920, Height: 1080, ByteSize: 2400000}},
+		{Content: "git commit -m \"feat: 输入法候选窗\"", SourceAppName: "Terminal", Timestamp: snapNow.Add(-3 * time.Hour)},
+		{Content: "微信支付回调签名校验失败，请检查商户证书与 APIv3 密钥是否匹配，然后重新发起退款请求。", Timestamp: snapNow.Add(-18 * time.Minute)},
+		{Content: "#3B82F6", SourceAppName: "Figma", Timestamp: snapNow.Add(-2 * time.Minute)},
+		{Content: "SELECT id, content, kind\nFROM clipboard_items\nWHERE kind = 'image'\nORDER BY updated_at DESC\nLIMIT 20;", SourceAppName: "Notes", Timestamp: snapNow.Add(-20 * time.Second)},
+	} {
+		if _, _, err := f.clips.Record(ctxRecord, clip); err != nil {
+			t.Fatal(err)
+		}
 	}
+	lang := i18n.Current()
 	_ = f.ctrl.UpdateMainConfig(func(m *config.MainConfig) {
 		m.Appearance.VisualPreset = preset
 		m.Appearance.Animations = motion
 		m.Appearance.ObliqueRows = true
+		// Saving the config re-resolves [appearance].language; pin it to the
+		// subtest's language or every "zh" frame silently renders English.
+		m.Appearance.Language = string(lang)
 	})
 	appearance := f.ctrl.Config().Main.Appearance
 	ctx := &engine.CapsuleContext{AppName: "Visual Studio Code", SelectedText: "func main() {}"}

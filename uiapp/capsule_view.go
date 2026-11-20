@@ -599,35 +599,43 @@ func (a *AppController) renderOmniboxView(
 								Enter:     profile.rowEnterMotion(),
 								ExitDelay: -1, // rows leave at once; only entering staggers
 							})
-						fill, edge := ui.Transparent, ui.Transparent
+						// The chosen row is marked by a 2px accent bar at its leading
+						// edge over a faint tint — never a fully blue row, outline or
+						// tile. The 1px transparent border keeps the row's geometry.
+						fill, bar := ui.Transparent, ui.Transparent
 						if isSelected {
-							fill, edge = selectionFill(theme), selectionEdge(theme)
+							fill, bar = rowSelectionFill(theme), rowSelectionBar(theme)
 						}
 						if selAnim := profile.selectionAnimation(); selAnim.Duration > 0 {
-							row.Background(row.AnimateColor("row-sel", fill, selAnim)).
-								Border(1, row.AnimateColor("row-edge", edge, selAnim))
-						} else {
-							row.Background(fill).Border(1, edge)
+							fill = row.AnimateColor("row-sel", fill, selAnim)
+							bar = row.AnimateColor("row-bar", bar, selAnim)
+						}
+						row.Background(fill).Border(space1, ui.Transparent)
+						if bar.A > 0 {
+							row.Draw(func(p *ui.Painter, r ui.Rect) {
+								p.Fill(rowSelectionBarRect(r), bar, rowSelectionBarWidth/2)
+							})
 						}
 
 						row.Children(func() {
-							a.renderOmniboxRowLeadingIcon(c, theme, item, isSelected)
+							a.renderOmniboxRowLeadingIcon(c, theme, item)
 
 							ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(1).Children(func() {
 								ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 									spans := buildHighlightedSpans(item.Title, item.MatchedIndices, matchMark(theme), theme.Text)
-									title := ui.RichText(c, spans...).FontSize(typeBody).SingleLine().Shrink(1)
-									if isSelected {
-										title.FontWeight(600)
-									} else {
-										title.FontWeight(500)
-									}
+									// One weight whether chosen or not: a bolder chosen title
+									// re-measures and shifts its ellipsis as hover moves.
+									ui.RichText(c, spans...).FontSize(typeBody).FontWeight(500).SingleLine().Shrink(1)
 									if item.Kind == engine.ItemClipboardEntry && item.KeyHint == engine.KeyHintPinned {
-										renderSemanticIcon(c, "pin.fill", 11, accentGlyph(theme, surfaceBase(theme)))
+										renderSemanticIcon(c, "pin.fill", typeMeta, secondaryInk(theme))
 									}
 								})
-								if item.Subtitle != "" {
-									ui.Text(c, item.Subtitle).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+								subtitle := item.Subtitle
+								if item.Kind == engine.ItemClipboardEntry {
+									subtitle = clipboardRowMeta(item, clipboardClock())
+								}
+								if subtitle != "" {
+									ui.Text(c, subtitle).FontSize(typeMeta).TextColor(secondaryInk(theme)).SingleLine()
 								}
 							})
 
@@ -788,8 +796,9 @@ func (a *AppController) renderOmniboxFooterFrameToggle(
 // renderOmniboxRowLeadingIcon draws a row's leading glyph at one fixed tile
 // size, so titles align whatever the item: media thumbnails and app icons
 // show as they are, a hex color shows as its own swatch, clipboard text gets
-// a content-type icon, everything else its semantic icon in a tinted tile.
-func (a *AppController) renderOmniboxRowLeadingIcon(c *ui.Context, theme *ui.Theme, item engine.OmniboxItem, selected bool) {
+// a content-type icon, everything else its semantic icon in a neutral tile.
+// Tiles stay neutral on the chosen row too: the selection bar carries it.
+func (a *AppController) renderOmniboxRowLeadingIcon(c *ui.Context, theme *ui.Theme, item engine.OmniboxItem) {
 	switch item.Kind {
 	case engine.ItemClipboardEntry:
 		if m := item.ClipboardMedia; m != nil && m.ThumbPath != "" {
@@ -806,7 +815,7 @@ func (a *AppController) renderOmniboxRowLeadingIcon(c *ui.Context, theme *ui.The
 		if item.ClipboardMedia == nil || item.ClipboardMedia.Kind == "" {
 			icon = clipboardContentIcon(item.ClipboardContent, item.Icon)
 		}
-		iconTile(c, theme, icon, selected)
+		iconTile(c, theme, icon, false)
 
 	case engine.ItemInstalledApp:
 		if bmp := a.AppIconBitmap(item.AppPath); bmp != nil {
@@ -819,7 +828,7 @@ func (a *AppController) renderOmniboxRowLeadingIcon(c *ui.Context, theme *ui.The
 		if iconName == "" {
 			iconName = "app.badge"
 		}
-		iconTile(c, theme, iconName, selected)
+		iconTile(c, theme, iconName, false)
 
 	case engine.ItemEmoji:
 		glyph := strings.TrimSpace(item.UtilityValue)
@@ -829,14 +838,14 @@ func (a *AppController) renderOmniboxRowLeadingIcon(c *ui.Context, theme *ui.The
 			})
 			return
 		}
-		iconTile(c, theme, "face.smiling", selected)
+		iconTile(c, theme, "face.smiling", false)
 
 	default:
 		iconName := item.Icon
 		if iconName == "" {
 			iconName = "bolt"
 		}
-		iconTile(c, theme, iconName, selected)
+		iconTile(c, theme, iconName, false)
 	}
 }
 

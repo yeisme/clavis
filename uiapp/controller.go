@@ -2118,11 +2118,22 @@ func clipboardItemsToEntries(items []clipboard.ClipboardItem) []engine.OmniboxCl
 		}
 		entries[i] = engine.OmniboxClipboardEntry{
 			ID: it.ID, Content: it.Content, SourceAppName: it.SourceAppName, IsPinned: it.IsPinned,
-			Media: media, Preview: preview,
+			CopiedAt: clipboardCopiedAt(it),
+			Media:    media, Preview: preview,
 			Actions: engine.ClipboardEntryActions{CanPin: !it.IsPinned, CanUnpin: it.IsPinned, CanCopy: true, CanPaste: true, CanDelete: true},
 		}
 	}
 	return entries
+}
+
+// clipboardCopiedAt is when an entry was last copied: a re-copy of the same
+// content refreshes UpdatedAt (and moves the entry up), so that wins over
+// the first capture time.
+func clipboardCopiedAt(it clipboard.ClipboardItem) time.Time {
+	if !it.UpdatedAt.IsZero() {
+		return it.UpdatedAt
+	}
+	return it.CreatedAt
 }
 
 func (c *AppController) cancelClipboardSearch(seq uint64) {

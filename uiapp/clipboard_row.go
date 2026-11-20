@@ -2,10 +2,79 @@ package uiapp
 
 import (
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/yeisme/clavis/pkg/core/engine"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
+
+// clipboardClock is "now" for the relative copy times on clipboard rows;
+// tests and snapshots pin it so the meta line is deterministic.
+var clipboardClock = time.Now
+
+// clipboardRowMeta is the secondary line of a clipboard row, joined with
+// " · ": the source app (omitted when unknown — "Clipboard" there was noise
+// in the clipboard tab), how long ago it was copied, and for multi-line
+// text the line count, because the title shows only the first line and a
+// long block otherwise looks like a one-liner.
+func clipboardRowMeta(item engine.OmniboxItem, now time.Time) string {
+	parts := make([]string, 0, 3)
+	if app := strings.TrimSpace(item.ClipboardSourceApp); app != "" {
+		parts = append(parts, app)
+	}
+	if !item.ClipboardCopiedAt.IsZero() {
+		parts = append(parts, relativeCopyTime(item.ClipboardCopiedAt, now))
+	}
+	if item.ClipboardMedia == nil {
+		if n := clipboardLineCount(item.ClipboardContent); n > 1 {
+			parts = append(parts, i18n.T("clipboard.row.lines", n))
+		}
+	}
+	if len(parts) == 0 {
+		return item.Subtitle
+	}
+	return strings.Join(parts, " · ")
+}
+
+// clipboardLineCount counts the lines of a text entry, ignoring leading
+// and trailing blank lines (a copied line usually ends with a newline).
+func clipboardLineCount(content string) int {
+	s := strings.Trim(content, " \t\r\n")
+	if s == "" {
+		return 0
+	}
+	return strings.Count(strings.ReplaceAll(s, "\r\n", "\n"), "\n") + 1
+}
+
+// relativeCopyTime says when an entry was copied the way a person would:
+// just now, N minutes/hours ago, yesterday (calendar day, local time),
+// N days ago within a week, then the date.
+func relativeCopyTime(at, now time.Time) string {
+	at, now = at.In(time.Local), now.In(time.Local)
+	d := now.Sub(at)
+	switch {
+	case d < time.Minute:
+		return i18n.T("clipboard.row.just_now")
+	case d < time.Hour:
+		return i18n.T("clipboard.row.minutes_ago", int(d/time.Minute))
+	case d < 24*time.Hour:
+		return i18n.T("clipboard.row.hours_ago", int(d/time.Hour))
+	}
+	day := func(t time.Time) time.Time { return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local) }
+	days := int(day(now).Sub(day(at)).Hours()/24 + 0.5)
+	switch {
+	case days <= 1:
+		return i18n.T("clipboard.row.yesterday")
+	case days < 7:
+		return i18n.T("clipboard.row.days_ago", days)
+	case at.Year() == now.Year():
+		return i18n.T("clipboard.row.date", int(at.Month()), at.Day())
+	default:
+		return i18n.T("clipboard.row.date_year", at.Year(), int(at.Month()), at.Day())
+	}
+}
 
 // clipboardContentIcon picks the leading icon for a text clipboard entry
 // from what the text looks like, so a list of history reads at a glance:

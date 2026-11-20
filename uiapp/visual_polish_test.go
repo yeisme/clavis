@@ -58,6 +58,13 @@ func TestTokenContrast(t *testing.T) {
 			{"matched runes on chosen row", theme.Text, marked, minTextContrast},
 			{"matched runes on resting row", theme.Text, matchMark(theme).Over(bg), minTextContrast},
 			{"tile icon on chosen row", selectedTileGlyph(theme), selectedTileFill(theme).Over(selected), minGlyphContrast},
+			// Omnibox rows: faint tint + 2px bar. Secondary lines (source · time)
+			// are held to the body-text 4.5:1, on the resting and chosen row.
+			{"title on chosen omnibox row", theme.Text, rowSelectionFill(theme).Over(bg), minTextContrast},
+			{"secondary line on resting row", secondaryInk(theme), bg, minTextContrast},
+			{"secondary line on chosen omnibox row", secondaryInk(theme), rowSelectionFill(theme).Over(bg), minTextContrast},
+			{"matched runes on chosen omnibox row", theme.Text, matchMark(theme).Over(rowSelectionFill(theme).Over(bg)), minTextContrast},
+			{"selection bar on chosen omnibox row", rowSelectionBar(theme), rowSelectionFill(theme).Over(bg), minGlyphContrast},
 			{"pill EN segment", theme.Background, theme.Text.Alpha(0.88).Over(bg), minTextContrast},
 			{"diff insertion", theme.Text, diffInsertMark(theme).Over(theme.Surface), minTextContrast},
 			{"diff deletion", diffDeleteInk(theme, theme.Surface), diffDeleteMark(theme).Over(theme.Surface), minTextContrast},

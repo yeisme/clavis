@@ -134,6 +134,18 @@ edit plus the layout tests:
   or 3:1 (glyphs), so a yellow or graphite system accent stays readable.
   `TestTokenContrast` checks every derived colour, on elevation backgrounds and
   on the card surface, for light/dark × {yellow, graphite, pink} accents.
+- **Secondary lines read at 4.5:1 too.** `secondaryInk` is `TextMuted` pushed
+  toward the text colour until it clears 4.5:1 on the chosen row's tint (the
+  worst case); row subtitles and the clipboard "source · time · N lines" line use
+  it. `TestOmniboxSelectionIsEdgeBarNotFlood` re-measures it on real rendered
+  pixels, light and dark.
+- **The chosen Omnibox row is an edge bar, not a flood.** A 2px
+  `rowSelectionBar` flush with the row's leading edge (inset `space10` top and
+  bottom) over a faint `rowSelectionFill` (accent .08 light / .14 dark). There is
+  no accent outline, no accent icon tile and no bolder title. The bar is held to
+  3:1 against the tint, so a pale system accent still reads. Controls that use
+  `selectionFill`/`selectionEdge` (Leader list, settings, segmented controls)
+  keep their own style.
 - **Reduce Motion** → identity plan: no rotation, no slide, opacity only.
 - **Reduce Transparency** → opaque surface + border, shaders off.
 - **High Contrast** → no pitch, no specular, heavier borders.

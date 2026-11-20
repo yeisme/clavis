@@ -55,6 +55,9 @@ type OmniboxClipboardEntry struct {
 	Content       string `json:"content"`
 	SourceAppName string `json:"sourceAppName,omitempty"`
 	IsPinned      bool   `json:"isPinned"`
+	// CopiedAt is when the entry was last copied (a re-copy moves it up and
+	// refreshes it); the UI shows it as a relative time. Zero when unknown.
+	CopiedAt time.Time `json:"copiedAt,omitzero"`
 	// Media is set for image/file/video entries (empty Kind = text).
 	Media   ClipboardMedia        `json:"media,omitzero"`
 	Preview ClipboardEntryPreview `json:"preview,omitzero"`
@@ -161,6 +164,11 @@ type OmniboxItem struct {
 	Port             int                    `json:"port,omitempty"`
 	PortPID          int                    `json:"portPid,omitempty"`
 	PortProcess      string                 `json:"portProcess,omitempty"`
+	// ClipboardSourceApp and ClipboardCopiedAt feed the clipboard row's
+	// "source · time" line; Subtitle keeps its "Clipboard" fallback for
+	// screen readers and other consumers.
+	ClipboardSourceApp string    `json:"clipboardSourceApp,omitempty"`
+	ClipboardCopiedAt  time.Time `json:"clipboardCopiedAt,omitzero"`
 }
 
 // CapsulePhase identifies the current Capsule UI phase.
@@ -1615,6 +1623,8 @@ func makeClipboardOmniboxItems(entries []OmniboxClipboardEntry) []OmniboxItem {
 			ClipboardContent: entry.Content,
 			ClipboardMedia:   clipboardMediaPtr(entry.Media),
 		})
+		candidates[len(candidates)-1].ClipboardSourceApp = entry.SourceAppName
+		candidates[len(candidates)-1].ClipboardCopiedAt = entry.CopiedAt
 		if entry.Media.IsMedia() {
 			candidates[len(candidates)-1].Icon = clipboardMediaIcon(entry.Media)
 			if entry.IsPinned {

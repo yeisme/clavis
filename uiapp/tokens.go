@@ -208,6 +208,38 @@ func selectionEdge(t *ui.Theme) ui.Color {
 	return t.Accent.Alpha(0.40)
 }
 
+// rowSelectionFill is the chosen Omnibox row's tint. It is fainter than
+// selectionFill because the rowSelectionBar carries the selection; the tint
+// only groups the row (blue marks the selection, it never floods the row).
+func rowSelectionFill(t *ui.Theme) ui.Color {
+	if t.Dark {
+		return t.Accent.Alpha(0.14)
+	}
+	return t.Accent.Alpha(0.08)
+}
+
+// rowSelectionBar is the solid accent bar at the chosen row's edge, pushed
+// toward the text color only if a pale system accent (yellow, graphite)
+// would not reach the 3:1 a UI mark needs on the row's tint.
+func rowSelectionBar(t *ui.Theme) ui.Color { return derivedPalette(t).selectionBar }
+
+// The selection bar: 2px wide, flush with the row's leading edge, inset
+// from the top and bottom so it clears the row's corner radius.
+const (
+	rowSelectionBarWidth float32 = 2
+	rowSelectionBarInset float32 = space10
+)
+
+func rowSelectionBarRect(r ui.Rect) ui.Rect {
+	h := max(r.H-2*rowSelectionBarInset, space8)
+	return ui.Rect{X: r.X, Y: r.Y + (r.H-h)/2, W: rowSelectionBarWidth, H: h}
+}
+
+// secondaryInk is the color of secondary lines (row subtitles, clipboard
+// source and time): the theme's muted text, pushed toward the text color
+// until it reads at 4.5:1 on the chosen row's tint, the worst case.
+func secondaryInk(t *ui.Theme) ui.Color { return derivedPalette(t).secondaryInk }
+
 // hairline is the low-contrast separator/border used on glass surfaces.
 func hairline(t *ui.Theme) ui.Color { return t.Border.Alpha(0.6) }
 
@@ -308,12 +340,14 @@ type palette struct {
 	selectedTileGlyph ui.Color
 	accentInk         ui.Color
 	accentGlyph       ui.Color
+	secondaryInk      ui.Color
+	selectionBar      ui.Color
 }
 
 // paletteKey is what the derived colors depend on.
 type paletteKey struct {
-	accent, text, background ui.Color
-	dark                     bool
+	accent, text, muted, background ui.Color
+	dark                            bool
 }
 
 var paletteCache struct {
@@ -327,7 +361,7 @@ var paletteCache struct {
 // theme's accent, text, background or appearance changed (one entry: the
 // UI uses one theme at a time, and a system accent change just refills it).
 func derivedPalette(t *ui.Theme) palette {
-	key := paletteKey{accent: t.Accent, text: t.Text, background: t.Background, dark: t.Dark}
+	key := paletteKey{accent: t.Accent, text: t.Text, muted: t.TextMuted, background: t.Background, dark: t.Dark}
 	paletteCache.Lock()
 	defer paletteCache.Unlock()
 	if paletteCache.valid && paletteCache.key == key {
@@ -339,6 +373,8 @@ func derivedPalette(t *ui.Theme) palette {
 		selectedTileGlyph: computeSelectedTileGlyph(t),
 		accentInk:         readableOn(t.Accent, t.Text, bg, minTextContrast),
 		accentGlyph:       readableOn(t.Accent, t.Text, bg, minGlyphContrast),
+		secondaryInk:      readableOn(t.TextMuted, t.Text, rowSelectionFill(t).Over(bg), minTextContrast),
+		selectionBar:      readableOn(t.Accent, t.Text, rowSelectionFill(t).Over(bg), minGlyphContrast),
 	}
 	paletteCache.valid, paletteCache.key, paletteCache.p = true, key, p
 	return p
