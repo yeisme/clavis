@@ -36,7 +36,10 @@ func DefaultTriggerConfig() TriggerConfig {
 		DoubleTapIntervalMs:       300,
 		CapsuleShortcut:           "option+space",
 		ClipboardShortcut:         "alt+shift+c",
-		InputEngineToggleShortcut: "ctrl+alt+;",
+		// Empty by default: the input-mode toggle now has dedicated gestures (double-tap
+		// right shift, or the candidate pill), so it no longer takes a chord away from the
+		// user's shortcut budget. Set a value here to opt back in to a hotkey.
+		InputEngineToggleShortcut: "",
 		SnippetExpansionEnabled:   true,
 		SnippetBackspaceUndo:      true,
 		LeaderRevealDelayMs:       DefaultLeaderRevealDelayMs,

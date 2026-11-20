@@ -677,11 +677,16 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 	}
 
 	if modName, ok := winVKToModifier(vk); ok && (isDown || isUp) {
-		if b.triggers != nil && (vk == vkShift || vk == vkLShift || vk == vkRShift) && b.triggers.doubleShift(modName, isDown, winOtherModifiersDown(vk), nowMs, b.hookIMEComposing(time.Now())) {
+		// Right shift is reserved for the input-mode toggle (see the darwin side); only
+		// left shift drives the double-shift selection bar, so one gesture never has to
+		// serve both purposes.
+		isShiftKey := vk == vkShift || vk == vkLShift || vk == vkRShift
+		isRightShift := vk == vkRShift || modName == "right_shift"
+		if b.triggers != nil && isShiftKey && !isRightShift && b.triggers.doubleShift(modName, isDown, winOtherModifiersDown(vk), nowMs, b.hookIMEComposing(time.Now())) {
 			b.emitTriggerEvents([]host.TriggerEvent{selectionEvent(nowMs)})
 			return 1
 		}
-		if vk == vkShift || vk == vkLShift || vk == vkRShift {
+		if isShiftKey {
 			b.inputEngineHandleKey(vk, info.ScanCode, isDown, time.Now()) // never consumes
 		}
 		otherDown := winOtherModifiersDown(vk)

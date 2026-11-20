@@ -898,20 +898,30 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 
 	case kCGEventFlagsChanged:
 		modName, isDown, otherDown := darwinModifierEvent(keyCode, flags)
-		if modName == "shift" {
-			if b.triggers != nil && b.triggers.doubleShift(modName, isDown, otherDown, nowMs, false) {
-				// A completed double tap belongs to the selection bar: cancel the
-				// deferred ASCII toggle queued by the first tap.
-				b.cancelShiftToggle()
-				b.emitTriggerEvents([]host.TriggerEvent{selectionEvent(nowMs)})
-				b.shiftDown = false
-				return 0
+		// darwinModifierEvent reports "left_shift"/"right_shift", never a bare "shift".
+		// The old `modName == "shift"` comparison therefore never matched and both the
+		// 中/英 toggle and the double-shift selection bar were dead on macOS.
+		//
+		// The two sides are now split on purpose, so neither has to share a gesture with
+		// the other: right shift owns the input-mode toggle, left shift owns the selection
+		// bar. That also frees the dedicated toggle from stealing a chord like ctrl+alt+;.
+		if strings.HasSuffix(modName, "shift") {
+			right := modName == "right_shift"
+			if !right {
+				if b.triggers != nil && b.triggers.doubleShift(modName, isDown, otherDown, nowMs, false) {
+					// A completed double tap belongs to the selection bar: cancel the
+					// deferred ASCII toggle queued by the first tap.
+					b.cancelShiftToggle()
+					b.emitTriggerEvents([]host.TriggerEvent{selectionEvent(nowMs)})
+					b.shiftDown = false
+					return 0
+				}
 			}
 			if isDown {
 				b.shiftDown = true
 				b.shiftHadKey = false
 			}
-			if !isDown && b.shiftDown && !b.shiftHadKey && b.inlineEnabled.Load() && !isSecureEventInputEnabled() && b.inlineIMEGate() {
+			if right && !isDown && b.shiftDown && !b.shiftHadKey && b.inlineEnabled.Load() && !isSecureEventInputEnabled() && b.inlineIMEGate() {
 				b.shiftDown = false
 				// With double-shift selection armed, the first tap must wait out the
 				// double-tap window before it flips 中/英; otherwise one gesture would
