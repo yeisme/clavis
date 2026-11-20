@@ -15,8 +15,10 @@ type PromptSlotKind string
 const (
 	PromptSlotText       PromptSlotKind = "text"
 	PromptSlotSelect     PromptSlotKind = "select"
+	PromptSlotNumber     PromptSlotKind = "number"
 	PromptSlotKindText                  = PromptSlotText
 	PromptSlotKindSelect                = PromptSlotSelect
+	PromptSlotKindNumber                = PromptSlotNumber
 )
 
 type PromptSlot struct {
@@ -233,8 +235,8 @@ func ValidatePrompts(c PromptsConfig) []ValidationIssue {
 			out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: path + ".trigger", Severity: SeverityError, Message: "prompt trigger cannot be empty"})
 		}
 		for j, s := range p.Slots {
-			if s.Kind != "text" && s.Kind != "select" {
-				out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: fmt.Sprintf("%s.slots[%d].kind", path, j), Severity: SeverityError, Message: "prompt slot kind must be text or select"})
+			if s.Kind != "text" && s.Kind != "select" && s.Kind != "number" {
+				out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: fmt.Sprintf("%s.slots[%d].kind", path, j), Severity: SeverityError, Message: "prompt slot kind must be text, select, or number"})
 			}
 		}
 	}
