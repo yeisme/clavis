@@ -20,7 +20,21 @@
 
 ### 本机 DSH 取证
 
-本机没有找到 state_5.sqlite，也没有在 ~/.dsh 找到 SQLite 文件。可读的会话缓存是 ~/.dsh/storages/session_projcache/sessions/*.json，每个文件含 record.identity.createdAt、record.identity.cwd、record.rows.title、record.rows.sessionStats、record.rows.modelSelection、record.rows.workingDirectory、record.rows.turnOutline 等字段。另有 ~/.dsh/threads/pi/*.jsonl，首行含 type=session、id、timestamp、cwd，后续 type=message 记录角色和消息内容。以上是本机现状证据，不代表所有 DSH 版本都使用同一路径。
+可读的会话缓存是 ~/.dsh/storages/session_projcache/sessions/*.json，每个文件含 record.identity.createdAt、record.identity.cwd、record.rows.title、record.rows.sessionStats、record.rows.modelSelection、record.rows.workingDirectory、record.rows.turnOutline 等字段。另有 ~/.dsh/threads/pi/*.jsonl，首行含 type=session、id、timestamp、cwd，后续 type=message 记录角色和消息内容。以上是本机现状证据，不代表所有 DSH 版本都使用同一路径。
+
+**勘误（2026-11-21 15:15 复核）**：本文初稿写「本机没有找到 state_5.sqlite」，这是错的。
+`~/.codex/state_5.sqlite` **存在**（约 2.0 MB），`threads` 表实测 **476 行**，是 Codex 侧会话列表最主要的
+数据源。初稿漏掉它会让"agent 会话列表"少掉主来源，必须在实现里纳入。
+
+取证与读取约束：
+- 必须用 `file:...?mode=ro` 只读打开，**不能用 `?immutable=1`**——`immutable` 按 SQLite 定义忽略
+  `-wal`，只读到最近一次 checkpoint 的世界且不报错，偏差等于距上次 checkpoint 的时长（实测同刻
+  双读可差 1.6M token / 2 分 46 秒，轻载时隔过 78 分钟）。
+- Codex 的滚动日志 `~/.codex/logs_2.sqlite` 无行数上限也不守恒，ERROR 存量既不能证有也不能证无，
+  只能按时间窗扫。
+- 不要把"文件存在"当作"会话在跑"：状态要靠 `threads` 的更新时间与 turn 记录判断，并且要能区分
+  「DSH 用 app-server 拉起的 thread」与「CLI 直接起的会话」——前者不写 state_5、不生成
+  ~/.codex/sessions/*.jsonl，只写 logs_2。
 
 state_5.sqlite 的 schema、会话目录的完整 schema、DSH app-server 的会话列举 RPC 和将窗口拉到前台的 RPC，在本机或公开官方页面中未验证。实现必须通过能力探测确认，禁止把推测的方法名写死。
 
