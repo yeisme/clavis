@@ -2,6 +2,7 @@ package uiapp
 
 import (
 	"image"
+	"math"
 	"testing"
 	"time"
 
@@ -138,8 +139,10 @@ func TestOmniboxSelectionIsEdgeBarNotFlood(t *testing.T) {
 				}
 			}
 			// Old style stroked the whole row with an accent hairline: the top
-			// edge mid-row must now be plain tint.
-			if top, mid := rgbaAt(img, rowX+int(chosen.W/2), int(chosen.Y)), rgbaAt(img, rowX+int(chosen.W/2), int(chosen.Y)+3); !colorClose(top, mid) {
+			// edge mid-row must now be plain tint. Sample the first pixel row
+			// fully inside the box (its top may fall between pixels).
+			topY := int(math.Ceil(float64(chosen.Y)))
+			if top, mid := rgbaAt(img, rowX+int(chosen.W/2), topY), rgbaAt(img, rowX+int(chosen.W/2), topY+3); !colorClose(top, mid) {
 				t.Fatalf("chosen row has an outline: top edge %v vs inside %v", top, mid)
 			}
 

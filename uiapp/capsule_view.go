@@ -852,53 +852,58 @@ func (a *AppController) renderOmniboxFooterFrameToggle(
 // a content-type icon, everything else its semantic icon in a neutral tile.
 // Tiles stay neutral on the chosen row too: the selection bar carries it.
 func (a *AppController) renderOmniboxRowLeadingIcon(c *ui.Context, theme *ui.Theme, item engine.OmniboxItem) {
+	slot := func(body func()) {
+		ui.Box(c).Size(rowLeadingSlot, rowLeadingSlot).Center().Shrink(0).Children(body)
+	}
 	switch item.Kind {
 	case engine.ItemClipboardEntry:
+		// Images are the content: a thumbnail filling the whole slot tells
+		// them apart at a glance (it was the 26px icon tile's size).
 		if m := item.ClipboardMedia; m != nil && m.ThumbPath != "" {
 			if bmp := a.ThumbBitmap(m.ThumbPath); bmp != nil {
-				ui.Image(c, bmp).Size(rowIconTile, rowIconTile).Fit(ui.Cover).Radius(radiusTile)
+				ui.Image(c, bmp).Size(rowLeadingSlot, rowLeadingSlot).Fit(ui.Cover).Radius(radiusTile).Shrink(0)
 				return
 			}
 		}
 		if _, ok := parseHexSwatch(item.ClipboardContent); ok {
-			ColorSwatch3D(c, item.ClipboardContent, rowIconTile, effectiveSpatialAppearance(c, a.Config().Main.Appearance)).Border(1, hairline(theme))
+			ColorSwatch3D(c, item.ClipboardContent, rowLeadingSlot, effectiveSpatialAppearance(c, a.Config().Main.Appearance)).Border(1, hairline(theme))
 			return
 		}
 		icon := item.Icon
 		if item.ClipboardMedia == nil || item.ClipboardMedia.Kind == "" {
 			icon = clipboardContentIcon(item.ClipboardContent, item.Icon)
 		}
-		iconTile(c, theme, icon, false)
+		slot(func() { iconTile(c, theme, icon, false) })
 
 	case engine.ItemInstalledApp:
 		if bmp := a.AppIconBitmap(item.AppPath); bmp != nil {
-			ui.Box(c).Size(rowIconTile, rowIconTile).Center().Children(func() {
-				ui.Image(c, bmp).Size(24, 24).Radius(radiusChip)
-			})
+			slot(func() { ui.Image(c, bmp).Size(24, 24).Radius(radiusChip) })
 			return
 		}
 		iconName := item.Icon
 		if iconName == "" {
 			iconName = "app.badge"
 		}
-		iconTile(c, theme, iconName, false)
+		slot(func() { iconTile(c, theme, iconName, false) })
 
 	case engine.ItemEmoji:
 		glyph := strings.TrimSpace(item.UtilityValue)
 		if glyph != "" {
-			ui.Box(c).Size(rowIconTile, rowIconTile).Radius(radiusTile).Center().Background(tileFill(theme)).Children(func() {
-				ui.Text(c, glyph).FontSize(typeGlyph).SingleLine()
+			slot(func() {
+				ui.Box(c).Size(rowIconTile, rowIconTile).Radius(radiusTile).Center().Background(tileFill(theme)).Children(func() {
+					ui.Text(c, glyph).FontSize(typeGlyph).SingleLine()
+				})
 			})
 			return
 		}
-		iconTile(c, theme, "face.smiling", false)
+		slot(func() { iconTile(c, theme, "face.smiling", false) })
 
 	default:
 		iconName := item.Icon
 		if iconName == "" {
 			iconName = "bolt"
 		}
-		iconTile(c, theme, iconName, false)
+		slot(func() { iconTile(c, theme, iconName, false) })
 	}
 }
 

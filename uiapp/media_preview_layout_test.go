@@ -144,3 +144,81 @@ func TestPreviewCardTitleIconIsNeutral(t *testing.T) {
 		}
 	}
 }
+
+// TestClipboardThumbnailsFillTheLeadingSlot renders the clipboard list with an
+// image entry: its thumbnail is drawn rowLeadingSlot wide (it was the 26px
+// icon tile), the titles of image and text rows start at the same x (icon
+// tiles centre in the same slot), and the row pitch stays within the row
+// budget the window is sized by.
+func TestClipboardThumbnailsFillTheLeadingSlot(t *testing.T) {
+	f, w, h := mediaPreviewFixture(t)
+	// A text row whose title starts with the same glyph as the image row's,
+	// so the first ink pixel compares layout, not side bearings.
+	f.record(t, "Image notes")
+	f.ctrl.OpenOmnibox(config.TabClipboard, "")
+	waitUntil(t, 2*time.Second, func() bool {
+		for _, it := range f.ctrl.State().OmniboxItems {
+			if it.Title == "Image notes" {
+				return true
+			}
+		}
+		return false
+	}, "text row")
+	for idx, it := range f.ctrl.State().OmniboxItems {
+		if it.ClipboardMedia != nil && it.ClipboardMedia.IsMedia() {
+			f.ctrl.SelectIndex(idx)
+			break
+		}
+	}
+	tt := ui.NewTester(f.ctrl.CapsuleView, w, h)
+	// Reduce Motion flattens the stage: the spatial preset skews resting
+	// rows a few px, which would move their titles apart regardless of the
+	// leading slot.
+	tt.SetPreferences(ui.Preferences{ReduceMotion: true})
+	tt.Frame()
+	img := tt.Image()
+	media, ok := tt.Find("Image 1920×1080")
+	text, ok2 := tt.Find("Image notes")
+	third, ok3 := tt.Find("third entry")
+	second, ok4 := tt.Find("second entry")
+	if !ok || !ok2 || !ok3 || !ok4 {
+		t.Fatalf("rows missing; texts %q", tt.Texts())
+	}
+	// The thumbnail (testPNG16: blue 200 under an R/G gradient) along the
+	// media row's middle.
+	y := int(media.Y + media.H/2)
+	lo, hi := -1, -1
+	for x := int(media.X); x < int(media.X)+80; x++ {
+		c := img.RGBAAt(x, y)
+		if c.B >= 185 && c.B <= 215 && c.R < 200 {
+			if lo < 0 {
+				lo = x
+			}
+			hi = x
+		}
+	}
+	if lo < 0 || hi-lo+1 < int(rowLeadingSlot)-2 {
+		t.Fatalf("thumbnail drawn %dpx wide (x %d..%d), want ~%vpx", hi-lo+1, lo, hi, rowLeadingSlot)
+	}
+	// Title start: first text-colored pixel right of the slot, upper half.
+	titleX := func(row ui.Rect) int {
+		ink := ui.LightTheme().Text
+		for x := int(row.X) + int(rowLeadingSlot); x < int(row.X+row.W); x++ {
+			for yy := int(row.Y) + 4; yy < int(row.Y+row.H/2); yy++ {
+				if colorClose(rgbaAt(img, x, yy), ink) {
+					return x
+				}
+			}
+		}
+		return -1
+	}
+	if a, b := titleX(media), titleX(text); a < 0 || a != b {
+		t.Fatalf("titles start at x=%d (image row) and x=%d (text row); they must align", a, b)
+	}
+	// "third entry" was captured just after "second entry": adjacent rows.
+	pitch := second.Y - third.Y
+	if pitch <= 0 || pitch > rowHeightOmnibox+rowGap {
+		t.Fatalf("row pitch %.1f outside (0, %v], the row budget the window is sized by", pitch, rowHeightOmnibox+rowGap)
+	}
+	t.Logf("thumbnail %dpx; titles at x=%d; row pitch %.1f", hi-lo+1, titleX(text), pitch)
+}

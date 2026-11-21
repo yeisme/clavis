@@ -182,6 +182,9 @@ const (
 const (
 	rowIconTile float32 = 26
 	rowIconSize float32 = 15
+	// rowLeadingSlot is the square every row's leading glyph sits in, so
+	// titles align: thumbnails and swatches fill it, icon tiles centre in it.
+	rowLeadingSlot float32 = space32
 )
 
 // minTextContrast and minGlyphContrast are the WCAG 2 thresholds the tokens
