@@ -60,3 +60,39 @@ func TestOnboardingPermissionRowsSayGrantOnce(t *testing.T) {
 		t.Fatalf("granted guide shows %q %d times, want 2", ok, n)
 	}
 }
+
+// TestOnboardingDecorationIsNeutral reads pixels off the fresh guide, light
+// and dark: the progress rail and the step numbers (everything left of the
+// step titles) and the permission tiles (left of their labels) carry no
+// accent. The accent is left to the primary "Grant…" button.
+func TestOnboardingDecorationIsNeutral(t *testing.T) {
+	for _, dark := range []bool{false, true} {
+		tt := renderGuide(t, false, dark)
+		accent := ui.LightTheme().Accent
+		if dark {
+			accent = ui.DarkTheme().Accent
+		}
+		title, ok := tt.Find(i18n.T("onboarding.step.permissions"))
+		if !ok {
+			t.Fatalf("step title missing; texts %q", tt.Texts())
+		}
+		header, _ := tt.Find(i18n.T("onboarding.title"))
+		// Rail dots and step badges: the strip left of the step titles,
+		// below the welcome header.
+		if n := accentPixels(tt, 0, int(header.Y+header.H), int(title.X)-2, 520, accent); n != 0 {
+			t.Fatalf("dark=%v: %d accent pixels in the progress rail / step numbers", dark, n)
+		}
+		label, ok := tt.Find(i18n.T("settings.perm.accessibility"))
+		if !ok {
+			t.Fatal("accessibility row missing")
+		}
+		if n := accentPixels(tt, int(label.X)-int(space32)-int(space8), int(label.Y)-int(space8), int(label.X)-2, int(label.Y+label.H)+int(space8), accent); n != 0 {
+			t.Fatalf("dark=%v: the primary permission's tile paints %d accent pixels", dark, n)
+		}
+		// The primary button is the one place that keeps the accent.
+		btn, ok := tt.Find(i18n.T("onboarding.perm.grant"))
+		if !ok || accentPixels(tt, int(btn.X), int(btn.Y), int(btn.X+btn.W), int(btn.Y+btn.H), accent) == 0 {
+			t.Fatalf("dark=%v: the primary Grant button lost its accent fill (found=%v)", dark, ok)
+		}
+	}
+}

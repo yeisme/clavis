@@ -192,7 +192,9 @@ func renderOnboardingRail(c *ui.Context, theme *ui.Theme, permissionsDone, leade
 			if i > 0 {
 				ui.Box(c).Width(space1).Height(space12).Background(hairline(theme))
 			}
-			color := theme.Accent
+			// Pending steps are neutral; only completion has a color (the
+			// success semantic). The accent stays for the one action to take.
+			color := secondaryInk(theme)
 			if done {
 				color = theme.Success
 			}
@@ -211,7 +213,7 @@ func onboardingStep(c *ui.Context, theme *ui.Theme, n int, title string, done bo
 				if done {
 					renderSemanticIcon(c, "checkmark", typeLabel, theme.Success)
 				} else {
-					ui.Text(c, strconv.Itoa(n)).FontSize(typeLabel).FontWeight(700).TextColor(accentInk(theme, theme.Surface)).SingleLine()
+					ui.Text(c, strconv.Itoa(n)).FontSize(typeLabel).FontWeight(700).TextColor(secondaryInk(theme)).SingleLine()
 				}
 			})
 			ui.Column(c).Grow(1).Shrink(1).Gap(space8).Children(func() {
@@ -278,7 +280,9 @@ func (a *AppController) onboardingPermRow(c *ui.Context, theme *ui.Theme, kind, 
 		if kind == "input_monitoring" {
 			icon = "keyboard"
 		}
-		kitIconTile(c, theme, icon, !granted && primary)
+		// A neutral tile: the primary "Grant…" button already marks the
+		// permission to take next.
+		kitIconTile(c, theme, icon, false)
 		ui.Column(c).Grow(1).Shrink(1).Gap(space2).Children(func() {
 			ui.Text(c, label).FontSize(typeBody).FontWeight(600).TextColor(theme.Text).SingleLine()
 			applyProseLineHeight(ui.Text(c, purpose)).FontSize(typeMeta).TextColor(theme.TextMuted)
@@ -286,8 +290,6 @@ func (a *AppController) onboardingPermRow(c *ui.Context, theme *ui.Theme, kind, 
 		color := theme.TextMuted
 		if granted {
 			color = theme.Success
-		} else if primary {
-			color = theme.Accent
 		}
 		ui.Row(c).Gap(space4).AlignItems(ui.Center).Shrink(0).Children(func() {
 			kitStatusDot(c, color, !granted && primary)
