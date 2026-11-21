@@ -64,6 +64,12 @@ func CoreSemanticIconNames() []string {
 		// IME rule variants
 		"keyboard.badge.ellipsis",
 		"keyboard.chevron.compact.down",
+		// preview toggle, media kinds and workflows
+		"eye",
+		"photo",
+		"film",
+		"doc",
+		"arrow.triangle.branch",
 	}
 }
 
@@ -127,6 +133,16 @@ var semanticIconBodies = map[string]string{
 	"envelope":    `<rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>`,
 	"curlybraces": `<path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1"/><path d="M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1"/>`,
 	"doc.text":    `<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>`,
+
+	// Media and workflow kinds (SF Symbols names: macOS draws the native
+	// glyph; these vectors draw them on Windows and in headless renders,
+	// where the lookup used to fall back to the generic bolt — the preview
+	// toggle, image/video/file rows and workflow items all showed a bolt).
+	"eye":                   `<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/>`,
+	"photo":                 `<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>`,
+	"film":                  `<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 3v18"/><path d="M3 7.5h4"/><path d="M3 12h18"/><path d="M3 16.5h4"/><path d="M17 3v18"/><path d="M17 7.5h4"/><path d="M17 16.5h4"/>`,
+	"doc":                   `<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>`,
+	"arrow.triangle.branch": `<path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/>`,
 
 	// Floating pill states.
 	"lock.fill":                `<rect width="18" height="11" x="3" y="11" rx="2" ry="2" fill="currentColor"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>`,
