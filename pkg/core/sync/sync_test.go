@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
@@ -534,6 +535,134 @@ func TestEnvelopeAADUsesLengthPrefixedFields(t *testing.T) {
 	other.DeviceID = "device:object"
 	if string(ambiguous.aad()) == string(other.aad()) {
 		t.Fatal("AAD aliases fields containing a colon")
+	}
+}
+
+func TestV2DevicesDecryptWithSharedADKAndRecoveryCode(t *testing.T) {
+	s := NewServer()
+	a, err := NewClient(s, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewClient(s, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, err := s.RegisterAccount("acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.LoginWithCredential("acct", cred); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.LoginWithCredential("acct", cred); err != nil {
+		t.Fatal(err)
+	}
+	if string(a.privateKey) == string(b.privateKey) || string(a.xPrivateKey.Bytes()) == string(b.xPrivateKey.Bytes()) {
+		t.Fatal("test clients unexpectedly share private keys")
+	}
+	if err := a.PairDevice(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.PairDevice(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.WrapADKForDevice("b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RefreshADK(); err != nil {
+		t.Fatal(err)
+	}
+	if string(a.ADK()) != string(b.ADK()) {
+		t.Fatal("paired devices do not share ADK")
+	}
+	e, err := NewEncryptedEnvelope(a.privateKey, a.ADK(), "acct", "a", "object", uint64(1), InputMethod, []byte("history"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UploadEnvelope("acct", "a", "object", 1, e); err != nil {
+		t.Fatal(err)
+	}
+	code, err := a.PrepareRecoveryCode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.mu.Lock()
+	b.adk = nil
+	b.recoveryWrap = nil
+	b.recoveryReady = false
+	b.syncEnabled = false
+	b.mu.Unlock()
+	if err := b.ConfirmRecoveryCode("WRONG"); err == nil {
+		t.Fatal("wrong recovery code accepted")
+	}
+	if err := b.ConfirmRecoveryCode(code); err != nil {
+		t.Fatal(err)
+	}
+	if string(b.ADK()) != string(a.ADK()) {
+		t.Fatal("recovery code did not restore ADK")
+	}
+	stored, err := ParseEncryptedEnvelope(s.objects["acct"]["object"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecryptEnvelope(b.ADK(), stored, a.privateKey.Public().(ed25519.PublicKey)); err != nil || string(got) != "history" {
+		t.Fatalf("cross-device decrypt = %q, %v", got, err)
+	}
+}
+
+func TestEnvelopeRequiresADKKeyID(t *testing.T) {
+	adk := bytes.Repeat([]byte{7}, 32)
+	priv := make(ed25519.PrivateKey, ed25519.PrivateKeySize)
+	_, _ = rand.Read(priv)
+	e, err := NewEncryptedEnvelope(priv, adk, "acct", "device", "object", uint64(1), InputMethod, []byte("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.KeyID = ""
+	if _, err := MarshalEncryptedEnvelope(e); err == nil {
+		t.Fatal("envelope without KeyID accepted")
+	}
+}
+
+func TestEnvelopeAADAndSignatureBindV2Fields(t *testing.T) {
+	priv := make(ed25519.PrivateKey, ed25519.PrivateKeySize)
+	_, _ = rand.Read(priv)
+	pub := priv.Public().(ed25519.PublicKey)
+	adk := bytes.Repeat([]byte{7}, 32)
+	e, err := NewEncryptedEnvelope(priv, adk, "acct", "device", "object", uint64(1), InputMethod, []byte("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*EncryptedEnvelope){"keyid": func(x *EncryptedEnvelope) { x.KeyID = "adk-v2" }, "object": func(x *EncryptedEnvelope) { x.ObjectID = "other" }, "version": func(x *EncryptedEnvelope) { x.Version++ }} {
+		t.Run(name, func(t *testing.T) {
+			x := e
+			mutate(&x)
+			if x.Verify(pub) {
+				t.Fatal("tampered envelope verified")
+			}
+			if _, err := DecryptEnvelope(adk, x, pub); err == nil {
+				t.Fatal("tampered envelope decrypted")
+			}
+		})
+	}
+}
+
+func TestServerStoresOnlyWrappedADKBytes(t *testing.T) {
+	s, a, _ := setupClients(t)
+	if len(s.wrappedADK["acct"]) == 0 {
+		t.Fatal("server did not store wrapped ADK")
+	}
+	if len(s.recoveryWrap["acct"]) == 0 {
+		t.Fatal("server did not store recovery wrap")
+	}
+	if len(a.ADK()) != 32 {
+		t.Fatal("client ADK missing")
+	}
+	for _, wrapped := range s.wrappedADK["acct"] {
+		if string(wrapped) == string(a.ADK()) {
+			t.Fatal("server stored plaintext ADK")
+		}
 	}
 }
 

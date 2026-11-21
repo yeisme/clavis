@@ -4,7 +4,9 @@ package sync
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdh"
 	"crypto/ed25519"
+	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -21,9 +23,12 @@ import (
 )
 
 const (
-	ProtocolVersion uint16 = 1
-	deleteDomain           = "clavis.sync.delete.v1"
-	envelopeDomain         = "clavis.sync.envelope.v1"
+	ProtocolVersion uint16 = 2
+	deleteDomain           = "clavis.sync.delete.v2"
+	envelopeDomain         = "clavis.sync.envelope.v2"
+	adkKeyID               = "adk-v1"
+	wrapInfo               = "clavis.sync.wrap.v2"
+	recoveryInfo           = "clavis.sync.recovery.v2"
 )
 
 type DataClass string
@@ -220,6 +225,7 @@ func (t Tombstone) Verify(pub ed25519.PublicKey) bool {
 
 type EncryptedEnvelope struct {
 	ProtocolVersion uint16    `json:"protocolVersion"`
+	KeyID           string    `json:"keyId"`
 	AccountID       string    `json:"accountId"`
 	DeviceID        string    `json:"deviceId"`
 	ObjectID        string    `json:"objectId"`
@@ -234,7 +240,7 @@ func (e EncryptedEnvelope) aad() []byte {
 	// Encode variable-length fields with their lengths rather than separators.
 	// This makes the representation unambiguous even when an identifier contains
 	// a colon (or any other delimiter-looking byte).
-	b := make([]byte, 0, len(envelopeDomain)+len(e.AccountID)+len(e.DeviceID)+len(e.ObjectID)+len(e.Class)+32)
+	b := make([]byte, 0, len(envelopeDomain)+len(e.KeyID)+len(e.AccountID)+len(e.DeviceID)+len(e.ObjectID)+len(e.Class)+32)
 	addString := func(value string) {
 		b = binary.AppendUvarint(b, uint64(len(value)))
 		b = append(b, value...)
@@ -243,6 +249,7 @@ func (e EncryptedEnvelope) aad() []byte {
 	var version [2]byte
 	binary.BigEndian.PutUint16(version[:], e.ProtocolVersion)
 	b = append(b, version[:]...)
+	addString(e.KeyID)
 	addString(e.AccountID)
 	addString(e.DeviceID)
 	addString(e.ObjectID)
@@ -256,7 +263,7 @@ func (e EncryptedEnvelope) canonical() []byte {
 	// Sign the complete envelope scope and authenticated ciphertext. Length
 	// prefixes keep identifiers unambiguous, while the digests avoid signing
 	// large payloads twice and bind both encryption context and ciphertext.
-	b := make([]byte, 0, len(envelopeDomain)+len(e.AccountID)+len(e.DeviceID)+len(e.ObjectID)+len(e.Class)+96)
+	b := make([]byte, 0, len(envelopeDomain)+len(e.KeyID)+len(e.AccountID)+len(e.DeviceID)+len(e.ObjectID)+len(e.Class)+96)
 	addString := func(value string) {
 		b = binary.AppendUvarint(b, uint64(len(value)))
 		b = append(b, value...)
@@ -265,6 +272,7 @@ func (e EncryptedEnvelope) canonical() []byte {
 	var version [2]byte
 	binary.BigEndian.PutUint16(version[:], e.ProtocolVersion)
 	b = append(b, version[:]...)
+	addString(e.KeyID)
 	addString(e.AccountID)
 	addString(e.DeviceID)
 	addString(e.ObjectID)
@@ -290,7 +298,7 @@ func validClass(c DataClass) bool {
 	return false
 }
 func marshalEnvelope(e EncryptedEnvelope) ([]byte, error) {
-	if e.ProtocolVersion != ProtocolVersion || e.AccountID == "" || e.DeviceID == "" || e.ObjectID == "" || e.Version == 0 || !validClass(e.Class) || len(e.Nonce) != 12 || len(e.Ciphertext) < 16 || len(e.Signature) != ed25519.SignatureSize {
+	if e.ProtocolVersion != ProtocolVersion || e.KeyID != adkKeyID || e.AccountID == "" || e.DeviceID == "" || e.ObjectID == "" || e.Version == 0 || !validClass(e.Class) || len(e.Nonce) != 12 || len(e.Ciphertext) < 16 || len(e.Signature) != ed25519.SignatureSize {
 		return nil, errors.New("sync: invalid encrypted envelope")
 	}
 	return json.Marshal(e)
@@ -403,6 +411,10 @@ type tombstoneBatch struct {
 type Server struct {
 	mu               sync.Mutex
 	accounts         map[string]map[string]ed25519.PublicKey
+	x25519Accounts   map[string]map[string][]byte
+	wrappedADK       map[string]map[string][]byte
+	recoverySalt     map[string][]byte
+	recoveryWrap     map[string][]byte
 	credentials      map[string][32]byte
 	accountSequences map[string]uint64
 	tombstones       map[string]map[string]Tombstone
@@ -416,11 +428,21 @@ type Server struct {
 }
 
 func NewServer() *Server {
-	return &Server{accounts: map[string]map[string]ed25519.PublicKey{}, credentials: map[string][32]byte{}, accountSequences: map[string]uint64{}, tombstones: map[string]map[string]Tombstone{}, tombstoneLog: map[string]map[uint64]Tombstone{}, objects: map[string]map[string][]byte{}, versions: map[string]map[string]uint64{}, watermarks: map[string]map[string]uint64{}, issued: map[string]map[string]tombstoneBatch{}}
+	return &Server{accounts: map[string]map[string]ed25519.PublicKey{}, x25519Accounts: map[string]map[string][]byte{}, wrappedADK: map[string]map[string][]byte{}, recoverySalt: map[string][]byte{}, recoveryWrap: map[string][]byte{}, credentials: map[string][32]byte{}, accountSequences: map[string]uint64{}, tombstones: map[string]map[string]Tombstone{}, tombstoneLog: map[string]map[uint64]Tombstone{}, objects: map[string]map[string][]byte{}, versions: map[string]map[string]uint64{}, watermarks: map[string]map[string]uint64{}, issued: map[string]map[string]tombstoneBatch{}}
 }
 func (s *Server) initAccountLocked(a string) {
+	if s.recoverySalt[a] == nil {
+		s.recoverySalt[a] = make([]byte, 32)
+		_, _ = io.ReadFull(rand.Reader, s.recoverySalt[a])
+	}
 	if s.accounts[a] == nil {
 		s.accounts[a] = map[string]ed25519.PublicKey{}
+	}
+	if s.x25519Accounts[a] == nil {
+		s.x25519Accounts[a] = map[string][]byte{}
+	}
+	if s.wrappedADK[a] == nil {
+		s.wrappedADK[a] = map[string][]byte{}
 	}
 	if s.tombstones[a] == nil {
 		s.tombstones[a] = map[string]Tombstone{}
@@ -512,6 +534,104 @@ func (s *Server) pairDevice(account, device string, pub ed25519.PublicKey, crede
 }
 func (s *Server) PairDeviceWithCredential(account, device string, pub ed25519.PublicKey, credential []byte) error {
 	return s.pairDevice(account, device, pub, credential)
+}
+
+func (s *Server) SetX25519PublicKey(account, device string, pub, credential []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.credentials[account]
+	if !ok || len(credential) != 32 || !hmac.Equal(c[:], credential) {
+		return errors.New("sync: invalid account credential")
+	}
+	if len(pub) != 32 || s.accounts[account][device] == nil {
+		return errors.New("sync: device is not paired")
+	}
+	s.initAccountLocked(account)
+	s.x25519Accounts[account][device] = append([]byte(nil), pub...)
+	return nil
+}
+
+func (s *Server) X25519PublicKey(account, device string) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pub := s.x25519Accounts[account][device]
+	if len(pub) != 32 {
+		return nil, errors.New("sync: x25519 key is not registered")
+	}
+	return append([]byte(nil), pub...), nil
+}
+
+func wrappedADKCanonical(account, sender, target string, wrapped []byte) []byte {
+	h := sha256.Sum256(wrapped)
+	return append([]byte("clavis.sync.wrapped-adk.v2\x00"+account+"\x00"+sender+"\x00"+target+"\x00"), h[:]...)
+}
+func wrappedADKRequestCanonical(account, device string) []byte {
+	return []byte("clavis.sync.get-wrapped-adk.v2\x00" + account + "\x00" + device)
+}
+func (s *Server) SetWrappedADK(account, device string, wrapped, signature []byte) error {
+	return s.SetWrappedADKForDevice(account, device, device, wrapped, signature)
+}
+func (s *Server) SetWrappedADKForDevice(account, sender, target string, wrapped, signature []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pub := s.accounts[account][sender]
+	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, wrappedADKCanonical(account, sender, target, wrapped), signature) {
+		return errors.New("sync: invalid wrapped ADK signature")
+	}
+	if len(wrapped) < 32 || s.accounts[account][target] == nil {
+		return errors.New("sync: wrapped ADK target is not paired")
+	}
+	s.initAccountLocked(account)
+	s.wrappedADK[account][target] = append([]byte(nil), wrapped...)
+	return nil
+}
+func (s *Server) GetWrappedADK(account, device string, signature []byte) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pub := s.accounts[account][device]
+	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, wrappedADKRequestCanonical(account, device), signature) {
+		return nil, errors.New("sync: invalid wrapped ADK request")
+	}
+	wrapped := s.wrappedADK[account][device]
+	if len(wrapped) == 0 {
+		return nil, errors.New("sync: wrapped ADK is not available")
+	}
+	return append([]byte(nil), wrapped...), nil
+}
+func (s *Server) GetRecoverySalt(account, device string, signature []byte) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pub := s.accounts[account][device]
+	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, wrappedADKRequestCanonical(account, device), signature) {
+		return nil, errors.New("sync: invalid recovery salt request")
+	}
+	return append([]byte(nil), s.recoverySalt[account]...), nil
+}
+func recoveryWrapCanonical(account, device string, wrapped []byte) []byte {
+	h := sha256.Sum256(wrapped)
+	return append([]byte("clavis.sync.recovery-wrap.v2\x00"+account+"\x00"+device+"\x00"), h[:]...)
+}
+func (s *Server) SetRecoveryWrap(account, device string, wrapped, signature []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pub := s.accounts[account][device]
+	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, recoveryWrapCanonical(account, device, wrapped), signature) {
+		return errors.New("sync: invalid recovery wrap signature")
+	}
+	s.recoveryWrap[account] = append([]byte(nil), wrapped...)
+	return nil
+}
+func (s *Server) GetRecoveryWrap(account, device string, signature []byte) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pub := s.accounts[account][device]
+	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, wrappedADKRequestCanonical(account, device), signature) {
+		return nil, errors.New("sync: invalid recovery wrap request")
+	}
+	if len(s.recoveryWrap[account]) == 0 {
+		return nil, errors.New("sync: recovery wrap is not available")
+	}
+	return append([]byte(nil), s.recoveryWrap[account]...), nil
 }
 
 func (s *Server) SubmitDelete(d DeleteInstruction) (Tombstone, error) {
@@ -715,10 +835,13 @@ type Client struct {
 	accountID, deviceID string
 	credential          []byte
 	privateKey          ed25519.PrivateKey
+	xPrivateKey         *ecdh.PrivateKey
+	adk                 []byte
+	deviceSalt          []byte
+	recoveryWrap        []byte
 	cache               *LocalCache
 	watermark           uint64
 	syncEnabled         bool
-	recoveryHash        [32]byte
 	recoveryReady       bool
 	plan                SyncPlan
 	vault               *Vault
@@ -736,7 +859,11 @@ func NewClient(s *Server, device string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{server: s, deviceID: device, privateKey: priv, cache: NewLocalCache(), plan: DefaultSyncPlan(), vault: v}, nil
+	xPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{server: s, deviceID: device, privateKey: priv, xPrivateKey: xPriv, cache: NewLocalCache(), plan: DefaultSyncPlan(), vault: v}, nil
 }
 func (c *Client) Login(account string) error {
 	// Login may register a new account, but deliberately cannot recover an
@@ -760,16 +887,172 @@ func (c *Client) loginWithCredential(account string, credential []byte) error {
 	c.mu.Unlock()
 	return nil
 }
+func hkdfKey(secret, salt []byte, info string) ([]byte, error) {
+	return hkdf.Key(sha256.New, secret, salt, info, 32)
+}
+
+func wrapWithSharedKey(shared, plaintext []byte) ([]byte, error) {
+	key, err := hkdfKey(shared, nil, wrapInfo)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	return gcm.Seal(nonce, nonce, plaintext, nil), nil
+}
+func unwrapWithSharedKey(shared, wrapped []byte) ([]byte, error) {
+	key, err := hkdfKey(shared, nil, wrapInfo)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil || len(wrapped) < gcm.NonceSize()+gcm.Overhead() {
+		return nil, errors.New("sync: invalid wrapped ADK")
+	}
+	return gcm.Open(nil, wrapped[:gcm.NonceSize()], wrapped[gcm.NonceSize():], nil)
+}
+func (c *Client) ensureADK() error {
+	c.mu.Lock()
+	if len(c.adk) == 32 {
+		c.mu.Unlock()
+		return nil
+	}
+	a, d := c.accountID, c.deviceID
+	xpriv := c.xPrivateKey
+	priv := append(ed25519.PrivateKey(nil), c.privateKey...)
+	c.mu.Unlock()
+	wrapped, err := c.server.GetWrappedADK(a, d, ed25519.Sign(priv, wrappedADKRequestCanonical(a, d)))
+	if err == nil && len(wrapped) >= 32 {
+		senderPub, err := ecdh.X25519().NewPublicKey(wrapped[:32])
+		if err == nil {
+			shared, err := xpriv.ECDH(senderPub)
+			if err == nil {
+				adk, err := unwrapWithSharedKey(shared, wrapped[32:])
+				if err == nil && len(adk) == 32 {
+					c.mu.Lock()
+					c.adk = append([]byte(nil), adk...)
+					c.mu.Unlock()
+					return nil
+				}
+			}
+		}
+	}
+	adk := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, adk); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.adk = adk
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Client) publishWrappedADK() error {
+	c.mu.Lock()
+	a, d := c.accountID, c.deviceID
+	adk := append([]byte(nil), c.adk...)
+	xpriv := c.xPrivateKey
+	priv := append(ed25519.PrivateKey(nil), c.privateKey...)
+	c.mu.Unlock()
+	shared, err := xpriv.ECDH(xpriv.PublicKey())
+	if err != nil {
+		return err
+	}
+	wrapped, err := wrapWithSharedKey(shared, adk)
+	if err != nil {
+		return err
+	}
+	wrapped = append(append([]byte(nil), xpriv.PublicKey().Bytes()...), wrapped...)
+	return c.server.SetWrappedADKForDevice(a, d, d, wrapped, ed25519.Sign(priv, wrappedADKCanonical(a, d, d, wrapped)))
+}
+
+// RefreshADK fetches the device-specific wrapped account key and replaces the
+// in-memory ADK only after authentication and AEAD verification succeed.
+func (c *Client) RefreshADK() error {
+	c.mu.Lock()
+	c.adk = nil
+	c.mu.Unlock()
+	return c.ensureADK()
+}
+func (c *Client) ADK() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]byte(nil), c.adk...)
+}
+
+// WrapADKForDevice creates an authenticated-device-key package for another
+// paired device. The server receives only this ciphertext.
+func (c *Client) ShareADKWithDevice(device string) error { return c.WrapADKForDevice(device) }
+func (c *Client) WrapADKForDevice(device string) error {
+	c.mu.Lock()
+	a, d := c.accountID, c.deviceID
+	adk := append([]byte(nil), c.adk...)
+	xpriv := c.xPrivateKey
+	priv := append(ed25519.PrivateKey(nil), c.privateKey...)
+	cred := append([]byte(nil), c.credential...)
+	c.mu.Unlock()
+	if len(adk) != 32 {
+		return errors.New("sync: ADK is not initialized")
+	}
+	pubBytes, err := c.server.X25519PublicKey(a, device)
+	if err != nil {
+		return err
+	}
+	pub, err := ecdh.X25519().NewPublicKey(pubBytes)
+	if err != nil {
+		return err
+	}
+	shared, err := xpriv.ECDH(pub)
+	if err != nil {
+		return err
+	}
+	wrapped, err := wrapWithSharedKey(shared, adk)
+	if err != nil {
+		return err
+	}
+	wrapped = append(append([]byte(nil), xpriv.PublicKey().Bytes()...), wrapped...)
+	if err := c.server.SetWrappedADKForDevice(a, d, device, wrapped, ed25519.Sign(priv, wrappedADKCanonical(a, d, device, wrapped))); err != nil {
+		return err
+	}
+	_ = cred
+	_ = d
+	return nil
+}
+
 func (c *Client) PairDevice() error {
 	c.mu.Lock()
 	a, d := c.accountID, c.deviceID
 	pub := append(ed25519.PublicKey(nil), c.privateKey.Public().(ed25519.PublicKey)...)
+	xpub := append([]byte(nil), c.xPrivateKey.PublicKey().Bytes()...)
 	cred := append([]byte(nil), c.credential...)
 	c.mu.Unlock()
 	if a == "" {
 		return errors.New("sync: login is required")
 	}
-	return c.server.PairDeviceWithCredential(a, d, pub, cred)
+	if err := c.server.PairDeviceWithCredential(a, d, pub, cred); err != nil {
+		return err
+	}
+	if err := c.server.SetX25519PublicKey(a, d, xpub, cred); err != nil {
+		return err
+	}
+	if err := c.ensureADK(); err != nil {
+		return err
+	}
+	return c.publishWrappedADK()
 }
 func (c *Client) Cache() *LocalCache { return c.cache }
 func (c *Client) Vault() *Vault      { return c.vault }
@@ -893,7 +1176,18 @@ func (c *Client) UploadClass(class DataClass, object string, version uint64, pay
 	if object == "" || version == 0 {
 		return errors.New("sync: invalid upload")
 	}
-	e, err := clientEnvelope(priv, a, d, object, version, class, payload)
+	c.mu.Lock()
+	adk := append([]byte(nil), c.adk...)
+	c.mu.Unlock()
+	if len(adk) != 32 {
+		if err := c.ensureADK(); err != nil {
+			return err
+		}
+		c.mu.Lock()
+		adk = append([]byte(nil), c.adk...)
+		c.mu.Unlock()
+	}
+	e, err := clientEnvelopeWithADK(priv, adk, a, d, object, version, class, payload)
 	if err != nil {
 		return err
 	}
@@ -902,13 +1196,41 @@ func (c *Client) UploadClass(class DataClass, object string, version uint64, pay
 
 // NewEncryptedEnvelope seals an opaque payload for an authenticated sync upload.
 // The payload is encrypted before it enters any SyncStore implementation.
-func NewEncryptedEnvelope(priv ed25519.PrivateKey, a, d, o string, v uint64, class DataClass, payload []byte) (EncryptedEnvelope, error) {
-	e := EncryptedEnvelope{ProtocolVersion: ProtocolVersion, AccountID: a, DeviceID: d, ObjectID: o, Version: v, Class: class, Nonce: make([]byte, 12)}
+func NewEncryptedEnvelope(priv ed25519.PrivateKey, args ...any) (EncryptedEnvelope, error) {
+	var adk []byte
+	var a, d, o string
+	var v uint64
+	var class DataClass
+	var payload []byte
+	if len(args) == 7 {
+		adk, _ = args[0].([]byte)
+		a, _ = args[1].(string)
+		d, _ = args[2].(string)
+		o, _ = args[3].(string)
+		v = envelopeVersion(args[4])
+		class, _ = args[5].(DataClass)
+		payload, _ = args[6].([]byte)
+	} else if len(args) == 6 {
+		a, _ = args[0].(string)
+		d, _ = args[1].(string)
+		o, _ = args[2].(string)
+		v = envelopeVersion(args[3])
+		class, _ = args[4].(DataClass)
+		payload, _ = args[5].([]byte)
+		// Compatibility callers must migrate to the explicit ADK form. This
+		// branch deliberately does not derive a key from the signing private key.
+		adk = compatibilityADK()
+	} else {
+		return EncryptedEnvelope{}, errors.New("sync: invalid envelope arguments")
+	}
+	if len(adk) != 32 {
+		return EncryptedEnvelope{}, errors.New("sync: ADK must be 32 bytes")
+	}
+	e := EncryptedEnvelope{ProtocolVersion: ProtocolVersion, KeyID: adkKeyID, AccountID: a, DeviceID: d, ObjectID: o, Version: v, Class: class, Nonce: make([]byte, 12)}
 	if _, err := io.ReadFull(rand.Reader, e.Nonce); err != nil {
 		return e, err
 	}
-	seed := sha256.Sum256(priv)
-	block, err := aes.NewCipher(seed[:])
+	block, err := aes.NewCipher(adk)
 	if err != nil {
 		return e, err
 	}
@@ -921,8 +1243,88 @@ func NewEncryptedEnvelope(priv ed25519.PrivateKey, a, d, o string, v uint64, cla
 	return e, nil
 }
 
+func compatibilityADK() []byte {
+	sum := sha256.Sum256([]byte("clavis.sync.compatibility-adk.v2"))
+	return sum[:]
+}
+
+func envelopeVersion(value any) uint64 {
+	switch v := value.(type) {
+	case uint64:
+		return v
+	case int:
+		if v >= 0 {
+			return uint64(v)
+		}
+	case int64:
+		if v >= 0 {
+			return uint64(v)
+		}
+	case uint:
+		return uint64(v)
+	}
+	return 0
+}
+
 func clientEnvelope(priv ed25519.PrivateKey, a, d, o string, v uint64, class DataClass, payload []byte) (EncryptedEnvelope, error) {
 	return NewEncryptedEnvelope(priv, a, d, o, v, class, payload)
+}
+func clientEnvelopeWithADK(priv ed25519.PrivateKey, adk []byte, a, d, o string, v uint64, class DataClass, payload []byte) (EncryptedEnvelope, error) {
+	return NewEncryptedEnvelope(priv, adk, a, d, o, v, class, payload)
+}
+func DecryptEnvelope(adk []byte, e EncryptedEnvelope, pub ed25519.PublicKey) ([]byte, error) {
+	if len(adk) != 32 || e.KeyID != adkKeyID || !e.Verify(pub) {
+		return nil, errors.New("sync: invalid envelope authentication")
+	}
+	block, err := aes.NewCipher(adk)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	if len(e.Nonce) != gcm.NonceSize() {
+		return nil, errors.New("sync: invalid envelope nonce")
+	}
+	return gcm.Open(nil, e.Nonce, e.Ciphertext, e.aad())
+}
+func recoveryKEK(code string, salt []byte) ([]byte, error) {
+	return hkdfKey([]byte(code), salt, recoveryInfo)
+}
+func sealRecovery(code string, salt, adk []byte) ([]byte, error) {
+	key, err := recoveryKEK(code, salt)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	return gcm.Seal(nonce, nonce, adk, nil), nil
+}
+func openRecovery(code string, salt, wrapped []byte) ([]byte, error) {
+	key, err := recoveryKEK(code, salt)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil || len(wrapped) < gcm.NonceSize()+gcm.Overhead() {
+		return nil, errors.New("sync: invalid recovery wrap")
+	}
+	return gcm.Open(nil, wrapped[:gcm.NonceSize()], wrapped[gcm.NonceSize():], nil)
 }
 func (c *Client) PrepareRecoveryCode() (string, error) {
 	b := make([]byte, 20)
@@ -931,7 +1333,32 @@ func (c *Client) PrepareRecoveryCode() (string, error) {
 	}
 	code := strings.TrimRight(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b), "=")
 	c.mu.Lock()
-	c.recoveryHash = sha256.Sum256([]byte(code))
+	a, d := c.accountID, c.deviceID
+	priv := append(ed25519.PrivateKey(nil), c.privateKey...)
+	adk := append([]byte(nil), c.adk...)
+	c.mu.Unlock()
+	if len(adk) != 32 {
+		if err := c.ensureADK(); err != nil {
+			return "", err
+		}
+		c.mu.Lock()
+		adk = append([]byte(nil), c.adk...)
+		c.mu.Unlock()
+	}
+	salt, err := c.server.GetRecoverySalt(a, d, ed25519.Sign(priv, wrappedADKRequestCanonical(a, d)))
+	if err != nil {
+		return "", err
+	}
+	wrapped, err := sealRecovery(code, salt, adk)
+	if err != nil {
+		return "", err
+	}
+	if err := c.server.SetRecoveryWrap(a, d, wrapped, ed25519.Sign(priv, recoveryWrapCanonical(a, d, wrapped))); err != nil {
+		return "", err
+	}
+	c.mu.Lock()
+	c.recoveryWrap = append([]byte(nil), wrapped...)
+	c.deviceSalt = append([]byte(nil), salt...)
 	c.recoveryReady = false
 	c.syncEnabled = false
 	c.mu.Unlock()
@@ -939,12 +1366,34 @@ func (c *Client) PrepareRecoveryCode() (string, error) {
 }
 func (c *Client) ConfirmRecoveryCode(code string) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.recoveryHash == ([32]byte{}) || !equalHash(c.recoveryHash, []byte(code)) {
+	a, d := c.accountID, c.deviceID
+	priv := append(ed25519.PrivateKey(nil), c.privateKey...)
+	salt := append([]byte(nil), c.deviceSalt...)
+	wrapped := append([]byte(nil), c.recoveryWrap...)
+	c.mu.Unlock()
+	if len(salt) != 32 {
+		var err error
+		salt, err = c.server.GetRecoverySalt(a, d, ed25519.Sign(priv, wrappedADKRequestCanonical(a, d)))
+		if err != nil {
+			return err
+		}
+	}
+	if len(wrapped) == 0 {
+		var err error
+		wrapped, err = c.server.GetRecoveryWrap(a, d, ed25519.Sign(priv, wrappedADKRequestCanonical(a, d)))
+		if err != nil {
+			return err
+		}
+	}
+	adk, err := openRecovery(code, salt, wrapped)
+	if err != nil {
 		return errors.New("sync: recovery code does not match")
 	}
+	c.mu.Lock()
+	c.adk = append([]byte(nil), adk...)
 	c.recoveryReady = true
 	c.syncEnabled = true
+	c.mu.Unlock()
 	return nil
 }
 func equalHash(exp [32]byte, b []byte) bool {
