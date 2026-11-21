@@ -61,12 +61,14 @@ type LearningEntry struct {
 	WordDigest string `json:"wordDigest"`
 	Frequency  uint64 `json:"frequency"`
 	Pinned     bool   `json:"pinned,omitempty"`
+	LastUsedNS int64  `json:"lastUsedNs,omitempty"`
 }
 
 type BigramEntry struct {
 	PreviousDigest string `json:"previousDigest"`
 	WordDigest     string `json:"wordDigest"`
 	Frequency      uint64 `json:"frequency"`
+	LastUsedNS     int64  `json:"lastUsedNs,omitempty"`
 }
 
 // LearningData is a privacy-preserving summary only. It is useful for
