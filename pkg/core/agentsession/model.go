@@ -37,10 +37,29 @@ type Diagnostic struct {
 	Message  string
 }
 
+// CodexThread is the provider-neutral row returned by a Codex state reader.
+// The reader lives outside pkg/core because this package must remain pure stdlib.
+type CodexThread struct {
+	ID             string
+	Title          string
+	Workspace      string
+	Status         string
+	LastActivityAt time.Time
+	LastMessage    string
+	PendingReview  bool
+}
+
+// CodexThreadsReader returns raw thread rows from the Codex state database.
+// Implementations must be read-only and are injected by the platform layer.
+type CodexThreadsReader interface {
+	Threads(ctx context.Context, limit int) ([]CodexThread, error)
+}
+
 type Options struct {
 	DSHDir          string
 	DSHThreadsDir   string
 	CodexDB         string
+	CodexReader     CodexThreadsReader
 	ClaudeDir       string
 	ProviderTimeout time.Duration
 	Now             func() time.Time

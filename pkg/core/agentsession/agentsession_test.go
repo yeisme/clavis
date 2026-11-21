@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/egoist/mygo/plugins/sqlite"
 )
 
 func writeJSON(t *testing.T, path string, value any) {
@@ -67,31 +65,27 @@ func TestLastMessageIsTruncatedAndSanitized(t *testing.T) {
 		t.Fatalf("sessions=%+v", sessions)
 	}
 	got := sessions[0].LastMessage
-	if len([]rune(got)) > 121 || strings.Contains(got, "sk-abcdefghijklmnopqrstuvwxyz") || strings.Contains(got, "/Users/alice") || strings.Contains(got, "```") {
+	if len([]rune(got)) > 120 || strings.Contains(got, "sk-abcdefghijklmnopqrstuvwxyz") || strings.Contains(got, "/Users/alice") || strings.Contains(got, "```") {
 		t.Fatalf("unsanitized message=%q", got)
 	}
 }
 
-func TestCodexUsesReadOnlyStateDatabase(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "state_5.sqlite")
-	db, err := sqlite.Open(context.Background(), path, sqlite.OpenOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Execute(context.Background(), `CREATE TABLE threads (id TEXT, title TEXT, cwd TEXT, updated_at TEXT, status TEXT, last_message TEXT)`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Execute(context.Background(), `INSERT INTO threads VALUES (?,?,?,?,?,?)`, "cx-1", "Codex", "/work/project", "2026-11-21T11:00:00Z", "completed", "finished"); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-	sessions, diags := Discover(context.Background(), Options{DSHDir: filepath.Join(root, "dsh"), DSHThreadsDir: filepath.Join(root, "threads"), CodexDB: path, ClaudeDir: filepath.Join(root, "claude"), ProviderTimeout: 500 * time.Millisecond})
-	if len(sessions) != 1 || sessions[0].Provider != "codex" || sessions[0].ID != "cx-1" {
+type fakeCodexReader struct {
+	rows []CodexThread
+	err  error
+}
+
+func (r fakeCodexReader) Threads(context.Context, int) ([]CodexThread, error) { return r.rows, r.err }
+
+func TestCodexReaderFeedsAggregationWithoutSQLiteInCore(t *testing.T) {
+	now := time.Date(2026, 11, 21, 11, 0, 0, 0, time.UTC)
+	sessions, diags := Discover(context.Background(), Options{
+		DSHDir: filepath.Join(t.TempDir(), "dsh"), DSHThreadsDir: filepath.Join(t.TempDir(), "threads"), ClaudeDir: filepath.Join(t.TempDir(), "claude"),
+		CodexReader: fakeCodexReader{rows: []CodexThread{{ID: "cx-1", Title: "Codex", Workspace: "/work/project", Status: "completed", LastActivityAt: now, LastMessage: "finished"}}},
+		Now:         func() time.Time { return now }, ProviderTimeout: 500 * time.Millisecond,
+	})
+	if len(sessions) != 1 || sessions[0].Provider != "codex" || sessions[0].ID != "cx-1" || sessions[0].Status != StatusStopped {
 		t.Fatalf("sessions=%+v diags=%+v", sessions, diags)
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatal(err)
 	}
 	for _, d := range diags {
 		if d.Provider == "codex" {

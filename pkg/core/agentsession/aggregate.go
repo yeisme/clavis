@@ -1,9 +1,6 @@
 package agentsession
 
-import (
-	"sort"
-	"time"
-)
+import "sort"
 
 func sortSessions(items []Session) []Session {
 	sort.SliceStable(items, func(i, j int) bool {
@@ -14,5 +11,3 @@ func sortSessions(items []Session) []Session {
 	})
 	return items
 }
-
-func parseTimeValue(v any) time.Time { return parseDBTime(v) }
