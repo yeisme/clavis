@@ -223,6 +223,7 @@ func (f *bridgeTestFreq) CustomWordsForPrefix(prefix string) []ime.UserCandidate
 	}
 	return out
 }
+func (f *bridgeTestFreq) BigramWordsForPrefix(string, string) []ime.UserCandidate { return nil }
 
 func TestInputEngineUserLearningConfigAndCommitTracker(t *testing.T) {
 	freq := newBridgeTestFreq()

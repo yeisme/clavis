@@ -368,6 +368,7 @@ func (s *LearningStore) mirrorIMECommit(pinyinKey, word, prevWord string, pinned
 	v.lastUsed = now
 	v.pinned = v.pinned || pinned
 	s.lex[k] = v
+	s.addReadingLocked(word, pinyinKey)
 	if prevWord != "" {
 		bk := [2]string{prevWord, word}
 		b, bexists := s.bigrams[bk]

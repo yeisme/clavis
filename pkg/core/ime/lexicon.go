@@ -26,6 +26,8 @@ func (c Candidate) String() string {
 }
 
 type UserCandidate struct {
+	// PinyinKey is populated by learned phrase mirrors; legacy callers may leave it empty.
+	PinyinKey string
 	Word      string
 	Frequency int32
 }

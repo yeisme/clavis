@@ -33,6 +33,8 @@ const (
 	DefaultFrecencyRetentionWindow = 90 * 24 * time.Hour
 
 	maxCustomPrefixCandidates = 32
+	// Do not let a single accidental transition change candidate generation.
+	minBigramCandidateCount = 2
 )
 
 // LearnedWord is a locally learned IME candidate.
@@ -68,11 +70,12 @@ type useValue struct {
 
 // LearningStore owns the learning, frecency, and prompt-history tables on a shared SQLite DB.
 type LearningStore struct {
-	db      *sqlite.DB
-	mu      sync.RWMutex
-	lex     map[lexKey]lexValue
-	bigrams map[[2]string]lexValue
-	uses    map[string]useValue
+	db       *sqlite.DB
+	mu       sync.RWMutex
+	lex      map[lexKey]lexValue
+	bigrams  map[[2]string]lexValue
+	readings map[string]map[string]struct{}
+	uses     map[string]useValue
 }
 
 // NewLearningStore creates learning tables and loads their bounded hot mirror.
@@ -80,7 +83,7 @@ func NewLearningStore(db *sqlite.DB) (*LearningStore, error) {
 	if db == nil {
 		return nil, fmt.Errorf("nil sqlite database")
 	}
-	s := &LearningStore{db: db, lex: make(map[lexKey]lexValue), bigrams: make(map[[2]string]lexValue), uses: make(map[string]useValue)}
+	s := &LearningStore{db: db, lex: make(map[lexKey]lexValue), bigrams: make(map[[2]string]lexValue), readings: make(map[string]map[string]struct{}), uses: make(map[string]useValue)}
 	if err := s.initSchema(context.Background()); err != nil {
 		return nil, err
 	}
@@ -120,6 +123,7 @@ func (s *LearningStore) load(ctx context.Context) error {
 			w := truncateUTF8(str(r, 1), MaxMirrorKeyBytes)
 			if py != "" && w != "" {
 				s.lex[lexKey{py, w, ""}] = lexValue{int64val(r, 2), int64val(r, 4) != 0, int64val(r, 3)}
+				s.addReadingLocked(w, py)
 			}
 		}
 	}
@@ -189,6 +193,7 @@ func (s *LearningStore) RecordIMECommit(ctx context.Context, pinyinKey, word, pr
 	v.lastUsed = now
 	v.pinned = v.pinned || pinned
 	s.lex[lk] = v
+	s.addReadingLocked(word, pinyinKey)
 	if prevWord != "" {
 		bk := [2]string{prevWord, word}
 		b, bexists := s.bigrams[bk]
@@ -253,6 +258,59 @@ func (s *LearningStore) CustomWordsForPrefix(prefix string) []LearnedWord {
 	sort.Slice(out, func(i, j int) bool { return out[i].Frequency > out[j].Frequency })
 	return out
 }
+
+// BigramWordsForPrefix returns learned continuations from the bounded RAM
+// mirror. The returned candidates carry their compact reading so the engine can
+// verify the requested prefix and account for consumed syllables without any
+// database access on the typing path.
+func (s *LearningStore) BigramWordsForPrefix(prevWord, syllablePrefix string) []ime.UserCandidate {
+	if s == nil || prevWord == "" || syllablePrefix == "" {
+		return nil
+	}
+	s.mu.RLock()
+	byWord := make(map[string]ime.UserCandidate, 8)
+	for key, value := range s.bigrams {
+		if key[0] != prevWord || value.frequency < minBigramCandidateCount {
+			continue
+		}
+		for reading := range s.readings[key[1]] {
+			// The learned lexicon stores the complete compact reading (for example
+			// women); the current composition is the continuation suffix (men).
+			if !strings.HasSuffix(reading, syllablePrefix) {
+				continue
+			}
+			frequency := value.frequency
+			if frequency > math.MaxInt32 {
+				frequency = math.MaxInt32
+			}
+			candidate := ime.UserCandidate{PinyinKey: reading, Word: key[1], Frequency: int32(frequency)}
+			if prior, ok := byWord[candidate.Word]; !ok || candidate.Frequency > prior.Frequency {
+				byWord[candidate.Word] = candidate
+			}
+		}
+	}
+	s.mu.RUnlock()
+	out := make([]ime.UserCandidate, 0, len(byWord))
+	for _, candidate := range byWord {
+		out = append(out, candidate)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Frequency > out[j].Frequency })
+	return out
+}
+
+func (s *LearningStore) addReadingLocked(word, reading string) {
+	if word == "" || reading == "" {
+		return
+	}
+	if s.readings == nil {
+		s.readings = make(map[string]map[string]struct{})
+	}
+	if s.readings[word] == nil {
+		s.readings[word] = make(map[string]struct{})
+	}
+	s.readings[word][reading] = struct{}{}
+}
+
 func (s *LearningStore) DeleteLearnedWord(ctx context.Context, pinyinKey, word string) error {
 	if s == nil || s.db == nil {
 		return nil

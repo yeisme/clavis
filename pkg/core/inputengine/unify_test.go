@@ -314,6 +314,47 @@ func (m *mockUserFreq) CustomWordsForPrefix(prefix string) []UserCandidate {
 	return nil
 }
 
+func (m *mockUserFreq) BigramWordsForPrefix(prevWord, prefix string) []UserCandidate {
+	if prevWord == "我" && prefix == "men" {
+		return []UserCandidate{{PinyinKey: "women", Word: "我们", Frequency: 8}}
+	}
+	return nil
+}
+
+func TestBigramGenerationAndColdStartSnapshot(t *testing.T) {
+	withBigram := &mockUserFreq{}
+	e := New(Options{CandidateCount: 7, UserFrequency: withBigram})
+	typeLetters(e, "wo")
+	wo := e.View()
+	idx := slices.IndexFunc(wo.Candidates, func(c Candidate) bool { return c.Text == "我" })
+	if idx < 0 {
+		t.Fatalf("previous-word candidate missing: %v", texts(wo))
+	}
+	if got := e.HandleKey(Key{Kind: KeyDigit, Rune: rune('1' + idx)}); got.Commit != "我" {
+		t.Fatalf("commit previous word: %+v", got)
+	}
+	typeLetters(e, "men")
+	withBigramCandidates := texts(e.View())
+	if !slices.Contains(withBigramCandidates, "我们") {
+		t.Fatalf("bigram candidate missing: %v", withBigramCandidates)
+	}
+	if slices.Index(withBigramCandidates, "我们") > 2 {
+		t.Fatalf("bigram candidate did not surface early: %v", withBigramCandidates)
+	}
+
+	cold := New(Options{CandidateCount: 7})
+	typeLetters(cold, "men")
+	want := texts(cold.View())
+	if slices.Contains(want, "我们") {
+		t.Fatalf("cold start unexpectedly contains learned bigram: %v", want)
+	}
+	withEmptyMirror := New(Options{CandidateCount: 7, UserFrequency: &mockUserFreq{}})
+	typeLetters(withEmptyMirror, "men")
+	if got := texts(withEmptyMirror.View()); !slices.Equal(want, got) {
+		t.Fatalf("cold-start candidate snapshot changed: got=%v want=%v", got, want)
+	}
+}
+
 func TestUserFrequencyHookAndBigramContext(t *testing.T) {
 	uf := &mockUserFreq{}
 	e := New(Options{CandidateCount: 7, UserFrequency: uf})

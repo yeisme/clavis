@@ -64,6 +64,53 @@ func TestLearningStoreRoundTripAndFrecency(t *testing.T) {
 	}
 }
 
+func TestLearningStoreBigramWordsForPrefixUsesRAMMirror(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, ":memory:", sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewLearningStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := store.RecordIMECommit(ctx, "women", "我们", "我", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adapter := NewUserFrequencyAdapter(store)
+	got := adapter.BigramWordsForPrefix("我", "men")
+	if len(got) != 1 || got[0].Word != "我们" || got[0].Frequency != 2 {
+		t.Fatalf("bigram candidates = %+v", got)
+	}
+	if got := adapter.BigramWordsForPrefix("你", "men"); len(got) != 0 {
+		t.Fatalf("wrong previous word returned candidates: %+v", got)
+	}
+	eng := inputengine.New(inputengine.Options{CandidateCount: 7, UserFrequency: adapter})
+	typeEngineLetters(eng, "wo")
+	previous := eng.View()
+	previousIndex := -1
+	for i, candidate := range previous.Candidates {
+		if candidate.Text == "我" {
+			previousIndex = i
+			break
+		}
+	}
+	if previousIndex < 0 {
+		t.Fatalf("previous-word candidate missing: %+v", previous.Candidates)
+	}
+	if r := eng.HandleKey(inputengine.Key{Kind: inputengine.KeyDigit, Rune: rune('1' + previousIndex)}); r.Commit != "我" {
+		t.Fatalf("commit previous word: %+v", r)
+	}
+	typeEngineLetters(eng, "men")
+	candidates := eng.View().Candidates
+	if len(candidates) == 0 || candidates[0].Text != "我们" {
+		t.Fatalf("bigram candidate generation = %+v", candidates)
+	}
+}
+
 func BenchmarkLearningStoreLookupBoost(b *testing.B) {
 	ctx := context.Background()
 	db, err := sqlite.Open(ctx, ":memory:", sqlite.OpenOptions{})

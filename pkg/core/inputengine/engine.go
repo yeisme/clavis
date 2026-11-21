@@ -102,6 +102,10 @@ type UserCandidate = ime.UserCandidate
 type UserFrequencyProvider interface {
 	LookupBoost(pinyinKey, word, prevWord string) int32
 	CustomWordsForPrefix(syllablePrefix string) []UserCandidate
+	// BigramWordsForPrefix returns RAM-mirror continuations after prevWord whose
+	// reading can start with syllablePrefix. Implementations must never perform
+	// I/O on the typing hot path.
+	BigramWordsForPrefix(prevWord, syllablePrefix string) []UserCandidate
 }
 
 // Options configure the engine.
@@ -836,6 +840,22 @@ func (e *Engine) buildCandidates() {
 		}
 	}
 
+	// Learned bigrams are a generation tier, not merely a score for dictionary
+	// entries. They must sit after dictionary phrases and before single-character
+	// fallback so a learned continuation can surface even when it is absent from
+	// the current phrase slice. The optional interface keeps the no-data path
+	// byte-for-byte equivalent to the cold-start candidate list.
+	if uf != nil && e.prevCommit != "" && len(e.cands) < maxCandidates {
+		for _, u := range uf.BigramWordsForPrefix(e.prevCommit, joinCompact(segs)) {
+			if consumed := bigramConsumed(u.PinyinKey, segs); consumed > 0 {
+				e.addCandidate(u.Word, consumed, false)
+			}
+			if len(e.cands) >= maxCandidates {
+				break
+			}
+		}
+	}
+
 	// 3. Single-syllable words and characters for the first segment.
 	singlesStart := -1
 	if len(e.cands) < maxCandidates {
@@ -984,6 +1004,22 @@ func (e *Engine) emitAltPhrases(segAlts [][]string, primary []string) {
 		}
 	}
 	walk(0, false)
+}
+
+func bigramConsumed(reading string, segs []string) int {
+	if reading == "" || len(segs) == 0 {
+		return 0
+	}
+	full := splitIMEPinyin(reading)
+	for start := range full {
+		if len(full)-start < len(segs) {
+			continue
+		}
+		if matchKey(full[start:start+len(segs)], segs) {
+			return len(segs)
+		}
+	}
+	return 0
 }
 
 func joinCompact(segs []string) string {

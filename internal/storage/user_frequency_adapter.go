@@ -37,3 +37,11 @@ func (a *UserFrequencyAdapter) CustomWordsForPrefix(prefix string) []ime.UserCan
 	}
 	return a.store.customUserCandidatesForPrefix(prefix)
 }
+
+// BigramWordsForPrefix returns RAM-mirror continuations for the active previous word.
+func (a *UserFrequencyAdapter) BigramWordsForPrefix(prevWord, syllablePrefix string) []ime.UserCandidate {
+	if a == nil || a.store == nil {
+		return nil
+	}
+	return a.store.BigramWordsForPrefix(prevWord, syllablePrefix)
+}
