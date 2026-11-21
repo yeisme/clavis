@@ -19,9 +19,9 @@ var omniboxTabs = []config.CapsuleTab{
 	config.TabActions,
 	config.TabClipboard,
 	config.TabSnippets,
-	config.TabSettings, // UI label is Agent. Engine state remains untouched.
 	config.TabAI,
 	config.TabGlossary,
+	config.TabAgent,
 }
 
 // CapsuleView renders the native MyGo Capsule UI for the current CapsulePhase.
@@ -467,7 +467,7 @@ func (a *AppController) renderOmniboxView(
 		}
 		return a.handleOmniboxKey(ev.Key, ev.Mods, state)
 	})
-	if state.OmniboxTab == config.TabSettings {
+	if state.OmniboxTab == config.TabAgent {
 		c.OnWindowShortcut(primaryMod(), ui.KeyR, func() { a.AgentRefresh() })
 	}
 
@@ -617,7 +617,7 @@ func (a *AppController) renderOmniboxView(
 		}
 
 		items := state.OmniboxItems
-		if state.OmniboxTab == config.TabSettings {
+		if state.OmniboxTab == config.TabAgent {
 			sessions, diagnostics := a.cachedAgentData()
 			items = agentItems(sessions, diagnostics, state.OmniboxQuery)
 		}
@@ -631,7 +631,7 @@ func (a *AppController) renderOmniboxView(
 			})
 		} else {
 			selectedIdx := state.SelectedIndex
-			if state.OmniboxTab == config.TabSettings {
+			if state.OmniboxTab == config.TabAgent {
 				selectedIdx = a.uiState.agentSelected
 			}
 			if selectedIdx < 0 {
@@ -714,7 +714,7 @@ func (a *AppController) renderOmniboxView(
 						}
 
 						row.Children(func() {
-							if state.OmniboxTab == config.TabSettings {
+							if state.OmniboxTab == config.TabAgent {
 								status := agentsession.StatusUnknown
 								if sessions, _ := a.cachedAgentData(); true {
 									if session, ok := agentSessionForItem(item, sessions); ok {
@@ -766,14 +766,14 @@ func (a *AppController) renderOmniboxView(
 
 						if row.RowDoubleClicked() {
 							a.SelectIndex(i)
-							if state.OmniboxTab == config.TabSettings {
+							if state.OmniboxTab == config.TabAgent {
 								_ = a.agentItemAction(item)
 							} else {
 								a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
 							}
 						} else if row.RowClicked() {
 							a.SelectIndex(i)
-							if state.OmniboxTab == config.TabSettings {
+							if state.OmniboxTab == config.TabAgent {
 								a.uiState.agentSelected = i
 								_ = a.agentItemAction(item)
 								return row
@@ -790,13 +790,13 @@ func (a *AppController) renderOmniboxView(
 					}).FillWidth().Grow(1)
 
 					if list.Changed() && selectedIdx >= 0 && selectedIdx < len(items) && selectedIdx != state.SelectedIndex {
-						if state.OmniboxTab == config.TabSettings {
+						if state.OmniboxTab == config.TabAgent {
 							a.uiState.agentSelected = selectedIdx
 						}
 						a.SelectIndex(selectedIdx)
 					}
 					if list.Submitted() {
-						if state.OmniboxTab == config.TabSettings && selectedIdx >= 0 && selectedIdx < len(items) {
+						if state.OmniboxTab == config.TabAgent && selectedIdx >= 0 && selectedIdx < len(items) {
 							_ = a.agentItemAction(items[selectedIdx])
 						} else {
 							a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
@@ -1017,7 +1017,7 @@ func rowSelectionTheme(theme *ui.Theme) *ui.Theme {
 }
 
 func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state engine.State) bool {
-	if state.OmniboxTab == config.TabSettings && mods == 0 && (key == ui.KeyDown || key == ui.KeyUp) {
+	if state.OmniboxTab == config.TabAgent && mods == 0 && (key == ui.KeyDown || key == ui.KeyUp) {
 		items := a.agentVisibleItems(state.OmniboxQuery)
 		if len(items) == 0 {
 			return true
@@ -1032,7 +1032,7 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 		a.SelectIndex(idx)
 		return true
 	}
-	if state.OmniboxTab == config.TabSettings && key == ui.KeyEnter && mods == 0 {
+	if state.OmniboxTab == config.TabAgent && key == ui.KeyEnter && mods == 0 {
 		items := a.agentVisibleItems(state.OmniboxQuery)
 		if state.SelectedIndex >= 0 && state.SelectedIndex < len(items) {
 			return a.agentItemAction(items[state.SelectedIndex])
@@ -1485,7 +1485,7 @@ func omniboxTabLabel(tab config.CapsuleTab) string {
 		return i18n.T("omnibox.tab.ai")
 	case config.TabGlossary:
 		return i18n.T("omnibox.tab.glossary")
-	case config.TabSettings:
+	case config.TabAgent:
 		return "Agent"
 	default:
 		return string(tab)
@@ -1506,8 +1506,8 @@ func omniboxTabIcon(tab config.CapsuleTab) string {
 		return "sparkles"
 	case config.TabGlossary:
 		return "character.book.closed"
-	case config.TabSettings:
-		return "bolt"
+	case config.TabAgent:
+		return "person.crop.circle"
 	default:
 		return "bolt"
 	}
@@ -1515,7 +1515,7 @@ func omniboxTabIcon(tab config.CapsuleTab) string {
 
 func omniboxPlaceholder(tab config.CapsuleTab) string {
 	switch tab {
-	case config.TabSettings:
+	case config.TabAgent:
 		return "搜索 Agent 会话，输入 / 补全命令"
 	case config.TabClipboard:
 		return i18n.T("omnibox.placeholder.clipboard")
@@ -1532,7 +1532,7 @@ func omniboxPlaceholder(tab config.CapsuleTab) string {
 
 func omniboxEmptyText(tab config.CapsuleTab) string {
 	switch tab {
-	case config.TabSettings:
+	case config.TabAgent:
 		return "没有发现 Agent 会话"
 	case config.TabClipboard:
 		return i18n.T("omnibox.empty.clipboard")
@@ -1551,9 +1551,7 @@ func cycleOmniboxTab(current config.CapsuleTab, backward bool) config.CapsuleTab
 	idx := 0
 	cycleTabs := make([]config.CapsuleTab, 0, len(omniboxTabs))
 	for _, t := range omniboxTabs {
-		if t != config.TabSettings {
-			cycleTabs = append(cycleTabs, t)
-		}
+		cycleTabs = append(cycleTabs, t)
 	}
 	for i, t := range cycleTabs {
 		if t == current {
@@ -1581,6 +1579,8 @@ func numberKeyIndex(key ui.Key) (int, bool) {
 		return 3, true
 	case ui.Key5:
 		return 4, true
+	case ui.Key6:
+		return 5, true
 	default:
 		return 0, false
 	}

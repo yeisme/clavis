@@ -126,6 +126,7 @@ var semanticIconBodies = map[string]string{
 	"lock.open":            `<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>`,
 	"arrow.clockwise":      `<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>`,
 	"circle":               `<circle cx="12" cy="12" r="9"/>`,
+	"person.crop.circle":   `<circle cx="12" cy="12" r="9"/><circle cx="12" cy="9" r="2.5"/><path d="M7.5 18c.8-2.5 2.2-3.7 4.5-3.7s3.7 1.2 4.5 3.7"/>`,
 
 	// Clipboard content kinds (names match SF Symbols so macOS draws the
 	// native glyph and other platforms these vectors).

@@ -563,8 +563,14 @@ func TestOmnibox_TabsNavigationAndAIStreaming(t *testing.T) {
 	w, h := PreferredCapsuleSize(engine.PhaseOmnibox, ctrl.Config().Main.Appearance)
 	tt := ui.NewTester(ctrl.CapsuleView, w, h)
 	tt.Frame()
+	for _, tab := range omniboxTabs {
+		if label := omniboxTabLabel(tab); !tt.HasText(label) {
+			t.Fatalf("tab bar is missing %q in rendered output: %v", label, tt.Texts())
+		}
+	}
 
-	// Cmd+1..Cmd+5 tab switching
+	// Cmd+1..Cmd+6 tab switching. Agent is appended so the original five
+	// positions keep their established meanings.
 	tt.Key(ui.Cmd, ui.Key2)
 	tt.Frame()
 	if ctrl.State().OmniboxTab != config.TabClipboard {
@@ -584,6 +590,11 @@ func TestOmnibox_TabsNavigationAndAIStreaming(t *testing.T) {
 	tt.Frame()
 	if ctrl.State().OmniboxTab != config.TabGlossary {
 		t.Fatalf("Cmd+5 tab = %s, want glossary", ctrl.State().OmniboxTab)
+	}
+	tt.Key(ui.Cmd, ui.Key6)
+	tt.Frame()
+	if ctrl.State().OmniboxTab != config.TabAgent {
+		t.Fatalf("Cmd+6 tab = %s, want agent", ctrl.State().OmniboxTab)
 	}
 	tt.Key(ui.Cmd, ui.Key1)
 	tt.Frame()

@@ -30,7 +30,7 @@ func TestAgentTabRendersCachedSessionAndDiagnostic(t *testing.T) {
 	ctrl.agentSessions = []agentsession.Session{{ID: "dsh-1", Provider: "dsh", Title: "DSH 会话", Status: agentsession.StatusWaiting, LastActivityAt: time.Now(), PendingReview: true}}
 	ctrl.agentDiagnostics = []agentsession.Diagnostic{{Provider: "claude", Code: "unavailable", Message: "projects directory was not found"}}
 	ctrl.agentMu.Unlock()
-	ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabSettings})
+	ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabAgent})
 	w, h := PreferredCapsuleSize(engine.PhaseOmnibox, ctrl.Config().Main.Appearance)
 	tt := ui.NewTester(ctrl.CapsuleView, w, h)
 	tt.Frame()

@@ -179,8 +179,8 @@ func TestTabArbitration_CmdArrowsSwitchTabs(t *testing.T) {
 	}
 	tt.Key(primaryMod(), ui.KeyLeft)
 	tt.Frame()
-	if got := ctrl.State().OmniboxTab; got != config.TabGlossary {
-		t.Fatalf("Cmd+Left from the first tab should wrap to the last (Glossary), got %s", got)
+	if got := ctrl.State().OmniboxTab; got != config.TabAgent {
+		t.Fatalf("Cmd+Left from the first tab should wrap to the last (Agent), got %s", got)
 	}
 }
 

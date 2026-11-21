@@ -56,6 +56,7 @@ const (
 	TabAI        CapsuleTab = "ai"
 	TabGlossary  CapsuleTab = "glossary"
 	TabSettings  CapsuleTab = "settings"
+	TabAgent     CapsuleTab = "agent"
 )
 
 func AllCapsuleTabs() []CapsuleTab {
@@ -66,6 +67,7 @@ func AllCapsuleTabs() []CapsuleTab {
 		TabAI,
 		TabGlossary,
 		TabSettings,
+		TabAgent,
 	}
 }
 

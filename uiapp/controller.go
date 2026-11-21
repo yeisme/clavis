@@ -778,7 +778,7 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 		c.uiState.hoverRow = 0
 		c.uiState.hoverSuppressed = 0
 		if ev.Type == engine.EventOpenOmnibox || ev.Type == engine.EventSwitchTab || ev.Type == engine.EventUpdateQuery || ev.Type == engine.EventBackspace {
-			if ev.Type != engine.EventOpenOmnibox || ev.Tab == config.TabSettings {
+			if ev.Type != engine.EventOpenOmnibox || ev.Tab == config.TabAgent {
 				c.uiState.agentSelected = 0
 			}
 		}
@@ -798,7 +798,7 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 		}
 		c.clipboardPasteGen++
 	}
-	if ev.Type == engine.EventOpenOmnibox && ev.Tab == config.TabSettings {
+	if ev.Type == engine.EventOpenOmnibox && ev.Tab == config.TabAgent {
 		go c.refreshAgentSessions()
 	}
 	prev := c.StateMachine.State()
