@@ -711,7 +711,9 @@ func (a *AppController) renderOmniboxView(
 					capsuleUI.togglePreview(a, cfg.Main.Appearance.ShowPreviewPane)
 					a.uiState.searchHandle.RequestFocus(c)
 				})
-			a.renderOmniboxFooterFrameToggle(c, theme, "command", prefix+i18n.T("omnibox.footer.actions"),
+			// The label already carries the shortcut (⌘K); the icon names
+			// the function — a "more actions" ellipsis, not the ⌘ key again.
+			a.renderOmniboxFooterFrameToggle(c, theme, "ellipsis", prefix+i18n.T("omnibox.footer.actions"),
 				a.omniboxActionMenuOpen(state), func() {
 					a.toggleOmniboxActionMenu()
 					a.uiState.searchHandle.RequestFocus(c)

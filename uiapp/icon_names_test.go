@@ -22,7 +22,7 @@ func TestUIIconNamesHaveOwnGeometry(t *testing.T) {
 			}
 		}
 	}
-	add("omnibox footer toggles", "eye", "command")
+	add("omnibox footer toggles", "eye", "ellipsis")
 	// engine.clipboardMediaIcon names image, video and file entries.
 	add("clipboard media kinds", "photo", "film", "doc")
 	for _, tab := range omniboxTabs {
