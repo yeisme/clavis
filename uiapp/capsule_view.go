@@ -457,9 +457,10 @@ func (a *AppController) renderOmniboxView(
 		if ev.Kind != ui.InputKeyDown {
 			return false
 		}
-		// IME owns unmodified Enter/Tab/arrows/Escape during preedit, but
-		// Cmd/Ctrl chords are application shortcuts and must still work.
-		if a.uiState.isComposing && ev.Mods == 0 {
+		// IME owns unmodified Enter/Tab/arrows/Escape during preedit, and the
+		// arbitrated Shift+Tab and Cmd+←/→; other Cmd/Ctrl chords are
+		// application shortcuts and must still work.
+		if a.uiState.isComposing && imeOwnsKey(ev.Key, ev.Mods) {
 			return false
 		}
 		return a.handleOmniboxKey(ev.Key, ev.Mods, state)
@@ -483,6 +484,18 @@ func (a *AppController) renderOmniboxView(
 			a.handleOmniboxKey(shortcut.key, mods, state)
 		})
 	}
+	// Cmd+←/→ switch tabs from anywhere in the panel (spec §3.1). The
+	// focused search field takes them first, as the arrows edit; here they
+	// reach a list or footer that has the focus. An IME preedit keeps them.
+	for _, key := range []ui.Key{ui.KeyLeft, ui.KeyRight} {
+		key := key
+		c.OnWindowShortcut(mods, key, func() {
+			if a.uiState.isComposing {
+				return
+			}
+			a.handleOmniboxKey(key, mods, state)
+		})
+	}
 	// Do not claim Escape while an IME preedit is active: the focused text
 	// editor must be able to cancel the candidate composition first.
 	if a.omniboxActionMenuOpen(state) && !a.uiState.isComposing {
@@ -504,6 +517,13 @@ func (a *AppController) renderOmniboxView(
 				FontSize(typeSearch).
 				Grow(1)
 
+			if a.uiState.search.caretEnd {
+				// After the completion Tab accepted, typing goes on at its end.
+				a.uiState.search.caretEnd = false
+				n := utf8.RuneCountInString(query)
+				in.SetTextSelection(n, n)
+			}
+
 			if query != "" {
 				in.TextRanges(ui.TextRange{
 					Start:  0,
@@ -511,6 +531,9 @@ func (a *AppController) renderOmniboxView(
 					Color:  theme.Text,
 					Weight: 500,
 				})
+			}
+			if full, ok := omniboxCompletion(state); ok && query == state.OmniboxQuery {
+				drawCompletionGhost(in, theme, query, full[len(query):], typeSearch)
 			}
 
 			in.ObserveInput(func(ev ui.InputEvent) {
@@ -534,17 +557,38 @@ func (a *AppController) renderOmniboxView(
 				if ev.Kind != ui.InputKeyDown {
 					return false
 				}
-				if a.uiState.isComposing && ev.Mods == 0 {
+				if a.uiState.isComposing && imeOwnsKey(ev.Key, ev.Mods) {
+					return false
+				}
+				// Tab goes on to OnTextKey: accepting a completion replaces the
+				// text the editor holds, which only a TextKey can do.
+				if ev.Key == ui.KeyTab && ev.Mods == 0 {
 					return false
 				}
 				return a.handleOmniboxKey(ev.Key, ev.Mods, state)
 			})
 
 			in.OnTextKey(func(k ui.TextKey) bool {
-				if a.uiState.isComposing && k.Mods == 0 {
+				if a.uiState.isComposing && imeOwnsKey(k.Key, k.Mods) {
+					// The preedit's keys are its own. Taking Enter, the vertical
+					// arrows, Tab and Escape keeps them from submitting, moving
+					// the focus or closing; the rest go on to the editor.
 					switch k.Key {
 					case ui.KeyEnter, ui.KeyUp, ui.KeyDown, ui.KeyTab, ui.KeyEscape:
 						return true
+					}
+					return false
+				}
+				if k.Key == ui.KeyTab && k.Mods == 0 && !a.omniboxActionMenuOpen(state) {
+					// The completion follows what the editor holds, which may be
+					// ahead of the query the last frame showed.
+					if title, ok := omniboxCompletionTitle(state); ok {
+						if full, ok := inlineCompletion(k.Text(), title); ok {
+							k.SetText(full)
+							a.uiState.search.caretEnd = true
+							a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: full})
+							return true
+						}
 					}
 				}
 				return a.handleOmniboxKey(k.Key, k.Mods, state)
@@ -774,38 +818,49 @@ func (a *AppController) renderOmniboxView(
 // renderOmniboxFooterHints names what the keys do to the chosen row rather
 // than listing every shortcut: its primary (↵) and secondary (⌘↵) actions,
 // then the ⌥-number quick select. The rest lives in the ⌘K action menu.
+// Last comes what the Tab arbitration leaves the field: "Tab Complete"
+// while the query shows a completion, "⇧Tab Switch tab" otherwise. When the
+// row would not fit beside the footer toggles, the quick select gives way
+// first, then the secondary action; a truncated caption helps no one.
 func (a *AppController) renderOmniboxFooterHints(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig, state engine.State) {
+	_, completing := omniboxCompletion(state)
+	tab := searchTabHint(completing)
+	tab.drop = 1
 	selected, ok := selectedOmniboxItem(state)
 	if !ok {
-		ui.Row(c).Gap(space8).AlignItems(ui.Center).Children(func() {
-			keyHint(c, theme, "Tab", i18n.T("omnibox.footer.switch_tab"), keyToneNeutral)
-			ui.Box(c).Width(space1).Height(space12).Background(hairline(theme))
-			keyHint(c, theme, "esc", i18n.T("omnibox.footer.close"), keyToneNeutral)
-		})
+		renderFooterHints(c, theme, []footerHint{tab, {keys: "esc", caption: i18n.T("omnibox.footer.close")}})
 		return
 	}
-	specs := engine.AvailableItemActions(selected)
-	ui.Row(c).Gap(space8).AlignItems(ui.Center).Children(func() {
-		for i, spec := range specs {
-			if i >= 2 {
-				break
-			}
-			if i > 0 {
-				ui.Box(c).Width(space1).Height(space12).Background(hairline(theme))
-			}
-			keyHint(c, theme, adaptActionShortcut(spec.Shortcut), spec.Label, keyToneNeutral)
+	var hints []footerHint
+	for i, spec := range engine.AvailableItemActions(selected) {
+		if i >= 2 {
+			break
 		}
-		if cfg.Main.Appearance.ShowKeyHints && len(state.OmniboxItems) > 1 {
-			if len(specs) > 0 {
-				ui.Box(c).Width(space1).Height(space12).Background(hairline(theme))
-			}
-			tone := keyToneNeutral
-			if c.Modifiers()&ui.Alt != 0 {
-				tone = keyToneAccent
-			}
-			keyHint(c, theme, altPrefix()+"1–9", i18n.T("omnibox.footer.quick_select"), tone)
+		hints = append(hints, footerHint{keys: adaptActionShortcut(spec.Shortcut), caption: spec.Label, drop: 2 * i})
+	}
+	if cfg.Main.Appearance.ShowKeyHints && len(state.OmniboxItems) > 1 {
+		tone := keyToneNeutral
+		if c.Modifiers()&ui.Alt != 0 {
+			tone = keyToneAccent
 		}
-	})
+		hints = append(hints, footerHint{keys: altPrefix() + "1–9", caption: i18n.T("omnibox.footer.quick_select"), tone: tone, drop: 3})
+	}
+	hints = append(hints, tab)
+	renderFooterHints(c, theme, fitFooterHints(c, hints, omniboxFooterRoom(c)))
+}
+
+// omniboxFooterRoom is the width the footer leaves its hints: the window
+// less the panel's side padding (space14), the preview and actions toggles
+// (kitIconButton: space8 padding, a 16pt icon, space4, the label, 1px
+// border) and the space12 gaps around the spacer between them.
+func omniboxFooterRoom(c *ui.Context) float32 {
+	w, _ := c.Size()
+	room := w - 2*space14 - 3*space12
+	for _, label := range []string{i18n.T("omnibox.footer.preview"), i18n.T("omnibox.footer.actions")} {
+		lw, _ := c.MeasureText(0, ui.Span{Text: modPrefix() + label, Size: typeMeta})
+		room -= 2*space8 + IconSize16 + space4 + lw + 2*space1
+	}
+	return room
 }
 
 // omniboxRouteMode names the search mode a quick-route prefix selects, for
@@ -943,6 +998,26 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 		}
 	}
 
+	// Tab, Shift+Tab and Cmd+←/→: IME preedit > inline completion > tab
+	// navigation. The focused search field accepts a completion itself
+	// (OnTextKey); this path serves the field after a footer or list click.
+	full, completing := omniboxCompletion(state)
+	switch arbitrateSearchKey(key, mods, a.uiState.isComposing, completing) {
+	case searchKeyIME:
+		return false
+	case searchKeyAccept:
+		a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: full})
+		return true
+	case searchKeyInert:
+		return true
+	case searchKeyNextTab:
+		a.switchOmniboxTab(cycleOmniboxTab(state.OmniboxTab, false))
+		return true
+	case searchKeyPrevTab:
+		a.switchOmniboxTab(cycleOmniboxTab(state.OmniboxTab, true))
+		return true
+	}
+
 	// Clipboard pin/delete works wherever a clipboard entry is selected
 	// (the Clipboard tab, or '@' prefix routing in the Actions tab).
 	if selected, ok := selectedOmniboxItem(state); ok && selected.Kind == engine.ItemClipboardEntry {
@@ -987,11 +1062,6 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 		return true
 	case key == ui.KeyEnter && mods == 0:
 		a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
-		return true
-	case key == ui.KeyTab && (mods == 0 || mods == ui.Shift):
-		nextTab := cycleOmniboxTab(state.OmniboxTab, mods == ui.Shift)
-		capsuleUI.setActionMenuShown(a, false)
-		a.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: nextTab})
 		return true
 	case key == ui.KeyEscape && mods == 0:
 		a.Dispatch(engine.Event{Type: engine.EventEscape})

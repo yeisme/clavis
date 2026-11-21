@@ -154,6 +154,22 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, m
 		tt.Frame()
 	})
 
+	// Tab arbitration (spec §3.1): a query the chosen row completes shows
+	// the rest of its title muted and "Tab Complete" in the footer; one it
+	// does not shows "⇧Tab Switch tab".
+	f.ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Context: ctx})
+	probe := []rune(f.ctrl.State().OmniboxItems[0].Title)
+	shoot("03d-omnibox-completion", f.ctrl.CapsuleView, w, h, 2, func(tt *ui.Tester) {
+		tt.Type(string(probe[:min(3, len(probe)-1)]))
+		tt.Frame()
+		tt.Frame()
+	})
+	f.ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Context: ctx})
+	shoot("03e-omnibox-no-completion", f.ctrl.CapsuleView, w, h, 2, func(tt *ui.Tester) {
+		tt.Type("zqx")
+		tt.Frame()
+	})
+
 	f.ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Context: ctx})
 	shoot("03b-omnibox-hover", f.ctrl.CapsuleView, w, h, 2, func(tt *ui.Tester) {
 		tt.Move(float32(w/2), float32(h/2+20))

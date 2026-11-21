@@ -191,6 +191,9 @@ type uiViewState struct {
 	imeRuleSourceDraft     string
 	imeRuleModeDraft       config.IMEMode
 
+	// search is the view state of the search fields (search_keys.go).
+	search searchFieldState
+
 	// aiReview caches the diff of an AI rewrite against its source and the
 	// view the user picked (see ai_review.go).
 	aiReview aiReviewState
