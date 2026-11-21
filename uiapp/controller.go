@@ -359,6 +359,8 @@ type AppController struct {
 
 	// Ephemeral UI state (used on the UI build thread)
 	uiState uiViewState
+	// uiPersist is view state saved to ui-state.json (the preview split).
+	uiPersist uiPersistState
 
 	// Active prompt slot composer session & UI handles
 	promptSession         *prompt.SlotComposerSession
@@ -484,6 +486,7 @@ func defaultConfigDir() string {
 
 // Close stops background workers, cancels any running AI request, and stops HUD timers.
 func (c *AppController) Close() {
+	c.flushUIState()
 	c.StopAll("close")
 	c.mu.Lock()
 	mcpManager := c.MCPManager

@@ -689,12 +689,23 @@ func (a *AppController) renderOmniboxView(
 				a.uiState.mediaPreview = mediaPreviewState{}
 			}
 			if hasPreview && a.previewPaneVisible(cfg) {
-				ui.Row(c).FillWidth().Grow(1).Gap(10).AlignItems(ui.Stretch).Children(func() {
-					ui.Column(c).Grow(3).Children(renderList)
-					ui.Column(c).Grow(2).Children(func() {
+				// The list and the preview share the body at a divider the
+				// user drags (or moves with the arrows once focused); a double
+				// click restores the default. Each pane keeps a little air
+				// from the 1px line between them.
+				pct := a.previewListPercent()
+				split := ui.SplitPercent(c, &pct, func() {
+					ui.Column(c).Fill().Padding(space0, space6, space0, space0).Children(renderList)
+				}, func() {
+					// The pane clips: the inset on the right and bottom keeps the
+					// elevated card's edge and shadow inside it.
+					ui.Column(c).Fill().Padding(space0, space2, space4, space8).Children(func() {
 						a.renderOmniboxPreviewCard(c, theme, state, previewItem)
 					})
-				})
+				}).FillWidth().Grow(1).SplitReset(defaultPreviewListPercent)
+				if split.Changed() {
+					a.setPreviewListPercent(pct)
+				}
 			} else {
 				renderList()
 			}

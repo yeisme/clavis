@@ -220,10 +220,10 @@ func (a *AppController) renderClipboardMediaToolbar(c *ui.Context, theme *ui.The
 
 func (a *AppController) renderClipboardMediaCanvas(c *ui.Context, theme *ui.Theme, m engine.ClipboardMedia) {
 	p := &a.uiState.mediaPreview
-	canvasHeight := mediaPreviewCanvasHeight(m)
-	// canvasHeight is the preferred height; in a short card the canvas shrinks
-	// to mediaCanvasMinHeight before the metadata below it is pushed out.
-	canvas := ui.Box(c).FillWidth().Height(canvasHeight).MinHeight(mediaCanvasMinHeight).Clip().Focusable().Bind(&a.uiState.mediaPreviewHandle).FocusRing(false)
+	// The canvas takes all the height the card has left (never under
+	// mediaCanvasMinHeight), and its width is the preview pane's, so widening
+	// the pane at the divider enlarges the image instead of a fixed 300px box.
+	canvas := ui.Box(c).FillWidth().Grow(1).MinHeight(mediaCanvasMinHeight).Clip().Focusable().Bind(&a.uiState.mediaPreviewHandle).FocusRing(false)
 	canvas.HandleInput(func(ev ui.InputEvent) bool {
 		if ev.Kind == ui.InputPointerDown {
 			a.uiState.mediaPreviewHandle.RequestFocus(c)
