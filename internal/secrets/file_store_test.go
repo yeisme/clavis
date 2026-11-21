@@ -69,6 +69,7 @@ func TestFileStoreMissingFileIsNotAnError(t *testing.T) {
 // After the one-off migration the AI path must never reach the keychain again: that read is
 // what raised a SecurityAgent dialog on every keystroke once the app had been rebuilt.
 func TestLayeredStoreNeverTouchesKeychainWhenMigrationIsOff(t *testing.T) {
+	t.Setenv(DefaultEnvVar, "")
 	kc := &countingStore{}
 	fs := NewFileStore(filepath.Join(t.TempDir(), "ai-keys.toml"))
 	layered := &LayeredStore{File: fs, Keychain: kc} // Migrate defaults to false
@@ -77,11 +78,51 @@ func TestLayeredStoreNeverTouchesKeychainWhenMigrationIsOff(t *testing.T) {
 		t.Fatalf("err = %v, want ErrSecretNotFound", err)
 	}
 	if _, err := layered.ResolveAPIKey("acct.one"); err != ErrSecretNotFound {
-		t.Fatalf("resolve err = %v", err)
+		t.Fatalf("resolve err = %v, want ErrSecretNotFound", err)
 	}
 	if kc.calls != 0 {
 		t.Fatalf("keychain was consulted %d times; it must never be touched after migration", kc.calls)
 	}
+}
+
+func TestLayeredStoreResolvePriorityAndEnvIsolation(t *testing.T) {
+	t.Setenv(DefaultEnvVar, "env-value")
+
+	t.Run("environment source", func(t *testing.T) {
+		kc := &countingStore{}
+		layered := &LayeredStore{File: NewFileStore(filepath.Join(t.TempDir(), "ai-keys.toml")), Keychain: kc}
+		got, err := layered.ResolveAPIKey("acct.one")
+		if err != nil || got != "env-value" {
+			t.Fatalf("resolve = %q, %v; want env-value", got, err)
+		}
+		source, err := layered.ResolveAPIKeySource("acct.one")
+		if err != nil || source != KeySourceEnv {
+			t.Fatalf("source = %q, %v; want env", source, err)
+		}
+		if kc.calls != 0 {
+			t.Fatalf("keychain was consulted %d times for env source", kc.calls)
+		}
+	})
+
+	t.Run("file takes precedence over environment", func(t *testing.T) {
+		kc := &countingStore{}
+		fs := NewFileStore(filepath.Join(t.TempDir(), "ai-keys.toml"))
+		if err := fs.SaveKey("acct.one", "file-value"); err != nil {
+			t.Fatal(err)
+		}
+		layered := &LayeredStore{File: fs, Keychain: kc}
+		got, err := layered.ResolveAPIKey("acct.one")
+		if err != nil || got != "file-value" {
+			t.Fatalf("resolve = %q, %v; want file-value", got, err)
+		}
+		source, err := layered.ResolveAPIKeySource("acct.one")
+		if err != nil || source != KeySourceFile {
+			t.Fatalf("source = %q, %v; want file", source, err)
+		}
+		if kc.calls != 0 {
+			t.Fatalf("keychain was consulted %d times for file source", kc.calls)
+		}
+	})
 }
 
 // Writes always land in the file, never the keychain, so a rebuild can never orphan a newly
@@ -133,7 +174,7 @@ func (c *countingStore) ReadKey(string) (string, error) {
 	return c.value, nil
 }
 func (c *countingStore) SaveKey(string, string) error { c.saveCalls++; return nil }
-func (c *countingStore) DeleteKey(string) error      { return nil }
+func (c *countingStore) DeleteKey(string) error       { return nil }
 func (c *countingStore) ResolveAPIKey(string) (string, error) {
 	return c.ReadKey("")
 }
