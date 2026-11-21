@@ -47,9 +47,17 @@ func TestChineseLocalizationRendering(t *testing.T) {
 	// Leader view localizes its footer and empty state.
 	ctrl.Dispatch(engine.Event{Type: engine.EventOpenLeader, Context: &engine.CapsuleContext{AppName: "Notes"}})
 	tt.Frame()
-	for _, want := range []string{"触发", "搜索", "返回", "关闭", "窗口"} {
+	for _, want := range []string{"触发", "搜索", "关闭", "窗口"} {
 		if !tt.HasText(want) {
 			t.Fatalf("Chinese leader footer/labels missing %q; texts: %q", want, tt.Texts())
+		}
+	}
+	// "⌫ 返回" shows inside a group only: at the top ⌫ closes the panel.
+	ctrl.Dispatch(engine.Event{Type: engine.EventLeaderKeyPress, Key: "w"})
+	tt.Frame()
+	for _, want := range []string{"返回", "窗口", "左半屏"} {
+		if !tt.HasText(want) {
+			t.Fatalf("Chinese leader group missing %q; texts: %q", want, tt.Texts())
 		}
 	}
 

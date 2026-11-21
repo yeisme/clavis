@@ -138,6 +138,11 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, m
 	f.ctrl.Dispatch(engine.Event{Type: engine.EventOpenLeader, Context: ctx})
 	w, h := PreferredCapsuleSizeForState(f.ctrl.State(), appearance)
 	shoot("01-leader", f.ctrl.CapsuleView, w, h, 2, nil)
+	// Inside a group (AI rewrite): the back button, the group title and a
+	// window sized for its two rows.
+	f.ctrl.Dispatch(engine.Event{Type: engine.EventLeaderKeyPress, Key: "a"})
+	gw, gh := PreferredCapsuleSizeForState(f.ctrl.State(), appearance)
+	shoot("01b-leader-group", f.ctrl.CapsuleView, gw, gh, 2, nil)
 
 	f.ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Context: ctx})
 	w, h = PreferredCapsuleSizeForState(f.ctrl.State(), appearance)

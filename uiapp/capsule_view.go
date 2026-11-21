@@ -174,11 +174,7 @@ func (a *AppController) renderCapsuleHeader(
 				renderSemanticIcon(c, "command", typeBody, secondaryInk(theme))
 				ui.Text(c, "Clavis").FontSize(typeLabel).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
 			})
-			crumbs := make([]string, 0, 1+len(state.LeaderBreadcrumbs))
-			crumbs = append(crumbs, i18n.T("leader.root"))
-			crumbs = append(crumbs, state.LeaderBreadcrumbs...)
-			ui.Text(c, strings.Join(crumbs, " › ")).FontSize(typeBody).FontWeight(600).
-				TextColor(theme.Text).SingleLine()
+			a.renderLeaderTitle(c, theme, state)
 
 		case engine.PhaseOmnibox:
 			labels := make([]string, len(omniboxTabs))
@@ -269,6 +265,43 @@ func nextAIProfileID(aiCfg config.AIConfig, currentID string) string {
 	return profiles[0].ID
 }
 
+// renderLeaderTitle names where the Leader is. At the top level that is
+// "Leader"; inside a group it is a back button naming the level above —
+// the way a macOS navigation bar does — and the group's own name. The button
+// does what ⌫ does.
+func (a *AppController) renderLeaderTitle(c *ui.Context, theme *ui.Theme, state engine.State) {
+	crumbs := state.LeaderBreadcrumbs
+	if len(crumbs) == 0 || len(state.LeaderPath) == 0 {
+		ui.Text(c, i18n.T("leader.root")).FontSize(typeBody).FontWeight(600).TextColor(theme.Text).SingleLine()
+		return
+	}
+	parent := i18n.T("leader.root")
+	if len(crumbs) > 1 {
+		parent = i18n.DisplayLabel(crumbs[len(crumbs)-2])
+	}
+	// The pair is labelled with the whole path ("Leader › Window"), so a
+	// screen reader still hears where it is, not just the last level.
+	path := append([]string{i18n.T("leader.root")}, crumbs...)
+	ui.Row(c).Label(strings.Join(path, " › ")).Gap(space4).AlignItems(ui.Center).Shrink(1).Children(func() {
+		back := ui.ButtonBase(c).Key("leader-back").Padding(space2, space6).Radius(radiusChip).FocusRing(false).
+			Label(i18n.T("leader.hint.back") + " " + parent)
+		if back.Hovered() {
+			back.Background(tileFill(theme))
+		}
+		back.Children(func() {
+			ui.Row(c).Gap(space2).AlignItems(ui.Center).Children(func() {
+				renderSemanticIcon(c, "chevron.left", typeMeta, secondaryInk(theme))
+				ui.Text(c, parent).FontSize(typeLabel).TextColor(secondaryInk(theme)).SingleLine()
+			})
+		})
+		if back.Clicked() {
+			a.Dispatch(engine.Event{Type: engine.EventBackspace})
+			a.uiState.leaderHandle.RequestFocus(c)
+		}
+		ui.Text(c, i18n.DisplayLabel(crumbs[len(crumbs)-1])).FontSize(typeBody).FontWeight(600).TextColor(theme.Text).SingleLine().Shrink(1)
+	})
+}
+
 func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state engine.State) {
 	container := ui.Column(c).
 		Bind(&a.uiState.leaderHandle).
@@ -342,7 +375,11 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 		ui.Row(c).FillWidth().Gap(space12).AlignItems(ui.Center).Children(func() {
 			keyHint(c, theme, "a–z", i18n.T("leader.hint.trigger"), keyToneNeutral)
 			keyHint(c, theme, "/", i18n.T("leader.hint.search"), keyToneNeutral)
-			keyHint(c, theme, "⌫", i18n.T("leader.hint.back"), keyToneNeutral)
+			// ⌫ goes up a level only inside a group; at the top it closes the
+			// panel like esc, so "Back" there promised something it did not do.
+			if len(state.LeaderPath) > 0 {
+				keyHint(c, theme, "⌫", i18n.T("leader.hint.back"), keyToneNeutral)
+			}
 			keyHint(c, theme, "esc", i18n.T("leader.hint.close"), keyToneNeutral)
 			ui.Spacer(c)
 			// While the Leader holds the temporary ASCII lock, say so: it is
