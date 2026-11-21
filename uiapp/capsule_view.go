@@ -9,6 +9,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/markdown"
+	"github.com/yeisme/clavis/pkg/core/agentsession"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/i18n"
@@ -20,6 +21,7 @@ var omniboxTabs = []config.CapsuleTab{
 	config.TabSnippets,
 	config.TabAI,
 	config.TabGlossary,
+	config.TabSettings, // UI label is Agent. Engine state remains untouched.
 }
 
 // CapsuleView renders the native MyGo Capsule UI for the current CapsulePhase.
@@ -465,6 +467,9 @@ func (a *AppController) renderOmniboxView(
 		}
 		return a.handleOmniboxKey(ev.Key, ev.Mods, state)
 	})
+	if state.OmniboxTab == config.TabSettings {
+		c.OnWindowShortcut(primaryMod(), ui.KeyR, func() { a.AgentRefresh() })
+	}
 
 	// Keep the important Omnibox chords alive after a footer/list click moves
 	// focus away from the search field. Unmodified navigation remains in the
@@ -612,6 +617,10 @@ func (a *AppController) renderOmniboxView(
 		}
 
 		items := state.OmniboxItems
+		if state.OmniboxTab == config.TabSettings {
+			sessions, diagnostics := a.cachedAgentData()
+			items = agentItems(sessions, diagnostics, state.OmniboxQuery)
+		}
 		if len(items) == 0 {
 			// Empty-state illustration: the tab's icon above its caption.
 			ui.Box(c).FillWidth().Grow(1).Center().Padding(space24).Children(func() {
@@ -622,6 +631,9 @@ func (a *AppController) renderOmniboxView(
 			})
 		} else {
 			selectedIdx := state.SelectedIndex
+			if state.OmniboxTab == config.TabSettings {
+				selectedIdx = a.uiState.agentSelected
+			}
 			if selectedIdx < 0 {
 				selectedIdx = 0
 			}
@@ -671,7 +683,7 @@ func (a *AppController) renderOmniboxView(
 				ui.Themed(c, rowSelectionTheme(theme)).Background(ui.Transparent).FillWidth().Grow(1).Children(func() {
 					list := stageRowList(c, &a.uiState.listState, plan, len(items), selectedIdx, func(i int) ui.Element {
 						item := items[i]
-						isSelected := i == state.SelectedIndex
+						isSelected := i == selectedIdx
 						row := ui.Row(c).
 							FillWidth().
 							Padding(space6, space8).
@@ -702,7 +714,21 @@ func (a *AppController) renderOmniboxView(
 						}
 
 						row.Children(func() {
-							a.renderOmniboxRowLeadingIcon(c, theme, item)
+							if state.OmniboxTab == config.TabSettings {
+								status := agentsession.StatusUnknown
+								if sessions, _ := a.cachedAgentData(); true {
+									if session, ok := agentSessionForItem(item, sessions); ok {
+										status = session.Status
+									}
+								}
+								color := secondaryInk(theme)
+								if status == agentsession.StatusRunning {
+									color = theme.Accent
+								}
+								ui.Box(c).Size(space8, space8).Radius(radiusChip).Background(color).Shrink(0)
+							} else {
+								a.renderOmniboxRowLeadingIcon(c, theme, item)
+							}
 
 							ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(1).Children(func() {
 								ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
@@ -740,9 +766,18 @@ func (a *AppController) renderOmniboxView(
 
 						if row.RowDoubleClicked() {
 							a.SelectIndex(i)
-							a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
+							if state.OmniboxTab == config.TabSettings {
+								_ = a.agentItemAction(item)
+							} else {
+								a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
+							}
 						} else if row.RowClicked() {
 							a.SelectIndex(i)
+							if state.OmniboxTab == config.TabSettings {
+								a.uiState.agentSelected = i
+								_ = a.agentItemAction(item)
+								return row
+							}
 							// Clipboard rows use Maccy semantics: a click pastes; pinning is
 							// available only through the explicit action menu.
 							if item.Kind == engine.ItemClipboardEntry {
@@ -755,10 +790,17 @@ func (a *AppController) renderOmniboxView(
 					}).FillWidth().Grow(1)
 
 					if list.Changed() && selectedIdx >= 0 && selectedIdx < len(items) && selectedIdx != state.SelectedIndex {
+						if state.OmniboxTab == config.TabSettings {
+							a.uiState.agentSelected = selectedIdx
+						}
 						a.SelectIndex(selectedIdx)
 					}
 					if list.Submitted() {
-						a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
+						if state.OmniboxTab == config.TabSettings && selectedIdx >= 0 && selectedIdx < len(items) {
+							_ = a.agentItemAction(items[selectedIdx])
+						} else {
+							a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
+						}
 					}
 				})
 			}
@@ -975,6 +1017,28 @@ func rowSelectionTheme(theme *ui.Theme) *ui.Theme {
 }
 
 func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state engine.State) bool {
+	if state.OmniboxTab == config.TabSettings && mods == 0 && (key == ui.KeyDown || key == ui.KeyUp) {
+		items := a.agentVisibleItems(state.OmniboxQuery)
+		if len(items) == 0 {
+			return true
+		}
+		idx := a.uiState.agentSelected
+		if key == ui.KeyDown {
+			idx = (idx + 1) % len(items)
+		} else {
+			idx = (idx - 1 + len(items)) % len(items)
+		}
+		a.uiState.agentSelected = idx
+		a.SelectIndex(idx)
+		return true
+	}
+	if state.OmniboxTab == config.TabSettings && key == ui.KeyEnter && mods == 0 {
+		items := a.agentVisibleItems(state.OmniboxQuery)
+		if state.SelectedIndex >= 0 && state.SelectedIndex < len(items) {
+			return a.agentItemAction(items[state.SelectedIndex])
+		}
+		return true
+	}
 	// The contextual action menu takes navigation keys while it is open.
 	if a.handleActionMenuKey(key, mods, state) {
 		return true
@@ -1422,7 +1486,7 @@ func omniboxTabLabel(tab config.CapsuleTab) string {
 	case config.TabGlossary:
 		return i18n.T("omnibox.tab.glossary")
 	case config.TabSettings:
-		return i18n.T("common.settings")
+		return "Agent"
 	default:
 		return string(tab)
 	}
@@ -1443,7 +1507,7 @@ func omniboxTabIcon(tab config.CapsuleTab) string {
 	case config.TabGlossary:
 		return "character.book.closed"
 	case config.TabSettings:
-		return "gearshape"
+		return "bolt"
 	default:
 		return "bolt"
 	}
@@ -1451,6 +1515,8 @@ func omniboxTabIcon(tab config.CapsuleTab) string {
 
 func omniboxPlaceholder(tab config.CapsuleTab) string {
 	switch tab {
+	case config.TabSettings:
+		return "搜索 Agent 会话，输入 / 补全命令"
 	case config.TabClipboard:
 		return i18n.T("omnibox.placeholder.clipboard")
 	case config.TabSnippets:
@@ -1466,6 +1532,8 @@ func omniboxPlaceholder(tab config.CapsuleTab) string {
 
 func omniboxEmptyText(tab config.CapsuleTab) string {
 	switch tab {
+	case config.TabSettings:
+		return "没有发现 Agent 会话"
 	case config.TabClipboard:
 		return i18n.T("omnibox.empty.clipboard")
 	case config.TabSnippets:
@@ -1481,18 +1549,24 @@ func omniboxEmptyText(tab config.CapsuleTab) string {
 
 func cycleOmniboxTab(current config.CapsuleTab, backward bool) config.CapsuleTab {
 	idx := 0
-	for i, t := range omniboxTabs {
+	cycleTabs := make([]config.CapsuleTab, 0, len(omniboxTabs))
+	for _, t := range omniboxTabs {
+		if t != config.TabSettings {
+			cycleTabs = append(cycleTabs, t)
+		}
+	}
+	for i, t := range cycleTabs {
 		if t == current {
 			idx = i
 			break
 		}
 	}
 	if backward {
-		idx = (idx - 1 + len(omniboxTabs)) % len(omniboxTabs)
+		idx = (idx - 1 + len(cycleTabs)) % len(cycleTabs)
 	} else {
-		idx = (idx + 1) % len(omniboxTabs)
+		idx = (idx + 1) % len(cycleTabs)
 	}
-	return omniboxTabs[idx]
+	return cycleTabs[idx]
 }
 
 func numberKeyIndex(key ui.Key) (int, bool) {

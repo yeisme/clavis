@@ -24,6 +24,7 @@ import (
 	"github.com/yeisme/clavis/internal/bridge"
 	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/pkg/core/actions"
+	"github.com/yeisme/clavis/pkg/core/agentsession"
 	"github.com/yeisme/clavis/pkg/core/ai"
 	"github.com/yeisme/clavis/pkg/core/automation"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
@@ -192,7 +193,8 @@ type uiViewState struct {
 	imeRuleModeDraft       config.IMEMode
 
 	// search is the view state of the search fields (search_keys.go).
-	search searchFieldState
+	search        searchFieldState
+	agentSelected int
 
 	// aiReview caches the diff of an AI rewrite against its source and the
 	// view the user picked (see ai_review.go).
@@ -289,6 +291,11 @@ type AppController struct {
 	activeKeymapLayer string
 
 	// AI cancellation & generation guard
+	agentMu             sync.RWMutex
+	agentSessions       []agentsession.Session
+	agentDiagnostics    []agentsession.Diagnostic
+	agentRefreshStarted bool
+
 	aiCancel      context.CancelFunc
 	aiDone        func()
 	runtime       *runtimecoord.Registry
@@ -475,6 +482,7 @@ func NewAppController(opts Options) *AppController {
 	)
 
 	c.refreshAPIKeySource()
+	go c.refreshAgentSessions()
 	go c.runClipboardWorker()
 	return c
 }
@@ -769,6 +777,11 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 	case engine.EventOpenOmnibox, engine.EventSwitchTab, engine.EventUpdateQuery, engine.EventBackspace:
 		c.uiState.hoverRow = 0
 		c.uiState.hoverSuppressed = 0
+		if ev.Type == engine.EventOpenOmnibox || ev.Type == engine.EventSwitchTab || ev.Type == engine.EventUpdateQuery || ev.Type == engine.EventBackspace {
+			if ev.Type != engine.EventOpenOmnibox || ev.Tab == config.TabSettings {
+				c.uiState.agentSelected = 0
+			}
+		}
 	}
 	if ev.Type == engine.EventOpenLeader || ev.Type == engine.EventOpenOmnibox {
 		c.ensureInstalledAppsSyncedLocked()
@@ -784,6 +797,9 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 			}
 		}
 		c.clipboardPasteGen++
+	}
+	if ev.Type == engine.EventOpenOmnibox && ev.Tab == config.TabSettings {
+		go c.refreshAgentSessions()
 	}
 	prev := c.StateMachine.State()
 	// A HUD notice must never destroy an active Capsule session. When a floating pill sink is
