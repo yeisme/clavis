@@ -73,6 +73,16 @@ func (w *DictionaryWatcher) Start(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Establish the baseline before returning from Start. If this happens in the
+	// goroutine, a caller can write a dictionary immediately after Start and have
+	// that write mistaken for the initial state, losing the first callback.
+	baseline, err := snapshotDictionaryDir(w.dir)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	w.mu.Lock()
 	if w.running {
 		w.mu.Unlock()
@@ -82,7 +92,7 @@ func (w *DictionaryWatcher) Start(ctx context.Context) error {
 	w.running, w.cancel, w.done = true, cancel, make(chan struct{})
 	done := w.done
 	w.mu.Unlock()
-	go func() { defer close(done); defer w.markStopped(); w.run(watchCtx) }()
+	go func() { defer close(done); defer w.markStopped(); w.run(watchCtx, baseline) }()
 	return nil
 }
 
@@ -106,8 +116,7 @@ func (w *DictionaryWatcher) markStopped() {
 	w.mu.Unlock()
 }
 
-func (w *DictionaryWatcher) run(ctx context.Context) {
-	prev := snapshotDictionaryDir(w.dir)
+func (w *DictionaryWatcher) run(ctx context.Context, prev map[string]dictionaryDigest) {
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 	var timer *time.Timer
@@ -120,7 +129,10 @@ func (w *DictionaryWatcher) run(ctx context.Context) {
 			}
 			return
 		case <-ticker.C:
-			curr := snapshotDictionaryDir(w.dir)
+			curr, err := snapshotDictionaryDir(w.dir)
+			if err != nil {
+				continue
+			}
 			if dictionarySnapshotsEqual(prev, curr) {
 				continue
 			}
@@ -160,10 +172,10 @@ type dictionaryDigest struct {
 	hash    [32]byte
 }
 
-func snapshotDictionaryDir(dir string) map[string]dictionaryDigest {
+func snapshotDictionaryDir(dir string) (map[string]dictionaryDigest, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	paths := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -185,7 +197,7 @@ func snapshotDictionaryDir(dir string) map[string]dictionaryDigest {
 		}
 		out[name] = dictionaryDigest{size: info.Size(), modTime: info.ModTime().UnixNano(), hash: sha256.Sum256(data)}
 	}
-	return out
+	return out, nil
 }
 func dictionarySnapshotsEqual(a, b map[string]dictionaryDigest) bool {
 	if len(a) != len(b) {
