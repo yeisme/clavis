@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,6 +25,7 @@ const maxPendingIMECommits = 256
 // not trigger it.
 func inputEngineConfigEqual(a, b config.InputEngineConfig) bool {
 	return a.Enabled == b.Enabled &&
+		a.ForceTakeover == b.ForceTakeover &&
 		a.Mode == b.Mode &&
 		a.Scheme == b.Scheme &&
 		a.CandidateCount == b.CandidateCount &&
@@ -92,7 +94,9 @@ func inputEngineOptionsFromConfig(cfg config.InputEngineConfig, cacheDir string,
 	}
 	// Resolve and index all dictionaries during ConfigureInputEngine, not in the
 	// hook's key path. The resulting Dictionary is immutable and lookup-only.
-	dict, _ := inputengine.LoadDictionaryWithDiagnostics(cfg.CustomDictPaths, resolvedCache)
+	dict, _ := inputengine.LoadDictionaryWithDiagnostics(cfg.CustomDictPaths, resolvedCache, func(d inputengine.DictionaryDiagnostic) {
+		log.Printf("inputengine: dictionary diagnostic path=%q kind=%s message=%s", d.Path, d.Kind, d.Message)
+	})
 	return inputengine.Options{
 		CandidateCount:   cfg.CandidateCount,
 		ShiftToggleASCII: cfg.ShiftToggleASCII,

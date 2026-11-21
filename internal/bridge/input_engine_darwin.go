@@ -20,10 +20,12 @@ func (b *darwinBridge) UpdateInputEngineBlockedWords(words []string) { b.ime.set
 // ConfigureInputEngine installs the pure-Go engine behind the existing CGEventTap. The tap
 // itself checks secure input and the native Clavis IMK source before calling this handler.
 func (b *darwinBridge) ConfigureInputEngine(cfg config.InputEngineConfig) {
+	b.SetInlineIMEForced(cfg.ForceTakeover)
 	b.configureInputEngine(cfg, false)
 }
 
 func (b *darwinBridge) ReloadInputEngine(cfg config.InputEngineConfig) {
+	b.SetInlineIMEForced(cfg.ForceTakeover)
 	b.configureInputEngine(cfg, true)
 }
 
