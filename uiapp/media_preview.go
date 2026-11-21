@@ -205,9 +205,16 @@ func (a *AppController) renderClipboardMediaToolbar(c *ui.Context, theme *ui.The
 		}
 		button(i18n.T("preview.media.fit"), p.mode == MediaZoomFit, func() { a.setMediaZoom(MediaZoomFit, 1) })
 		button("−", false, func() { a.adjustMediaZoom(-mediaZoomStep) })
-		ui.Text(c, mediaZoomLabel(p.mode, p.zoom)).FontSize(typeMicro).FontWeight(700).TextColor(theme.Text).SingleLine()
 		button("+", false, func() { a.adjustMediaZoom(mediaZoomStep) })
 		button(i18n.T("preview.media.original"), p.mode == MediaZoomOriginal, func() { a.setMediaZoom(MediaZoomOriginal, 1) })
+		// The zoom readout sits at the trailing edge, so no button moves when
+		// it appears, and only when it says something the pills do not: a
+		// percentage. In Fit mode the lit "Fit" pill already says it — the
+		// readout used to repeat "Fit" between − and +.
+		ui.Spacer(c)
+		if p.mode != MediaZoomFit {
+			ui.Text(c, mediaZoomLabel(p.mode, p.zoom)).FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
+		}
 	})
 }
 
