@@ -1,6 +1,7 @@
 package inputengine
 
 import (
+	"bytes"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -25,6 +26,82 @@ type Dictionary interface {
 	// LookupSingle emits single-syllable words/characters matching seg (exact syllable or
 	// prefix). Iteration stops early if emit returns false.
 	LookupSingle(seg string, emit func(word string) bool)
+}
+
+// DictionarySource identifies the origin of a candidate. Smaller values have
+// higher priority; callers should use the named constants rather than relying
+// on their numeric values.
+type DictionarySource uint8
+
+const (
+	SourceCustom DictionarySource = iota
+	SourceLearned
+	SourceStarter
+	SourceBuiltin
+)
+
+// CandidateRecord is the canonical candidate before presentation formatting.
+type CandidateRecord struct {
+	Pinyin          string
+	Word            string
+	Source          DictionarySource
+	Frequency       uint64
+	Pinned          bool
+	OriginalOrdinal uint32
+}
+
+// ResolveCandidate applies source priority, then the deterministic same-source
+// tie-breaks from the dictionary contract. It emits one record per (Pinyin, Word)
+// pair and performs no I/O.
+func ResolveCandidate(records []CandidateRecord) []CandidateRecord {
+	winners := make(map[string]CandidateRecord, len(records))
+	for _, record := range records {
+		key := record.Pinyin + "\x00" + record.Word
+		current, ok := winners[key]
+		if !ok || betterCandidate(record, current) {
+			winners[key] = record
+		}
+	}
+	out := make([]CandidateRecord, 0, len(winners))
+	for _, record := range winners {
+		out = append(out, record)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return betterCandidate(out[i], out[j]) })
+	return out
+}
+
+func betterCandidate(a, b CandidateRecord) bool {
+	if sourcePriority(a.Source) != sourcePriority(b.Source) {
+		return sourcePriority(a.Source) < sourcePriority(b.Source)
+	}
+	if a.Pinned != b.Pinned {
+		return a.Pinned
+	}
+	if a.Frequency != b.Frequency {
+		return a.Frequency > b.Frequency
+	}
+	if a.OriginalOrdinal != b.OriginalOrdinal {
+		return a.OriginalOrdinal < b.OriginalOrdinal
+	}
+	if a.Pinyin != b.Pinyin {
+		return bytes.Compare([]byte(a.Pinyin), []byte(b.Pinyin)) < 0
+	}
+	return bytes.Compare([]byte(a.Word), []byte(b.Word)) < 0
+}
+
+func sourcePriority(source DictionarySource) int {
+	switch source {
+	case SourceCustom:
+		return 0
+	case SourceLearned:
+		return 1
+	case SourceStarter:
+		return 2
+	case SourceBuiltin:
+		return 3
+	default:
+		return 4
+	}
 }
 
 // UnihanDictionary returns the embedded Unihan character + built-in phrase dictionary.
@@ -166,6 +243,15 @@ type DictionaryStatus struct {
 	Diagnostics []string
 }
 
+// DictionaryDiagnostic explains why one custom source was not used. It contains
+// no dictionary contents, so callers can safely surface it in settings/logs.
+type DictionaryDiagnostic struct {
+	Path     string
+	Kind     string
+	Message  string
+	Fallback string
+}
+
 // LoadUserDictionary resolves ~/.config/clavis/dicts/*.clvdict. Every file is
 // loaded and indexed before returning, so Dictionary lookups never perform disk
 // I/O. Files are sorted by name and earlier layers have higher priority.
@@ -217,29 +303,153 @@ func LoadUserDictionary() (Dictionary, DictionaryStatus) {
 	return ChainDictionaries(append(layers, defaultDictionary())...), status
 }
 
-// LoadDictionaryWithDiagnostics resolves user dictionaries and returns a status
-// suitable for diagnostics. Explicit paths retain the historical LoadDictionary
-// behavior and are intentionally not folded into this status.
-func LoadDictionaryWithDiagnostics(customPaths []string, cacheDir string) (Dictionary, DictionaryStatus) {
+// LoadDictionaryWithDiagnostics resolves every explicit custom source independently. A
+// bad file is skipped as a whole and reported; another valid file still loads.
+// The returned dictionary is fully indexed before this function returns, so its
+// lookup path performs no disk I/O.
+func LoadDictionaryWithDiagnostics(customPaths []string, cacheDir string, report func(DictionaryDiagnostic)) (Dictionary, error) {
 	user, status := LoadUserDictionary()
 	clean := cleanDictionaryPaths(customPaths)
 	if len(clean) == 0 {
-		return user, status
+		return user, nil
 	}
 	resolvedCache := strings.TrimSpace(cacheDir)
 	if resolvedCache == "" {
 		resolvedCache = defaultDictCacheDir()
 	}
-	lex, err := ime.LoadOrCompileDicts(clean, resolvedCache)
-	if err != nil || lex == nil || lex.Len() == 0 {
-		status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("explicit dictionary: %v", err))
-		return user, status
+	layers := make([]Dictionary, 0, len(clean))
+	for _, path := range clean {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			diagnostic := DictionaryDiagnostic{Path: path, Kind: "unreadable", Message: readErr.Error(), Fallback: "starter+builtin"}
+			recordDictionaryDiagnostic(&status, diagnostic, report)
+			continue
+		}
+		if kind, valid := validateDictionaryData(data); !valid {
+			message := "dictionary contains invalid or missing fields"
+			diagnostic := DictionaryDiagnostic{Path: path, Kind: kind, Message: message, Fallback: "starter+builtin"}
+			status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("%s: %s", path, message))
+			if report != nil {
+				report(diagnostic)
+			}
+			continue
+		}
+		lex, loadErr := ime.LoadOrCompileDicts([]string{path}, resolvedCache)
+		if loadErr != nil || lex == nil || lex.Len() == 0 {
+			kind := classifyDictionaryFailure(data, loadErr)
+			message := "empty dictionary"
+			if loadErr != nil {
+				message = loadErr.Error()
+			}
+			diagnostic := DictionaryDiagnostic{Path: path, Kind: kind, Message: message, Fallback: "starter+builtin"}
+			status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("%s: %s", path, message))
+			if report != nil {
+				report(diagnostic)
+			}
+			continue
+		}
+		layers = append(layers, NewIMEDictionary(lex))
 	}
-	status.Source = "explicit"
-	status.Path = strings.Join(clean, ", ")
-	status.Count += lex.Len()
-	// Explicit paths are highest priority; user files still precede all embedded layers.
-	return ChainDictionaries(NewIMEDictionary(lex), user), status
+	if len(layers) == 0 {
+		return user, nil
+	}
+	// Explicit custom layers outrank user, learned, starter, and builtin layers.
+	return ChainDictionaries(append(layers, user)...), nil
+}
+
+func recordDictionaryDiagnostic(status *DictionaryStatus, diagnostic DictionaryDiagnostic, report func(DictionaryDiagnostic)) {
+	status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("%s: %s", diagnostic.Path, diagnostic.Message))
+	if report != nil {
+		report(diagnostic)
+		return
+	}
+	// Keep a nil callback observable without persisting user dictionary contents.
+	fmt.Fprintf(os.Stderr, "inputengine: dictionary diagnostic path=%q kind=%s message=%s\n", diagnostic.Path, diagnostic.Kind, diagnostic.Message)
+}
+
+func validateDictionaryData(data []byte) (string, bool) {
+	if bytes.HasPrefix(data, []byte{'C', 'L', 'V', 'D'}) {
+		return "", true
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return "empty", false
+	}
+	inHeader := false
+	decidedHeader := false
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.Trim(raw, " \r")
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !decidedHeader {
+			decidedHeader = true
+			if line == "---" || (!strings.ContainsRune(line, '\t') && strings.ContainsRune(line, ':')) {
+				inHeader = true
+				continue
+			}
+		}
+		if inHeader {
+			if line == "..." {
+				inHeader = false
+			}
+			continue
+		}
+		if line == "..." {
+			continue
+		}
+		if !strings.ContainsRune(line, '\t') {
+			return "malformed", false
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) < 2 || strings.TrimSpace(fields[0]) == "" || strings.TrimSpace(fields[1]) == "" {
+			return "missing_field", false
+		}
+	}
+	return "", true
+}
+
+func classifyDictionaryFailure(data []byte, loadErr error) string {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return "empty"
+	}
+	if bytes.HasPrefix(data, []byte{'C', 'L', 'V', 'D'}) {
+		return "malformed"
+	}
+	inHeader := false
+	decidedHeader := false
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(strings.TrimPrefix(raw, "\ufeff"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !decidedHeader {
+			decidedHeader = true
+			if line == "---" || (!strings.ContainsRune(line, '\t') && strings.ContainsRune(line, ':')) {
+				inHeader = true
+				continue
+			}
+		}
+		if inHeader {
+			if line == "..." {
+				inHeader = false
+			}
+			continue
+		}
+		if line == "..." {
+			continue
+		}
+		if !strings.ContainsRune(line, '\t') {
+			return "malformed"
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) < 2 || strings.TrimSpace(fields[0]) == "" || strings.TrimSpace(fields[1]) == "" {
+			return "missing_field"
+		}
+	}
+	if loadErr != nil {
+		return "compiler_error"
+	}
+	return "empty"
 }
 
 // LoadDictionary resolves the active Dictionary with priority:
@@ -249,19 +459,8 @@ func LoadDictionaryWithDiagnostics(customPaths []string, cacheDir string) (Dicti
 //
 // Missing or invalid customPaths degrade gracefully to the built-in dictionaries.
 func LoadDictionary(customPaths []string, cacheDir string) Dictionary {
-	clean := cleanDictionaryPaths(customPaths)
-	if len(clean) == 0 {
-		return defaultDictionary()
-	}
-	resolvedCache := strings.TrimSpace(cacheDir)
-	if resolvedCache == "" {
-		resolvedCache = defaultDictCacheDir()
-	}
-	customLex, err := ime.LoadOrCompileDicts(clean, resolvedCache)
-	if err != nil || customLex == nil || customLex.Len() == 0 {
-		return defaultDictionary()
-	}
-	return ChainDictionaries(NewIMEDictionary(customLex), defaultDictionary())
+	dict, _ := LoadDictionaryWithDiagnostics(customPaths, cacheDir, nil)
+	return dict
 }
 
 func cleanDictionaryPaths(paths []string) []string {
