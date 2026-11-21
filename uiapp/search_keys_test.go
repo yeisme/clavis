@@ -43,6 +43,29 @@ func TestArbitrateSearchKey_Table(t *testing.T) {
 	}
 }
 
+func TestIMEPreeditOwnsTabNavigationKeys(t *testing.T) {
+	cmd := primaryMod()
+	for _, tc := range []struct {
+		name string
+		key  ui.Key
+		mods ui.Modifiers
+	}{
+		{name: "Tab", key: ui.KeyTab},
+		{name: "Shift+Tab", key: ui.KeyTab, mods: ui.Shift},
+		{name: "Cmd+Left", key: ui.KeyLeft, mods: cmd},
+		{name: "Cmd+Right", key: ui.KeyRight, mods: cmd},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !imeOwnsKey(tc.key, tc.mods) {
+				t.Fatalf("IME preedit must retain %s", tc.name)
+			}
+		})
+	}
+	if imeOwnsKey(ui.KeyK, cmd) {
+		t.Fatal("IME preedit must leave unrelated Cmd shortcuts to the panel")
+	}
+}
+
 func TestInlineCompletion(t *testing.T) {
 	cases := []struct {
 		typed, title, want string
