@@ -3,10 +3,10 @@
   "platform": "darwin",
   "project": "clavis",
   "branch": "main",
-  "head": "3228eab",
-  "dirty": 7,
+  "head": "eccff6e",
+  "dirty": 5,
   "ahead": 0,
-  "timestamp": "2026-11-16T15:26:04+08:00",
-  "tests": "部署 3228eab 自签名构建: codesign verify 与 DR ok, smoke-check ok, 主线程在 run loop, 事件 tap 已启用, 引导走完, 用户配置解析 ok",
-  "notes": "mini 改用自签名证书 Clavis Local Signing (DR 为 certificate leaf), 以后重建不再丢辅助功能和输入监控授权; AI 密钥的钥匙串条目每个新构建仍会询问一次 (无 Team ID 时按 cdhash 分区); magpie 已设 reasoning_effort=low"
+  "timestamp": "2026-11-21T18:07:07+08:00",
+  "tests": "心跳刷新：当前 HEAD eccff6e；工作区有 5 个并行任务改动，未在本轮运行全量测试",
+  "notes": "mini 心跳刷新；dirty 计数包含并行任务的 5 个未提交路径。本轮只更新本设备心跳和协议文档，不触碰其他改动。"
 }
