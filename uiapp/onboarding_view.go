@@ -284,32 +284,30 @@ func (a *AppController) onboardingPermRow(c *ui.Context, theme *ui.Theme, kind, 
 			applyProseLineHeight(ui.Text(c, purpose)).FontSize(typeMeta).TextColor(theme.TextMuted)
 		})
 		color := theme.TextMuted
-		tone := chipNeutral
-		state := i18n.T("onboarding.perm.grant")
 		if granted {
 			color = theme.Success
-			tone = chipSuccess
-			state = i18n.T("settings.perm.granted")
 		} else if primary {
 			color = theme.Accent
-			tone = chipAccent
 		}
 		ui.Row(c).Gap(space4).AlignItems(ui.Center).Shrink(0).Children(func() {
 			kitStatusDot(c, color, !granted && primary)
-			if !granted {
-				btn := ui.Button
-				if primary {
-					btn = ui.PrimaryButton
-				}
-				if btn(c, i18n.T("onboarding.perm.grant")).Key("onboarding-grant:" + kind).Clicked() {
-					go func() {
-						ctx, cancel := context.WithTimeout(context.Background(), onboardingGuideTimeout)
-						defer cancel()
-						_, _ = a.GuidePermission(ctx, kind)
-					}()
-				}
+			if granted {
+				kitStatusPill(c, theme, i18n.T("settings.perm.granted"), chipSuccess)
+				return
 			}
-			kitStatusPill(c, theme, state, tone)
+			// Not granted, the button is both the state and the action. A
+			// status pill beside it used to repeat "Grant…" word for word.
+			btn := ui.Button
+			if primary {
+				btn = ui.PrimaryButton
+			}
+			if btn(c, i18n.T("onboarding.perm.grant")).Key("onboarding-grant:" + kind).Clicked() {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), onboardingGuideTimeout)
+					defer cancel()
+					_, _ = a.GuidePermission(ctx, kind)
+				}()
+			}
 		})
 	})
 }
