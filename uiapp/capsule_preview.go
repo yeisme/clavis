@@ -345,6 +345,17 @@ func (a *AppController) renderOmniboxPreviewCard(
 			ui.Text(c, previewKindLabel(item)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 		})
 		kitDivider(c, theme)
+		// Text scrolls inside the card. Media does not: its canvas gives up
+		// height (down to mediaCanvasMinHeight) so the metadata and action
+		// hints stay in view, instead of a fixed 300px canvas pushing the card
+		// past the list and over the footer.
+		if m := item.ClipboardMedia; m != nil && m.IsMedia() {
+			ui.Column(c).FillWidth().Grow(1).MinHeight(0).Gap(space4).Children(func() {
+				a.renderOmniboxPreviewBody(c, theme, state, item)
+				a.renderPreviewActionHints(c, theme, item)
+			})
+			return
+		}
 		ui.Scroll(c).FillWidth().Grow(1).Children(func() {
 			ui.Column(c).FillWidth().Gap(space4).Children(func() {
 				a.renderOmniboxPreviewBody(c, theme, state, item)
@@ -352,6 +363,9 @@ func (a *AppController) renderOmniboxPreviewCard(
 			})
 		})
 	})
+	// The card is bounded by its column (the list's height); without this it
+	// takes its content's height and overflows onto the footer.
+	card.Grow(1).MinHeight(0)
 	// Preserve the snippet flash as a border animation on the elevated card.
 	if len(flashFrames) == 2 {
 		glow := card.Keyframes("snippet-flash", flashFrames, ui.KeyframeOptions{Run: flashRun, NonMotion: true})
@@ -693,7 +707,7 @@ func (a *AppController) renderClipboardMediaPreview(c *ui.Context, theme *ui.The
 				}
 			})
 		} else if bmp != nil && m.Kind != "image" && m.Kind != "video" {
-			ui.Image(c, bmp).FillWidth().Height(mediaPreviewCanvasHeight(m)).Fit(ui.Contain).Radius(radiusChip)
+			ui.Image(c, bmp).FillWidth().Height(mediaPreviewCanvasHeight(m)).MinHeight(mediaCanvasMinHeight).Fit(ui.Contain).Radius(radiusChip)
 		} else if bmp == nil && m.Kind != "image" && m.Kind != "video" {
 			ui.Text(c, i18n.T("preview.media.unavailable")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 		}
@@ -703,5 +717,5 @@ func (a *AppController) renderClipboardMediaPreview(c *ui.Context, theme *ui.The
 		if len(m.FilePaths) > 0 {
 			renderPreviewLines(c, theme, strings.Join(m.FilePaths, "\n"), 20)
 		}
-	})
+	}).Grow(1).MinHeight(0)
 }

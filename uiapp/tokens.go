@@ -170,6 +170,7 @@ const (
 	controlHeight             float32 = 28
 	mediaCanvasHeight         float32 = 300
 	mediaCanvasPortraitHeight float32 = 324
+	mediaCanvasMinHeight      float32 = 120 // how far a media canvas shrinks in a short card
 	mediaImageBase            float32 = 340
 	cardPadX                  float32 = 12
 	cardPadY                  float32 = 10
