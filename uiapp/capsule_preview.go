@@ -339,7 +339,8 @@ func (a *AppController) renderOmniboxPreviewCard(
 
 	card := kitCard(c, theme, cardElevated, func() {
 		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
-			renderSemanticIcon(c, previewIcon(item), typeLabel, theme.Accent)
+			// Neutral: the card's title icon is a label, not a selection.
+			renderSemanticIcon(c, previewIcon(item), typeLabel, secondaryInk(theme))
 			ui.Text(c, i18n.T("preview.title")).FontSize(typeMeta).FontWeight(700).TextColor(theme.Text).SingleLine()
 			ui.Spacer(c)
 			ui.Text(c, previewKindLabel(item)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()

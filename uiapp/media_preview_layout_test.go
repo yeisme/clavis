@@ -121,3 +121,26 @@ func mediaPreviewFixture(t *testing.T) (*interactionFixture, int, int) {
 	w, h := PreferredCapsuleSizeForState(f.ctrl.State(), f.ctrl.Config().Main.Appearance)
 	return f, w, h
 }
+
+// TestPreviewCardTitleIconIsNeutral reads the preview card's title row off a
+// real render, light and dark: the icon before "Preview" is a label, so no
+// pixel left of the title may be painted in the accent.
+func TestPreviewCardTitleIconIsNeutral(t *testing.T) {
+	f, w, h := mediaPreviewFixture(t)
+	for _, dark := range []bool{false, true} {
+		tt := ui.NewTester(f.ctrl.CapsuleView, w, h)
+		tt.SetDark(dark)
+		tt.Frame()
+		title, ok := tt.Find(i18n.T("preview.title"))
+		if !ok {
+			t.Fatalf("preview title missing; texts %q", tt.Texts())
+		}
+		accent := ui.LightTheme().Accent
+		if dark {
+			accent = ui.DarkTheme().Accent
+		}
+		if n := accentPixels(tt, int(title.X)-int(space24), int(title.Y), int(title.X), int(title.Y+title.H)+1, accent); n != 0 {
+			t.Fatalf("dark=%v: preview title icon paints %d accent pixels; it must be neutral", dark, n)
+		}
+	}
+}
