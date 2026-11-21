@@ -347,8 +347,9 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 			ui.Spacer(c)
 			// While the Leader holds the temporary ASCII lock, say so: it is
 			// why the keys type letters even though a Chinese IME was active.
+			// A status, not an action: neutral, like the IME pill's layer state.
 			if a.asciiLockedForCapsule() {
-				chip(c, theme, "lock.fill", i18n.T("leader.ascii_locked"), chipAccent)
+				chip(c, theme, "lock.fill", i18n.T("leader.ascii_locked"), chipNeutral)
 			}
 		})
 	})
