@@ -2,6 +2,7 @@
 package sync
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
@@ -536,6 +537,27 @@ func (s *Server) PairDeviceWithCredential(account, device string, pub ed25519.Pu
 	return s.pairDevice(account, device, pub, credential)
 }
 
+// RemoveDevice revokes a paired device after credential validation. It removes
+// only server-side public keys and wrapped material; the caller must also call
+// DeleteDeviceIdentity locally to prevent reappearance after restart.
+func (s *Server) RemoveDevice(account, device string, credential []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.credentials[account]
+	if !ok || len(credential) != 32 || !hmac.Equal(c[:], credential) {
+		return errors.New("sync: invalid account credential")
+	}
+	if s.accounts[account][device] == nil {
+		return errors.New("sync: device is not paired")
+	}
+	delete(s.accounts[account], device)
+	delete(s.x25519Accounts[account], device)
+	delete(s.wrappedADK[account], device)
+	delete(s.watermarks[account], device)
+	delete(s.issued[account], device)
+	return nil
+}
+
 func (s *Server) SetX25519PublicKey(account, device string, pub, credential []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -839,6 +861,8 @@ type Client struct {
 	adk                 []byte
 	deviceSalt          []byte
 	recoveryWrap        []byte
+	stateStore          StateStore
+	keyStore            SecretStore
 	cache               *LocalCache
 	watermark           uint64
 	syncEnabled         bool
@@ -847,23 +871,73 @@ type Client struct {
 	vault               *Vault
 }
 
-func NewClient(s *Server, device string) (*Client, error) {
+func newClient(s *Server, device string, identity DeviceIdentity) (*Client, error) {
 	if s == nil || strings.TrimSpace(device) == "" {
 		return nil, errors.New("sync: server and device id are required")
 	}
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, err
+	if len(identity.Ed25519Private) != ed25519.PrivateKeySize || identity.X25519Private == nil || len(identity.Credential) != 32 || len(identity.ADK) != 32 {
+		return nil, errors.New("sync: incomplete device identity")
 	}
 	v, err := NewVaultWithError("")
 	if err != nil {
 		return nil, err
 	}
-	xPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	return &Client{server: s, deviceID: device, privateKey: append(ed25519.PrivateKey(nil), identity.Ed25519Private...), xPrivateKey: identity.X25519Private, adk: append([]byte(nil), identity.ADK...), credential: append([]byte(nil), identity.Credential...), cache: NewLocalCache(), plan: DefaultSyncPlan(), vault: v}, nil
+}
+
+// NewClient retains the in-memory constructor for callers that do not yet have
+// an OS keystore. Persistent callers should use NewClientWithIdentity.
+func NewClient(s *Server, device string) (*Client, error) {
+	identity, err := newDeviceIdentity()
 	if err != nil {
 		return nil, err
 	}
-	return &Client{server: s, deviceID: device, privateKey: priv, xPrivateKey: xPriv, cache: NewLocalCache(), plan: DefaultSyncPlan(), vault: v}, nil
+	return newClient(s, device, identity)
+}
+func NewClientWithIdentity(s *Server, device string, identity DeviceIdentity) (*Client, error) {
+	return newClient(s, device, identity)
+}
+
+// NewPersistentClient loads identity from the keystore and non-secret state
+// from SQLite. It does not pair or write any secret to SQLite.
+func NewPersistentClient(ctx context.Context, s *Server, device string, keyStore SecretStore, state StateStore) (*Client, error) {
+	identity, err := LoadOrCreateDeviceIdentity(keyStore)
+	if err != nil {
+		return nil, err
+	}
+	c, err := newClient(s, device, identity)
+	if err != nil {
+		return nil, err
+	}
+	if state != nil {
+		c.keyStore = keyStore
+		w, ready, err := state.Load(ctx)
+		if err != nil {
+			return nil, err
+		}
+		c.watermark, c.recoveryReady, c.syncEnabled, c.stateStore = w, ready, ready, state
+	}
+	return c, nil
+}
+
+// LoginWithStoredCredential resumes an account using the credential loaded in
+// DeviceIdentity, without generating a new device identity or requiring a
+// second pairing operation.
+func (c *Client) LoginWithStoredCredential(account string) error {
+	c.mu.Lock()
+	credential := append([]byte(nil), c.credential...)
+	c.mu.Unlock()
+	return c.LoginWithCredential(account, credential)
+}
+
+func (c *Client) saveState() error {
+	c.mu.Lock()
+	state, watermark, ready := c.stateStore, c.watermark, c.recoveryReady
+	c.mu.Unlock()
+	if state == nil {
+		return nil
+	}
+	return state.Save(context.Background(), watermark, ready)
 }
 func (c *Client) Login(account string) error {
 	// Login may register a new account, but deliberately cannot recover an
@@ -884,7 +958,13 @@ func (c *Client) loginWithCredential(account string, credential []byte) error {
 	c.mu.Lock()
 	c.accountID = account
 	c.credential = append([]byte(nil), credential...)
+	store := c.keyStore
 	c.mu.Unlock()
+	if store != nil {
+		if err := store.SaveKey(accountCredentialKey, encodeSecret(credential)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 func hkdfKey(secret, salt []byte, info string) ([]byte, error) {
@@ -1102,7 +1182,7 @@ func (c *Client) Delete(object string) error {
 		c.watermark = t.Sequence
 	}
 	c.mu.Unlock()
-	return nil
+	return c.saveState()
 }
 func (c *Client) Sync() ([]Tombstone, CleanupReport, error) {
 	// The server records one issued tombstone batch per device. Serialize the
@@ -1148,6 +1228,9 @@ func (c *Client) Sync() ([]Tombstone, CleanupReport, error) {
 		c.watermark = confirm
 	}
 	c.mu.Unlock()
+	if err := c.saveState(); err != nil {
+		return nil, CleanupReport{}, err
+	}
 	return ts, r, nil
 }
 func (c *Client) Upload(object string, version uint64, payload []byte) error {
