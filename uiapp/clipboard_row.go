@@ -45,7 +45,9 @@ func clipboardLineCount(content string) int {
 	if s == "" {
 		return 0
 	}
-	return strings.Count(strings.ReplaceAll(s, "\r\n", "\n"), "\n") + 1
+	// Every CRLF holds exactly one LF, so counting LFs needs no normalized
+	// copy of the entry (this runs per visible row per frame).
+	return strings.Count(s, "\n") + 1
 }
 
 // relativeCopyTime says when an entry was copied the way a person would:
@@ -88,23 +90,35 @@ func clipboardContentIcon(content, fallback string) string {
 		}
 		return "doc.on.clipboard"
 	}
-	lower := strings.ToLower(s)
-	singleLine := !strings.ContainsAny(s, "\r\n")
+	// Classify from the head only: this runs for every visible row on every
+	// frame, and a 256 KiB log used to be lowercased whole and scanned once per
+	// code marker each time. Links, addresses, paths and commands are short
+	// single lines, so anything longer than the head is none of them; code
+	// shows itself in its first lines.
+	head, truncated := s, len(s) > clipboardSniffBytes
+	if truncated {
+		head = s[:clipboardSniffBytes]
+	}
+	lower := strings.ToLower(head)
+	singleLine := !truncated && !strings.ContainsAny(head, "\r\n")
 	switch {
 	case singleLine && (strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "www.")):
 		return "link"
-	case singleLine && looksLikeEmail(s):
+	case singleLine && looksLikeEmail(head):
 		return "envelope"
-	case singleLine && looksLikePath(s):
+	case singleLine && looksLikePath(head):
 		return "folder"
 	case singleLine && looksLikeShellCommand(lower):
 		return "terminal"
-	case looksLikeCode(s):
+	case looksLikeCode(head):
 		return "curlybraces"
 	default:
 		return "doc.text"
 	}
 }
+
+// clipboardSniffBytes bounds how much of an entry the per-row classifiers read.
+const clipboardSniffBytes = 2048
 
 func looksLikeEmail(s string) bool {
 	if strings.ContainsAny(s, " \t") {

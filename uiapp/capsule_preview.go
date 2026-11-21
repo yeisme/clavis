@@ -574,8 +574,7 @@ func renderPreviewLines(c *ui.Context, theme *ui.Theme, text string, limit int) 
 	}
 	// Code, commands and paths keep their shape in the monospace face on a
 	// faint well; prose wraps with the wider CJK leading.
-	trimmed := strings.TrimSpace(text)
-	mono := looksLikeCode(text) || looksLikeShellCommand(strings.ToLower(trimmed)) || looksLikePath(trimmed)
+	mono := previewIsMono(text)
 	body := ui.Column(c).FillWidth().Gap(space2)
 	if mono {
 		body.Padding(space6, space8).Radius(radiusChip).Background(tileFill(theme)).Border(1, hairline(theme))
@@ -609,24 +608,42 @@ func previewLines(text string, limit int) (lines []string, hidden int) {
 	if strings.TrimSpace(text) == "" {
 		return nil, 0
 	}
-	normalized := strings.ReplaceAll(text, "\r\n", "\n")
-	lines = strings.Split(strings.TrimRight(normalized, "\n"), "\n")
-	if limit > 0 && len(lines) > limit {
-		hidden = len(lines) - limit
-		lines = lines[:limit:limit]
+	// Cut only the lines that are shown and count the rest: the preview is
+	// rebuilt every frame, and splitting a 256 KiB log into all its lines
+	// (after copying it to normalize CRLF) was most of the frame.
+	rest := text
+	for strings.HasSuffix(rest, "\n") {
+		rest = strings.TrimSuffix(strings.TrimSuffix(rest, "\n"), "\r")
 	}
-	return lines, hidden
+	for limit <= 0 || len(lines) < limit {
+		i := strings.IndexByte(rest, '\n')
+		if i < 0 {
+			lines = append(lines, rest)
+			return lines, 0
+		}
+		lines = append(lines, strings.TrimSuffix(rest[:i], "\r"))
+		rest = rest[i+1:]
+	}
+	return lines, strings.Count(rest, "\n") + 1
 }
 
-func previewLineCount(text string) int {
-	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	count := 0
-	for _, line := range lines {
-		if strings.TrimSpace(line) != "" {
-			count++
-		}
+// previewIsMono reports whether a preview reads as code, a command or a path.
+// Like clipboardContentIcon it reads only the head: it runs every frame, and
+// lowercasing a whole 256 KiB entry here was the largest allocation of a
+// selection change (BenchmarkClipboardSwitch/large).
+func previewIsMono(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	head, truncated := trimmed, len(trimmed) > clipboardSniffBytes
+	if truncated {
+		head = trimmed[:clipboardSniffBytes]
 	}
-	return count
+	return looksLikeCode(head) || looksLikeShellCommand(strings.ToLower(head)) || (!truncated && looksLikePath(head))
+}
+
+// previewLineCount counts lines as a split on LF would (a trailing newline
+// starts an empty last line); CRLF holds one LF, so no normalized copy.
+func previewLineCount(text string) int {
+	return strings.Count(text, "\n") + 1
 }
 
 func previewKindLabel(item engine.OmniboxItem) string {
