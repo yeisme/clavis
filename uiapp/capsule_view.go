@@ -19,9 +19,9 @@ var omniboxTabs = []config.CapsuleTab{
 	config.TabActions,
 	config.TabClipboard,
 	config.TabSnippets,
+	config.TabSettings, // UI label is Agent. Engine state remains untouched.
 	config.TabAI,
 	config.TabGlossary,
-	config.TabSettings, // UI label is Agent. Engine state remains untouched.
 }
 
 // CapsuleView renders the native MyGo Capsule UI for the current CapsulePhase.
