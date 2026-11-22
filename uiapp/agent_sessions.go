@@ -244,7 +244,12 @@ func agentItems(sessions []agentsession.Session, diagnostics []agentsession.Diag
 	agentLatestResult.RLock()
 	result := agentLatestResult.result
 	agentLatestResult.RUnlock()
-	if trimmed == "" && result.State != "" && result.State != host.StateReady {
+	// 刷新中且列表为空时，状态交给「居中加载态」渲染（capsule_view 的 len(items)==0 分支），
+	// 不要在这种情况再塞一条状态行——否则 items 永不为空，居中加载态成了死代码，
+	// 用户只看到列表里孤零零一行「刷新中…」。有缓存会话时仍保留状态行，否则用户看不到刷新中的提示。
+	// 2026-11-22 实测 TestAgentTabShowsLoadingStateDuringRefresh 因此失败。
+	refreshingWithNothingToShow := result.State == host.StateRefreshing && len(sessions) == 0
+	if trimmed == "" && result.State != "" && result.State != host.StateReady && !refreshingWithNothingToShow {
 		retryable := result.Retryable && result.State != host.StateUnknown
 		items = append(items, engine.OmniboxItem{ID: "agent-status:" + string(result.State), Title: agentStatusMessage(result), Subtitle: agentStatusSubtitle(result), Icon: "info.circle", Kind: engine.ItemUtility, UtilityValue: "agent-refresh-status", KeyHint: map[bool]string{true: "R", false: ""}[retryable]})
 	}
