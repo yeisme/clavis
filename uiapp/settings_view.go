@@ -158,7 +158,23 @@ func (a *AppController) requestSettingsSection(index int) {
 }
 
 func (a *AppController) settingsDraftDirty() bool {
-	state := seGet(a.settingsEditor(), func(s *settingsEditorState) settingsEditorState { return *s })
+	state := seGet(a.settingsEditor(), func(s *settingsEditorState) struct {
+		snippetIsNew, glossaryIsNew, workflowLoaded, workflowIsNew              bool
+		snippetSelected, glossarySelected, workflowOriginalID, workflowSelected string
+		snippetDraft                                                            config.SnippetItem
+		glossaryDraft                                                           config.GlossaryTerm
+		workflowDraft                                                           config.Workflow
+		leaderNewKey, leaderNewLabel                                            string
+	} {
+		return struct {
+			snippetIsNew, glossaryIsNew, workflowLoaded, workflowIsNew              bool
+			snippetSelected, glossarySelected, workflowOriginalID, workflowSelected string
+			snippetDraft                                                            config.SnippetItem
+			glossaryDraft                                                           config.GlossaryTerm
+			workflowDraft                                                           config.Workflow
+			leaderNewKey, leaderNewLabel                                            string
+		}{s.snippetIsNew, s.glossaryIsNew, s.workflowLoaded, s.workflowIsNew, s.snippetSelected, s.glossarySelected, s.workflowOriginalID, s.workflowSelected, s.snippetDraft, s.glossaryDraft, s.workflowDraft, s.leaderNewKey, s.leaderNewLabel}
+	})
 	cfg := a.ConfigStore.Current()
 	if state.snippetIsNew || state.snippetSelected != "" {
 		var saved config.SnippetItem
