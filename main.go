@@ -404,7 +404,11 @@ func (a *desktopApp) start() {
 	})
 
 	initW, initH := uiapp.PreferredCapsuleSize(engine.PhaseLeader, cfg.Main.Appearance)
-	capsulePanel := mygo.NewWindow(mygo.WindowOptions{
+	surfaceSpec := func(height int, elevation int, blur mygo.Vibrancy, dismiss uiapp.SurfaceDismissPolicy, focusRestore bool) uiapp.SurfaceSpec {
+		return uiapp.FloatingSurfaceSpecWithElevation(cfg.Main.Appearance, height, elevation, blur, dismiss, focusRestore)
+	}
+	capsuleSpec := surfaceSpec(initH, uiapp.SurfaceElevationPanel, mygo.VibrancyGlass, uiapp.DismissExplicit|uiapp.DismissEscape|uiapp.DismissOutsideClick, true)
+	capsulePanel := mygo.NewWindow(uiapp.FloatingSurface(mygo.WindowOptions{
 		Title:         appName,
 		Width:         initW,
 		Height:        initH,
@@ -413,28 +417,26 @@ func (a *desktopApp) start() {
 		Frameless:     true,
 		Transparent:   true,
 		Vibrancy:      mygo.VibrancyGlass,
-		CornerRadius:  int(uiapp.NormalizeCornerRadius(cfg.Main.Appearance)),
 		DisableResize: true,
 		AlwaysOnTop:   true,
 		SkipTaskbar:   true,
 		Content:       ui.View(controller.CapsuleView),
-	})
-	capsulePanel.OnClose(a.closeHides(func() {
-		controller.Dispatch(engine.Event{Type: engine.EventDismiss})
-	}))
-	capsulePanel.OnBlur(func() {
-		if a.isInPresentTransition() {
-			return
-		}
-		phase := controller.State().Phase
-		if phase == engine.PhaseHidden || phase == engine.PhaseHUD {
-			return
-		}
-		controller.Dispatch(engine.Event{Type: engine.EventDismiss})
+	}, capsuleSpec))
+	uiapp.BindFloatingSurface(capsulePanel, capsuleSpec, uiapp.SurfaceHooks{
+		Dismiss: func() { controller.Dispatch(engine.Event{Type: engine.EventDismiss}) },
+		CanDismiss: func() bool {
+			if a.isInPresentTransition() {
+				return false
+			}
+			phase := controller.State().Phase
+			return phase != engine.PhaseHidden && phase != engine.PhaseHUD
+		},
+		Quitting: a.quitting.Load,
 	})
 
 	promptW, promptH := uiapp.PreferredPromptComposerPanelSize(2)
-	promptPanel := mygo.NewWindow(mygo.WindowOptions{
+	promptSpec := surfaceSpec(promptH, uiapp.SurfaceElevationPanel, mygo.VibrancyGlass, uiapp.DismissExplicit|uiapp.DismissEscape|uiapp.DismissOutsideClick, true)
+	promptPanel := mygo.NewWindow(uiapp.FloatingSurface(mygo.WindowOptions{
 		Title:         i18n.T("prompts.composer_title"),
 		Width:         promptW,
 		Height:        promptH,
@@ -443,24 +445,20 @@ func (a *desktopApp) start() {
 		Frameless:     true,
 		Transparent:   true,
 		Vibrancy:      mygo.VibrancyGlass,
-		CornerRadius:  int(uiapp.NormalizeCornerRadius(cfg.Main.Appearance)),
 		DisableResize: true,
 		AlwaysOnTop:   true,
 		SkipTaskbar:   true,
 		Content:       ui.View(controller.PromptComposerView),
-	})
-	promptPanel.OnClose(a.closeHides(controller.ClosePromptComposer))
-	promptPanel.OnBlur(func() {
-		if a.isInPresentTransition() {
-			return
-		}
-		if controller.PromptComposerOpen() {
-			controller.ClosePromptComposer()
-		}
+	}, promptSpec))
+	uiapp.BindFloatingSurface(promptPanel, promptSpec, uiapp.SurfaceHooks{
+		Dismiss:    func() { controller.ClosePromptComposer() },
+		CanDismiss: func() bool { return !a.isInPresentTransition() && controller.PromptComposerOpen() },
+		Quitting:   a.quitting.Load,
 	})
 
 	pillW, pillH := uiapp.PreferredIMEPillSize()
-	imePillPanel := mygo.NewWindow(mygo.WindowOptions{
+	pillSpec := surfaceSpec(pillH, uiapp.SurfaceElevationIndicator, mygo.VibrancyGlass, uiapp.DismissExplicit, false)
+	imePillPanel := mygo.NewWindow(uiapp.FloatingSurface(mygo.WindowOptions{
 		Title:         i18n.T("tray.ime_window"),
 		Width:         pillW,
 		Height:        pillH,
@@ -469,18 +467,20 @@ func (a *desktopApp) start() {
 		Frameless:     true,
 		Transparent:   true,
 		Vibrancy:      mygo.VibrancyGlass,
-		CornerRadius:  15,
 		DisableResize: true,
 		AlwaysOnTop:   true,
 		SkipTaskbar:   true,
 		Content: ui.View(func(c *ui.Context) {
 			uiapp.IMEPillView(c, a.currentIMEPillLabel())
 		}),
+	}, pillSpec))
+	uiapp.BindFloatingSurface(imePillPanel, pillSpec, uiapp.SurfaceHooks{
+		Dismiss: imePillPanel.Hide, Quitting: a.quitting.Load,
 	})
-	imePillPanel.OnClose(a.closeHides(imePillPanel.Hide))
 
 	sbW, sbH := uiapp.PreferredSelectionBarWidth(nil), 34
-	selectionBar := mygo.NewWindow(mygo.WindowOptions{
+	selectionSpec := surfaceSpec(sbH, uiapp.SurfaceElevationRaised, mygo.VibrancyGlass, uiapp.DismissExplicit, false)
+	selectionBar := mygo.NewWindow(uiapp.FloatingSurface(mygo.WindowOptions{
 		Title:         "Clavis Selection",
 		Width:         sbW,
 		Height:        sbH,
@@ -489,7 +489,6 @@ func (a *desktopApp) start() {
 		Frameless:     true,
 		Transparent:   true,
 		Vibrancy:      mygo.VibrancyGlass,
-		CornerRadius:  17,
 		DisableResize: true,
 		AlwaysOnTop:   true,
 		SkipTaskbar:   true,
@@ -497,10 +496,14 @@ func (a *desktopApp) start() {
 			cfg := controller.Config()
 			uiapp.SelectionBarView(c, a.selectionBarSnapshot(), cfg.Main.Appearance)
 		}),
+	}, selectionSpec))
+	uiapp.BindFloatingSurface(selectionBar, selectionSpec, uiapp.SurfaceHooks{
+		Dismiss: selectionBar.Hide, Quitting: a.quitting.Load,
 	})
-	selectionBar.OnClose(a.closeHides(selectionBar.Hide))
 
-	settingsWin := mygo.NewWindow(mygo.WindowOptions{
+	settingsSpec := surfaceSpec(640, uiapp.SurfaceElevationFlat, mygo.VibrancyNone, uiapp.DismissExplicit, true)
+	settingsSpec.Radius = uiapp.SurfaceRadius{Kind: uiapp.SurfaceRadiusSystem}
+	settingsWin := mygo.NewWindow(uiapp.FloatingSurface(mygo.WindowOptions{
 		Title:     i18n.T("tray.settings_window"),
 		Width:     960,
 		Height:    640,
@@ -509,10 +512,14 @@ func (a *desktopApp) start() {
 		Hidden:    true,
 		StateKey:  "settings",
 		Content:   ui.View(controller.SettingsView),
+	}, settingsSpec))
+	uiapp.BindFloatingSurface(settingsWin, settingsSpec, uiapp.SurfaceHooks{
+		Dismiss: settingsWin.Hide, RestoreFocus: a.restorePreviousAppFocus, Quitting: a.quitting.Load,
 	})
-	settingsWin.OnClose(a.closeHides(settingsWin.Hide))
 
-	onboardingWin := mygo.NewWindow(mygo.WindowOptions{
+	onboardingSpec := surfaceSpec(740, uiapp.SurfaceElevationFlat, mygo.VibrancyNone, uiapp.DismissExplicit, true)
+	onboardingSpec.Radius = uiapp.SurfaceRadius{Kind: uiapp.SurfaceRadiusSystem}
+	onboardingWin := mygo.NewWindow(uiapp.FloatingSurface(mygo.WindowOptions{
 		Title:     i18n.T("tray.onboarding_window"),
 		Width:     600,
 		Height:    740,
@@ -520,12 +527,14 @@ func (a *desktopApp) start() {
 		MinHeight: 520,
 		Hidden:    true,
 		Content:   ui.View(controller.OnboardingView),
-	})
+	}, onboardingSpec))
 	// Closing the guide finishes it, as Get Started does; a quit (a restart
 	// for Input Monitoring) closes it without, so it shows again after.
-	onboardingWin.OnClose(a.closeHides(a.finishOnboarding))
+	uiapp.BindFloatingSurface(onboardingWin, onboardingSpec, uiapp.SurfaceHooks{
+		Dismiss: a.finishOnboardingAndRestore, Quitting: a.quitting.Load,
+	})
 	controller.SetOnboardingHooks(uiapp.OnboardingHooks{
-		Finish:   a.finishOnboarding,
+		Finish:   a.finishOnboardingAndRestore,
 		Relaunch: func() { mygo.App.Relaunch() },
 	})
 
@@ -682,6 +691,33 @@ func (a *desktopApp) closeHides(hide func()) func(*mygo.CloseEvent) {
 		e.PreventDefault()
 		hide()
 	}
+}
+
+// restorePreviousAppFocus returns focus after a document-style surface closes.
+// MyGo has no API for activating an arbitrary external bundle, so the safe
+// fallback is to hide Clavis and let macOS reveal the previous application.
+// Never do this while another Clavis surface is visible, because App.Hide
+// would hide that surface as a side effect.
+func (a *desktopApp) restorePreviousAppFocus() {
+	a.mu.Lock()
+	capsule := a.capsulePanel
+	prompt := a.promptPanel
+	pill := a.imePillPanel
+	selection := a.selectionBar
+	settings := a.settingsWin
+	onboarding := a.onboardingWin
+	a.mu.Unlock()
+	for _, win := range []*mygo.Window{capsule, prompt, pill, selection, settings, onboarding} {
+		if win != nil && win.IsVisible() {
+			return
+		}
+	}
+	mygo.App.Hide()
+}
+
+func (a *desktopApp) finishOnboardingAndRestore() {
+	a.finishOnboarding()
+	a.restorePreviousAppFocus()
 }
 
 func (a *desktopApp) setupTray() {
