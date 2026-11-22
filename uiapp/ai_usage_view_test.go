@@ -112,6 +112,25 @@ func TestAIUsageBandUses56PointHeight(t *testing.T) {
 	}
 }
 
+func TestAIUsageBandUsesCallsForEmptyState(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	ctrl.aiUsageMu.Lock()
+	ctrl.aiUsageLoaded = true
+	ctrl.aiUsageDays = []AIUsageDay{{Requests: 1}, {Requests: 0}, {Requests: 0}, {Requests: 0}, {Requests: 0}, {Requests: 0}, {Requests: 0}}
+	ctrl.aiUsageMu.Unlock()
+
+	tt := ui.NewTester(func(c *ui.Context) {
+		ctrl.renderAIUsageBand(c, ui.LightTheme())
+	}, 240, aiUsageBandHeight+16)
+	tt.Frame()
+	if _, ok := tt.Find("ai-usage-chart"); !ok {
+		t.Fatalf("usage chart missing when calls exist without provider token usage: %v", tt.Texts())
+	}
+	if tt.HasText("近 7 日无 AI 调用记录") {
+		t.Fatal("empty state shown despite a recorded call")
+	}
+}
+
 func TestAIUsageRefreshIsAsyncAndCached(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
 	started := make(chan struct{})

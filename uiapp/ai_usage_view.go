@@ -76,7 +76,7 @@ func (a *AppController) renderAIUsageBand(c *ui.Context, theme *ui.Theme) {
 			ui.Text(c, "AI 用量暂不可用").Key("ai-usage-error").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 		case !loaded || refreshing:
 			ui.Text(c, "正在加载 AI 用量…").Key("ai-usage-loading").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
-		case aiUsageTotalTokens(days) == 0:
+		case aiUsageTotalRequests(days) == 0:
 			ui.Text(c, "近 7 日无 AI 调用记录").Key("ai-usage-empty").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 		default:
 			renderAIUsageChart(c, theme, days)
@@ -95,6 +95,14 @@ func aiUsageTotalTokens(days []AIUsageDay) int {
 	total := 0
 	for _, day := range days {
 		total += aiUsageTokens(day)
+	}
+	return total
+}
+
+func aiUsageTotalRequests(days []AIUsageDay) int {
+	total := 0
+	for _, day := range days {
+		total += day.Requests
 	}
 	return total
 }
