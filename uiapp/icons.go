@@ -54,6 +54,7 @@ func CoreSemanticIconNames() []string {
 		"person.crop.circle",
 		"info.circle",
 		"questionmark",
+		"exclamationmark.circle",
 		"eyedropper", "doc.on.doc", "trash",
 		// navigation & status
 		"chevron.right",
@@ -157,6 +158,7 @@ var semanticIconBodies = map[string]string{
 	"lock.fill":                `<rect width="18" height="11" x="3" y="11" rx="2" ry="2" fill="currentColor"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>`,
 	"square.3.layers.3d":       `<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>`,
 	"info.circle":              `<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>`,
+	"exclamationmark.circle":   `<circle cx="12" cy="12" r="10"/><path d="M12 7v6"/><path d="M12 17h.01"/>`,
 	"exclamationmark.triangle": `<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>`,
 }
 
