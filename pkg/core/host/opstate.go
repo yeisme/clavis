@@ -1,0 +1,24 @@
+package host
+
+import "time"
+
+// OperationState describes the observable outcome of a cross-process, file,
+// or network operation. Unknown means the caller cannot confirm the outcome.
+type OperationState string
+
+const (
+	StateReady      OperationState = "ready"
+	StateRefreshing OperationState = "refreshing"
+	StateDegraded   OperationState = "degraded"
+	StateFailed     OperationState = "failed"
+	StateUnknown    OperationState = "unknown"
+)
+
+// OperationResult is the stable, user-observable result contract for host operations.
+type OperationResult struct {
+	State      OperationState
+	Code       string
+	Message    string
+	ObservedAt time.Time
+	Retryable  bool
+}

@@ -8,13 +8,21 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yeisme/clavis/pkg/core/agentsession"
 	"github.com/yeisme/clavis/pkg/core/engine"
+	"github.com/yeisme/clavis/pkg/core/host"
 )
 
 type agentCommand struct{ ID, Label, Detail string }
+
+var agentOperationResults sync.Map
+var agentLatestResult struct {
+	sync.RWMutex
+	result host.OperationResult
+}
 
 var agentCommands = []agentCommand{
 	{ID: "continue", Label: "继续当前任务", Detail: "继续最近一轮工作"},
@@ -55,14 +63,21 @@ func (c *AppController) refreshAgentSessions() {
 		return
 	}
 	c.agentRefreshStarted = true
+	setAgentOperationResult(c, host.OperationResult{State: host.StateRefreshing, ObservedAt: time.Now()})
 	c.agentMu.Unlock()
 	home, _ := os.UserHomeDir()
 	db := filepath.Join(home, ".codex", "state_5.sqlite")
+	previousSessions, _ := c.cachedAgentData()
 	sessions, diagnostics := agentsession.Discover(context.Background(), agentsession.Options{CodexDB: db, CodexReader: codexSQLiteReader{path: db}})
+	result := agentOperationResult(sessions, diagnostics, len(previousSessions) > 0)
+	if result.State == host.StateUnknown {
+		diagnostics = append(diagnostics, agentsession.Diagnostic{Provider: "aggregate", Code: "unknown", Message: "状态未知"})
+	}
 	c.agentMu.Lock()
 	c.agentSessions = append([]agentsession.Session(nil), sessions...)
 	c.agentDiagnostics = append([]agentsession.Diagnostic(nil), diagnostics...)
 	c.agentRefreshStarted = false
+	setAgentOperationResult(c, result)
 	c.agentMu.Unlock()
 	c.mu.Lock()
 	repaint := c.OnRepaint
@@ -70,6 +85,61 @@ func (c *AppController) refreshAgentSessions() {
 	if repaint != nil {
 		repaint()
 	}
+}
+
+func agentStatusMessage(result host.OperationResult) string {
+	switch result.State {
+	case host.StateRefreshing:
+		return "刷新中…"
+	case host.StateDegraded:
+		if result.Message != "" {
+			return "部分源不可用 · " + result.Message
+		}
+		return "部分源不可用"
+	case host.StateFailed:
+		if result.Message != "" {
+			return result.Message
+		}
+		return "Agent 刷新失败"
+	case host.StateUnknown:
+		return "状态未知"
+	default:
+		return ""
+	}
+}
+
+func agentOperationResult(sessions []agentsession.Session, diagnostics []agentsession.Diagnostic, hadCache bool) host.OperationResult {
+	result := host.OperationResult{State: host.StateReady, ObservedAt: time.Now()}
+	if len(diagnostics) == 0 {
+		return result
+	}
+	result.Code = diagnostics[0].Code
+	result.Message = agentDiagnosticSummary(diagnostics)
+	result.Retryable = true
+	if len(sessions) > 0 || hadCache {
+		result.State = host.StateDegraded
+		return result
+	}
+	result.State = host.StateFailed
+	return result
+}
+
+func agentOperationResultUnknown() host.OperationResult {
+	return host.OperationResult{State: host.StateUnknown, ObservedAt: time.Now(), Retryable: false}
+}
+
+func agentDiagnosticSummary(diagnostics []agentsession.Diagnostic) string {
+	providers := make([]string, 0, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		provider := agentProviderLabel(diagnostic.Provider)
+		if provider != "" {
+			providers = append(providers, provider)
+		}
+	}
+	if len(providers) == 0 {
+		return "Agent 数据源不可用"
+	}
+	return strings.Join(providers, "、") + " 数据源不可用"
 }
 
 func (c *AppController) cachedAgentData() ([]agentsession.Session, []agentsession.Diagnostic) {
@@ -82,6 +152,20 @@ func (c *AppController) agentRefreshing() bool {
 	c.agentMu.RLock()
 	defer c.agentMu.RUnlock()
 	return c.agentRefreshStarted
+}
+
+func (c *AppController) agentOperationResult() host.OperationResult {
+	if value, ok := agentOperationResults.Load(c); ok {
+		return value.(host.OperationResult)
+	}
+	return host.OperationResult{State: host.StateUnknown, ObservedAt: time.Now(), Retryable: false}
+}
+
+func setAgentOperationResult(c *AppController, result host.OperationResult) {
+	agentOperationResults.Store(c, result)
+	agentLatestResult.Lock()
+	agentLatestResult.result = result
+	agentLatestResult.Unlock()
 }
 
 func (c *AppController) agentVisibleItems(query string) []engine.OmniboxItem {
@@ -156,7 +240,14 @@ func agentItems(sessions []agentsession.Session, diagnostics []agentsession.Diag
 		}
 		return items
 	}
-	items := make([]engine.OmniboxItem, 0, len(sessions)+len(diagnostics))
+	items := make([]engine.OmniboxItem, 0, len(sessions)+len(diagnostics)+1)
+	agentLatestResult.RLock()
+	result := agentLatestResult.result
+	agentLatestResult.RUnlock()
+	if trimmed == "" && result.State != "" && result.State != host.StateReady {
+		retryable := result.Retryable && result.State != host.StateUnknown
+		items = append(items, engine.OmniboxItem{ID: "agent-status:" + string(result.State), Title: agentStatusMessage(result), Subtitle: agentStatusSubtitle(result), Icon: "info.circle", Kind: engine.ItemUtility, UtilityValue: "agent-refresh-status", KeyHint: map[bool]string{true: "R", false: ""}[retryable]})
+	}
 	for _, session := range sessions {
 		searchable := strings.ToLower(strings.Join([]string{session.Title, session.LastMessage, session.Provider, session.Workspace, session.ID}, " "))
 		if trimmed != "" && !strings.Contains(searchable, strings.ToLower(trimmed)) {
@@ -167,18 +258,34 @@ func agentItems(sessions []agentsession.Session, diagnostics []agentsession.Diag
 			subtitle += " · 待验收"
 		}
 		if session.LastMessage != "" {
-			subtitle += " · " + session.LastMessage
+			subtitle += " · " + agentsession.SanitizeDiagnosticText(session.LastMessage)
 		}
 		items = append(items, engine.OmniboxItem{ID: "agent-session:" + session.Provider + ":" + session.ID, Title: session.Title, Subtitle: subtitle, Keywords: []string{session.Provider, session.Workspace, session.ID, session.LastMessage}, Icon: "person.crop.circle", Kind: engine.ItemUtility, UtilityValue: "agent-session:" + session.Provider + ":" + session.ID})
 	}
 	for _, diagnostic := range diagnostics {
-		items = append(items, engine.OmniboxItem{ID: "agent-diagnostic:" + diagnostic.Provider + ":" + diagnostic.Code, Title: agentProviderLabel(diagnostic.Provider), Subtitle: "诊断：" + diagnostic.Message, Icon: "info.circle", Kind: engine.ItemUtility, UtilityValue: "agent-diagnostic"})
+		items = append(items, engine.OmniboxItem{ID: "agent-diagnostic:" + diagnostic.Provider + ":" + diagnostic.Code, Title: agentProviderLabel(diagnostic.Provider), Subtitle: "诊断：" + agentsession.SanitizeDiagnosticText(diagnostic.Message), Icon: "info.circle", Kind: engine.ItemUtility, UtilityValue: "agent-diagnostic"})
 	}
 	return items
+}
+
+func agentStatusSubtitle(result host.OperationResult) string {
+	if result.State == host.StateFailed && result.Retryable {
+		return "点击重试"
+	}
+	if result.State == host.StateUnknown {
+		return "请手动刷新确认"
+	}
+	return ""
 }
 func isAgentItem(item engine.OmniboxItem) bool { return strings.HasPrefix(item.ID, "agent-") }
 func (c *AppController) agentItemAction(item engine.OmniboxItem) bool {
 	value := item.UtilityValue
+	if value == "agent-refresh-status" {
+		if c.agentRefreshRetryable() {
+			c.AgentRefresh()
+		}
+		return true
+	}
 	if strings.HasPrefix(value, "agent-command:") {
 		message := ""
 		for _, command := range agentCommands {
@@ -227,3 +334,7 @@ func (c *AppController) agentItemAction(item engine.OmniboxItem) bool {
 	return true
 }
 func (c *AppController) AgentRefresh() { go c.refreshAgentSessions() }
+
+func (c *AppController) agentRefreshRetryable() bool {
+	return c.agentOperationResult().Retryable && c.agentOperationResult().State != host.StateUnknown
+}

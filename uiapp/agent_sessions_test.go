@@ -1,6 +1,7 @@
 package uiapp
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/yeisme/clavis/pkg/core/agentsession"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
+	"github.com/yeisme/clavis/pkg/core/host"
 )
 
 func TestAgentItemsConversationAndCommandCompletion(t *testing.T) {
@@ -55,5 +57,52 @@ func TestAgentTabShowsLoadingStateDuringRefresh(t *testing.T) {
 	tt.Frame()
 	if !tt.HasText("正在加载 Agent 会话…") {
 		t.Fatalf("loading state missing: %v", tt.Texts())
+	}
+}
+
+func TestAgentStatusMessageRendersFailureStateWithTester(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	result := host.OperationResult{State: host.StateFailed, Message: "Codex 数据源不可用", Retryable: true}
+	setAgentOperationResult(ctrl, result)
+	tt := ui.NewTester(func(c *ui.Context) {
+		ui.Text(c, agentStatusMessage(result)).Key("agent-refresh-status")
+	}, 260, 40)
+	tt.Frame()
+	if !tt.HasText("Codex 数据源不可用") {
+		t.Fatalf("status text missing: %v", tt.Texts())
+	}
+}
+
+func TestAgentOperationResultStatesAndUnknownDoesNotRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		sessions    int
+		diagnostics int
+		hadCache    bool
+		want        host.OperationState
+	}{
+		{"ready", 1, 0, false, host.StateReady},
+		{"degraded", 1, 1, true, host.StateDegraded},
+		{"failed", 0, 1, false, host.StateFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sessions := make([]agentsession.Session, tc.sessions)
+			diagnostics := make([]agentsession.Diagnostic, tc.diagnostics)
+			got := agentOperationResult(sessions, diagnostics, tc.hadCache)
+			if got.State != tc.want {
+				t.Fatalf("state=%s want %s", got.State, tc.want)
+			}
+		})
+	}
+	unknown := host.OperationResult{State: host.StateUnknown, Retryable: false}
+	if unknown.Retryable || agentStatusMessage(unknown) != "状态未知" {
+		t.Fatalf("unknown result=%+v", unknown)
+	}
+}
+
+func TestAgentDiagnosticTextIsRedactedBeforeUI(t *testing.T) {
+	items := agentItems(nil, []agentsession.Diagnostic{{Provider: "codex", Code: "read_failed", Message: "token=sk-abcdefghijklmnopqrstuvwxyz /Users/alice/private"}}, "")
+	if len(items) < 1 || strings.Contains(items[len(items)-1].Subtitle, "sk-abcdefghijklmnopqrstuvwxyz") || strings.Contains(items[len(items)-1].Subtitle, "/Users/alice") {
+		t.Fatalf("diagnostic leaked secret/path: %+v", items)
 	}
 }

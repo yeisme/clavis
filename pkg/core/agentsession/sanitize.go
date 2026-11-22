@@ -30,6 +30,12 @@ func sanitizeMessage(s string) string {
 	return s
 }
 
+// SanitizeDiagnosticText removes secrets, absolute paths, code and verbose
+// payloads before diagnostic text crosses into the user-facing UI.
+func SanitizeDiagnosticText(s string) string {
+	return sanitizeMessage(s)
+}
+
 func basename(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
