@@ -17,6 +17,92 @@ const (
 	lexiconSparklineDot     float32 = 4
 )
 
+func (a *AppController) ensureLexiconTopWordsRefresh() {
+	a.lexiconTopWordsMu.Lock()
+	if a.lexiconTopWordsLoaded || a.lexiconTopWordsRefreshing {
+		a.lexiconTopWordsMu.Unlock()
+		return
+	}
+	reader := a.lexiconTopWordsReader
+	a.lexiconTopWordsRefreshing = true
+	a.lexiconTopWordsMu.Unlock()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		var words []LexiconTopWord
+		var err error
+		if reader == nil {
+			err = context.Canceled
+		} else {
+			words, err = reader(ctx, 5)
+		}
+		a.lexiconTopWordsMu.Lock()
+		a.lexiconTopWords = append([]LexiconTopWord(nil), words...)
+		a.lexiconTopWordsErr = err
+		a.lexiconTopWordsLoaded = true
+		a.lexiconTopWordsRefreshing = false
+		a.lexiconTopWordsMu.Unlock()
+		a.mu.Lock()
+		repaint := a.OnRepaint
+		a.mu.Unlock()
+		if repaint != nil {
+			repaint()
+		}
+	}()
+}
+
+func (a *AppController) lexiconTopWordsSnapshot() ([]LexiconTopWord, error, bool) {
+	a.lexiconTopWordsMu.RLock()
+	defer a.lexiconTopWordsMu.RUnlock()
+	return append([]LexiconTopWord(nil), a.lexiconTopWords...), a.lexiconTopWordsErr, a.lexiconTopWordsLoaded
+}
+
+func lexiconTopWordMap(words []LexiconTopWord) (map[string]int, int) {
+	out := make(map[string]int, len(words))
+	maxUse := 0
+	for _, word := range words {
+		if word.Word == "" || word.UseCount <= 0 {
+			continue
+		}
+		out[word.Word] = word.UseCount
+		if word.UseCount > maxUse {
+			maxUse = word.UseCount
+		}
+	}
+	return out, maxUse
+}
+
+func lexiconMicrobarWidth(useCount, maxUse int) float32 {
+	if useCount <= 0 || maxUse <= 0 {
+		return 0
+	}
+	width := float32(44) * float32(useCount) / float32(maxUse)
+	if width < 2 {
+		return 2
+	}
+	return width
+}
+
+func lexiconMicrobarColor(useCount, maxUse int) ui.Color {
+	if useCount == maxUse && maxUse > 0 {
+		return ui.Hex("#0A84FF")
+	}
+	levels := []float32{0.65, 0.38, 0.22, 0.12}
+	level := 3
+	if maxUse > 0 {
+		ratio := float32(useCount) / float32(maxUse)
+		switch {
+		case ratio >= 0.75:
+			level = 0
+		case ratio >= 0.50:
+			level = 1
+		case ratio >= 0.25:
+			level = 2
+		}
+	}
+	return ui.Hex("#8E8E93").Alpha(levels[level])
+}
+
 func (a *AppController) ensureLexiconHitsRefresh() {
 	a.lexiconHitsMu.Lock()
 	if a.lexiconHitsLoaded || a.lexiconHitsRefreshStarted {

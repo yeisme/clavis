@@ -77,6 +77,12 @@ type LexiconHitDay struct {
 	Hits, Misses int
 }
 
+// LexiconTopWord is a displayable glossary word ranked by cumulative use.
+type LexiconTopWord struct {
+	Word     string
+	UseCount int
+}
+
 type lexKey struct{ pinyin, word, prev string }
 type lexValue struct {
 	frequency int64
@@ -526,6 +532,54 @@ func (s *LearningStore) customUserCandidatesForPrefix(prefix string) []ime.UserC
 		out = out[:maxCustomPrefixCandidates]
 	}
 	return out
+}
+
+// LexiconTopWords returns the most-used stored glossary words. Unknown item IDs
+// are skipped rather than displayed as internal identifiers; ties are stable.
+func (s *LearningStore) LexiconTopWords(ctx context.Context, n int) ([]LexiconTopWord, error) {
+	if n <= 0 {
+		return []LexiconTopWord{}, nil
+	}
+	if s == nil || s.db == nil {
+		return []LexiconTopWord{}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(ctx, `SELECT item_id, use_count FROM usage_frecency WHERE use_count > 0 ORDER BY use_count DESC, last_used_ns DESC, item_id ASC LIMIT ?`, MaxUsesMirrorEntries)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]LexiconTopWord, 0, min(n, len(rows.Values)))
+	for _, row := range rows.Values {
+		if len(row) < 2 {
+			continue
+		}
+		word, ok := glossaryWordFromItemID(str(row, 0))
+		if !ok {
+			continue
+		}
+		count := int(int64val(row, 1))
+		if count <= 0 {
+			continue
+		}
+		out = append(out, LexiconTopWord{Word: word, UseCount: count})
+		if len(out) == n {
+			break
+		}
+	}
+	return out, nil
+}
+
+func glossaryWordFromItemID(itemID string) (string, bool) {
+	parts := strings.SplitN(itemID, ":", 3)
+	if len(parts) != 3 || parts[0] != "glossary" || strings.TrimSpace(parts[2]) == "" {
+		return "", false
+	}
+	return parts[2], true
 }
 
 func (s *LearningStore) RecordItemUse(ctx context.Context, itemID string, now time.Time) error {

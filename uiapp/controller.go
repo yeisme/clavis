@@ -135,6 +135,13 @@ type LexiconHitDay struct {
 // Implementations must perform I/O off the UI thread.
 type LexiconHitsDailyReader func(context.Context, int) ([]LexiconHitDay, error)
 
+type LexiconTopWord struct {
+	Word     string
+	UseCount int
+}
+
+type LexiconTopWordsReader func(context.Context, int) ([]LexiconTopWord, error)
+
 func defaultAIUsageDailyReader(store clipboard.Store) AIUsageDailyReader {
 	sqliteStore, ok := store.(*internalstorage.SQLiteClipboardStore)
 	if !ok || sqliteStore == nil {
@@ -159,6 +166,35 @@ func defaultAIUsageDailyReader(store clipboard.Store) AIUsageDailyReader {
 		out := make([]AIUsageDay, len(days))
 		for i, day := range days {
 			out[i] = AIUsageDay{Day: day.Day, Requests: day.Requests, InputTokens: day.InputTokens, OutputTokens: day.OutputTokens}
+		}
+		return out, nil
+	}
+}
+
+func defaultLexiconTopWordsReader(store clipboard.Store) LexiconTopWordsReader {
+	sqliteStore, ok := store.(*internalstorage.SQLiteClipboardStore)
+	if !ok || sqliteStore == nil {
+		return func(context.Context, int) ([]LexiconTopWord, error) {
+			return nil, errors.New("lexicon top words storage is unavailable")
+		}
+	}
+	var once sync.Once
+	var learningStore *internalstorage.LearningStore
+	var initErr error
+	return func(ctx context.Context, n int) ([]LexiconTopWord, error) {
+		once.Do(func() {
+			learningStore, initErr = internalstorage.NewLearningStore(sqliteStore.DB())
+		})
+		if initErr != nil {
+			return nil, initErr
+		}
+		words, err := learningStore.LexiconTopWords(ctx, n)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]LexiconTopWord, len(words))
+		for i, word := range words {
+			out[i] = LexiconTopWord{Word: word.Word, UseCount: word.UseCount}
 		}
 		return out, nil
 	}
@@ -211,6 +247,7 @@ type Options struct {
 	ClipboardSearcher        ClipboardSearcher
 	AIUsageDaily             AIUsageDailyReader
 	LexiconHitsDaily         LexiconHitsDailyReader
+	LexiconTopWords          LexiconTopWordsReader
 	SecretStore              secrets.APIKeyStore
 	Bridge                   bridge.HostService
 	AppProvider              apps.AppProvider
@@ -477,6 +514,12 @@ type AppController struct {
 	lexiconHitsRefreshStarted bool
 	lexiconHitsErr            error
 	lexiconHitsReader         LexiconHitsDailyReader
+	lexiconTopWordsReader     LexiconTopWordsReader
+	lexiconTopWordsMu         sync.RWMutex
+	lexiconTopWords           []LexiconTopWord
+	lexiconTopWordsLoaded     bool
+	lexiconTopWordsRefreshing bool
+	lexiconTopWordsErr        error
 
 	// Ephemeral UI state (used on the UI build thread)
 	uiState uiViewState
@@ -590,6 +633,10 @@ func NewAppController(opts Options) *AppController {
 	c.lexiconHitsReader = opts.LexiconHitsDaily
 	if c.lexiconHitsReader == nil {
 		c.lexiconHitsReader = defaultLexiconHitsDailyReader(clipStore)
+	}
+	c.lexiconTopWordsReader = opts.LexiconTopWords
+	if c.lexiconTopWordsReader == nil {
+		c.lexiconTopWordsReader = defaultLexiconTopWordsReader(clipStore)
 	}
 	c.clipCond = sync.NewCond(&c.clipMu)
 

@@ -18,6 +18,31 @@ func testLexiconHitDays(days ...LexiconHitDay) []LexiconHitDay {
 	return days
 }
 
+func TestLexiconMicrobarGeometryAndColors(t *testing.T) {
+	if got := lexiconMicrobarWidth(1, 100); got != 2 {
+		t.Fatalf("minimum width=%v, want 2", got)
+	}
+	if got := lexiconMicrobarWidth(5, 10); got != 22 {
+		t.Fatalf("half width=%v, want 22", got)
+	}
+	if got := lexiconMicrobarWidth(10, 10); got != 44 {
+		t.Fatalf("maximum width=%v, want 44", got)
+	}
+	words, maxUse := lexiconTopWordMap([]LexiconTopWord{{Word: "a", UseCount: 10}, {Word: "b", UseCount: 5}, {Word: "zero", UseCount: 0}})
+	if maxUse != 10 || words["zero"] != 0 {
+		t.Fatalf("top word map=%v max=%d", words, maxUse)
+	}
+	if got := lexiconMicrobarColor(10, 10); got != ui.Hex("#0A84FF") {
+		t.Fatalf("maximum color=%v, want #0A84FF", got)
+	}
+	if lexiconMicrobarColor(5, 10) == lexiconMicrobarColor(1, 10) {
+		t.Fatal("gray microbar levels should vary by relative frequency")
+	}
+	if _, max := lexiconTopWordMap([]LexiconTopWord{{Word: "zero", UseCount: 0}}); max != 0 {
+		t.Fatalf("all-zero max=%d, want 0", max)
+	}
+}
+
 func TestLexiconStatsBandAndSparklineGeometry(t *testing.T) {
 	days := testLexiconHitDays()
 	for i := range days {
@@ -95,6 +120,56 @@ func TestLexiconStatsBandHidesSparklineWithoutActivity(t *testing.T) {
 	}
 	if !tt.HasText("已收录 42 词") {
 		t.Fatalf("catalog fallback missing: %v", tt.Texts())
+	}
+}
+
+func TestLexiconTopWordsRefreshIsAsyncAndCached(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	calls := 0
+	ctrl.lexiconTopWordsReader = func(ctx context.Context, n int) ([]LexiconTopWord, error) {
+		calls++
+		if n != 5 {
+			t.Fatalf("top window = %d, want 5", n)
+		}
+		close(started)
+		select {
+		case <-release:
+			return []LexiconTopWord{{Word: "alpha", UseCount: 4}}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	ctrl.ensureLexiconTopWordsRefresh()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("top words reader did not start asynchronously")
+	}
+	ctrl.lexiconTopWordsMu.RLock()
+	loaded := ctrl.lexiconTopWordsLoaded
+	ctrl.lexiconTopWordsMu.RUnlock()
+	if loaded {
+		t.Fatal("top cache marked loaded before reader returned")
+	}
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		ctrl.lexiconTopWordsMu.RLock()
+		loaded = ctrl.lexiconTopWordsLoaded
+		ctrl.lexiconTopWordsMu.RUnlock()
+		if loaded {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !loaded {
+		t.Fatal("top result was not cached")
+	}
+	ctrl.ensureLexiconTopWordsRefresh()
+	if calls != 1 {
+		t.Fatalf("reader calls = %d, want cached one-shot refresh", calls)
 	}
 }
 

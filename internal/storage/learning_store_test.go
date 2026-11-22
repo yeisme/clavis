@@ -50,6 +50,54 @@ func TestAIUsageDailyIncludesZeroDaysAndAggregates(t *testing.T) {
 	}
 }
 
+func TestLexiconTopWordsSortsSkipsZeroAndUnknownDeterministically(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, ":memory:", sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewLearningStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(100, 0)
+	for i := 0; i < 3; i++ {
+		if err := store.RecordItemUse(ctx, "glossary:0:alpha", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := store.RecordItemUse(ctx, "glossary:1:beta", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.RecordItemUse(ctx, "glossary:2:zero", at); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Execute(ctx, `UPDATE usage_frecency SET use_count=0 WHERE item_id=?`, "glossary:2:zero"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordItemUse(ctx, "leader:path#0", at); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.LexiconTopWords(ctx, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []LexiconTopWord{{Word: "alpha", UseCount: 3}, {Word: "beta", UseCount: 2}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("top words=%+v want=%+v", got, want)
+	}
+	again, err := store.LexiconTopWords(ctx, 5)
+	if err != nil || !reflect.DeepEqual(got, again) {
+		t.Fatalf("top words not deterministic: got=%+v again=%+v err=%v", got, again, err)
+	}
+	if got, err := store.LexiconTopWords(ctx, 0); err != nil || len(got) != 0 {
+		t.Fatalf("n<=0 result=%v err=%v", got, err)
+	}
+}
+
 func TestLexiconHitsDailyIncludesZeroDaysAndBatchesAsync(t *testing.T) {
 	ctx := context.Background()
 	db, err := sqlite.Open(ctx, ":memory:", sqlite.OpenOptions{})

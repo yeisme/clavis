@@ -61,6 +61,7 @@ const (
 // Radii beyond the original set: markers, inline controls, panels and the
 // two-segment pill. Everything else keeps the 5/6/7/9/10/999 ramp above.
 const (
+	radius2       float32 = 2  // glossary micro bars
 	radius4       float32 = 4  // underline, marker-pen edge
 	radius8       float32 = 8  // inline controls: fields, steppers, swatches
 	radius12      float32 = 12 // panels and stage cards

@@ -522,6 +522,8 @@ func (a *AppController) renderOmniboxView(
 			a.renderAIUsageBand(c, theme)
 		}
 		if state.OmniboxTab == config.TabGlossary {
+			a.ensureLexiconHitsRefresh()
+			a.ensureLexiconTopWordsRefresh()
 			days, err, loaded, _ := a.lexiconHitsSnapshot()
 			renderLexiconStatsBand(c, theme, days, loaded, err, len(cfg.Glossary.Terms))
 		}
@@ -790,6 +792,15 @@ func (a *AppController) renderOmniboxView(
 
 							if cfg.Main.Appearance.ShowKeyHints && item.KeyHint != "" && item.KeyHint != engine.KeyHintPinned {
 								keyHint(c, theme, item.KeyHint, "", keyToneNeutral)
+							}
+							if state.OmniboxTab == config.TabGlossary && item.Kind == engine.ItemGlossaryTerm {
+								words, _, _ := a.lexiconTopWordsSnapshot()
+								uses, maxUse := lexiconTopWordMap(words)
+								if use := uses[item.Title]; maxUse > 0 && use > 0 {
+									width := lexiconMicrobarWidth(use, maxUse)
+									color := lexiconMicrobarColor(use, maxUse)
+									ui.Box(c).Width(width).Height(4).Radius(radius2).Background(color).Shrink(0)
+								}
 							}
 							if altHeld && i < 9 {
 								keyHint(c, theme, quickIndexLabel(i), "", keyToneAccent)
