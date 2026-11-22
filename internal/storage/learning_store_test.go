@@ -4,13 +4,16 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/egoist/mygo/plugins/sqlite"
 	"github.com/yeisme/clavis/pkg/core/inputengine"
+	"github.com/yeisme/clavis/pkg/core/inputmigration"
 )
 
 func TestAIUsageDailyIncludesZeroDaysAndAggregates(t *testing.T) {
@@ -175,6 +178,87 @@ func TestLearningStoreBigramWordsForPrefixUsesRAMMirror(t *testing.T) {
 	if len(candidates) == 0 || candidates[0].Text != "我们" {
 		t.Fatalf("bigram candidate generation = %+v", candidates)
 	}
+}
+
+func TestLearningReadMergeKeepsPerDeviceFiles(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, ":memory:", sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewLearningStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordIMECommit(ctx, "nihao", "你好", "", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordIMECommit(ctx, "shijie", "世界", "你好", false); err != nil {
+		t.Fatal(err)
+	}
+	snapshotDir := t.TempDir()
+	if err := store.WriteDeviceLearningSnapshot(snapshotDir, "mini"); err != nil {
+		t.Fatal(err)
+	}
+	otherDB, err := sqlite.Open(ctx, ":memory:", sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer otherDB.Close()
+	other, err := NewLearningStore(otherDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := other.RecordIMECommit(ctx, "nihao", "你好", "", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.RecordIMECommit(ctx, "shijie", "世界", "你好", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.RecordIMECommit(ctx, "zaijian", "再见", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.WriteDeviceLearningSnapshot(snapshotDir, "windows"); err != nil {
+		t.Fatal(err)
+	}
+	for _, device := range []string{"mini", "windows"} {
+		if _, err := os.Stat(filepath.Join(snapshotDir, device+learningSnapshotSuffix)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	merged, pending, err := ReadMergedLearning(snapshotDir, []string{"mini", "windows"}, nil)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("merged=%+v pending=%v err=%v", merged, pending, err)
+	}
+	want := inputmigration.MergeLearning(snapshotForTest(store), snapshotForTest(other))
+	if !reflect.DeepEqual(merged, want) {
+		t.Fatalf("merged learning differs from MergeLearning:\n got=%+v\nwant=%+v", merged, want)
+	}
+	result, err := ReadMergedLearningSnapshots(snapshotDir, []string{"mini"}, nil)
+	if err != nil || len(result.PendingDevices) != 1 || result.PendingDevices[0] != "windows" || len(result.Diagnostics) != 1 {
+		t.Fatalf("unknown device result=%+v err=%v", result, err)
+	}
+}
+
+func snapshotForTest(s *LearningStore) inputmigration.LearningData {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var words []inputmigration.LearningEntry
+	for key, value := range s.lex {
+		if key.prev == "" {
+			entry := inputmigration.NewLearningEntry(key.pinyin, key.word, uint64(value.frequency), value.pinned)
+			entry.LastUsedNS = value.lastUsed
+			words = append(words, entry)
+		}
+	}
+	var bigrams []inputmigration.BigramEntry
+	for key, value := range s.bigrams {
+		entry := inputmigration.NewBigramEntry(key[0], key[1], uint64(value.frequency))
+		entry.LastUsedNS = value.lastUsed
+		bigrams = append(bigrams, entry)
+	}
+	return inputmigration.LearningData{Enabled: len(words) > 0 || len(bigrams) > 0, Words: words, Bigrams: bigrams}
 }
 
 func BenchmarkLearningStoreLookupBoost(b *testing.B) {
