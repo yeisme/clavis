@@ -54,6 +54,7 @@ func CoreSemanticIconNames() []string {
 		"person.crop.circle",
 		"info.circle",
 		"questionmark",
+		"eyedropper", "doc.on.doc", "trash",
 		// navigation & status
 		"chevron.right",
 		"chevron.left",
@@ -135,9 +136,12 @@ var semanticIconBodies = map[string]string{
 	// Clipboard content kinds (names match SF Symbols so macOS draws the
 	// native glyph and other platforms these vectors).
 	"link":        `<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>`,
+	"eyedropper":  `<path d="m14 4 6 6"/><path d="m12 6 6 6"/><path d="m5 19 8-8"/><path d="m3 21 3-1 8-8-3-3-8 8z"/>`,
 	"envelope":    `<rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>`,
 	"curlybraces": `<path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1"/><path d="M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1"/>`,
 	"doc.text":    `<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>`,
+	"doc.on.doc":  `<path d="M8 8h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2Z"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h0"/>`,
+	"trash":       `<path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="m6 7 1 14h10l1-14"/><path d="M9 7V4h6v3"/>`,
 
 	// Media and workflow kinds (SF Symbols names: macOS draws the native
 	// glyph; these vectors draw them on Windows and in headless renders,
@@ -226,7 +230,7 @@ func renderSemanticIcon(c *ui.Context, name string, size float32, color ui.Color
 	}
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
-		trimmed = "bolt"
+		trimmed = "command"
 	}
 	if runtime.GOOS == "darwin" && mygo.App.IsReady() && sfsymbols.Available() {
 		return sfsymbols.Symbol(c, trimmed).

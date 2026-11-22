@@ -169,6 +169,38 @@ func TestClipboardContentIcon(t *testing.T) {
 	}
 }
 
+func TestClipboardContentIconsCoverSixTypes(t *testing.T) {
+	got := map[string]string{
+		"text":  clipboardContentIcon("plain words", ""),
+		"link":  clipboardContentIcon("example.com", ""),
+		"code":  clipboardContentIcon("func main() {}", ""),
+		"color": clipboardContentIcon("#3B82F6", ""),
+		"file":  clipboardContentIcon("/Users/me/Projects/clavis/main.go", ""),
+		"image": "photo",
+	}
+	seen := map[string]string{}
+	for kind, icon := range got {
+		if icon == "" {
+			t.Fatalf("%s has no semantic icon", kind)
+		}
+		if previous, ok := seen[icon]; ok {
+			t.Fatalf("%s and %s share icon %q", kind, previous, icon)
+		}
+		seen[icon] = kind
+	}
+}
+
+func TestFallbackActionIconUsesNeutralFourLevelFallback(t *testing.T) {
+	if got := fallbackActionIcon("missing-symbol", "Unknown action", ""); got != "command" {
+		t.Fatalf("unknown explicit icon fell back to %q, want command", got)
+	}
+	for title, want := range map[string]string{"Search files": "search", "Delete item": "trash", "Translate text": "globe", "AI rewrite": "sparkles"} {
+		if got := fallbackActionIcon("", title, ""); got != want {
+			t.Errorf("fallbackActionIcon(%q) = %q, want %q", title, got, want)
+		}
+	}
+}
+
 func TestParseHexSwatch(t *testing.T) {
 	for _, ok := range []string{"#3B82F6", "#fff", "#3b82f680", " #ABCD "} {
 		if _, got := parseHexSwatch(ok); !got {

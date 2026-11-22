@@ -102,8 +102,10 @@ func clipboardContentIcon(content, fallback string) string {
 	lower := strings.ToLower(head)
 	singleLine := !truncated && !strings.ContainsAny(head, "\r\n")
 	switch {
-	case singleLine && (strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "www.")):
+	case singleLine && (strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "www.") || looksLikeDomain(head)):
 		return "link"
+	case singleLine && isColorText(head):
+		return "eyedropper"
 	case singleLine && looksLikeEmail(head):
 		return "envelope"
 	case singleLine && looksLikePath(head):
@@ -115,6 +117,32 @@ func clipboardContentIcon(content, fallback string) string {
 	default:
 		return "doc.text"
 	}
+}
+
+func looksLikeDomain(s string) bool {
+	if strings.ContainsAny(s, " 	/@") || !strings.Contains(s, ".") {
+		return false
+	}
+	parts := strings.Split(s, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-') {
+				return false
+			}
+		}
+	}
+	return len(parts[len(parts)-1]) >= 2
+}
+
+func isColorText(s string) bool {
+	_, ok := parseHexSwatch(s)
+	return ok
 }
 
 // clipboardSniffBytes bounds how much of an entry the per-row classifiers read.
