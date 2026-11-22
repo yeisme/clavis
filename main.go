@@ -404,10 +404,10 @@ func (a *desktopApp) start() {
 	})
 
 	initW, initH := uiapp.PreferredCapsuleSize(engine.PhaseLeader, cfg.Main.Appearance)
-	surfaceSpec := func(height int, elevation int, blur mygo.Vibrancy, dismiss uiapp.SurfaceDismissPolicy, focusRestore bool) uiapp.SurfaceSpec {
+	surfaceSpec := func(height int, elevation int, blur mygo.Vibrancy, dismiss uiapp.SurfaceDismissPolicy, focusRestore uiapp.SurfaceFocusRestore) uiapp.SurfaceSpec {
 		return uiapp.FloatingSurfaceSpecWithElevation(cfg.Main.Appearance, height, elevation, blur, dismiss, focusRestore)
 	}
-	capsuleSpec := surfaceSpec(initH, uiapp.SurfaceElevationPanel, mygo.VibrancyGlass, uiapp.DismissExplicit|uiapp.DismissEscape|uiapp.DismissOutsideClick, true)
+	capsuleSpec := surfaceSpec(initH, uiapp.SurfaceElevationPanel, mygo.VibrancyGlass, uiapp.DismissExplicit|uiapp.DismissEscape|uiapp.DismissOutsideClick, uiapp.FocusPanel)
 	capsulePanel := mygo.NewWindow(uiapp.FloatingSurface(mygo.WindowOptions{
 		Title:         appName,
 		Width:         initW,
@@ -435,7 +435,7 @@ func (a *desktopApp) start() {
 	})
 
 	promptW, promptH := uiapp.PreferredPromptComposerPanelSize(2)
-	promptSpec := surfaceSpec(promptH, uiapp.SurfaceElevationPanel, mygo.VibrancyGlass, uiapp.DismissExplicit|uiapp.DismissEscape|uiapp.DismissOutsideClick, true)
+	promptSpec := surfaceSpec(promptH, uiapp.SurfaceElevationPanel, mygo.VibrancyGlass, uiapp.DismissExplicit|uiapp.DismissEscape|uiapp.DismissOutsideClick, uiapp.FocusPanel)
 	promptPanel := mygo.NewWindow(uiapp.FloatingSurface(mygo.WindowOptions{
 		Title:         i18n.T("prompts.composer_title"),
 		Width:         promptW,
@@ -457,7 +457,7 @@ func (a *desktopApp) start() {
 	})
 
 	pillW, pillH := uiapp.PreferredIMEPillSize()
-	pillSpec := surfaceSpec(pillH, uiapp.SurfaceElevationIndicator, mygo.VibrancyGlass, uiapp.DismissExplicit, false)
+	pillSpec := surfaceSpec(pillH, uiapp.SurfaceElevationIndicator, mygo.VibrancyGlass, uiapp.DismissExplicit, uiapp.FocusNever)
 	imePillPanel := mygo.NewWindow(uiapp.FloatingSurface(mygo.WindowOptions{
 		Title:         i18n.T("tray.ime_window"),
 		Width:         pillW,
@@ -479,7 +479,7 @@ func (a *desktopApp) start() {
 	})
 
 	sbW, sbH := uiapp.PreferredSelectionBarWidth(nil), 34
-	selectionSpec := surfaceSpec(sbH, uiapp.SurfaceElevationRaised, mygo.VibrancyGlass, uiapp.DismissExplicit, false)
+	selectionSpec := surfaceSpec(sbH, uiapp.SurfaceElevationRaised, mygo.VibrancyGlass, uiapp.DismissExplicit, uiapp.FocusNever)
 	selectionBar := mygo.NewWindow(uiapp.FloatingSurface(mygo.WindowOptions{
 		Title:         "Clavis Selection",
 		Width:         sbW,
@@ -501,7 +501,7 @@ func (a *desktopApp) start() {
 		Dismiss: selectionBar.Hide, Quitting: a.quitting.Load,
 	})
 
-	settingsSpec := surfaceSpec(640, uiapp.SurfaceElevationFlat, mygo.VibrancyNone, uiapp.DismissExplicit, true)
+	settingsSpec := surfaceSpec(640, uiapp.SurfaceElevationFlat, mygo.VibrancyNone, uiapp.DismissExplicit, uiapp.FocusPreviousApp)
 	settingsSpec.Radius = uiapp.SurfaceRadius{Kind: uiapp.SurfaceRadiusSystem}
 	settingsWin := mygo.NewWindow(uiapp.FloatingSurface(mygo.WindowOptions{
 		Title:     i18n.T("tray.settings_window"),
@@ -517,7 +517,7 @@ func (a *desktopApp) start() {
 		Dismiss: settingsWin.Hide, RestoreFocus: a.restorePreviousAppFocus, Quitting: a.quitting.Load,
 	})
 
-	onboardingSpec := surfaceSpec(740, uiapp.SurfaceElevationFlat, mygo.VibrancyNone, uiapp.DismissExplicit, true)
+	onboardingSpec := surfaceSpec(740, uiapp.SurfaceElevationFlat, mygo.VibrancyNone, uiapp.DismissExplicit, uiapp.FocusPreviousApp)
 	onboardingSpec.Radius = uiapp.SurfaceRadius{Kind: uiapp.SurfaceRadiusSystem}
 	onboardingWin := mygo.NewWindow(uiapp.FloatingSurface(mygo.WindowOptions{
 		Title:     i18n.T("tray.onboarding_window"),
