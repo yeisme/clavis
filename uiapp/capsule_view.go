@@ -626,7 +626,11 @@ func (a *AppController) renderOmniboxView(
 			ui.Box(c).FillWidth().Grow(1).Center().Padding(space24).Children(func() {
 				ui.Column(c).Gap(10).Center().Children(func() {
 					renderSemanticIcon(c, omniboxTabIcon(state.OmniboxTab), 24, withAlpha(theme.TextMuted, alphaHalf))
-					ui.Text(c, omniboxEmptyText(state.OmniboxTab)).TextColor(theme.TextMuted)
+					emptyText := omniboxEmptyText(state.OmniboxTab)
+					if state.OmniboxTab == config.TabAgent && a.agentRefreshing() {
+						emptyText = "正在加载 Agent 会话…"
+					}
+					ui.Text(c, emptyText).TextColor(theme.TextMuted)
 				})
 			})
 		} else {
@@ -716,7 +720,8 @@ func (a *AppController) renderOmniboxView(
 						row.Children(func() {
 							if state.OmniboxTab == config.TabAgent {
 								status := agentsession.StatusUnknown
-								if sessions, _ := a.cachedAgentData(); true {
+								sessions, _ := a.cachedAgentData()
+								if true {
 									if session, ok := agentSessionForItem(item, sessions); ok {
 										status = session.Status
 									}
@@ -726,6 +731,7 @@ func (a *AppController) renderOmniboxView(
 									color = theme.Accent
 								}
 								ui.Box(c).Size(space8, space8).Radius(radiusChip).Background(color).Shrink(0)
+								renderAgentRowBadge(c, theme, item, sessions)
 							} else {
 								a.renderOmniboxRowLeadingIcon(c, theme, item)
 							}
@@ -854,6 +860,23 @@ func (a *AppController) renderOmniboxView(
 					a.uiState.searchHandle.RequestFocus(c)
 				})
 		})
+	})
+}
+
+func renderAgentRowBadge(c *ui.Context, theme *ui.Theme, item engine.OmniboxItem, sessions []agentsession.Session) {
+	label := ""
+	if session, ok := agentSessionForItem(item, sessions); ok {
+		label = agentProviderLabel(session.Provider)
+	} else if strings.HasPrefix(item.UtilityValue, "agent-command:") {
+		label = "命令"
+	} else if strings.HasPrefix(item.UtilityValue, "agent-diagnostic") {
+		label = "诊断"
+	}
+	if label == "" {
+		return
+	}
+	ui.Box(c).Padding(space1, space4).Radius(radius4).Background(tileFill(theme)).Border(space1, hairline(theme)).Shrink(0).Children(func() {
+		ui.Text(c, label).FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
 	})
 }
 

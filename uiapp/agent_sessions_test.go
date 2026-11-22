@@ -34,7 +34,26 @@ func TestAgentTabRendersCachedSessionAndDiagnostic(t *testing.T) {
 	w, h := PreferredCapsuleSize(engine.PhaseOmnibox, ctrl.Config().Main.Appearance)
 	tt := ui.NewTester(ctrl.CapsuleView, w, h)
 	tt.Frame()
-	if !tt.HasText("DSH 会话") || !tt.HasText("待验收") || !tt.HasText("诊断") {
+	if !tt.HasText("DSH 会话") || !tt.HasText("DSH") || !tt.HasText("待验收") || !tt.HasText("诊断") {
 		t.Fatalf("agent tab did not render cached session and diagnostic: %v", tt.Texts())
+	}
+	if rect, ok := tt.Find("DSH"); !ok || rect.W <= 0 || rect.H <= 0 {
+		t.Fatalf("provider badge has no rendered bounds: %v %v", rect, ok)
+	} else {
+		t.Logf("Agent provider badge DSH bounds: x=%.1f y=%.1f w=%.1f h=%.1f", rect.X, rect.Y, rect.W, rect.H)
+	}
+}
+
+func TestAgentTabShowsLoadingStateDuringRefresh(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	ctrl.agentMu.Lock()
+	ctrl.agentRefreshStarted = true
+	ctrl.agentMu.Unlock()
+	ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabAgent})
+	w, h := PreferredCapsuleSize(engine.PhaseOmnibox, ctrl.Config().Main.Appearance)
+	tt := ui.NewTester(ctrl.CapsuleView, w, h)
+	tt.Frame()
+	if !tt.HasText("正在加载 Agent 会话…") {
+		t.Fatalf("loading state missing: %v", tt.Texts())
 	}
 }

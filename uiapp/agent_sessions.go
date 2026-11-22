@@ -78,6 +78,12 @@ func (c *AppController) cachedAgentData() ([]agentsession.Session, []agentsessio
 	return append([]agentsession.Session(nil), c.agentSessions...), append([]agentsession.Diagnostic(nil), c.agentDiagnostics...)
 }
 
+func (c *AppController) agentRefreshing() bool {
+	c.agentMu.RLock()
+	defer c.agentMu.RUnlock()
+	return c.agentRefreshStarted
+}
+
 func (c *AppController) agentVisibleItems(query string) []engine.OmniboxItem {
 	sessions, diagnostics := c.cachedAgentData()
 	return agentItems(sessions, diagnostics, query)
@@ -156,7 +162,7 @@ func agentItems(sessions []agentsession.Session, diagnostics []agentsession.Diag
 		if trimmed != "" && !strings.Contains(searchable, strings.ToLower(trimmed)) {
 			continue
 		}
-		subtitle := fmt.Sprintf("%s · %s · %s", agentProviderLabel(session.Provider), agentStatusLabel(session.Status), agentRelativeTime(session.LastActivityAt, time.Now()))
+		subtitle := fmt.Sprintf("%s · %s", agentStatusLabel(session.Status), agentRelativeTime(session.LastActivityAt, time.Now()))
 		if session.PendingReview {
 			subtitle += " · 待验收"
 		}
@@ -210,7 +216,7 @@ func (c *AppController) agentItemAction(item engine.OmniboxItem) bool {
 	if err := c.writeClipboardText(selected.ID); err != nil {
 		c.ShowToastOrHUD(err.Error())
 	} else {
-		c.ShowToastOrHUD("已复制会话 ID")
+		c.ShowToastOrHUD("已复制会话 ID，可粘贴到 Agent 窗口")
 	}
 	c.mu.Lock()
 	bridge := c.Bridge
