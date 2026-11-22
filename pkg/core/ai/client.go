@@ -68,6 +68,7 @@ type OpenAICompatibleClient struct {
 	GlossaryEngine engine.GlossaryEngine
 	Doer           HTTPDoer
 	APIKeyProvider func(ctx context.Context) (string, error)
+	UsageRecorder  UsageRecorder
 }
 
 // NewOpenAICompatibleClient creates a client using a static API key or provider function.
@@ -409,10 +410,11 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 			"content": userPrompt,
 		})
 		payload := map[string]any{
-			"model":       profile.Model,
-			"stream":      true,
-			"temperature": profile.Temperature,
-			"messages":    messages,
+			"model":          profile.Model,
+			"stream":         true,
+			"stream_options": map[string]any{"include_usage": true},
+			"temperature":    profile.Temperature,
+			"messages":       messages,
 		}
 		if err := applyStructuredOutput(payload, profile.Protocol, req); err != nil {
 			return nil, err
@@ -441,13 +443,21 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 }
 
 // StreamCompletion executes the streaming request and invokes onDelta for each text delta.
-func (c *OpenAICompatibleClient) StreamCompletion(
+func (c *OpenAICompatibleClient) StreamCompletion(ctx context.Context, req CompletionRequest, onDelta func(delta string)) error {
+	_, err := c.StreamCompletionWithUsage(ctx, req, onDelta)
+	return err
+}
+
+// StreamCompletionWithUsage executes a stream and returns provider-reported
+// usage. If the provider omits usage, Reported remains false.
+func (c *OpenAICompatibleClient) StreamCompletionWithUsage(
 	ctx context.Context,
 	req CompletionRequest,
 	onDelta func(delta string),
-) error {
+) (ProviderUsage, error) {
+	startedAt := time.Now().UTC()
 	if err := ctx.Err(); err != nil {
-		return err
+		return ProviderUsage{}, err
 	}
 	profile := c.resolveProfile(req)
 	keylessOK := IsKeylessAllowed(profile.Provider, profile.BaseURL)
@@ -455,22 +465,22 @@ func (c *OpenAICompatibleClient) StreamCompletion(
 	var apiKey string
 	if c.APIKeyProvider == nil {
 		if !keylessOK {
-			return &ClientError{Kind: "missing_api_key", Message: "Missing API key provider"}
+			return ProviderUsage{}, &ClientError{Kind: "missing_api_key", Message: "Missing API key provider"}
 		}
 	} else {
 		key, err := c.APIKeyProvider(ctx)
 		if err != nil && !keylessOK {
-			return err
+			return ProviderUsage{}, err
 		}
 		apiKey = key
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return ProviderUsage{}, err
 	}
 
 	httpReq, err := c.BuildRequest(ctx, req, apiKey)
 	if err != nil {
-		return err
+		return ProviderUsage{}, err
 	}
 
 	doer := c.Doer
@@ -480,14 +490,14 @@ func (c *OpenAICompatibleClient) StreamCompletion(
 
 	resp, err := doer.Do(httpReq)
 	if err != nil {
-		return err
+		return ProviderUsage{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 65536))
 		msg := extractHTTPErrorMessage(errBytes, resp.StatusCode)
-		return &ClientError{
+		return ProviderUsage{}, &ClientError{
 			Kind:       "http_error",
 			StatusCode: resp.StatusCode,
 			Message:    msg,
@@ -497,10 +507,11 @@ func (c *OpenAICompatibleClient) StreamCompletion(
 	parser := SSEStreamParser{Protocol: profile.Protocol}
 	buf := make([]byte, 4096)
 	didFinish := false
+	var usage ProviderUsage
 
 	for !didFinish {
 		if err := ctx.Err(); err != nil {
-			return err
+			return usage, err
 		}
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
@@ -513,8 +524,10 @@ func (c *OpenAICompatibleClient) StreamCompletion(
 					}
 				case SSEDone:
 					didFinish = true
+				case SSEUsage:
+					usage = ev.Usage
 				case SSEError:
-					return &ClientError{Kind: "api_error", Message: ev.Text}
+					return usage, &ClientError{Kind: "api_error", Message: ev.Text}
 				}
 			}
 		}
@@ -522,7 +535,7 @@ func (c *OpenAICompatibleClient) StreamCompletion(
 			if errors.Is(readErr, io.EOF) {
 				break
 			}
-			return readErr
+			return usage, readErr
 		}
 	}
 
@@ -535,13 +548,22 @@ func (c *OpenAICompatibleClient) StreamCompletion(
 				}
 			case SSEDone:
 				didFinish = true
+			case SSEUsage:
+				usage = ev.Usage
 			case SSEError:
-				return &ClientError{Kind: "api_error", Message: ev.Text}
+				return usage, &ClientError{Kind: "api_error", Message: ev.Text}
 			}
 		}
 	}
 
-	return ctx.Err()
+	if c.UsageRecorder != nil {
+		profileName := profile.ID
+		if profileName == "" {
+			profileName = profile.Provider
+		}
+		c.UsageRecorder.RecordAIUsage(UsageRecord{At: startedAt, Profile: profileName, Provider: profile.Provider, Model: profile.Model, Action: req.Mode, Usage: usage, Latency: time.Since(startedAt)})
+	}
+	return usage, ctx.Err()
 }
 
 func structuredOutputRequested(req CompletionRequest) bool {

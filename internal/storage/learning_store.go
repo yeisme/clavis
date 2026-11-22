@@ -57,6 +57,21 @@ type PromptHistoryEntry struct {
 	CreatedAt                                        time.Time
 }
 
+// AIUsageRecord is an immutable provider accounting event queued away from the
+// typing/request hot path. Cost is intentionally not stored.
+type AIUsageRecord struct {
+	At                                      time.Time
+	Profile, Provider, Model, Action        string
+	InputTokens, OutputTokens, CachedTokens int
+	Reported                                bool
+	Latency                                 time.Duration
+}
+
+type AIUsageDay struct {
+	Day                                 string
+	Requests, InputTokens, OutputTokens int
+}
+
 type lexKey struct{ pinyin, word, prev string }
 type lexValue struct {
 	frequency int64
@@ -93,6 +108,36 @@ func NewLearningStore(db *sqlite.DB) (*LearningStore, error) {
 	return s, nil
 }
 
+// AIUsageDaily returns one row per local UTC calendar day, oldest first. Missing
+// days are included with zeroes so chart axes remain continuous.
+func (s *LearningStore) AIUsageDaily(ctx context.Context, n int) ([]AIUsageDay, error) {
+	if n <= 0 {
+		return []AIUsageDay{}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	end := time.Now().UTC().Truncate(24 * time.Hour)
+	start := end.AddDate(0, 0, -(n - 1))
+	rows, err := s.db.Query(ctx, `SELECT date(at_ns/1000000000,'unixepoch') AS day, COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) FROM ai_usage WHERE at_ns>=? AND at_ns<? GROUP BY day ORDER BY day`, start.UnixNano(), end.AddDate(0, 0, 1).UnixNano())
+	if err != nil {
+		return nil, err
+	}
+	byDay := make(map[string]AIUsageDay, len(rows.Values))
+	for _, row := range rows.Values {
+		if len(row) >= 4 {
+			byDay[str(row, 0)] = AIUsageDay{Day: str(row, 0), Requests: int(int64val(row, 1)), InputTokens: int(int64val(row, 2)), OutputTokens: int(int64val(row, 3))}
+		}
+	}
+	out := make([]AIUsageDay, n)
+	for i := range out {
+		day := start.AddDate(0, 0, i).Format("2006-01-02")
+		out[i] = byDay[day]
+		out[i].Day = day
+	}
+	return out, nil
+}
+
 func (s *LearningStore) initSchema(ctx context.Context) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS ime_user_lexicon (pinyin_key TEXT NOT NULL, word TEXT NOT NULL, frequency INTEGER NOT NULL DEFAULT 0, last_used_ns INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (pinyin_key, word))`,
@@ -101,6 +146,8 @@ func (s *LearningStore) initSchema(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS usage_frecency (item_id TEXT PRIMARY KEY, use_count INTEGER NOT NULL DEFAULT 0, last_used_ns INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS prompt_history (id INTEGER PRIMARY KEY AUTOINCREMENT, prompt_id TEXT NOT NULL, trigger TEXT NOT NULL, raw_draft TEXT NOT NULL, final_output TEXT NOT NULL, preset TEXT NOT NULL, created_at_ns INTEGER NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_prompt_history_recent ON prompt_history(prompt_id, created_at_ns DESC, id DESC)`,
+		`CREATE TABLE IF NOT EXISTS ai_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, at_ns INTEGER NOT NULL, profile TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, action TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cached_tokens INTEGER NOT NULL, reported INTEGER NOT NULL, latency_ms INTEGER NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS ai_usage_at ON ai_usage(at_ns)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Execute(ctx, stmt); err != nil {

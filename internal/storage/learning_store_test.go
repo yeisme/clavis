@@ -13,6 +13,40 @@ import (
 	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
 
+func TestAIUsageDailyIncludesZeroDaysAndAggregates(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, ":memory:", sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewLearningStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	day := time.Now().UTC().Truncate(24 * time.Hour)
+	writer := NewLearningWriter(store, LearningWriterOptions{FlushInterval: time.Hour})
+	writer.QueueAIUsage(AIUsageRecord{At: day.Add(-72*time.Hour + time.Hour), Profile: "p", Provider: "x", Model: "m", Action: "polish", InputTokens: 10, OutputTokens: 3, Reported: true})
+	writer.QueueAIUsage(AIUsageRecord{At: day.Add(-24*time.Hour + time.Hour), Profile: "p", Provider: "x", Model: "m", Action: "polish", InputTokens: 4, OutputTokens: 2, Reported: true})
+	if err := writer.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query(ctx, `SELECT COUNT(*) FROM ai_usage`)
+	if err != nil || len(rows.Values) == 0 || int64val(rows.Values[0], 0) != 2 {
+		t.Fatalf("ai_usage rows=%+v err=%v", rows.Values, err)
+	}
+	days, err := store.AIUsageDaily(ctx, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(days) != 4 || days[0].Requests != 1 || days[0].InputTokens != 10 || days[1].Requests != 0 || days[2].Requests != 1 || days[2].OutputTokens != 2 || days[3].Requests != 0 {
+		t.Fatalf("days=%+v", days)
+	}
+}
+
 func TestLearningStoreRoundTripAndFrecency(t *testing.T) {
 	ctx := context.Background()
 	db, err := sqlite.Open(ctx, ":memory:", sqlite.OpenOptions{})

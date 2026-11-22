@@ -1,6 +1,7 @@
 package ai_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -47,6 +48,44 @@ func TestSSEStreamParserSplitUTF8AndEvents(t *testing.T) {
 	}
 }
 
+func TestProviderUsageParsingReportedAndUnavailable(t *testing.T) {
+	got := ai.ParseProviderUsage([]byte(`{"usage":{"prompt_tokens":12,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":3}}}`))
+	if !got.Reported || got.InputTokens != 12 || got.OutputTokens != 7 || got.CachedTokens != 3 {
+		t.Fatalf("usage=%+v", got)
+	}
+	missing := ai.ParseProviderUsage([]byte(`{"choices":[]}`))
+	if missing.Reported || missing.InputTokens != 0 || missing.OutputTokens != 0 {
+		t.Fatalf("missing usage=%+v", missing)
+	}
+}
+
+func TestProviderUsageResponseParsing(t *testing.T) {
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewBufferString(`{"usage":{"prompt_tokens":8,"completion_tokens":5}}`))}
+	got, err := ai.ParseProviderUsageResponse(resp)
+	if err != nil || !got.Reported || got.InputTokens != 8 || got.OutputTokens != 5 {
+		t.Fatalf("usage=%+v err=%v", got, err)
+	}
+	missing := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewBufferString(`{"choices":[{"message":{"content":"ok"}}]}`))}
+	got, err = ai.ParseProviderUsageResponse(missing)
+	if err != nil || got.Reported {
+		t.Fatalf("missing usage=%+v err=%v", got, err)
+	}
+}
+
+func TestSSEStreamParserUsageFinalChunk(t *testing.T) {
+	var parser ai.SSEStreamParser
+	events := parser.Feed([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n"))
+	found := false
+	for _, event := range events {
+		if event.Kind == ai.SSEUsage && event.Usage.Reported && event.Usage.InputTokens == 4 && event.Usage.OutputTokens == 2 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("events=%+v", events)
+	}
+}
+
 func TestSSEStreamParserErrorJSON(t *testing.T) {
 	var parser ai.SSEStreamParser
 	events := parser.Feed([]byte("data: {\"error\":{\"message\":\"Rate limit exceeded\"}}\n\n"))
@@ -78,7 +117,7 @@ func TestOpenAICompatibleClientRequestAndStreaming(t *testing.T) {
 			capturedReq = req
 			raw, _ := io.ReadAll(req.Body)
 			_ = json.Unmarshal(raw, &capturedBody)
-			sseBody := "data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Clavis\"}}]}\n\ndata: [DONE]\n\n"
+			sseBody := "data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Clavis\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n"
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body:       io.NopCloser(strings.NewReader(sseBody)),
@@ -91,7 +130,7 @@ func TestOpenAICompatibleClientRequestAndStreaming(t *testing.T) {
 	})
 
 	var out strings.Builder
-	err := client.StreamCompletion(context.Background(), ai.CompletionRequest{
+	usage, err := client.StreamCompletionWithUsage(context.Background(), ai.CompletionRequest{
 		Mode:       "polish",
 		Prompt:     "Polish this",
 		SourceText: "use clavis",
@@ -100,6 +139,9 @@ func TestOpenAICompatibleClientRequestAndStreaming(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("StreamCompletion failed: %v", err)
+	}
+	if !usage.Reported || usage.InputTokens != 9 || usage.OutputTokens != 4 {
+		t.Fatalf("usage=%+v", usage)
 	}
 	if out.String() != "Hello Clavis" {
 		t.Fatalf("unexpected output: %q", out.String())

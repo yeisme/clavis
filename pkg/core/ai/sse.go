@@ -14,12 +14,14 @@ const (
 	SSEDelta SSEEventKind = iota + 1
 	SSEDone
 	SSEError
+	SSEUsage
 )
 
 // SSEEvent represents a parsed SSE event from an AI streaming response.
 type SSEEvent struct {
-	Kind SSEEventKind
-	Text string
+	Kind  SSEEventKind
+	Text  string
+	Usage ProviderUsage
 }
 
 // SSEStreamParser incrementally parses byte chunks into SSEEvents.
@@ -172,11 +174,19 @@ func (p *SSEStreamParser) dispatchCurrentEvent() []SSEEvent {
 		return []SSEEvent{{Kind: SSEError, Text: "Malformed SSE JSON payload: " + err.Error()}}
 	}
 
+	usage := ParseProviderUsage([]byte(trimmed))
 	if errMsg := extractErrorMessage(rawMap); errMsg != "" {
 		return []SSEEvent{{Kind: SSEError, Text: errMsg}}
 	}
 	if eventName == "error" || rawMap["type"] == "error" {
 		return []SSEEvent{{Kind: SSEError, Text: trimmed}}
+	}
+	// OpenAI-compatible providers normally send usage in a final chunk with
+	// choices=[]; expose it without guessing when it is absent.
+	if usage.Reported {
+		if choices, ok := rawMap["choices"].([]any); !ok || len(choices) == 0 {
+			return []SSEEvent{{Kind: SSEUsage, Usage: usage}}
+		}
 	}
 
 	switch proto {
@@ -191,10 +201,17 @@ func (p *SSEStreamParser) dispatchCurrentEvent() []SSEEvent {
 				deltaType, _ := delta["type"].(string)
 				if deltaType == "text_delta" || deltaType == "" {
 					if text, ok := delta["text"].(string); ok && text != "" {
-						return []SSEEvent{{Kind: SSEDelta, Text: text}}
+						out := []SSEEvent{{Kind: SSEDelta, Text: text}}
+						if usage.Reported {
+							out = append(out, SSEEvent{Kind: SSEUsage, Usage: usage})
+						}
+						return out
 					}
 				}
 			}
+		}
+		if usage.Reported {
+			return []SSEEvent{{Kind: SSEUsage, Usage: usage}}
 		}
 		return nil
 
@@ -223,24 +240,31 @@ func (p *SSEStreamParser) dispatchCurrentEvent() []SSEEvent {
 				}
 			}
 		}
+		if usage.Reported {
+			out = append(out, SSEEvent{Kind: SSEUsage, Usage: usage})
+		}
 		return out
 
 	default:
+		var out []SSEEvent
 		if choices, ok := rawMap["choices"].([]any); ok && len(choices) > 0 {
 			if first, ok := choices[0].(map[string]any); ok {
 				if delta, ok := first["delta"].(map[string]any); ok {
 					if content, ok := delta["content"].(string); ok && content != "" {
-						return []SSEEvent{{Kind: SSEDelta, Text: content}}
+						out = append(out, SSEEvent{Kind: SSEDelta, Text: content})
 					}
 				}
 				if msg, ok := first["message"].(map[string]any); ok {
 					if content, ok := msg["content"].(string); ok && content != "" {
-						return []SSEEvent{{Kind: SSEDelta, Text: content}}
+						out = append(out, SSEEvent{Kind: SSEDelta, Text: content})
 					}
 				}
 			}
 		}
-		return nil
+		if usage.Reported {
+			out = append(out, SSEEvent{Kind: SSEUsage, Usage: usage})
+		}
+		return out
 	}
 }
 

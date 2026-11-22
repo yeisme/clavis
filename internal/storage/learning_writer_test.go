@@ -101,6 +101,23 @@ func TestLearningWriterNeverBlocksOnSlowDisk(t *testing.T) {
 	}
 }
 
+func TestLearningWriterQueuesAIUsageWithoutInlineStorage(t *testing.T) {
+	store := mirrorOnlyStore()
+	sink := &recordingSink{delay: 120 * time.Millisecond}
+	w := newLearningWriter(store, LearningWriterOptions{FlushInterval: time.Hour}, sink.persist)
+	start := time.Now()
+	w.QueueAIUsage(AIUsageRecord{At: time.Now(), Profile: "p", Provider: "provider", Model: "model", Action: "polish", InputTokens: 3, OutputTokens: 2, Reported: true})
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("QueueAIUsage blocked for %v", elapsed)
+	}
+	if err := w.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.batches) != 1 || len(sink.batches[0].aiUsage) != 1 {
+		t.Fatalf("batches=%+v", sink.batches)
+	}
+}
+
 func TestLearningWriterRetriesThenSucceeds(t *testing.T) {
 	store := mirrorOnlyStore()
 	sink := &recordingSink{fail: 1}

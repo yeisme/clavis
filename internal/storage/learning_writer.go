@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/plugins/sqlite"
+	coreai "github.com/yeisme/clavis/pkg/core/ai"
 )
 
 // LearningWriter is the hot-path front of LearningStore. Each Queue* call
@@ -103,6 +104,7 @@ type learningBatch struct {
 	bigrams map[[2]string]lexDelta
 	uses    map[string]useDelta
 	prompts []promptVersion
+	aiUsage []AIUsageRecord
 	ops     int
 	retries int
 }
@@ -116,7 +118,7 @@ func newLearningBatch() *learningBatch {
 }
 
 func (b *learningBatch) empty() bool {
-	return len(b.lex) == 0 && len(b.bigrams) == 0 && len(b.uses) == 0 && len(b.prompts) == 0
+	return len(b.lex) == 0 && len(b.bigrams) == 0 && len(b.uses) == 0 && len(b.prompts) == 0 && len(b.aiUsage) == 0
 }
 
 // merge folds older (a batch whose flush failed) back under b.
@@ -141,6 +143,7 @@ func (b *learningBatch) merge(older *learningBatch) {
 		b.uses[k] = cur
 	}
 	b.prompts = append(older.prompts, b.prompts...)
+	b.aiUsage = append(older.aiUsage, b.aiUsage...)
 	if extra := len(b.prompts) - maxPendingPrompts; extra > 0 {
 		b.prompts = b.prompts[extra:]
 	}
@@ -242,6 +245,37 @@ func (w *LearningWriter) QueueItemUse(itemID string, now time.Time) {
 // QueuePromptVersion appends a prompt-history row. Prompt history is
 // persistence-only (no RAM mirror); at most maxPendingPrompts rows wait,
 // the oldest dropping first.
+// QueueAIUsage records provider usage without waiting for SQLite. It is safe
+// for request callbacks and is persisted with the next background batch.
+// RecordAIUsage implements ai.UsageRecorder by enqueueing the event. The
+// request callback performs only a bounded in-memory append; SQLite remains on
+// the writer goroutine.
+func (w *LearningWriter) RecordAIUsage(record coreai.UsageRecord) {
+	if w == nil {
+		return
+	}
+	w.QueueAIUsage(AIUsageRecord{
+		At: record.At, Profile: record.Profile, Provider: record.Provider, Model: record.Model,
+		Action: record.Action, InputTokens: record.Usage.InputTokens, OutputTokens: record.Usage.OutputTokens,
+		CachedTokens: record.Usage.CachedTokens, Reported: record.Usage.Reported, Latency: record.Latency,
+	})
+}
+
+func (w *LearningWriter) QueueAIUsage(record AIUsageRecord) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	w.pending.aiUsage = append(w.pending.aiUsage, record)
+	w.pending.ops++
+	full := w.pending.ops >= w.maxOps
+	w.mu.Unlock()
+	w.queued.Add(1)
+	if full {
+		w.wake()
+	}
+}
+
 func (w *LearningWriter) QueuePromptVersion(promptID, trigger, rawDraft, finalOutput, preset string) {
 	if promptID == "" && finalOutput == "" {
 		return
@@ -398,7 +432,7 @@ func (s *LearningStore) mirrorItemUse(itemID string, ns int64) {
 // persistBatch writes a coalesced batch in one transaction: counters are
 // added as deltas, so N commits of one word cost one UPSERT.
 func (s *LearningStore) persistBatch(ctx context.Context, b *learningBatch) error {
-	stmts := make([]sqlite.Statement, 0, len(b.lex)+len(b.bigrams)+len(b.uses)+len(b.prompts))
+	stmts := make([]sqlite.Statement, 0, len(b.lex)+len(b.bigrams)+len(b.uses)+len(b.prompts)+len(b.aiUsage))
 	for k, d := range b.lex {
 		stmts = append(stmts, sqlite.Statement{
 			SQL:  `INSERT INTO ime_user_lexicon(pinyin_key,word,frequency,last_used_ns,pinned) VALUES(?,?,?,?,?) ON CONFLICT(pinyin_key,word) DO UPDATE SET frequency=frequency+excluded.frequency,last_used_ns=MAX(last_used_ns,excluded.last_used_ns),pinned=MAX(pinned,excluded.pinned)`,
@@ -421,6 +455,12 @@ func (s *LearningStore) persistBatch(ctx context.Context, b *learningBatch) erro
 		stmts = append(stmts, sqlite.Statement{
 			SQL:  `INSERT INTO prompt_history(prompt_id,trigger,raw_draft,final_output,preset,created_at_ns) VALUES(?,?,?,?,?,?)`,
 			Args: []any{p.promptID, p.trigger, p.rawDraft, p.finalOutput, p.preset, p.createdAt},
+		})
+	}
+	for _, u := range b.aiUsage {
+		stmts = append(stmts, sqlite.Statement{
+			SQL:  `INSERT INTO ai_usage(at_ns,profile,provider,model,action,input_tokens,output_tokens,cached_tokens,reported,latency_ms) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			Args: []any{u.At.UnixNano(), u.Profile, u.Provider, u.Model, u.Action, u.InputTokens, u.OutputTokens, u.CachedTokens, boolInt(u.Reported), u.Latency.Milliseconds()},
 		})
 	}
 	if len(stmts) == 0 {
