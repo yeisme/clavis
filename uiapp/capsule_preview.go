@@ -703,6 +703,13 @@ func (a *AppController) renderClipboardMediaPreview(c *ui.Context, theme *ui.The
 			previewBadge(c, theme, "pin.fill", i18n.T("common.pinned"), true)
 		}
 	})
+	if meta := clipboardMediaMetaRows(m); len(meta) > 0 {
+		ui.Row(c).FillWidth().Gap(space2).AlignItems(ui.Center).Children(func() {
+			for _, row := range meta {
+				previewBadge(c, theme, "info.circle", row, false)
+			}
+		})
+	}
 	if m.Kind == "image" || m.Kind == "video" {
 		a.renderClipboardMediaToolbar(c, theme)
 	}
@@ -728,9 +735,6 @@ func (a *AppController) renderClipboardMediaPreview(c *ui.Context, theme *ui.The
 			ui.Image(c, bmp).FillWidth().Height(mediaPreviewCanvasHeight(m)).MinHeight(mediaCanvasMinHeight).Fit(ui.Contain).Radius(radiusChip)
 		} else if bmp == nil && m.Kind != "image" && m.Kind != "video" {
 			ui.Text(c, i18n.T("preview.media.unavailable")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
-		}
-		for _, row := range clipboardMediaMetaRows(m) {
-			ui.Text(c, row).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 		}
 		if len(m.FilePaths) > 0 {
 			renderPreviewLines(c, theme, strings.Join(m.FilePaths, "\n"), 20)
