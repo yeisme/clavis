@@ -39,6 +39,15 @@ type SurfaceRadius struct {
 	value float32
 }
 
+// SurfaceFocusRestore describes where keyboard focus belongs after dismissal.
+type SurfaceFocusRestore uint8
+
+const (
+	FocusNever SurfaceFocusRestore = iota
+	FocusPanel
+	FocusPreviousApp
+)
+
 func AppearanceSurfaceRadius(appearance config.AppearanceConfig) SurfaceRadius {
 	return SurfaceRadius{Kind: SurfaceRadiusAppearance, value: NormalizeCornerRadius(appearance)}
 }
@@ -69,7 +78,7 @@ type SurfaceSpec struct {
 	// FocusRestore requests the caller's restore hook after a successful
 	// dismissal. Panel surfaces rely on MyGo's native panel restoration and
 	// document surfaces provide the previous-app fallback.
-	FocusRestore bool
+	FocusRestore SurfaceFocusRestore
 }
 
 const (
@@ -128,7 +137,7 @@ func BindFloatingSurface(win *mygo.Window, spec SurfaceSpec, hooks SurfaceHooks)
 		if hooks.Dismiss != nil {
 			hooks.Dismiss()
 		}
-		if spec.FocusRestore && hooks.RestoreFocus != nil {
+		if spec.FocusRestore != FocusNever && hooks.RestoreFocus != nil {
 			hooks.RestoreFocus()
 		}
 	}
@@ -146,14 +155,14 @@ func BindFloatingSurface(win *mygo.Window, spec SurfaceSpec, hooks SurfaceHooks)
 	}
 }
 
-func FloatingSurfaceSpec(appearance config.AppearanceConfig, height int, blur mygo.Vibrancy, dismiss SurfaceDismissPolicy, focusRestore bool) SurfaceSpec {
+func FloatingSurfaceSpec(appearance config.AppearanceConfig, height int, blur mygo.Vibrancy, dismiss SurfaceDismissPolicy, focusRestore SurfaceFocusRestore) SurfaceSpec {
 	return FloatingSurfaceSpecWithElevation(appearance, height, SurfaceElevationFloating, blur, dismiss, focusRestore)
 }
 
 // FloatingSurfaceSpecWithElevation builds a surface contract while keeping the
 // five shared concerns in one place. Window-specific business behavior stays
 // in the caller's hooks.
-func FloatingSurfaceSpecWithElevation(appearance config.AppearanceConfig, height, elevation int, blur mygo.Vibrancy, dismiss SurfaceDismissPolicy, focusRestore bool) SurfaceSpec {
+func FloatingSurfaceSpecWithElevation(appearance config.AppearanceConfig, height, elevation int, blur mygo.Vibrancy, dismiss SurfaceDismissPolicy, focusRestore SurfaceFocusRestore) SurfaceSpec {
 	radius := AppearanceSurfaceRadius(appearance)
 	if height > 0 && height <= 40 {
 		radius = HalfHeightSurfaceRadius()
