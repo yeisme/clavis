@@ -14,6 +14,10 @@ import (
 // ("arrow.triangle.branch") all showed a bolt.
 func TestUIIconNamesHaveOwnGeometry(t *testing.T) {
 	bolt := SemanticIconSVG("bolt")
+	unknown := SemanticIconSVG("missing-semantic-icon")
+	if unknown == nil || unknown == bolt {
+		t.Fatalf("unknown semantic icons must use the neutral fallback, got bolt=%v unknown=%v", bolt, unknown)
+	}
 	used := map[string]string{}
 	add := func(where string, names ...string) {
 		for _, n := range names {

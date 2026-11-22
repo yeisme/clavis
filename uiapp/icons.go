@@ -51,6 +51,9 @@ func CoreSemanticIconNames() []string {
 		"pin.fill",
 		"search",
 		"command",
+		"person.crop.circle",
+		"info.circle",
+		"questionmark",
 		// navigation & status
 		"chevron.right",
 		"chevron.left",
@@ -127,6 +130,7 @@ var semanticIconBodies = map[string]string{
 	"arrow.clockwise":      `<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>`,
 	"circle":               `<circle cx="12" cy="12" r="9"/>`,
 	"person.crop.circle":   `<circle cx="12" cy="12" r="9"/><circle cx="12" cy="9" r="2.5"/><path d="M7.5 18c.8-2.5 2.2-3.7 4.5-3.7s3.7 1.2 4.5 3.7"/>`,
+	"questionmark":         `<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.7 2.7 0 1 1 4.5 2c-1.3.9-2 1.5-2 3"/><path d="M12 17h.01"/>`,
 
 	// Clipboard content kinds (names match SF Symbols so macOS draws the
 	// native glyph and other platforms these vectors).
@@ -184,12 +188,12 @@ func initParsedSVGs() {
 			parsedSVGs[k] = ui.MustParseSVG([]byte(svgFor(body, opticalStrokeWidth(IconSize24))))
 			parsedSVGsSmall[k] = ui.MustParseSVG([]byte(svgFor(body, opticalStrokeWidth(IconSize16))))
 		}
-		defaultSVG = parsedSVGs["bolt"]
+		defaultSVG = parsedSVGs["questionmark"]
 	})
 }
 
 // SemanticIconSVG returns the parsed *ui.SVG for a semantic icon name,
-// falling back to the default bolt icon when name is unknown or empty.
+// falling back to a neutral question-mark icon when name is unknown or empty.
 func SemanticIconSVG(name string) *ui.SVG {
 	initParsedSVGs()
 	key := strings.ToLower(strings.TrimSpace(name))

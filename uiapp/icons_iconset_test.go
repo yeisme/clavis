@@ -3,10 +3,13 @@ package uiapp
 import (
 	"bytes"
 	"encoding/binary"
+	"image"
 	"image/png"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/egoist/mygo/ui"
 )
 
 // TestAppIconICOAndMultiSizeSet pins the multi-size icon set and the
@@ -96,6 +99,7 @@ func TestSemanticIconCoverageAndOpticalVariants(t *testing.T) {
 		"chevron.right", "tag", "clipboard",
 		"keyboard.badge.ellipsis", "keyboard.chevron.compact.down",
 		"xmark", "checkmark", "chevron.down", "chevron.left", "ellipsis",
+		"person.crop.circle", "info.circle", "questionmark",
 	} {
 		if SemanticIconSVG(name) == SemanticIconSVG("bolt") {
 			t.Fatalf("%q still falls back to bolt", name)
@@ -110,4 +114,37 @@ func TestSemanticIconCoverageAndOpticalVariants(t *testing.T) {
 	if semanticIconSVGForSize("bolt", IconSize20) != regular {
 		t.Fatal("20 DIP should use the regular variant")
 	}
+}
+
+func TestSemanticIconFallbackRendersNeutralInBothThemes(t *testing.T) {
+	for _, dark := range []bool{false, true} {
+		name := "light"
+		if dark {
+			name = "dark"
+		}
+		t.Run(name, func(t *testing.T) {
+			tt := ui.NewTesterWith(func(c *ui.Context) {
+				ui.Box(c).Size(48, 48).Center().Children(func() {
+					renderSemanticIcon(c, "missing-semantic-icon", IconSize24, c.Theme().Text)
+				})
+			}, 80, 80, ui.TesterOptions{Dark: dark})
+			tt.Frame()
+			if countOpaquePixels(tt.Image()) == 0 {
+				t.Fatal("neutral fallback produced no visible pixels")
+			}
+			t.Logf("%s fallback rendered %d opaque pixels", name, countOpaquePixels(tt.Image()))
+		})
+	}
+}
+
+func countOpaquePixels(img *image.RGBA) int {
+	n := 0
+	for y := 0; y < img.Bounds().Dy(); y++ {
+		for x := 0; x < img.Bounds().Dx(); x++ {
+			if img.RGBAAt(x, y).A > 0 {
+				n++
+			}
+		}
+	}
+	return n
 }
