@@ -454,6 +454,9 @@ func (a *AppController) renderOmniboxView(
 	if state.OmniboxTab == config.TabAI {
 		a.ensureAIUsageRefresh()
 	}
+	if state.OmniboxTab == config.TabGlossary {
+		a.ensureLexiconHitsRefresh()
+	}
 	if a.uiState.lastPhase != engine.PhaseOmnibox || a.uiState.lastTab != state.OmniboxTab {
 		a.uiState.searchHandle.RequestFocus(c)
 	}
@@ -517,6 +520,10 @@ func (a *AppController) renderOmniboxView(
 		query := state.OmniboxQuery
 		if state.OmniboxTab == config.TabAI {
 			a.renderAIUsageBand(c, theme)
+		}
+		if state.OmniboxTab == config.TabGlossary {
+			days, err, loaded, _ := a.lexiconHitsSnapshot()
+			renderLexiconStatsBand(c, theme, days, loaded, err, len(cfg.Glossary.Terms))
 		}
 		if state.OmniboxTab == config.TabClipboard {
 			a.ensureClipboardStatsRefresh()

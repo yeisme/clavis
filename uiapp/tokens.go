@@ -73,6 +73,7 @@ const (
 	typeMeta   float32 = 11
 	typeLabel  float32 = 12
 	typeBody   float32 = 13
+	typeKPI    float32 = 15
 	typeTitle  float32 = 14
 	typeSearch float32 = 16
 	typeGlyph  float32 = 17 // geometric glyphs: emoji, calculator output

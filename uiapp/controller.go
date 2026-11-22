@@ -123,6 +123,18 @@ type AIUsageDay struct {
 // Implementations must perform I/O off the UI thread.
 type AIUsageDailyReader func(context.Context, int) ([]AIUsageDay, error)
 
+// LexiconHitDay is the UI projection of one daily lexicon hit/miss aggregate.
+// The storage package supplies the same fields, while the UI keeps an injected
+// reader seam so rendering tests never need a real database.
+type LexiconHitDay struct {
+	Day          string
+	Hits, Misses int
+}
+
+// LexiconHitsDailyReader reads a bounded, oldest-first hit/miss window.
+// Implementations must perform I/O off the UI thread.
+type LexiconHitsDailyReader func(context.Context, int) ([]LexiconHitDay, error)
+
 func defaultAIUsageDailyReader(store clipboard.Store) AIUsageDailyReader {
 	sqliteStore, ok := store.(*internalstorage.SQLiteClipboardStore)
 	if !ok || sqliteStore == nil {
@@ -152,6 +164,35 @@ func defaultAIUsageDailyReader(store clipboard.Store) AIUsageDailyReader {
 	}
 }
 
+func defaultLexiconHitsDailyReader(store clipboard.Store) LexiconHitsDailyReader {
+	sqliteStore, ok := store.(*internalstorage.SQLiteClipboardStore)
+	if !ok || sqliteStore == nil {
+		return func(context.Context, int) ([]LexiconHitDay, error) {
+			return nil, errors.New("lexicon hit storage is unavailable")
+		}
+	}
+	var once sync.Once
+	var learningStore *internalstorage.LearningStore
+	var initErr error
+	return func(ctx context.Context, n int) ([]LexiconHitDay, error) {
+		once.Do(func() {
+			learningStore, initErr = internalstorage.NewLearningStore(sqliteStore.DB())
+		})
+		if initErr != nil {
+			return nil, initErr
+		}
+		days, err := learningStore.LexiconHitsDaily(ctx, n)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]LexiconHitDay, len(days))
+		for i, day := range days {
+			out[i] = LexiconHitDay{Day: day.Day, Hits: day.Hits, Misses: day.Misses}
+		}
+		return out, nil
+	}
+}
+
 const (
 	defaultClipboardMirrorLimit    = 50
 	defaultClipboardSearchDebounce = 50 * time.Millisecond
@@ -169,6 +210,7 @@ type Options struct {
 	ClipboardStore           clipboard.Store
 	ClipboardSearcher        ClipboardSearcher
 	AIUsageDaily             AIUsageDailyReader
+	LexiconHitsDaily         LexiconHitsDailyReader
 	SecretStore              secrets.APIKeyStore
 	Bridge                   bridge.HostService
 	AppProvider              apps.AppProvider
@@ -429,6 +471,13 @@ type AppController struct {
 	aiUsageErr            error
 	aiUsageReader         AIUsageDailyReader
 
+	lexiconHitsMu             sync.RWMutex
+	lexiconHitDays            []LexiconHitDay
+	lexiconHitsLoaded         bool
+	lexiconHitsRefreshStarted bool
+	lexiconHitsErr            error
+	lexiconHitsReader         LexiconHitsDailyReader
+
 	// Ephemeral UI state (used on the UI build thread)
 	uiState uiViewState
 	// uiPersist is view state saved to ui-state.json (the preview split).
@@ -537,6 +586,10 @@ func NewAppController(opts Options) *AppController {
 	c.aiUsageReader = opts.AIUsageDaily
 	if c.aiUsageReader == nil {
 		c.aiUsageReader = defaultAIUsageDailyReader(clipStore)
+	}
+	c.lexiconHitsReader = opts.LexiconHitsDaily
+	if c.lexiconHitsReader == nil {
+		c.lexiconHitsReader = defaultLexiconHitsDailyReader(clipStore)
 	}
 	c.clipCond = sync.NewCond(&c.clipMu)
 
