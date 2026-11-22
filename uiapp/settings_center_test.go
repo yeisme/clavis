@@ -33,6 +33,30 @@ func openSettingsSection(t *testing.T, tt *ui.Tester, label string) {
 	tt.Frame()
 }
 
+func TestSettingsNavigationHasFiveGroupsAndSecondaryPages(t *testing.T) {
+	sections := settingsNavigationSections()
+	if len(sections) != 12 {
+		t.Fatalf("settings navigation exposes %d pages, want 12", len(sections))
+	}
+	seenKeys := map[string]bool{}
+	seenGroups := map[string]bool{}
+	for _, section := range sections {
+		if section.Key == "" || seenKeys[section.Key] {
+			t.Fatalf("duplicate or empty settings page key %q", section.Key)
+		}
+		seenKeys[section.Key] = true
+		seenGroups[section.Group] = true
+	}
+	if len(seenGroups) != 5 {
+		t.Fatalf("settings navigation exposes %d groups, want 5", len(seenGroups))
+	}
+	for _, key := range []string{"leader", "snippets", "glossary", "clipboard", "workflows", "appearance", "about"} {
+		if _, ok := settingsSectionFromKey(key); !ok {
+			t.Fatalf("secondary settings page %q is not addressable", key)
+		}
+	}
+}
+
 // TestSettingsCenter_TriggersAndAppearancePersist drives the interactive
 // trigger and appearance editors and checks config.toml follows.
 func TestSettingsCenter_TriggersAndAppearancePersist(t *testing.T) {
