@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/egoist/mygo/ui"
@@ -22,8 +21,11 @@ const (
 	clipboardSparkHeight     float32 = 20
 )
 
+// clipboardStatsState is a snapshot copied by value into the render path, so it must not
+// carry a mutex: copylocks would flag it and a copied RWMutex is a real hazard. The live
+// guard is AppController.clipboardStatsMu; this struct only ever holds a point-in-time copy
+// (its fields are read under that outer lock and then handed off).
 type clipboardStatsState struct {
-	mu              sync.RWMutex
 	loaded, loading bool
 	days            []storage.ClipboardDay
 	kinds           []storage.ClipboardKindStat
