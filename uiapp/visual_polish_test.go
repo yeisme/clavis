@@ -279,13 +279,11 @@ func TestLeaderHeightFitsCards(t *testing.T) {
 		}
 		prev = h
 	}
-	// One action per row now, so the pinned values shifted up: 4 actions no longer share two
-	// rows. Pinned so a row-height change has to be a deliberate edit.
-	chrome := leaderChromeHeight
-	oneRow := leaderRowHeight
+	// One action per row uses the compact §2.3 formula. Pinned so a row-height
+	// change has to be a deliberate edit.
 	for nodes, want := range map[int]int{
-		4:  min(chrome+4*oneRow, leaderMaxHeight),
-		12: min(chrome+12*oneRow, leaderMaxHeight),
+		4:  leaderHeightFor(4),
+		12: leaderHeightFor(12),
 		24: leaderMaxHeight,
 	} {
 		if got := leaderHeightFor(nodes); got != want {

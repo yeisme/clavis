@@ -122,18 +122,14 @@ const (
 // Leader menu metrics: the chrome surrounds a single-column list of action rows. Keep each
 // term named so a row or footer density change has an obvious derivation.
 const (
-	leaderHeaderHeight = 44
-	leaderCardHeight   = 42
-	leaderGridGap      = 6
-	leaderBodyPadding  = 24
-	leaderFooterHeight = 38
-	// The compatibility row stride is 48pt (42pt card + 6pt gap). Keeping the
-	// stride as one derived value preserves the existing card renderer while
-	// making the formula equivalent to max(N-1)*G plus one row's spacing.
-	leaderChromeHeight = 100
-	leaderRowHeight    = leaderCardHeight + leaderGridGap
-	leaderMinHeight    = 156
-	leaderMaxHeight    = 508
+	leaderHeaderHeight = 40
+	leaderCardHeight   = 38
+	leaderGridGap      = 2
+	leaderBodyPadding  = 16
+	leaderFooterHeight = 34
+	leaderRowHeight    = leaderCardHeight
+	leaderMinHeight    = 140
+	leaderMaxHeight    = 438
 )
 
 // leaderHeightFor fits the Leader menu to its action rows (one per row) instead of a fixed
@@ -144,7 +140,7 @@ func leaderHeightFor(nodes int) int {
 	if rows < 1 {
 		rows = 1
 	}
-	// Keep the formula explicit so the card-compatible values mirror
+	// Keep the formula explicit so the compact flat-row values mirror
 	// clavis-visual-spec.md §2.3: header + padding + rows + inter-row gaps + footer.
 	h := leaderHeaderHeight + leaderBodyPadding + leaderFooterHeight +
 		rows*leaderCardHeight + max(rows-1, 0)*leaderGridGap

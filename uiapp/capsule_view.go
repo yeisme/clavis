@@ -307,14 +307,16 @@ func (a *AppController) renderLeaderTitle(c *ui.Context, theme *ui.Theme, state 
 
 func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state engine.State) {
 	container := ui.Column(c).
+		Key("leader-view").
+		Label("leader-view").
 		Bind(&a.uiState.leaderHandle).
 		Focusable().
 		AutoFocus().
 		FocusRing(false).
 		FillWidth().
 		Grow(1).
-		Padding(space12, space14).
-		Gap(10)
+		Padding(space8, space14).
+		Gap(space0)
 
 	if a.uiState.lastPhase != engine.PhaseLeader || !a.uiState.leaderHandle.Focused(c) {
 		a.uiState.leaderHandle.RequestFocus(c)
@@ -343,16 +345,21 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 					isGroup := n.Action.Type == config.ActionGroup
 					clicked := false
 					button := ui.ButtonBase(c).
+						Key("leader-row:"+n.Key).
+						Label("leader-row:"+n.Key).
 						FillWidth().
 						Height(float32(leaderCardHeight)).
 						Padding(space0, space12).
-						Radius(radiusRow).
+						Radius(leaderRowRadius).
 						FocusRing(false)
 					if button.Hovered() {
-						button.Background(selectionFill(theme)).Border(space1, selectionEdge(theme))
-					} else {
-						button.Background(tileFill(theme)).Border(space1, hairline(theme))
+						button.Background(leaderSelectionFill(theme))
 					}
+					button.Draw(func(p *ui.Painter, r ui.Rect) {
+						if button.Hovered() {
+							p.Fill(ui.Rect{X: r.X, Y: r.Y, W: rowSelectionBarWidth, H: r.H}, leaderSelectionBar(), 0)
+						}
+					})
 					button.Children(func() {
 						ui.Row(c).FillWidth().Gap(space10).AlignItems(ui.Center).Children(func() {
 							leaderKeycap(c, theme, n.Key)
@@ -375,7 +382,7 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 		})
 
 		ui.Divider(c)
-		ui.Row(c).FillWidth().Gap(space12).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).FillWidth().Height(float32(leaderFooterHeight)).Gap(space12).AlignItems(ui.Center).Children(func() {
 			keyHint(c, theme, "a–z", i18n.T("leader.hint.trigger"), keyToneNeutral)
 			keyHint(c, theme, "/", i18n.T("leader.hint.search"), keyToneNeutral)
 			// ⌫ goes up a level only inside a group; at the top it closes the

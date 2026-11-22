@@ -75,7 +75,9 @@ func TestPreferredCapsuleSizeOmniboxDerivation(t *testing.T) {
 // so height grows one row at a time rather than two cards at a time.
 func TestLeaderHeightFitsRowsForAllCounts(t *testing.T) {
 	for nodes := 1; nodes <= 24; nodes++ {
-		want := min(max(leaderChromeHeight+nodes*leaderRowHeight, leaderMinHeight), leaderMaxHeight)
+		raw := leaderHeaderHeight + leaderBodyPadding + leaderFooterHeight +
+			max(nodes, 1)*leaderCardHeight + max(nodes-1, 0)*leaderGridGap
+		want := min(max(raw, leaderMinHeight), leaderMaxHeight)
 		if got := leaderHeightFor(nodes); got != want {
 			t.Fatalf("nodes=%d height=%d, want %d", nodes, got, want)
 		}
@@ -86,10 +88,21 @@ func TestLeaderHeightFitsRowsForAllCounts(t *testing.T) {
 	}
 }
 
-func TestLeaderHeightUsesVisualSpecCardFormula(t *testing.T) {
-	for nodes, want := range map[int]int{0: 156, 2: 196, 5: 340, 9: 508} {
+func TestLeaderHeightUsesVisualSpecCompactFormula(t *testing.T) {
+	for nodes, want := range map[int]int{0: 140, 1: 140, 2: 168, 5: 288, 9: 438} {
 		if got := leaderHeightFor(nodes); got != want {
-			t.Fatalf("leaderHeightFor(%d) = %d, want %d from §2.3 card formula", nodes, got, want)
+			t.Fatalf("leaderHeightFor(%d) = %d, want %d from §2.3 compact formula", nodes, got, want)
+		}
+	}
+}
+
+func TestLeaderHeightCompactFormulaUsesExplicitTerms(t *testing.T) {
+	for nodes, want := range map[int]int{2: 168, 5: 288, 9: 438} {
+		raw := leaderHeaderHeight + leaderBodyPadding + leaderFooterHeight +
+			max(nodes, 1)*leaderCardHeight + max(nodes-1, 0)*leaderGridGap
+		formula := min(max(raw, leaderMinHeight), leaderMaxHeight)
+		if formula != want || leaderHeightFor(nodes) != want {
+			t.Fatalf("leaderHeightFor(%d)=%d, explicit formula=%d, want %d", nodes, leaderHeightFor(nodes), formula, want)
 		}
 	}
 }

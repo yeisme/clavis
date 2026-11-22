@@ -61,11 +61,12 @@ const (
 // Radii beyond the original set: markers, inline controls, panels and the
 // two-segment pill. Everything else keeps the 5/6/7/9/10/999 ramp above.
 const (
-	radius2       float32 = 2  // glossary micro bars
-	radius4       float32 = 4  // underline, marker-pen edge
-	radius8       float32 = 8  // inline controls: fields, steppers, swatches
-	radius12      float32 = 12 // panels and stage cards
-	radiusSegment float32 = 11 // pill segments (28x22 caps)
+	radius2         float32 = 2  // glossary micro bars
+	radius4         float32 = 4  // underline, marker-pen edge
+	radius8         float32 = 8  // inline controls: fields, steppers, swatches
+	radius12        float32 = 12 // panels and stage cards
+	radiusSegment   float32 = 11 // pill segments (28x22 caps)
+	leaderRowRadius float32 = 6  // compact Leader rows use a restrained menu radius
 )
 
 // Type scale (points). typeSearch is the Spotlight-sized query text.
@@ -205,6 +206,12 @@ func selectionFill(t *ui.Theme) ui.Color {
 	}
 	return t.Accent.Alpha(0.14)
 }
+
+func leaderSelectionFill(t *ui.Theme) ui.Color {
+	return ui.Hex("#0A84FF").Alpha(0.12)
+}
+
+func leaderSelectionBar() ui.Color { return ui.Hex("#0A84FF") }
 
 // selectionEdge is the hairline that crisps the chosen row against glass.
 func selectionEdge(t *ui.Theme) ui.Color {

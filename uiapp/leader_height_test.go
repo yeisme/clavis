@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/i18n"
 )
@@ -81,4 +82,51 @@ func TestLeaderSubpageHasAWayBack(t *testing.T) {
 		t.Fatalf("back at the top, height %d, want leaderHeightFor(5)=%d", h2, leaderHeightFor(5))
 	}
 
+}
+
+func TestLeaderCompactRowSelectionUsesFlatBlueMark(t *testing.T) {
+	f := newInteractionFixture(t, nil)
+	f.ctrl.Dispatch(engine.Event{Type: engine.EventOpenLeader, Context: &engine.CapsuleContext{AppName: "Xcode"}})
+	appearance := f.ctrl.Config().Main.Appearance
+	w, h := PreferredCapsuleSizeForState(f.ctrl.State(), appearance)
+	tt := ui.NewTester(f.ctrl.CapsuleView, w, h)
+	tt.Frame()
+	row, ok := tt.Find("leader-row:a")
+	if !ok {
+		t.Fatal("leader row not found")
+	}
+	if row.H != leaderCardHeight {
+		t.Fatalf("leader row height=%.1f, want 38", row.H)
+	}
+	tt.Move(row.X+row.W/2, row.Y+row.H/2)
+	bar := tt.Image().At(int(row.X+1), int(row.Y+row.H/2))
+	fill := tt.Image().At(int(row.X+10), int(row.Y+row.H/2))
+	br, bg, bb, ba := bar.RGBA()
+	if uint8(br>>8) != 10 || uint8(bg>>8) != 132 || uint8(bb>>8) != 255 || uint8(ba>>8) != 255 {
+		t.Fatalf("leader selection bar=%#v, want #0A84FF", bar)
+	}
+	expected := leaderSelectionFill(ui.LightTheme()).Over(ui.LightTheme().Background)
+	fr, fg, fb, fa := fill.RGBA()
+	if uint8(fr>>8) != expected.R || uint8(fg>>8) != expected.G || uint8(fb>>8) != expected.B || uint8(fa>>8) != expected.A {
+		t.Fatalf("leader selection fill=%#v, want %#v", fill, expected)
+	}
+}
+
+func TestLeaderCompactHeightsRenderAtFormulaValues(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	for count, want := range map[int]int{1: 140, 2: 168, 5: 288, 9: 438} {
+		nodes := make([]config.LeaderNode, count)
+		for i := range nodes {
+			nodes[i] = config.LeaderNode{Key: string(rune('a' + i)), Label: "Action"}
+		}
+		state := engine.State{Phase: engine.PhaseLeader, LeaderNodes: nodes}
+		tt := ui.NewTester(func(c *ui.Context) {
+			ctrl.renderLeaderView(c, ui.LightTheme(), state)
+		}, 680, want)
+		tt.Frame()
+		view, ok := tt.Find("leader-view")
+		if !ok || int(view.H) != want {
+			t.Fatalf("count=%d rendered leader height=%.1f ok=%v, want %d", count, view.H, ok, want)
+		}
+	}
 }
