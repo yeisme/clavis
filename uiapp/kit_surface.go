@@ -1,9 +1,171 @@
 package uiapp
 
 import (
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/config"
 )
+
+// SurfaceDismissPolicy describes which window-level exits a floating surface
+// accepts. The surface owns the policy wiring, while the caller owns the
+// business action performed by Dismiss.
+type SurfaceDismissPolicy uint8
+
+const (
+	DismissExplicit SurfaceDismissPolicy = 1 << iota
+	DismissEscape
+	DismissOutsideClick
+	// DismissBlur is the specification name for an outside-click dismissal.
+	// Keep DismissOutsideClick as the readable call-site alias.
+	DismissBlur = DismissOutsideClick
+)
+
+// SurfaceRadiusKind keeps a radius tied to its source instead of scattering
+// pixel literals through window construction.
+type SurfaceRadiusKind uint8
+
+const (
+	SurfaceRadiusNone SurfaceRadiusKind = iota
+	SurfaceRadiusAppearance
+	SurfaceRadiusHalfHeight
+)
+
+// SurfaceRadiusSystem leaves the native window corner treatment unchanged.
+// It is the explicit spelling for ordinary document windows.
+const SurfaceRadiusSystem = SurfaceRadiusNone
+
+type SurfaceRadius struct {
+	Kind  SurfaceRadiusKind
+	value float32
+}
+
+func AppearanceSurfaceRadius(appearance config.AppearanceConfig) SurfaceRadius {
+	return SurfaceRadius{Kind: SurfaceRadiusAppearance, value: NormalizeCornerRadius(appearance)}
+}
+
+func HalfHeightSurfaceRadius() SurfaceRadius {
+	return SurfaceRadius{Kind: SurfaceRadiusHalfHeight}
+}
+
+func (r SurfaceRadius) resolve(height int) int {
+	switch r.Kind {
+	case SurfaceRadiusAppearance:
+		return int(r.value)
+	case SurfaceRadiusHalfHeight:
+		if height > 0 {
+			return height / 2
+		}
+	}
+	return 0
+}
+
+// SurfaceSpec is the complete shared contract for a floating window. Content,
+// placement and domain-specific close actions remain with the caller.
+type SurfaceSpec struct {
+	Elevation int
+	Radius    SurfaceRadius
+	Blur      mygo.Vibrancy
+	Dismiss   SurfaceDismissPolicy
+	// FocusRestore requests the caller's restore hook after a successful
+	// dismissal. Panel surfaces rely on MyGo's native panel restoration and
+	// document surfaces provide the previous-app fallback.
+	FocusRestore bool
+}
+
+const (
+	SurfaceElevationFlat      = elevNone
+	SurfaceElevationRaised    = elev2
+	SurfaceElevationPanel     = elev3
+	SurfaceElevationIndicator = elev4
+	// SurfaceElevationFloating is kept as the default for callers that do not
+	// need to distinguish the panel and indicator tiers.
+	SurfaceElevationFloating = SurfaceElevationIndicator
+)
+
+// FloatingSurface applies the shared visual properties to a MyGo window
+// option set. Existing options remain authoritative for content, placement,
+// focus mode and window lifetime.
+func FloatingSurface(opts mygo.WindowOptions, spec SurfaceSpec) mygo.WindowOptions {
+	if spec.Radius.Kind != SurfaceRadiusNone {
+		opts.CornerRadius = spec.Radius.resolve(opts.Height)
+	}
+	if spec.Blur != mygo.VibrancyNone {
+		opts.Transparent = true
+		opts.Vibrancy = spec.Blur
+	} else {
+		opts.Transparent = false
+		opts.Vibrancy = mygo.VibrancyNone
+	}
+	if opts.Panel {
+		// MyGo exposes native shadow as a boolean. The geometry and alpha for
+		// inner cards remain owned by elevationStep/elevationShadow.
+		opts.DisableShadow = spec.Elevation <= elevNone
+	}
+	return opts
+}
+
+type SurfaceHooks struct {
+	Dismiss      func()
+	RestoreFocus func()
+	CanDismiss   func() bool
+	Quitting     func() bool
+}
+
+// BindFloatingSurface centralizes close and outside-click policy. The close
+// callback is deliberately not once-only because a retained window can be
+// shown and dismissed repeatedly during the app lifetime.
+func BindFloatingSurface(win *mygo.Window, spec SurfaceSpec, hooks SurfaceHooks) {
+	if win == nil {
+		return
+	}
+	dismiss := func() {
+		if hooks.Quitting != nil && hooks.Quitting() {
+			return
+		}
+		if hooks.CanDismiss != nil && !hooks.CanDismiss() {
+			return
+		}
+		if hooks.Dismiss != nil {
+			hooks.Dismiss()
+		}
+		if spec.FocusRestore && hooks.RestoreFocus != nil {
+			hooks.RestoreFocus()
+		}
+	}
+	if spec.Dismiss&DismissExplicit != 0 || spec.Dismiss&DismissEscape != 0 {
+		win.OnClose(func(e *mygo.CloseEvent) {
+			if hooks.Quitting != nil && hooks.Quitting() {
+				return
+			}
+			e.PreventDefault()
+			dismiss()
+		})
+	}
+	if spec.Dismiss&DismissOutsideClick != 0 {
+		win.OnBlur(dismiss)
+	}
+}
+
+func FloatingSurfaceSpec(appearance config.AppearanceConfig, height int, blur mygo.Vibrancy, dismiss SurfaceDismissPolicy, focusRestore bool) SurfaceSpec {
+	return FloatingSurfaceSpecWithElevation(appearance, height, SurfaceElevationFloating, blur, dismiss, focusRestore)
+}
+
+// FloatingSurfaceSpecWithElevation builds a surface contract while keeping the
+// five shared concerns in one place. Window-specific business behavior stays
+// in the caller's hooks.
+func FloatingSurfaceSpecWithElevation(appearance config.AppearanceConfig, height, elevation int, blur mygo.Vibrancy, dismiss SurfaceDismissPolicy, focusRestore bool) SurfaceSpec {
+	radius := AppearanceSurfaceRadius(appearance)
+	if height > 0 && height <= 40 {
+		radius = HalfHeightSurfaceRadius()
+	}
+	return SurfaceSpec{
+		Elevation:    elevation,
+		Radius:       radius,
+		Blur:         blur,
+		Dismiss:      dismiss,
+		FocusRestore: focusRestore,
+	}
+}
 
 type cardVariant int
 
