@@ -531,7 +531,7 @@ func (a *desktopApp) start() {
 	// Closing the guide finishes it, as Get Started does; a quit (a restart
 	// for Input Monitoring) closes it without, so it shows again after.
 	uiapp.BindFloatingSurface(onboardingWin, onboardingSpec, uiapp.SurfaceHooks{
-		Dismiss: a.finishOnboardingAndRestore, Quitting: a.quitting.Load,
+		Dismiss: a.finishOnboarding, RestoreFocus: a.restorePreviousAppFocus, Quitting: a.quitting.Load,
 	})
 	controller.SetOnboardingHooks(uiapp.OnboardingHooks{
 		Finish:   a.finishOnboardingAndRestore,
