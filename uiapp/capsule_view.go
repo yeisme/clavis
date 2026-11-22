@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/egoist/mygo/ui"
@@ -622,17 +623,11 @@ func (a *AppController) renderOmniboxView(
 			items = agentItems(sessions, diagnostics, state.OmniboxQuery)
 		}
 		if len(items) == 0 {
-			// Empty-state illustration: the tab's icon above its caption.
-			ui.Box(c).FillWidth().Grow(1).Center().Padding(space24).Children(func() {
-				ui.Column(c).Gap(10).Center().Children(func() {
-					renderSemanticIcon(c, omniboxTabIcon(state.OmniboxTab), 24, withAlpha(theme.TextMuted, alphaHalf))
-					emptyText := omniboxEmptyText(state.OmniboxTab)
-					if state.OmniboxTab == config.TabAgent && a.agentRefreshing() {
-						emptyText = "正在加载 Agent 会话…"
-					}
-					ui.Text(c, emptyText).TextColor(theme.TextMuted)
-				})
-			})
+			if state.OmniboxTab == config.TabAgent && a.agentRefreshing() {
+				kitStateView(c, theme, kitStateLoading, "arrow.clockwise", "正在加载 Agent 会话…", "", nil)
+			} else {
+				kitStateView(c, theme, kitStateEmpty, omniboxTabIcon(state.OmniboxTab), omniboxEmptyText(state.OmniboxTab), "", nil)
+			}
 		} else {
 			selectedIdx := state.SelectedIndex
 			if state.OmniboxTab == config.TabAgent {
@@ -833,6 +828,7 @@ func (a *AppController) renderOmniboxView(
 						a.renderOmniboxPreviewCard(c, theme, state, previewItem)
 					})
 				}).FillWidth().Grow(1).SplitReset(defaultPreviewListPercent)
+				a.renderPreviewDividerState(c, theme, &pct)
 				if split.Changed() {
 					a.setPreviewListPercent(pct)
 				}
@@ -861,6 +857,82 @@ func (a *AppController) renderOmniboxView(
 				})
 		})
 	})
+}
+
+// renderPreviewDividerState overlays the SplitPercent divider with the
+// specification's 8pt hit target and delayed hover treatment. The underlying
+// MyGo split remains the source of drag/reset behavior and pointer capture.
+func (a *AppController) renderPreviewDividerState(c *ui.Context, theme *ui.Theme, pct *float32) {
+	width, _ := c.Size()
+	dividerX := width * *pct / 100
+	if dividerX < 0 || dividerX > width {
+		return
+	}
+	hit := ui.Box(c).Absolute().Left(dividerX - space4).Top(0).Width(space8).FillHeight()
+	hovered := hit.Hovered()
+	_, _, dragging := hit.Dragged()
+	dragging = dragging || a.uiState.previewDividerDragging
+	now := c.Now()
+	if hovered {
+		if a.uiState.previewDividerHoverSince.IsZero() {
+			a.uiState.previewDividerHoverSince = now
+		}
+		if now.Sub(a.uiState.previewDividerHoverSince) >= 150*time.Millisecond {
+			a.uiState.previewDividerHot = true
+		}
+	} else if !dragging {
+		a.uiState.previewDividerHoverSince = time.Time{}
+		a.uiState.previewDividerHot = false
+	}
+	if dragging {
+		a.uiState.previewDividerHot = true
+	}
+	if a.uiState.previewDividerHot != a.uiState.previewDividerLastHot {
+		a.uiState.previewDividerRun++
+		a.uiState.previewDividerLastHot = a.uiState.previewDividerHot
+	}
+	normal := ui.RGBA(0, 0, 0, 0.09)
+	if theme.Dark {
+		normal = ui.RGBA(255, 255, 255, 0.11)
+	}
+	progress := float32(0)
+	if a.uiState.previewDividerRun > 0 {
+		frames := []ui.Keyframe{{At: 0, Value: 1}, {At: 100 * time.Millisecond, Value: 0, Ease: ui.EaseOut}}
+		if a.uiState.previewDividerHot {
+			frames = []ui.Keyframe{{At: 0, Value: 0}, {At: 100 * time.Millisecond, Value: 1, Ease: ui.EaseOut}}
+		}
+		progress = hit.Keyframes("preview-divider-hover", frames, ui.KeyframeOptions{Run: a.uiState.previewDividerRun})
+	}
+	lineWidth := float32(1) + progress
+	lineColor := mixColor(normal, previewDividerAccent(0.55), progress)
+	if dragging {
+		lineWidth = 2
+		lineColor = previewDividerAccent(1)
+	}
+	cursor := ui.CursorResizeEW
+	if *pct <= minPreviewListPercent {
+		cursor = ui.CursorResizeE
+	} else if *pct >= maxPreviewListPercent {
+		cursor = ui.CursorResizeW
+	}
+	hit.Cursor(cursor).PassThrough()
+	if hit.Pressed() {
+		a.uiState.previewDividerDragging = true
+	}
+	if a.uiState.previewDividerDragging && !hit.Pressed() {
+		a.uiState.previewDividerDragging = false
+	}
+	hit.DrawOver(func(p *ui.Painter, r ui.Rect) {
+		if lineWidth == 1 {
+			p.Fill(ui.Rect{X: r.X + space4 - 0.5, Y: r.Y, W: 1, H: r.H}, lineColor, 0)
+			return
+		}
+		p.Fill(ui.Rect{X: r.X + space4 - lineWidth/2, Y: r.Y, W: lineWidth, H: r.H}, lineColor, 0)
+	})
+}
+
+func previewDividerAccent(alpha float32) ui.Color {
+	return ui.RGBA(10, 132, 255, alpha)
 }
 
 func renderAgentRowBadge(c *ui.Context, theme *ui.Theme, item engine.OmniboxItem, sessions []agentsession.Session) {
@@ -1324,21 +1396,17 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 						a.uiState.lastAIError = state.AIError
 						a.uiState.aiShakeRun++
 					}
-					errBox := ui.Box(c).
-						FillWidth().
-						Padding(space10, space12).
-						Radius(radius8).
-						Background(withAlpha(theme.Danger, alphaFaint)).
-						Border(1, withAlpha(theme.Danger, alphaHalf)).
-						Children(func() {
-							ui.Text(c, state.AIError).FontSize(typeBody).TextColor(theme.Danger)
+					errBox := ui.Column(c).FillWidth().Children(func() {
+						kitStateView(c, theme, kitStateError, "exclamationmark.circle", i18n.T("common.error"), state.AIError, func() {
+							a.Dispatch(engine.Event{Type: engine.EventFollowUpAI, Prompt: state.AIPrompt})
 						})
+					})
 					if frames := shakeKeyframes(profile); frames != nil {
 						jolt := errBox.Keyframes("ai-error-shake", frames, ui.KeyframeOptions{Run: a.uiState.aiShakeRun})
 						errBox.Translate(jolt*3, 0)
 					}
 				case state.AIOutput == "":
-					ui.Text(c, i18n.T("ai.generating")).FontSize(typeBody).TextColor(theme.TextMuted)
+					kitStateView(c, theme, kitStateLoading, "arrow.clockwise", i18n.T("ai.generating"), "", nil)
 				case hasReview && a.aiReviewShowsChanges(review):
 					renderAIReviewChanges(c, theme, review)
 				default:

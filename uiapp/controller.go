@@ -210,8 +210,13 @@ type uiViewState struct {
 	// Media preview state belongs to this controller, not a package-global map.
 	// It is reset when the selected Omnibox item changes and is only mutated by
 	// the Capsule UI thread.
-	mediaPreview       mediaPreviewState
-	mediaPreviewHandle ui.Handle
+	mediaPreview             mediaPreviewState
+	mediaPreviewHandle       ui.Handle
+	previewDividerHoverSince time.Time
+	previewDividerHot        bool
+	previewDividerLastHot    bool
+	previewDividerDragging   bool
+	previewDividerRun        uint64
 
 	// Pointer hover selection is tracked as index+1 (0 means none) so the zero
 	// value needs no initialisation. hoverSuppressed records the row a keyboard

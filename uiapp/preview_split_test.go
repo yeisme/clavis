@@ -16,6 +16,7 @@ import (
 	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/engine"
 )
 
 // widePNG is a solid 16:9 image in a color nothing else in the UI uses, so
@@ -188,4 +189,49 @@ func TestClampPreviewListPercent(t *testing.T) {
 			t.Errorf("clampPreviewListPercent(%v) = %v, want %v", in, got, want)
 		}
 	}
+}
+
+func TestPreviewDividerHoverAndDragStatesRenderWithSpecCursor(t *testing.T) {
+	f := newInteractionFixture(t, nil)
+	mediaPath := filepath.Join(t.TempDir(), "divider.png")
+	if err := os.WriteFile(mediaPath, widePNG(t), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.record(t, "divider item")
+	if _, _, err := f.clips.Record(context.Background(), clipboard.CaptureCandidate{
+		Content: "divider image", SourceAppName: "Preview", Timestamp: time.Now(),
+		Media: clipboard.Media{Kind: clipboard.KindImage, BlobSHA: "divider-sha", MediaPath: mediaPath, ThumbPath: mediaPath, Width: 64, Height: 36},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.ctrl.OpenOmnibox(config.TabClipboard, "")
+	for idx, item := range f.ctrl.State().OmniboxItems {
+		if item.ClipboardMedia != nil && item.ClipboardMedia.IsMedia() {
+			f.ctrl.SelectIndex(idx)
+			break
+		}
+	}
+	tt := f.omniboxTester(t)
+	w, h := PreferredCapsuleSize(engine.PhaseOmnibox, f.ctrl.Config().Main.Appearance)
+	y := float32(h) / 2
+	x0, total := space14, float32(w)-2*space14
+	x := x0 + total*defaultPreviewListPercent/100
+	tt.Move(x, y)
+	tt.Frame()
+	if tt.Cursor() != ui.CursorResizeEW {
+		t.Fatalf("divider hit target should expose EW resize cursor, got %v", tt.Cursor())
+	}
+	tt.Advance(150 * time.Millisecond)
+	tt.Frame()
+	if tt.Cursor() != ui.CursorResizeEW {
+		t.Fatalf("hovered divider should retain EW resize cursor, got %v", tt.Cursor())
+	}
+	tt.Press(x, y)
+	tt.Move(x+40, y)
+	tt.Frame()
+	if tt.Cursor() != ui.CursorResizeEW {
+		t.Fatalf("dragging divider should lock EW resize cursor, got %v", tt.Cursor())
+	}
+	tt.Release(x+40, y)
+	tt.Frame()
 }
