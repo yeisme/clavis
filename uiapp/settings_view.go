@@ -448,6 +448,7 @@ func (a *AppController) renderSettingsAboutSection(c *ui.Context, theme *ui.Them
 	settingsSourceCard(c, theme, i18n.T("settings.section.about"), "[about]", func() {
 		settingsHint(c, theme, i18n.T("settings.section.about.hint"))
 	})
+	a.renderSyncStatusCard(c, theme)
 }
 
 // renderSettingsGeneralSection draws the interactive trigger and appearance editors.
