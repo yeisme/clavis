@@ -518,6 +518,20 @@ func (a *AppController) renderOmniboxView(
 		if state.OmniboxTab == config.TabAI {
 			a.renderAIUsageBand(c, theme)
 		}
+		if state.OmniboxTab == config.TabClipboard {
+			a.ensureClipboardStatsRefresh()
+			stats, _ := a.clipboardStatsSnapshot()
+			renderClipboardStatsBand(c, theme, stats, func(kind string) {
+				a.clipboardStatsMu.Lock()
+				if a.clipboardStats.filter == kind {
+					a.clipboardStats.filter = ""
+				} else {
+					a.clipboardStats.filter = kind
+				}
+				a.clipboardStatsMu.Unlock()
+				a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: state.OmniboxQuery})
+			})
+		}
 		searchRow := ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center)
 		searchRow.Children(func() {
 			in := ui.TextInput(c, &query).
@@ -627,6 +641,17 @@ func (a *AppController) renderOmniboxView(
 		if state.OmniboxTab == config.TabAgent {
 			sessions, diagnostics := a.cachedAgentData()
 			items = agentItems(sessions, diagnostics, state.OmniboxQuery)
+		}
+		if state.OmniboxTab == config.TabClipboard {
+			if kind := a.clipboardStatsFilter(); kind != "" {
+				filtered := make([]engine.OmniboxItem, 0, len(items))
+				for _, item := range items {
+					if clipboardItemMatchesKind(item, kind) {
+						filtered = append(filtered, item)
+					}
+				}
+				items = filtered
+			}
 		}
 		if len(items) == 0 {
 			if state.OmniboxTab == config.TabAgent && a.agentRefreshing() {

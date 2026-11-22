@@ -106,6 +106,11 @@ type ClipboardSearcher interface {
 	Search(ctx context.Context, query string, limit int) ([]clipboard.ClipboardItem, error)
 }
 
+type clipboardStatsReader interface {
+	ClipboardDaily(context.Context, int) ([]internalstorage.ClipboardDay, error)
+	ClipboardKindStats(context.Context) ([]internalstorage.ClipboardKindStat, error)
+}
+
 // AIUsageDay is the UI projection of one daily token aggregate. The storage
 // package supplies the same fields, but the UI keeps an injected reader seam so
 // rendering tests never need a real database.
@@ -272,7 +277,9 @@ type uiViewState struct {
 // AppController coordinates Clavis state, host integration, AI streaming,
 // clipboard persistence, and native MyGo UI views.
 type AppController struct {
-	mu sync.Mutex
+	mu               sync.Mutex
+	clipboardStatsMu sync.RWMutex
+	clipboardStats   clipboardStatsState
 
 	ConfigStore       *config.ConfigStore
 	StateMachine      *engine.StateMachine

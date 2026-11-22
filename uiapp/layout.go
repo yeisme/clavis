@@ -91,6 +91,9 @@ func PreferredCapsuleSize(phase engine.CapsulePhase, appearance config.Appearanc
 // PreferredCapsuleSizeForState computes Capsule dimensions taking multi-turn AI history into account.
 func PreferredCapsuleSizeForState(state engine.State, appearance config.AppearanceConfig) (width, height int) {
 	w, h := PreferredCapsuleSize(state.Phase, appearance)
+	if state.Phase == engine.PhaseOmnibox && state.OmniboxTab == config.TabClipboard {
+		h += int(clipboardStatsBandHeight)
+	}
 	if state.Phase == engine.PhaseOmnibox && state.SelectedIndex >= 0 && state.SelectedIndex < len(state.OmniboxItems) {
 		item := state.OmniboxItems[state.SelectedIndex]
 		if item.ClipboardMedia != nil && item.ClipboardMedia.IsMedia() && (item.ClipboardMedia.Kind == "image" || item.ClipboardMedia.Kind == "video") {
