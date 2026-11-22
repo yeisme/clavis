@@ -69,36 +69,49 @@ type Options struct {
 	RequestTimeout time.Duration
 	MaxMessageSize int
 	MaxOutputSize  int
+	LookupTimeout  time.Duration
+	CrashLimit     int
 }
 
 // Supervisor scans and owns local plugin processes. A plugin process is
 // started only on its first Invoke call.
 type Supervisor struct {
-	mu        sync.RWMutex
-	plugins   map[string]*runtime
-	order     []string
-	registry  Registry
-	launcher  ProcessLauncher
-	timeout   time.Duration
-	max       int
-	maxOutput int
-	closed    bool
+	mu            sync.RWMutex
+	plugins       map[string]*runtime
+	order         []string
+	registry      Registry
+	launcher      ProcessLauncher
+	timeout       time.Duration
+	max           int
+	maxOutput     int
+	lookupTimeout time.Duration
+	crashLimit    int
+	closed        bool
+	watchCancel   context.CancelFunc
+	manifestState map[string]string
+	directoryPath string
 }
 
 type runtime struct {
-	manifest   Manifest
-	mu         sync.Mutex
-	process    Process
-	stdin      io.WriteCloser
-	encoder    *pluginprotocol.Encoder
-	responses  chan pluginprotocol.Response
-	done       chan struct{}
-	doneOnce   sync.Once
-	available  bool
-	nextID     atomic.Uint64
-	startErr   error
-	registry   Registry
-	registered map[string]struct{}
+	manifest      Manifest
+	mu            sync.Mutex
+	process       Process
+	stdin         io.WriteCloser
+	encoder       *pluginprotocol.Encoder
+	responses     chan pluginprotocol.Response
+	done          chan struct{}
+	doneOnce      sync.Once
+	available     bool
+	nextID        atomic.Uint64
+	startErr      error
+	crashes       int
+	disabled      bool
+	registry      Registry
+	registered    map[string]struct{}
+	crashLimit    int
+	stopping      bool
+	crashRecorded bool
+	owner         *Supervisor
 }
 
 // NewSupervisor scans opts.Directory and registers every valid manifest.
@@ -125,15 +138,22 @@ func NewSupervisor(opts Options) (*Supervisor, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Supervisor{plugins: make(map[string]*runtime), registry: opts.Registry, launcher: opts.Launcher, timeout: opts.RequestTimeout, max: opts.MaxMessageSize, maxOutput: opts.MaxOutputSize}
+	if opts.LookupTimeout <= 0 {
+		opts.LookupTimeout = 100 * time.Millisecond
+	}
+	if opts.CrashLimit <= 0 {
+		opts.CrashLimit = 3
+	}
+	s := &Supervisor{plugins: make(map[string]*runtime), registry: opts.Registry, launcher: opts.Launcher, timeout: opts.RequestTimeout, max: opts.MaxMessageSize, maxOutput: opts.MaxOutputSize, lookupTimeout: opts.LookupTimeout, crashLimit: opts.CrashLimit, manifestState: make(map[string]string), directoryPath: opts.Directory}
 	for _, manifest := range manifests {
 		if _, exists := s.plugins[manifest.ID]; exists {
 			return nil, fmt.Errorf("duplicate plugin id %q", manifest.ID)
 		}
-		r := &runtime{manifest: manifest, available: true, registry: opts.Registry, registered: make(map[string]struct{})}
+		r := newRuntime(s, manifest, opts.CrashLimit)
+		s.manifestState[manifest.ID] = manifestSignature(manifest)
 		s.plugins[manifest.ID] = r
 		s.order = append(s.order, manifest.ID)
-		metadata := Metadata{ID: manifest.ID, Name: manifest.Name, Version: manifest.Version, Description: manifest.Description, Capabilities: append([]string(nil), manifest.Capabilities...), Permissions: manifest.Permissions, ManifestPath: filepath.Join(manifest.Dir, "plugin.toml")}
+		metadata := Metadata{ID: manifest.ID, Name: manifest.Name, Version: manifest.Version, Description: manifest.Description, Capabilities: append([]string(nil), manifest.Capabilities...), StyleFields: append([]string(nil), manifest.StyleFields...), Permissions: manifest.Permissions, ManifestPath: filepath.Join(manifest.Dir, "plugin.toml")}
 		if err := opts.Registry.RegisterPlugin(metadata); err != nil {
 			return nil, fmt.Errorf("register plugin %q: %w", manifest.ID, err)
 		}
@@ -154,7 +174,7 @@ func (s *Supervisor) Plugins() []Metadata {
 	out := make([]Metadata, 0, len(s.plugins))
 	for _, id := range s.order {
 		r := s.plugins[id]
-		out = append(out, Metadata{ID: r.manifest.ID, Name: r.manifest.Name, Version: r.manifest.Version, Description: r.manifest.Description, Capabilities: append([]string(nil), r.manifest.Capabilities...), Permissions: r.manifest.Permissions, ManifestPath: filepath.Join(r.manifest.Dir, "plugin.toml")})
+		out = append(out, Metadata{ID: r.manifest.ID, Name: r.manifest.Name, Version: r.manifest.Version, Description: r.manifest.Description, Capabilities: append([]string(nil), r.manifest.Capabilities...), StyleFields: append([]string(nil), r.manifest.StyleFields...), Permissions: r.manifest.Permissions, ManifestPath: filepath.Join(r.manifest.Dir, "plugin.toml")})
 	}
 	return out
 }
@@ -170,7 +190,52 @@ func (s *Supervisor) Available(id string) bool {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.available
+	return r.available && !r.disabled
+}
+
+// PluginStatus is a diagnostic snapshot for a discovered plugin.
+type PluginStatus struct {
+	ID           string
+	Available    bool
+	Disabled     bool
+	CrashCount   int
+	LastError    string
+	Capabilities []string
+}
+
+func (s *Supervisor) Status(id string) (PluginStatus, error) {
+	r, err := s.plugin(id)
+	if err != nil {
+		return PluginStatus{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	status := PluginStatus{ID: r.manifest.ID, Available: r.available && !r.disabled, Disabled: r.disabled, CrashCount: r.crashes, Capabilities: append([]string(nil), r.manifest.Capabilities...)}
+	if r.startErr != nil {
+		status.LastError = r.startErr.Error()
+	}
+	return status, nil
+}
+
+func (r *runtime) recordCrash(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopping || r.disabled || r.crashRecorded {
+		return
+	}
+	r.crashRecorded = true
+	r.crashes++
+	r.startErr = err
+	r.available = r.crashes < r.crashLimit
+	if r.crashes >= r.crashLimit {
+		r.disabled = true
+	}
+	r.process = nil
+	r.encoder = nil
+	r.responses = nil
+	if r.crashes < r.crashLimit {
+		r.available = true
+	}
 }
 
 type initializeParams struct {
@@ -203,6 +268,9 @@ func (s *Supervisor) plugin(id string) (*runtime, error) {
 func (s *Supervisor) ensureStarted(ctx context.Context, r *runtime) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.disabled {
+		return ErrPluginUnavailable
+	}
 	if !r.available {
 		if r.startErr != nil {
 			return fmt.Errorf("%w: %v", ErrPluginUnavailable, r.startErr)
@@ -212,6 +280,10 @@ func (s *Supervisor) ensureStarted(ctx context.Context, r *runtime) error {
 	if r.process != nil {
 		return nil
 	}
+	r.stopping = false
+	r.crashRecorded = false
+	r.startErr = nil
+	r.doneOnce = sync.Once{}
 	command, args := r.manifest.executable()
 	p, err := s.launcher.Launch(ctx, command, args, r.manifest.Dir)
 	if err != nil {
@@ -252,12 +324,7 @@ func (r *runtime) readResponses(stdout io.Reader, max int) {
 		message, err := decoder.Read()
 		if err != nil {
 			r.closeDone()
-			r.mu.Lock()
-			if r.available {
-				r.available = false
-				r.startErr = err
-			}
-			r.mu.Unlock()
+			r.recordCrash(err)
 			return
 		}
 		if message.Response != nil {
@@ -272,12 +339,9 @@ func (r *runtime) readResponses(stdout io.Reader, max int) {
 func (r *runtime) waitProcess() {
 	err := r.process.Wait()
 	r.closeDone()
-	r.mu.Lock()
-	if err != nil && r.available {
-		r.available = false
-		r.startErr = err
+	if err != nil {
+		r.recordCrash(err)
 	}
-	r.mu.Unlock()
 }
 
 func (r *runtime) handshakeLocked(ctx context.Context) error {
@@ -371,6 +435,9 @@ func (s *Supervisor) Invoke(ctx context.Context, id, capability string, params j
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, ok := r.registered[capability]; !ok {
+		return nil, ErrCapabilityDenied
+	}
 	if !r.available {
 		return nil, ErrPluginUnavailable
 	}
@@ -439,6 +506,7 @@ func (s *Supervisor) Shutdown(ctx context.Context) error {
 	s.mu.Unlock()
 	for _, r := range rs {
 		r.mu.Lock()
+		r.stopping = true
 		if r.process == nil {
 			r.mu.Unlock()
 			continue

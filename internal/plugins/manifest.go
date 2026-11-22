@@ -29,17 +29,20 @@ type Permissions struct {
 // Command is retained as a convenient spelling for manifests produced by
 // older tooling. Args are passed to the entrypoint without shell expansion.
 type Manifest struct {
-	APIVersion   string      `toml:"api_version"`
-	ID           string      `toml:"id"`
-	Name         string      `toml:"name"`
-	Version      string      `toml:"version"`
-	Description  string      `toml:"description"`
-	Entrypoint   string      `toml:"entrypoint"`
-	Command      string      `toml:"command"`
-	Args         []string    `toml:"args"`
-	Capabilities []string    `toml:"capabilities"`
-	Permissions  Permissions `toml:"permissions"`
-	Dir          string      `toml:"-"`
+	APIVersion   string   `toml:"api_version"`
+	ID           string   `toml:"id"`
+	Name         string   `toml:"name"`
+	Version      string   `toml:"version"`
+	Description  string   `toml:"description"`
+	Entrypoint   string   `toml:"entrypoint"`
+	Command      string   `toml:"command"`
+	Args         []string `toml:"args"`
+	Capabilities []string `toml:"capabilities"`
+	// StyleFields is the allow-list returned by style.render. A style response
+	// can never expose fields that are absent from this declaration.
+	StyleFields []string    `toml:"style_fields"`
+	Permissions Permissions `toml:"permissions"`
+	Dir         string      `toml:"-"`
 }
 
 // Metadata is the provider-neutral registration record.
@@ -49,6 +52,7 @@ type Metadata struct {
 	Version      string
 	Description  string
 	Capabilities []string
+	StyleFields  []string
 	Permissions  Permissions
 	ManifestPath string
 }
