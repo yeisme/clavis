@@ -327,8 +327,12 @@ func (a *AppController) renderSettingsSidebar(c *ui.Context, section int, cfg co
 }
 
 func settingsSectionMatches(meta settingsSectionMeta, query string, cfg config.ClavisConfig) bool {
-	haystack := strings.ToLower(strings.Join([]string{meta.Key, meta.Label, meta.Hint, fmt.Sprintf("%+v", cfg)}, " "))
-	return strings.Contains(haystack, query)
+	compact := func(value string) string {
+		value = strings.ToLower(value)
+		return strings.NewReplacer("_", "", "-", "", " ", "").Replace(value)
+	}
+	haystack := compact(strings.Join([]string{meta.Key, meta.Label, meta.Hint, fmt.Sprintf("%+v", cfg)}, " "))
+	return strings.Contains(haystack, compact(query))
 }
 
 func settingsStatusIsFailure(status string) bool {
