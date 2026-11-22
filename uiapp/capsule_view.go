@@ -827,9 +827,9 @@ func (a *AppController) renderOmniboxView(
 				split := ui.SplitPercent(c, &pct, func() {
 					ui.Column(c).Fill().Padding(space0, space6, space0, space0).Children(renderList)
 				}, func() {
-					// The pane clips: the inset on the right and bottom keeps the
-					// elevated card's edge and shadow inside it.
-					ui.Column(c).Fill().Padding(space0, space2, space4, space8).Children(func() {
+					// The preview shares the content surface. Its former elevated
+					// card consumed horizontal width and created a second frame.
+					ui.Column(c).Fill().Padding(space0, space8, space4, space0).Children(func() {
 						a.renderOmniboxPreviewCard(c, theme, state, previewItem)
 					})
 				}).FillWidth().Grow(1).SplitReset(defaultPreviewListPercent)
@@ -1019,10 +1019,7 @@ func (a *AppController) renderOmniboxRowLeadingIcon(c *ui.Context, theme *ui.The
 		slot(func() { iconTile(c, theme, "face.smiling", false) })
 
 	default:
-		iconName := item.Icon
-		if iconName == "" {
-			iconName = "bolt"
-		}
+		iconName := fallbackActionIcon(item.Icon, item.Title, item.Subtitle)
 		slot(func() { iconTile(c, theme, iconName, false) })
 	}
 }
@@ -1532,7 +1529,7 @@ func omniboxTabIcon(tab config.CapsuleTab) string {
 	case config.TabAgent:
 		return "person.crop.circle"
 	default:
-		return "bolt"
+		return "command"
 	}
 }
 

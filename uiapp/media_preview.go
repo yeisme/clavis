@@ -63,10 +63,47 @@ func mediaZoomPercent(mode MediaZoomMode, custom float32) int {
 }
 
 func mediaZoomLabel(mode MediaZoomMode, custom float32) string {
+	return mediaZoomLabelWithFit(mode, custom, 100)
+}
+
+func mediaZoomLabelWithFit(mode MediaZoomMode, custom float32, fitPercent int) string {
 	if mode == MediaZoomFit {
-		return i18n.T("preview.media.fit")
+		if fitPercent < 1 {
+			fitPercent = 1
+		}
+		return fmt.Sprintf("%d%%", fitPercent)
 	}
 	return fmt.Sprintf("%d%%", mediaZoomPercent(mode, custom))
+}
+
+// mediaFitPercent reports the real aspect-fit scale for the current canvas.
+// It is deliberately capped at 100% so Fit never enlarges a source image.
+func mediaFitPercent(m engine.ClipboardMedia, canvasWidth, canvasHeight float32) int {
+	if m.Width <= 0 || m.Height <= 0 || canvasWidth <= 0 || canvasHeight <= 0 {
+		return 100
+	}
+	availableWidth := maxFloat32(canvasWidth-24, 1)
+	availableHeight := maxFloat32(canvasHeight-24, 1)
+	scale := minFloat32(1, minFloat32(availableWidth/float32(m.Width), availableHeight/float32(m.Height)))
+	percent := int(math.Round(float64(scale * 100)))
+	if percent < 1 {
+		return 1
+	}
+	return percent
+}
+
+func minFloat32(a, b float32) float32 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxFloat32(a, b float32) float32 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (a *AppController) resetMediaPreview(item engine.OmniboxItem) {
@@ -178,8 +215,10 @@ func (a *AppController) handleMediaPreviewInput(ev ui.InputEvent) bool {
 	return false
 }
 
-func (a *AppController) renderClipboardMediaToolbar(c *ui.Context, theme *ui.Theme) {
+func (a *AppController) renderClipboardMediaToolbar(c *ui.Context, theme *ui.Theme, m engine.ClipboardMedia) {
 	p := a.uiState.mediaPreview
+	canvasWidth, _ := c.Size()
+	fitPercent := mediaFitPercent(m, canvasWidth, mediaCanvasHeight)
 	ui.Row(c).FillWidth().Gap(space2).AlignItems(ui.Center).Children(func() {
 		// The preview rail is intentionally compact (especially at the minimum
 		// Capsule width), so visible text labels stay readable without relying on
@@ -187,6 +226,9 @@ func (a *AppController) renderClipboardMediaToolbar(c *ui.Context, theme *ui.The
 		// labels and keyboard-focus behavior.
 		button := func(label string, active bool, fn func()) {
 			b := ui.ButtonBase(c).Height(controlHeight).Padding(space2, space4).Radius(radiusPill).FocusRing(false)
+			if label != "−" && label != "+" && label != i18n.T("preview.media.fit") && label != i18n.T("preview.media.original") {
+				b.Width(42)
+			}
 			if active {
 				b.Background(theme.Accent.Alpha(alphaSubtle)).Border(space1, theme.Accent.Alpha(alphaHalf))
 			} else {
@@ -203,18 +245,15 @@ func (a *AppController) renderClipboardMediaToolbar(c *ui.Context, theme *ui.The
 				fn()
 			}
 		}
-		button(i18n.T("preview.media.fit"), p.mode == MediaZoomFit, func() { a.setMediaZoom(MediaZoomFit, 1) })
 		button("−", false, func() { a.adjustMediaZoom(-mediaZoomStep) })
+		zoomReadout := mediaZoomLabelWithFit(p.mode, p.zoom, fitPercent)
+		button(zoomReadout, false, func() { a.setMediaZoom(MediaZoomFit, 1) })
 		button("+", false, func() { a.adjustMediaZoom(mediaZoomStep) })
+		button(i18n.T("preview.media.fit"), p.mode == MediaZoomFit, func() { a.setMediaZoom(MediaZoomFit, 1) })
 		button(i18n.T("preview.media.original"), p.mode == MediaZoomOriginal, func() { a.setMediaZoom(MediaZoomOriginal, 1) })
-		// The zoom readout sits at the trailing edge, so no button moves when
-		// it appears, and only when it says something the pills do not: a
-		// percentage. In Fit mode the lit "Fit" pill already says it — the
-		// readout used to repeat "Fit" between − and +.
+		// The readout is a stable percentage between − and +. The separate Fit
+		// and Original controls remain localized action buttons.
 		ui.Spacer(c)
-		if p.mode != MediaZoomFit {
-			ui.Text(c, mediaZoomLabel(p.mode, p.zoom)).FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
-		}
 	})
 }
 

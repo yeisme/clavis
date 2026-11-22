@@ -337,7 +337,7 @@ func (a *AppController) renderOmniboxPreviewCard(
 		flashFrames = []ui.Keyframe{{At: 0, Value: 1}, {At: profile.flash, Value: 0, Ease: ui.EaseOut}}
 	}
 
-	card := kitCard(c, theme, cardElevated, func() {
+	card := ui.Column(c).FillWidth().Padding(space0, space0).Gap(space6).Background(theme.Background).Children(func() {
 		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 			// Neutral: the card's title icon is a label, not a selection.
 			renderSemanticIcon(c, previewIcon(item), typeLabel, secondaryInk(theme))
@@ -370,7 +370,7 @@ func (a *AppController) renderOmniboxPreviewCard(
 	// Preserve the snippet flash as a border animation on the elevated card.
 	if len(flashFrames) == 2 {
 		glow := card.Keyframes("snippet-flash", flashFrames, ui.KeyframeOptions{Run: flashRun, NonMotion: true})
-		card.Border(space1, mixColor(theme.Accent.Alpha(alphaStrong), hairline(theme), 1-glow))
+		card.Background(mixColor(theme.Accent.Alpha(alphaStrong), theme.Background, 1-glow))
 	}
 
 }
@@ -689,7 +689,44 @@ func previewIcon(item engine.OmniboxItem) string {
 	case engine.ItemWorkflow:
 		return "arrow.triangle.branch"
 	default:
-		return "bolt"
+		return fallbackActionIcon(item.Icon, item.Title, item.Subtitle)
+	}
+}
+
+func fallbackActionIcon(explicit, title, subtitle string) string {
+	if name := strings.ToLower(strings.TrimSpace(explicit)); name != "" {
+		if _, ok := semanticIconBodies[name]; ok {
+			return name
+		}
+	}
+	text := strings.ToLower(strings.TrimSpace(title + " " + subtitle))
+	switch {
+	case strings.Contains(text, "window") || strings.Contains(text, "窗口"):
+		return "macwindow"
+	case strings.Contains(text, "ai") || strings.Contains(text, "rewrite") || strings.Contains(text, "改写"):
+		return "sparkles"
+	case strings.Contains(text, "clipboard") || strings.Contains(text, "剪贴板"):
+		return "doc.on.clipboard"
+	case strings.Contains(text, "snippet") || strings.Contains(text, "片段"):
+		return "curlybraces"
+	case strings.Contains(text, "ime") || strings.Contains(text, "输入法") || strings.Contains(text, "词库"):
+		return "character.book.closed"
+	case strings.Contains(text, "setting") || strings.Contains(text, "设置"):
+		return "gearshape"
+	case strings.Contains(text, "http") || strings.Contains(text, "url") || strings.Contains(text, "链接"):
+		return "globe"
+	case strings.Contains(text, "search") || strings.Contains(text, "搜索"):
+		return "search"
+	case strings.Contains(text, "copy") || strings.Contains(text, "复制"):
+		return "doc.on.doc"
+	case strings.Contains(text, "translat") || strings.Contains(text, "翻译"):
+		return "globe"
+	case strings.Contains(text, "delete") || strings.Contains(text, "删除"):
+		return "trash"
+	case strings.Contains(text, "terminal") || strings.Contains(text, "shell"):
+		return "terminal"
+	default:
+		return "command"
 	}
 }
 
@@ -698,7 +735,7 @@ func (a *AppController) renderClipboardMediaPreview(c *ui.Context, theme *ui.The
 	a.resetMediaPreview(item)
 	source := strings.TrimSpace(item.Subtitle)
 	ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
-		previewBadge(c, theme, item.Icon, source, false)
+		previewBadge(c, theme, "app.badge", source, false)
 		if item.KeyHint == engine.KeyHintPinned {
 			previewBadge(c, theme, "pin.fill", i18n.T("common.pinned"), true)
 		}
@@ -711,7 +748,11 @@ func (a *AppController) renderClipboardMediaPreview(c *ui.Context, theme *ui.The
 		})
 	}
 	if m.Kind == "image" || m.Kind == "video" {
-		a.renderClipboardMediaToolbar(c, theme)
+		// Keep media metadata visually separate from the zoom controls. The
+		// 12pt breathing room also protects the footer's ⌘I action when the
+		// preview is at its compact height.
+		ui.Box(c).Height(space12)
+		a.renderClipboardMediaToolbar(c, theme, m)
 	}
 	kitInsetWell(c, theme, func() {
 		bmp := a.ThumbBitmap(m.ThumbPath)

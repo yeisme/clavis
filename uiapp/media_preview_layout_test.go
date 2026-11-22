@@ -90,10 +90,28 @@ func TestMediaPreviewToolbarSaysFitOnce(t *testing.T) {
 	if !ok || readout == fit {
 		t.Fatalf("zoomed in, readout %q not shown as a percentage; texts %q", readout, tt.Texts())
 	}
-	if r.X < after.X {
-		t.Fatalf("readout %q at x=%.1f sits before + (x=%.1f); it belongs at the trailing edge", readout, r.X, after.X)
+	if r.X > after.X {
+		t.Fatalf("readout %q at x=%.1f sits after + (x=%.1f); it belongs between − and +", readout, r.X, after.X)
 	}
 	t.Logf("Fit shown once; + stays at x=%.1f; readout %q at x=%.1f", plus.X, readout, r.X)
+}
+
+func TestMediaPreviewSpecFrameKeepsWideImageReadable(t *testing.T) {
+	f, _, _ := mediaPreviewFixture(t)
+	const width, height = 720, 536
+	tt := ui.NewTester(f.ctrl.CapsuleView, width, height)
+	tt.Frame()
+	tt.Advance(2 * time.Second)
+	tt.Frame()
+	handle, ok := splitHandleX(tt, float32(height)/2, 200, width-100)
+	if !ok {
+		t.Fatal("spec frame has no draggable preview divider")
+	}
+	got := float32(width) - handle - space8
+	if got < 420 {
+		t.Fatalf("720×536 preview net width = %.0fpt, want at least 420pt", got)
+	}
+	t.Logf("720×536 preview divider %.1fpt, preview net width %.0fpt", handle, got)
 }
 
 // mediaPreviewFixture opens the clipboard tab with an image entry chosen and

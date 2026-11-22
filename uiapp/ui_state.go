@@ -13,7 +13,7 @@ import (
 // has the focus, a double click puts it back). The percentage is the
 // list's share; the limits keep both panes usable.
 const (
-	defaultPreviewListPercent float32 = 58 // the preview takes 42%
+	defaultPreviewListPercent float32 = 38 // the preview takes 62%
 	minPreviewListPercent     float32 = 35 // the list keeps at least 35%
 	maxPreviewListPercent     float32 = 75 // the preview keeps at least 25%
 )

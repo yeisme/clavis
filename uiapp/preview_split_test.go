@@ -183,7 +183,7 @@ func TestPreviewSplitDragsClampsResetsAndPersists(t *testing.T) {
 }
 
 func TestClampPreviewListPercent(t *testing.T) {
-	for in, want := range map[float32]float32{0: 58, -5: 58, 10: 35, 35: 35, 50: 50, 75: 75, 99: 75} {
+	for in, want := range map[float32]float32{0: 38, -5: 38, 10: 35, 35: 35, 50: 50, 75: 75, 99: 75} {
 		if got := clampPreviewListPercent(in); got != want {
 			t.Errorf("clampPreviewListPercent(%v) = %v, want %v", in, got, want)
 		}
