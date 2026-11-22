@@ -47,6 +47,38 @@ func TestAIUsageDailyIncludesZeroDaysAndAggregates(t *testing.T) {
 	}
 }
 
+func TestLexiconHitsDailyIncludesZeroDaysAndBatchesAsync(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, ":memory:", sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewLearningStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := NewLearningWriter(store, LearningWriterOptions{FlushInterval: time.Hour})
+	now := time.Now().In(time.Local)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	writer.QueueLexiconHit(today.Add(-48*time.Hour), true)
+	writer.QueueLexiconHit(today.Add(-48*time.Hour), false)
+	writer.QueueLexiconHit(today, true)
+	if err := writer.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	days, err := store.LexiconHitsDaily(ctx, 4)
+	if err != nil || len(days) != 4 {
+		t.Fatalf("days=%+v err=%v", days, err)
+	}
+	if days[0].Hits != 0 || days[0].Misses != 0 || days[1].Hits != 1 || days[1].Misses != 1 || days[2].Hits != 0 || days[3].Hits != 1 || days[3].Misses != 0 {
+		t.Fatalf("days=%+v", days)
+	}
+}
+
 func TestLearningStoreRoundTripAndFrecency(t *testing.T) {
 	ctx := context.Background()
 	db, err := sqlite.Open(ctx, ":memory:", sqlite.OpenOptions{})

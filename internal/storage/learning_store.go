@@ -72,6 +72,11 @@ type AIUsageDay struct {
 	Requests, InputTokens, OutputTokens int
 }
 
+type LexiconHitDay struct {
+	Day          string
+	Hits, Misses int
+}
+
 type lexKey struct{ pinyin, word, prev string }
 type lexValue struct {
 	frequency int64
@@ -106,6 +111,39 @@ func NewLearningStore(db *sqlite.DB) (*LearningStore, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// LexiconHitsDaily returns per-day hit/miss counts for the last n local days,
+// oldest first, including zero rows for days without activity.
+func (s *LearningStore) LexiconHitsDaily(ctx context.Context, n int) ([]LexiconHitDay, error) {
+	if n <= 0 {
+		return []LexiconHitDay{}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	loc := time.Local
+	now := time.Now().In(loc)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	start := today.AddDate(0, 0, -(n - 1))
+	end := today.AddDate(0, 0, 1)
+	rows, err := s.db.Query(ctx, `SELECT day,hits,misses FROM lexicon_hits_daily WHERE day>=? AND day<? ORDER BY day`, start.Format("2006-01-02"), end.Format("2006-01-02"))
+	if err != nil {
+		return nil, err
+	}
+	byDay := make(map[string]LexiconHitDay, len(rows.Values))
+	for _, row := range rows.Values {
+		if len(row) >= 3 {
+			byDay[str(row, 0)] = LexiconHitDay{Day: str(row, 0), Hits: int(int64val(row, 1)), Misses: int(int64val(row, 2))}
+		}
+	}
+	out := make([]LexiconHitDay, n)
+	for i := range out {
+		day := start.AddDate(0, 0, i).Format("2006-01-02")
+		out[i] = byDay[day]
+		out[i].Day = day
+	}
+	return out, nil
 }
 
 // AIUsageDaily returns one row per local UTC calendar day, oldest first. Missing
@@ -146,6 +184,7 @@ func (s *LearningStore) initSchema(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS usage_frecency (item_id TEXT PRIMARY KEY, use_count INTEGER NOT NULL DEFAULT 0, last_used_ns INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS prompt_history (id INTEGER PRIMARY KEY AUTOINCREMENT, prompt_id TEXT NOT NULL, trigger TEXT NOT NULL, raw_draft TEXT NOT NULL, final_output TEXT NOT NULL, preset TEXT NOT NULL, created_at_ns INTEGER NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_prompt_history_recent ON prompt_history(prompt_id, created_at_ns DESC, id DESC)`,
+		`CREATE TABLE IF NOT EXISTS lexicon_hits_daily (day TEXT NOT NULL, hits INTEGER NOT NULL DEFAULT 0, misses INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day))`,
 		`CREATE TABLE IF NOT EXISTS ai_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, at_ns INTEGER NOT NULL, profile TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, action TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cached_tokens INTEGER NOT NULL, reported INTEGER NOT NULL, latency_ms INTEGER NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS ai_usage_at ON ai_usage(at_ns)`,
 	}

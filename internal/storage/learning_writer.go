@@ -93,6 +93,11 @@ type useDelta struct {
 	lastUsed int64
 }
 
+type hitDelta struct {
+	day          string
+	hits, misses int64
+}
+
 type promptVersion struct {
 	promptID, trigger, rawDraft, finalOutput, preset string
 	createdAt                                        int64
@@ -105,6 +110,7 @@ type learningBatch struct {
 	uses    map[string]useDelta
 	prompts []promptVersion
 	aiUsage []AIUsageRecord
+	hits    map[string]hitDelta
 	ops     int
 	retries int
 }
@@ -114,11 +120,12 @@ func newLearningBatch() *learningBatch {
 		lex:     make(map[lexKey]lexDelta),
 		bigrams: make(map[[2]string]lexDelta),
 		uses:    make(map[string]useDelta),
+		hits:    make(map[string]hitDelta),
 	}
 }
 
 func (b *learningBatch) empty() bool {
-	return len(b.lex) == 0 && len(b.bigrams) == 0 && len(b.uses) == 0 && len(b.prompts) == 0 && len(b.aiUsage) == 0
+	return len(b.lex) == 0 && len(b.bigrams) == 0 && len(b.uses) == 0 && len(b.prompts) == 0 && len(b.aiUsage) == 0 && len(b.hits) == 0
 }
 
 // merge folds older (a batch whose flush failed) back under b.
@@ -144,6 +151,13 @@ func (b *learningBatch) merge(older *learningBatch) {
 	}
 	b.prompts = append(older.prompts, b.prompts...)
 	b.aiUsage = append(older.aiUsage, b.aiUsage...)
+	for day, d := range older.hits {
+		cur := b.hits[day]
+		cur.day = day
+		cur.hits += d.hits
+		cur.misses += d.misses
+		b.hits[day] = cur
+	}
 	if extra := len(b.prompts) - maxPendingPrompts; extra > 0 {
 		b.prompts = b.prompts[extra:]
 	}
@@ -259,6 +273,30 @@ func (w *LearningWriter) RecordAIUsage(record coreai.UsageRecord) {
 		Action: record.Action, InputTokens: record.Usage.InputTokens, OutputTokens: record.Usage.OutputTokens,
 		CachedTokens: record.Usage.CachedTokens, Reported: record.Usage.Reported, Latency: record.Latency,
 	})
+}
+
+// QueueLexiconHit records a selection outcome without waiting for SQLite.
+func (w *LearningWriter) QueueLexiconHit(at time.Time, hit bool) {
+	if w == nil {
+		return
+	}
+	day := at.In(time.Local).Format("2006-01-02")
+	w.mu.Lock()
+	d := w.pending.hits[day]
+	d.day = day
+	if hit {
+		d.hits++
+	} else {
+		d.misses++
+	}
+	w.pending.hits[day] = d
+	w.pending.ops++
+	full := w.pending.ops >= w.maxOps
+	w.mu.Unlock()
+	w.queued.Add(1)
+	if full {
+		w.wake()
+	}
 }
 
 func (w *LearningWriter) QueueAIUsage(record AIUsageRecord) {
@@ -432,7 +470,7 @@ func (s *LearningStore) mirrorItemUse(itemID string, ns int64) {
 // persistBatch writes a coalesced batch in one transaction: counters are
 // added as deltas, so N commits of one word cost one UPSERT.
 func (s *LearningStore) persistBatch(ctx context.Context, b *learningBatch) error {
-	stmts := make([]sqlite.Statement, 0, len(b.lex)+len(b.bigrams)+len(b.uses)+len(b.prompts)+len(b.aiUsage))
+	stmts := make([]sqlite.Statement, 0, len(b.lex)+len(b.bigrams)+len(b.uses)+len(b.prompts)+len(b.aiUsage)+len(b.hits))
 	for k, d := range b.lex {
 		stmts = append(stmts, sqlite.Statement{
 			SQL:  `INSERT INTO ime_user_lexicon(pinyin_key,word,frequency,last_used_ns,pinned) VALUES(?,?,?,?,?) ON CONFLICT(pinyin_key,word) DO UPDATE SET frequency=frequency+excluded.frequency,last_used_ns=MAX(last_used_ns,excluded.last_used_ns),pinned=MAX(pinned,excluded.pinned)`,
@@ -456,6 +494,9 @@ func (s *LearningStore) persistBatch(ctx context.Context, b *learningBatch) erro
 			SQL:  `INSERT INTO prompt_history(prompt_id,trigger,raw_draft,final_output,preset,created_at_ns) VALUES(?,?,?,?,?,?)`,
 			Args: []any{p.promptID, p.trigger, p.rawDraft, p.finalOutput, p.preset, p.createdAt},
 		})
+	}
+	for _, h := range b.hits {
+		stmts = append(stmts, sqlite.Statement{SQL: `INSERT INTO lexicon_hits_daily(day,hits,misses) VALUES(?,?,?) ON CONFLICT(day) DO UPDATE SET hits=hits+excluded.hits,misses=misses+excluded.misses`, Args: []any{h.day, h.hits, h.misses}})
 	}
 	for _, u := range b.aiUsage {
 		stmts = append(stmts, sqlite.Statement{

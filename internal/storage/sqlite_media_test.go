@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo/plugins/sqlite"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
@@ -45,6 +46,75 @@ func TestSQLiteClipboardStore_MigratesPreMediaSchema(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer store.Close()
+}
+
+func TestSQLiteClipboardStore_BackfillsKindAndByteSizeIdempotently(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sqlite.Open(ctx, dbPath, sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Execute(ctx, `CREATE TABLE clipboard_items (id TEXT PRIMARY KEY, content TEXT NOT NULL, content_hash TEXT NOT NULL UNIQUE, source_bundle_id TEXT NOT NULL DEFAULT '', source_app_name TEXT NOT NULL DEFAULT '', created_at_ns INTEGER NOT NULL, updated_at_ns INTEGER NOT NULL, is_pinned INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL DEFAULT '', byte_size INTEGER NOT NULL DEFAULT 0)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Execute(ctx, `INSERT INTO clipboard_items VALUES ('old-2','你好','h2','','Notes',1,1,0,'',0)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	store, err := NewSQLiteClipboardStore(ctx, dbPath, clipboard.NewPrivacyFilter())
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.Recent(ctx, 10)
+	if err != nil || len(items) != 1 || items[0].Media.Kind != "" || items[0].ByteSize != int64(len([]byte("你好"))) {
+		t.Fatalf("items=%+v err=%v", items, err)
+	}
+	_ = store.Close()
+	store, err = NewSQLiteClipboardStore(ctx, dbPath, clipboard.NewPrivacyFilter())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	rows, err := store.DB().Query(ctx, `SELECT COUNT(*) FROM pragma_table_info('clipboard_items') WHERE name='kind'`)
+	if err != nil || len(rows.Values) != 1 || int64val(rows.Values[0], 0) != 1 {
+		t.Fatalf("kind columns=%+v err=%v", rows.Values, err)
+	}
+}
+
+func TestSQLiteClipboardStore_DailyAndKindStats(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t, ":memory:", clipboard.NewPrivacyFilter())
+	defer store.Close()
+	now := time.Now().In(time.Local)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, time.Local)
+	for _, candidate := range []clipboard.CaptureCandidate{{Content: "one", Timestamp: today.Add(-24 * time.Hour), Media: clipboard.Media{Kind: clipboard.KindText}}, {Content: "two", Timestamp: today, Media: clipboard.Media{Kind: clipboard.KindText}}, {Content: "img", Timestamp: today, Media: clipboard.Media{Kind: clipboard.KindImage, ByteSize: 42, BlobSHA: "blob"}}} {
+		if _, _, err := store.Record(ctx, candidate); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stats, err := store.ClipboardKindStats(ctx)
+	if err != nil || len(stats) != 2 {
+		t.Fatalf("stats=%+v err=%v", stats, err)
+	}
+	var text, image ClipboardKindStat
+	for _, s := range stats {
+		if s.Kind == "text" {
+			text = s
+		}
+		if s.Kind == "image" {
+			image = s
+		}
+	}
+	if text.Count != 2 || text.Bytes != int64(len([]byte("one"))+len([]byte("two"))) || image.Count != 1 || image.Bytes != 42 {
+		t.Fatalf("stats=%+v", stats)
+	}
+	days, err := store.ClipboardDaily(ctx, 7)
+	if err != nil || len(days) != 7 || days[5].Count != 1 || days[6].Count != 2 {
+		t.Fatalf("days=%+v err=%v", days, err)
+	}
 }
 
 func TestSQLiteClipboardStore_DedupRepairsMediaMetadata(t *testing.T) {

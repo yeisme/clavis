@@ -66,6 +66,67 @@ func NewSQLiteClipboardStoreFromConfig(ctx context.Context, dbPath string, cfg c
 }
 
 // SetPrivacyFilter updates the active PrivacyFilter (e.g. after config hot-reload).
+type ClipboardDay struct {
+	Day   string
+	Count int
+}
+type ClipboardKindStat struct {
+	Kind  string
+	Count int
+	Bytes int64
+}
+
+// ClipboardDaily returns per-day item counts for the last n local calendar days,
+// oldest first, including zero rows for missing days.
+func (s *SQLiteClipboardStore) ClipboardDaily(ctx context.Context, n int) ([]ClipboardDay, error) {
+	if n <= 0 {
+		return []ClipboardDay{}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	loc := time.Local
+	today := time.Now().In(loc)
+	startDate := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -(n - 1))
+	end := startDate.AddDate(0, 0, n)
+	rows, err := s.db.Query(ctx, `SELECT created_at_ns FROM clipboard_items WHERE created_at_ns>=? AND created_at_ns<?`, startDate.UnixNano(), end.UnixNano())
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int, len(rows.Values))
+	for _, row := range rows.Values {
+		if len(row) > 0 {
+			if ns, ok := row[0].(int64); ok {
+				counts[time.Unix(0, ns).In(loc).Format("2006-01-02")]++
+			}
+		}
+	}
+	out := make([]ClipboardDay, n)
+	for i := range out {
+		day := startDate.AddDate(0, 0, i).Format("2006-01-02")
+		out[i] = ClipboardDay{Day: day, Count: counts[day]}
+	}
+	return out, nil
+}
+
+// ClipboardKindStats returns current stored item counts and their byte totals.
+func (s *SQLiteClipboardStore) ClipboardKindStats(ctx context.Context) ([]ClipboardKindStat, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rows, err := s.db.Query(ctx, `SELECT CASE WHEN kind='' THEN 'text' ELSE kind END, COUNT(*), COALESCE(SUM(byte_size),0) FROM clipboard_items GROUP BY CASE WHEN kind='' THEN 'text' ELSE kind END ORDER BY 1`)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ClipboardKindStat, 0, len(rows.Values))
+	for _, row := range rows.Values {
+		if len(row) >= 3 {
+			out = append(out, ClipboardKindStat{Kind: str(row, 0), Count: int(int64val(row, 1)), Bytes: int64val(row, 2)})
+		}
+	}
+	return out, nil
+}
+
 func (s *SQLiteClipboardStore) SetPrivacyFilter(filter clipboard.PrivacyFilter) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -128,7 +189,10 @@ func (s *SQLiteClipboardStore) initSchema(ctx context.Context, enableWAL bool) e
 			return fmt.Errorf("init clipboard schema: %w", err)
 		}
 	}
-	return s.migrateMediaColumns(ctx)
+	if err := s.migrateMediaColumns(ctx); err != nil {
+		return err
+	}
+	return s.backfillClipboardMetadata(ctx)
 }
 
 // itemColumns is the column list every item query selects, in rowToItem order.
@@ -149,7 +213,7 @@ func qualifyColumns(prefix, cols string) string {
 // mediaColumns are added in place to pre-media databases (docs/design/media-preview.md §3).
 // FTS keeps indexing content/source_app_name only, so binary payloads never enter it.
 var mediaColumns = [][2]string{
-	{"kind", "TEXT NOT NULL DEFAULT 'text'"},
+	{"kind", "TEXT NOT NULL DEFAULT ''"},
 	{"media_path", "TEXT NOT NULL DEFAULT ''"},
 	{"media_mime", "TEXT NOT NULL DEFAULT ''"},
 	{"width", "INTEGER NOT NULL DEFAULT 0"},
@@ -158,6 +222,44 @@ var mediaColumns = [][2]string{
 	{"thumb_path", "TEXT NOT NULL DEFAULT ''"},
 	{"byte_size", "INTEGER NOT NULL DEFAULT 0"},
 	{"duration_ms", "INTEGER NOT NULL DEFAULT 0"},
+}
+
+// backfillClipboardMetadata upgrades legacy rows in bounded batches. A failed
+// row is skipped so startup remains available and a later open can retry it.
+func (s *SQLiteClipboardStore) backfillClipboardMetadata(ctx context.Context) error {
+	// Legacy databases can have an external-content FTS index without a row for
+	// every clipboard item. Its UPDATE trigger would reject an otherwise safe
+	// metadata-only backfill, so suspend that trigger for this idempotent pass.
+	if _, err := s.db.Execute(ctx, `DROP TRIGGER IF EXISTS clipboard_items_au`); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = s.db.Execute(context.Background(), `CREATE TRIGGER IF NOT EXISTS clipboard_items_au AFTER UPDATE ON clipboard_items BEGIN INSERT INTO clipboard_fts(clipboard_fts, rowid, content, source_app_name) VALUES ('delete', old.rowid, old.content, old.source_app_name); INSERT INTO clipboard_fts(rowid, content, source_app_name) VALUES (new.rowid, new.content, new.source_app_name); END`)
+	}()
+	for {
+		rows, err := s.db.Query(ctx, `SELECT id, content FROM clipboard_items WHERE kind='' LIMIT 256`)
+		if err != nil {
+			return fmt.Errorf("query clipboard metadata backfill: %w", err)
+		}
+		if len(rows.Values) == 0 {
+			return nil
+		}
+		for _, row := range rows.Values {
+			if len(row) < 2 {
+				continue
+			}
+			id, ok := row[0].(string)
+			if !ok || id == "" {
+				continue
+			}
+			content, _ := row[1].(string)
+			// Individual updates keep the migration retryable even for legacy
+			// databases whose FTS auxiliary tables are incomplete.
+			_, _ = s.db.Execute(ctx, `UPDATE clipboard_items SET kind=?, byte_size=? WHERE id=? AND kind=''`, string(clipboard.KindText), len([]byte(content)), id)
+		}
+		// A failed row remains blank by contract; do not spin forever during startup.
+		return nil
+	}
 }
 
 func (s *SQLiteClipboardStore) migrateMediaColumns(ctx context.Context) error {
@@ -213,6 +315,12 @@ func (s *SQLiteClipboardStore) Record(ctx context.Context, candidate clipboard.C
 		now = time.Now().UTC()
 	}
 	nowNs := now.UnixNano()
+	if candidate.Kind == "" {
+		candidate.Kind = clipboard.KindText
+	}
+	if candidate.Kind == clipboard.KindText && candidate.ByteSize == 0 {
+		candidate.ByteSize = int64(len([]byte(candidate.Content)))
+	}
 	hash := candidate.DedupeHash()
 
 	s.mu.Lock()
