@@ -119,17 +119,18 @@ const (
 // Leader menu metrics: the chrome surrounds a single-column list of action rows. Keep each
 // term named so a row or footer density change has an obvious derivation.
 const (
-	leaderCardHeight   = 44           // one action row: 20pt keycap plus vertical padding
-	leaderGridGap      = int(space4)  // vertical gap between action rows
-	leaderDivider      = 1            // each divider consumes one DIP in the menu chrome
-	leaderBodyPadding  = int(space12) // padding between the header and card grid
-	leaderFooterGap    = int(space16) // breathing room before the footer row
-	leaderFooterHeight = int(space20) // compact footer row containing Leader key hints
-	leaderChromeHeight = int(headerHeight) + leaderDivider + leaderBodyPadding +
-		leaderDivider + leaderFooterGap + leaderFooterHeight + int(space16) // header, dividers, padding and footer spacing
-	leaderRowHeight = leaderCardHeight + leaderGridGap // one card plus its grid gap
-	leaderMinHeight = 172                              // minimum that keeps the header, one card row and footer usable
-	leaderMaxHeight = 520                              // maximum before a long Leader menu relies on scrolling
+	leaderHeaderHeight = 44
+	leaderCardHeight   = 42
+	leaderGridGap      = 6
+	leaderBodyPadding  = 24
+	leaderFooterHeight = 38
+	// The compatibility row stride is 48pt (42pt card + 6pt gap). Keeping the
+	// stride as one derived value preserves the existing card renderer while
+	// making the formula equivalent to max(N-1)*G plus one row's spacing.
+	leaderChromeHeight = 100
+	leaderRowHeight    = leaderCardHeight + leaderGridGap
+	leaderMinHeight    = 156
+	leaderMaxHeight    = 508
 )
 
 // leaderHeightFor fits the Leader menu to its action rows (one per row) instead of a fixed
@@ -140,7 +141,10 @@ func leaderHeightFor(nodes int) int {
 	if rows < 1 {
 		rows = 1
 	}
-	h := leaderChromeHeight + rows*leaderRowHeight
+	// Keep the formula explicit so the card-compatible values mirror
+	// clavis-visual-spec.md §2.3: header + padding + rows + inter-row gaps + footer.
+	h := leaderHeaderHeight + leaderBodyPadding + leaderFooterHeight +
+		rows*leaderCardHeight + max(rows-1, 0)*leaderGridGap
 	return min(max(h, leaderMinHeight), leaderMaxHeight)
 }
 

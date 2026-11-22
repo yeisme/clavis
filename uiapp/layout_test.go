@@ -86,6 +86,14 @@ func TestLeaderHeightFitsRowsForAllCounts(t *testing.T) {
 	}
 }
 
+func TestLeaderHeightUsesVisualSpecCardFormula(t *testing.T) {
+	for nodes, want := range map[int]int{0: 156, 2: 196, 5: 340, 9: 508} {
+		if got := leaderHeightFor(nodes); got != want {
+			t.Fatalf("leaderHeightFor(%d) = %d, want %d from §2.3 card formula", nodes, got, want)
+		}
+	}
+}
+
 func TestPreferredCapsuleSizeChineseWidthFloor(t *testing.T) {
 	defer i18n.SetLanguage(i18n.English)
 	i18n.SetLanguage(i18n.Chinese)
