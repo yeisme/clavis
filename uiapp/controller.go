@@ -23,6 +23,7 @@ import (
 	"github.com/yeisme/clavis/internal/apps"
 	"github.com/yeisme/clavis/internal/bridge"
 	"github.com/yeisme/clavis/internal/secrets"
+	internalstorage "github.com/yeisme/clavis/internal/storage"
 	"github.com/yeisme/clavis/pkg/core/actions"
 	"github.com/yeisme/clavis/pkg/core/agentsession"
 	"github.com/yeisme/clavis/pkg/core/ai"
@@ -105,6 +106,47 @@ type ClipboardSearcher interface {
 	Search(ctx context.Context, query string, limit int) ([]clipboard.ClipboardItem, error)
 }
 
+// AIUsageDay is the UI projection of one daily token aggregate. The storage
+// package supplies the same fields, but the UI keeps an injected reader seam so
+// rendering tests never need a real database.
+type AIUsageDay struct {
+	Day                                 string
+	Requests, InputTokens, OutputTokens int
+}
+
+// AIUsageDailyReader reads a bounded, oldest-first daily usage window.
+// Implementations must perform I/O off the UI thread.
+type AIUsageDailyReader func(context.Context, int) ([]AIUsageDay, error)
+
+func defaultAIUsageDailyReader(store clipboard.Store) AIUsageDailyReader {
+	sqliteStore, ok := store.(*internalstorage.SQLiteClipboardStore)
+	if !ok || sqliteStore == nil {
+		return func(context.Context, int) ([]AIUsageDay, error) {
+			return nil, errors.New("AI usage storage is unavailable")
+		}
+	}
+	var once sync.Once
+	var learningStore *internalstorage.LearningStore
+	var initErr error
+	return func(ctx context.Context, n int) ([]AIUsageDay, error) {
+		once.Do(func() {
+			learningStore, initErr = internalstorage.NewLearningStore(sqliteStore.DB())
+		})
+		if initErr != nil {
+			return nil, initErr
+		}
+		days, err := learningStore.AIUsageDaily(ctx, n)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]AIUsageDay, len(days))
+		for i, day := range days {
+			out[i] = AIUsageDay{Day: day.Day, Requests: day.Requests, InputTokens: day.InputTokens, OutputTokens: day.OutputTokens}
+		}
+		return out, nil
+	}
+}
+
 const (
 	defaultClipboardMirrorLimit    = 50
 	defaultClipboardSearchDebounce = 50 * time.Millisecond
@@ -121,6 +163,7 @@ type Options struct {
 	ConfigStore              *config.ConfigStore
 	ClipboardStore           clipboard.Store
 	ClipboardSearcher        ClipboardSearcher
+	AIUsageDaily             AIUsageDailyReader
 	SecretStore              secrets.APIKeyStore
 	Bridge                   bridge.HostService
 	AppProvider              apps.AppProvider
@@ -372,6 +415,13 @@ type AppController struct {
 	aiTestStatus      AITestStatus
 	aiTestMessage     string
 
+	aiUsageMu             sync.RWMutex
+	aiUsageDays           []AIUsageDay
+	aiUsageLoaded         bool
+	aiUsageRefreshStarted bool
+	aiUsageErr            error
+	aiUsageReader         AIUsageDailyReader
+
 	// Ephemeral UI state (used on the UI build thread)
 	uiState uiViewState
 	// uiPersist is view state saved to ui-state.json (the preview split).
@@ -476,6 +526,10 @@ func NewAppController(opts Options) *AppController {
 		uiState: uiViewState{
 			imeRuleModeDraft: config.IMEModeASCII,
 		},
+	}
+	c.aiUsageReader = opts.AIUsageDaily
+	if c.aiUsageReader == nil {
+		c.aiUsageReader = defaultAIUsageDailyReader(clipStore)
 	}
 	c.clipCond = sync.NewCond(&c.clipMu)
 

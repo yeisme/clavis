@@ -451,6 +451,9 @@ func (a *AppController) renderOmniboxView(
 	state engine.State,
 ) {
 	profile := appMotionProfile(c, cfg.Main.Appearance)
+	if state.OmniboxTab == config.TabAI {
+		a.ensureAIUsageRefresh()
+	}
 	if a.uiState.lastPhase != engine.PhaseOmnibox || a.uiState.lastTab != state.OmniboxTab {
 		a.uiState.searchHandle.RequestFocus(c)
 	}
@@ -512,6 +515,9 @@ func (a *AppController) renderOmniboxView(
 
 	rootCol.Children(func() {
 		query := state.OmniboxQuery
+		if state.OmniboxTab == config.TabAI {
+			a.renderAIUsageBand(c, theme)
+		}
 		searchRow := ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center)
 		searchRow.Children(func() {
 			in := ui.TextInput(c, &query).
