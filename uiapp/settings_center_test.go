@@ -57,6 +57,38 @@ func TestSettingsNavigationHasFiveGroupsAndSecondaryPages(t *testing.T) {
 	}
 }
 
+func TestSettingsNavigationSearchMatchesPageAndConfigValue(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	cfg := ctrl.Config()
+	sections := settingsNavigationSections()
+	var clipboard settingsSectionMeta
+	for _, section := range sections {
+		if section.Key == "clipboard" {
+			clipboard = section
+			break
+		}
+	}
+	if !settingsSectionMatches(clipboard, "clipboard", cfg) {
+		t.Fatal("clipboard query did not match the secondary page")
+	}
+	if !settingsSectionMatches(clipboard, "maxhistoryitems", cfg) {
+		t.Fatal("config field query did not match the settings search index")
+	}
+}
+
+func TestSettingsDraftDirtyDetectsChangedSnippet(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	state := ctrl.settingsEditor()
+	seSet(state, func(s *settingsEditorState) {
+		s.snippetSelected = "sig"
+		s.snippetDraft.ID = "sig"
+		s.snippetDraft.Content = "changed"
+	})
+	if !ctrl.settingsDraftDirty() {
+		t.Fatal("changed snippet draft was not detected")
+	}
+}
+
 // TestSettingsCenter_TriggersAndAppearancePersist drives the interactive
 // trigger and appearance editors and checks config.toml follows.
 func TestSettingsCenter_TriggersAndAppearancePersist(t *testing.T) {
