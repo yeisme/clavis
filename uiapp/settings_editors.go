@@ -22,7 +22,10 @@ import (
 // controller.go keeps its own state untouched, and it is safe to read from any
 // goroutine the UI uses.
 type settingsEditorState struct {
-	mu sync.Mutex
+	mu             sync.Mutex
+	railQuery      string
+	pendingSection int
+	leavePrompt    bool
 
 	// recordingShortcut names the trigger field ("capsule_shortcut" or
 	// "clipboard_shortcut") whose recorder waits for the next modifier+key chord.
