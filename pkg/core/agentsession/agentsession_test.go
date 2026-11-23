@@ -3,6 +3,7 @@ package agentsession
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,6 +193,33 @@ func TestCodexTimeoutDiagnosticPreservesBoundary(t *testing.T) {
 		}
 	}
 	t.Fatalf("timeout was flattened into another diagnostic: %+v", diagnostics)
+}
+
+func TestCodexDiagnosticsPreserveReadBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		code string
+	}{
+		{errors.New("threads table not found"), "incompatible_schema"},
+		{errors.New("database is locked"), "busy"},
+		{errors.New("open read-only Codex state: permission denied"), "unavailable"},
+		{errors.New("disk I/O error"), "read_failed"},
+	} {
+		_, diagnostics := Discover(context.Background(), Options{
+			CodexDB: "/tmp/state_5.sqlite", CodexReader: fakeCodexReader{err: tc.err},
+			DSHDir: filepath.Join(t.TempDir(), "dsh"), DSHThreadsDir: filepath.Join(t.TempDir(), "threads"), ClaudeDir: filepath.Join(t.TempDir(), "claude"),
+		})
+		found := false
+		for _, diagnostic := range diagnostics {
+			if diagnostic.Provider == "codex" && diagnostic.Code == tc.code {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("error=%q diagnostics=%+v want=%q", tc.err, diagnostics, tc.code)
+		}
+	}
 }
 
 func TestClaudeAndCodexCompatibilityFieldsArePreserved(t *testing.T) {

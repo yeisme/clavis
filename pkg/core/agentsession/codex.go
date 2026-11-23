@@ -15,12 +15,7 @@ func discoverCodex(ctx context.Context, opts Options) ([]Session, []Diagnostic) 
 	}
 	threads, err := opts.CodexReader.Threads(ctx, 500)
 	if err != nil {
-		code := "query_failed"
-		if errors.Is(err, context.DeadlineExceeded) {
-			code = "timeout"
-		} else if errors.Is(err, context.Canceled) {
-			code = "cancelled"
-		}
+		code := codexDiagnosticCode(err)
 		return nil, []Diagnostic{{"codex", code, "threads could not be read"}}
 	}
 	now := opts.Now()
@@ -42,4 +37,24 @@ func discoverCodex(ctx context.Context, opts Options) ([]Session, []Diagnostic) 
 		})
 	}
 	return out, nil
+}
+
+func codexDiagnosticCode(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "timeout") {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) || strings.Contains(strings.ToLower(err.Error()), "cancel") {
+		return "cancelled"
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "locked"), strings.Contains(message, "busy"):
+		return "busy"
+	case strings.Contains(message, "schema"), strings.Contains(message, "table not found"), strings.Contains(message, "no stable id"), strings.Contains(message, "no such column"):
+		return "incompatible_schema"
+	case strings.Contains(message, "open read-only"), strings.Contains(message, "not found"), strings.Contains(message, "permission"):
+		return "unavailable"
+	default:
+		return "read_failed"
+	}
 }
