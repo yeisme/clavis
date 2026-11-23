@@ -16,9 +16,9 @@ const (
 
 // OperationResult is the stable, user-observable result contract for host operations.
 type OperationResult struct {
-	State      OperationState
-	Code       string
-	Message    string
-	ObservedAt time.Time
-	Retryable  bool
+	State      OperationState `json:"state"`
+	Code       string         `json:"code"`
+	Message    string         `json:"message"`
+	ObservedAt time.Time      `json:"observedAt"`
+	Retryable  bool           `json:"retryable"`
 }

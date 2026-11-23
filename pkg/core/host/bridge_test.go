@@ -2,11 +2,29 @@ package host_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/host"
 )
+
+func TestOperationResultUsesStableJSONFieldNames(t *testing.T) {
+	encoded, err := json.Marshal(host.OperationResult{State: host.StateUnknown, Code: "state_unavailable", Retryable: false})
+	if err != nil {
+		t.Fatalf("marshal operation result: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatalf("decode operation result JSON: %v", err)
+	}
+	if got["state"] != "unknown" || got["code"] != "state_unavailable" || got["retryable"] != false {
+		t.Fatalf("operation result JSON=%s", encoded)
+	}
+	if _, ok := got["State"]; ok {
+		t.Fatalf("operation result used Go field names: %s", encoded)
+	}
+}
 
 type stubBridge struct {
 	caps host.Capabilities
