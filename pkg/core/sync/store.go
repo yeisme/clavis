@@ -48,4 +48,5 @@ var (
 	ErrStoreBatch           = errors.New("sync: tombstone batch is not confirmed")
 	ErrStoreCursor          = errors.New("sync: invalid tombstone cursor")
 	ErrStorePlaintext       = errors.New("sync: plaintext payloads are not accepted")
+	ErrStoreConflict        = errors.New("sync: concurrent object conflict")
 )

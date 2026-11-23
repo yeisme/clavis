@@ -2,6 +2,7 @@
 package sync
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -813,7 +814,7 @@ func (s *Server) UploadEnvelope(account, device, object string, version uint64, 
 		return errors.New("sync: object is permanently deleted")
 	}
 	if version <= s.versions[account][object] {
-		return errors.New("sync: upload version is not newer")
+		return ErrStoreVersion
 	}
 	encoded, err := marshalEnvelope(e)
 	if err != nil {
@@ -850,10 +851,37 @@ func (s *Server) AuditForAccount(account string) []AuditEvent {
 }
 func (s *Server) LatestSequence() uint64 { s.mu.Lock(); defer s.mu.Unlock(); return s.sequence }
 
+type PulledObject struct {
+	ObjectID string
+	Version  uint64
+	Class    DataClass
+	Payload  []byte
+}
+
+type ConflictEntry struct {
+	ObjectID      string
+	ConflictID    string
+	LocalVersion  uint64
+	RemoteVersion uint64
+	LocalPayload  []byte
+	RemotePayload []byte
+}
+
+type PullResult struct {
+	Objects   []PulledObject
+	Conflicts []ConflictEntry
+}
+
+type localObject struct {
+	version uint64
+	payload []byte
+}
+
 type Client struct {
 	mu                  sync.Mutex
 	syncMu              sync.Mutex
 	server              *Server
+	store               SyncStore
 	accountID, deviceID string
 	credential          []byte
 	privateKey          ed25519.PrivateKey
@@ -869,6 +897,8 @@ type Client struct {
 	recoveryReady       bool
 	plan                SyncPlan
 	vault               *Vault
+	localObjects        map[string]localObject
+	conflicts           []ConflictEntry
 }
 
 func newClient(s *Server, device string, identity DeviceIdentity) (*Client, error) {
@@ -882,7 +912,11 @@ func newClient(s *Server, device string, identity DeviceIdentity) (*Client, erro
 	if err != nil {
 		return nil, err
 	}
-	return &Client{server: s, deviceID: device, privateKey: append(ed25519.PrivateKey(nil), identity.Ed25519Private...), xPrivateKey: identity.X25519Private, adk: append([]byte(nil), identity.ADK...), credential: append([]byte(nil), identity.Credential...), cache: NewLocalCache(), plan: DefaultSyncPlan(), vault: v}, nil
+	store, err := NewServerStore(s)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{server: s, store: store, deviceID: device, privateKey: append(ed25519.PrivateKey(nil), identity.Ed25519Private...), xPrivateKey: identity.X25519Private, adk: append([]byte(nil), identity.ADK...), credential: append([]byte(nil), identity.Credential...), cache: NewLocalCache(), plan: DefaultSyncPlan(), vault: v, localObjects: make(map[string]localObject)}, nil
 }
 
 // NewClient retains the in-memory constructor for callers that do not yet have
@@ -896,6 +930,35 @@ func NewClient(s *Server, device string) (*Client, error) {
 }
 func NewClientWithIdentity(s *Server, device string, identity DeviceIdentity) (*Client, error) {
 	return newClient(s, device, identity)
+}
+
+// NewClientWithStore uses the durable encrypted-object store for all sync data
+// operations. The store is the protocol boundary; no plaintext is passed to it.
+func NewClientWithStore(store SyncStore, device string, identity DeviceIdentity) (*Client, error) {
+	if store == nil {
+		return nil, errors.New("sync: store is required")
+	}
+	if strings.TrimSpace(device) == "" {
+		return nil, errors.New("sync: device id is required")
+	}
+	if len(identity.Ed25519Private) != ed25519.PrivateKeySize || identity.X25519Private == nil || len(identity.ADK) != 32 {
+		return nil, errors.New("sync: incomplete device identity")
+	}
+	v, err := NewVaultWithError("")
+	if err != nil {
+		return nil, err
+	}
+	return &Client{store: store, deviceID: device, privateKey: append(ed25519.PrivateKey(nil), identity.Ed25519Private...), xPrivateKey: identity.X25519Private, adk: append([]byte(nil), identity.ADK...), cache: NewLocalCache(), plan: DefaultSyncPlan(), vault: v, localObjects: make(map[string]localObject)}, nil
+}
+
+func (c *Client) syncStore() (SyncStore, error) {
+	c.mu.Lock()
+	store := c.store
+	c.mu.Unlock()
+	if store == nil {
+		return nil, errors.New("sync: store is not configured")
+	}
+	return store, nil
 }
 
 // NewPersistentClient loads identity from the keystore and non-secret state
@@ -940,16 +1003,24 @@ func (c *Client) saveState() error {
 	return state.Save(context.Background(), watermark, ready)
 }
 func (c *Client) Login(account string) error {
+	store, err := c.syncStore()
+	if err != nil {
+		return err
+	}
 	// Login may register a new account, but deliberately cannot recover an
-	// existing account's credential from the Server object.
-	cred, err := c.server.RegisterAccount(account)
+	// existing account's credential from the store.
+	cred, err := store.RegisterAccount(account)
 	if err != nil {
 		return err
 	}
 	return c.loginWithCredential(account, cred)
 }
 func (c *Client) LoginWithCredential(account string, credential []byte) error {
-	if err := c.server.LoginWithCredential(account, credential); err != nil {
+	store, err := c.syncStore()
+	if err != nil {
+		return err
+	}
+	if err := store.LoginWithCredential(account, credential); err != nil {
 		return err
 	}
 	return c.loginWithCredential(account, credential)
@@ -1119,14 +1190,28 @@ func (c *Client) PairDevice() error {
 	pub := append(ed25519.PublicKey(nil), c.privateKey.Public().(ed25519.PublicKey)...)
 	xpub := append([]byte(nil), c.xPrivateKey.PublicKey().Bytes()...)
 	cred := append([]byte(nil), c.credential...)
+	store := c.store
+	server := c.server
 	c.mu.Unlock()
 	if a == "" {
 		return errors.New("sync: login is required")
 	}
-	if err := c.server.PairDeviceWithCredential(a, d, pub, cred); err != nil {
+	if store == nil {
+		return errors.New("sync: store is not configured")
+	}
+	if err := store.PairDeviceWithCredential(a, d, pub, cred); err != nil {
 		return err
 	}
-	if err := c.server.SetX25519PublicKey(a, d, xpub, cred); err != nil {
+	if server == nil {
+		// A durable SyncStore currently owns encrypted objects and device
+		// signatures. The ADK is supplied by the persisted identity; no server
+		// private-key or plaintext key exchange is required for this client path.
+		if len(c.ADK()) != 32 {
+			return errors.New("sync: ADK is not initialized")
+		}
+		return nil
+	}
+	if err := server.SetX25519PublicKey(a, d, xpub, cred); err != nil {
 		return err
 	}
 	if err := c.ensureADK(); err != nil {
@@ -1134,6 +1219,101 @@ func (c *Client) PairDevice() error {
 	}
 	return c.publishWrappedADK()
 }
+func conflictObjectID(object, device string, version uint64) string {
+	sum := sha256.Sum256([]byte(object + "\x00" + device + "\x00" + fmt.Sprint(version)))
+	return object + ".conflict." + hex.EncodeToString(sum[:8])
+}
+
+func (c *Client) recordConflict(conflict ConflictEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.conflicts = append(c.conflicts, ConflictEntry{ObjectID: conflict.ObjectID, ConflictID: conflict.ConflictID, LocalVersion: conflict.LocalVersion, RemoteVersion: conflict.RemoteVersion, LocalPayload: append([]byte(nil), conflict.LocalPayload...), RemotePayload: append([]byte(nil), conflict.RemotePayload...)})
+}
+
+func (c *Client) Conflicts() []ConflictEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]ConflictEntry, len(c.conflicts))
+	for i := range c.conflicts {
+		out[i] = c.conflicts[i]
+		out[i].LocalPayload = append([]byte(nil), c.conflicts[i].LocalPayload...)
+		out[i].RemotePayload = append([]byte(nil), c.conflicts[i].RemotePayload...)
+	}
+	return out
+}
+
+// Pull fetches one encrypted object, verifies its sender signature, and only
+// then decrypts it. A verification failure never reaches the AEAD operation.
+func (c *Client) Pull(object string) (PulledObject, error) {
+	result, err := c.PullObjects(object)
+	if err != nil {
+		return PulledObject{}, err
+	}
+	if len(result.Objects) == 0 {
+		return PulledObject{}, ErrStoreObjectMissing
+	}
+	return result.Objects[0], nil
+}
+
+func (c *Client) PullObjects(objects ...string) (PullResult, error) {
+	store, err := c.syncStore()
+	if err != nil {
+		return PullResult{}, err
+	}
+	c.mu.Lock()
+	account := c.accountID
+	adk := append([]byte(nil), c.adk...)
+	c.mu.Unlock()
+	if account == "" {
+		return PullResult{}, errors.New("sync: login is required")
+	}
+	if len(adk) != 32 {
+		if err := c.ensureADK(); err != nil {
+			return PullResult{}, err
+		}
+		c.mu.Lock()
+		adk = append([]byte(nil), c.adk...)
+		c.mu.Unlock()
+	}
+	out := PullResult{}
+	for _, object := range objects {
+		envelope, err := store.GetEnvelope(account, object)
+		if err != nil {
+			return out, err
+		}
+		pub, err := store.DevicePublicKey(account, envelope.DeviceID)
+		if err != nil {
+			return out, err
+		}
+		if !envelope.Verify(pub) {
+			return out, errors.New("sync: invalid envelope signature")
+		}
+		payload, err := DecryptEnvelope(adk, envelope, pub)
+		if err != nil {
+			return out, err
+		}
+		pulled := PulledObject{ObjectID: envelope.ObjectID, Version: envelope.Version, Class: envelope.Class, Payload: append([]byte(nil), payload...)}
+		c.mu.Lock()
+		local, hasLocal := c.localObjects[object]
+		c.mu.Unlock()
+		if hasLocal && local.version != envelope.Version && !bytes.Equal(local.payload, payload) {
+			conflictID := conflictObjectID(object, envelope.DeviceID, envelope.Version)
+			conflict := ConflictEntry{ObjectID: object, ConflictID: conflictID, LocalVersion: local.version, RemoteVersion: envelope.Version, LocalPayload: local.payload, RemotePayload: payload}
+			c.recordConflict(conflict)
+			out.Conflicts = append(out.Conflicts, conflict)
+			continue
+		}
+		c.mu.Lock()
+		if c.localObjects == nil {
+			c.localObjects = make(map[string]localObject)
+		}
+		c.localObjects[object] = localObject{version: envelope.Version, payload: append([]byte(nil), payload...)}
+		c.mu.Unlock()
+		out.Objects = append(out.Objects, pulled)
+	}
+	return out, nil
+}
+
 func (c *Client) Cache() *LocalCache { return c.cache }
 func (c *Client) Vault() *Vault      { return c.vault }
 func (c *Client) ConfigurePlan(p SyncPlan) error {
@@ -1170,7 +1350,11 @@ func (c *Client) Delete(object string) error {
 	if err != nil {
 		return err
 	}
-	t, err := c.server.SubmitDelete(d)
+	store, storeErr := c.syncStore()
+	if storeErr != nil {
+		return storeErr
+	}
+	t, err := store.SubmitDelete(d)
 	if t.ObjectID != "" {
 		c.applyTombstone(t)
 	}
@@ -1196,13 +1380,17 @@ func (c *Client) Sync() ([]Tombstone, CleanupReport, error) {
 	if a == "" {
 		return nil, CleanupReport{}, errors.New("sync: login is required")
 	}
-	ts, err := c.server.SyncTombstones(a, d, after)
+	store, storeErr := c.syncStore()
+	if storeErr != nil {
+		return nil, CleanupReport{}, storeErr
+	}
+	ts, err := store.SyncTombstones(a, d, after)
 	if err != nil {
 		return nil, CleanupReport{}, err
 	}
 	var r CleanupReport
 	for _, t := range ts {
-		if t.AccountID != a || t.ObjectID == "" || t.Version == 0 || !c.server.VerifyTombstone(t) {
+		if t.AccountID != a || t.ObjectID == "" || t.Version == 0 || !store.VerifyTombstone(t) {
 			return nil, CleanupReport{}, errors.New("sync: invalid tombstone")
 		}
 		x := c.applyTombstone(t)
@@ -1219,7 +1407,7 @@ func (c *Client) Sync() ([]Tombstone, CleanupReport, error) {
 		}
 	}
 	if len(ts) > 0 {
-		if err := c.server.ConfirmTombstones(a, d, confirm); err != nil {
+		if err := store.ConfirmTombstones(a, d, confirm); err != nil {
 			return nil, CleanupReport{}, err
 		}
 	}
@@ -1274,7 +1462,46 @@ func (c *Client) UploadClass(class DataClass, object string, version uint64, pay
 	if err != nil {
 		return err
 	}
-	return c.server.UploadEnvelope(a, d, object, version, e)
+	store, storeErr := c.syncStore()
+	if storeErr != nil {
+		return storeErr
+	}
+	if err := store.UploadEnvelope(a, d, object, version, e); err != nil {
+		if !errors.Is(err, ErrStoreVersion) {
+			return err
+		}
+		// Another device won the same object/version. Preserve this local
+		// payload under a deterministic conflict object instead of dropping it.
+		remote, getErr := store.GetEnvelope(a, object)
+		if getErr != nil {
+			return err
+		}
+		pub, keyErr := store.DevicePublicKey(a, remote.DeviceID)
+		if keyErr != nil {
+			return err
+		}
+		remotePayload, decErr := DecryptEnvelope(adk, remote, pub)
+		if decErr != nil {
+			return decErr
+		}
+		conflictID := conflictObjectID(object, d, version)
+		conflictEnvelope, envErr := clientEnvelopeWithADK(priv, adk, a, d, conflictID, version, class, payload)
+		if envErr != nil {
+			return envErr
+		}
+		if uploadErr := store.UploadEnvelope(a, d, conflictID, version, conflictEnvelope); uploadErr != nil {
+			return uploadErr
+		}
+		c.recordConflict(ConflictEntry{ObjectID: object, ConflictID: conflictID, LocalVersion: version, RemoteVersion: remote.Version, LocalPayload: append([]byte(nil), payload...), RemotePayload: remotePayload})
+		return ErrStoreConflict
+	}
+	c.mu.Lock()
+	if c.localObjects == nil {
+		c.localObjects = make(map[string]localObject)
+	}
+	c.localObjects[object] = localObject{version: version, payload: append([]byte(nil), payload...)}
+	c.mu.Unlock()
+	return nil
 }
 
 // NewEncryptedEnvelope seals an opaque payload for an authenticated sync upload.

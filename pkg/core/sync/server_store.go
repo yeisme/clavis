@@ -29,6 +29,27 @@ func (s *ServerStore) LoginWithCredential(account string, credential []byte) err
 func (s *ServerStore) PairDeviceWithCredential(account, device string, pub ed25519.PublicKey, credential []byte) error {
 	return s.server.PairDeviceWithCredential(account, device, pub, credential)
 }
+func (s *ServerStore) SetX25519PublicKey(account, device string, pub, credential []byte) error {
+	return s.server.SetX25519PublicKey(account, device, pub, credential)
+}
+func (s *ServerStore) X25519PublicKey(account, device string) ([]byte, error) {
+	return s.server.X25519PublicKey(account, device)
+}
+func (s *ServerStore) SetWrappedADKForDevice(account, sender, target string, wrapped, signature []byte) error {
+	return s.server.SetWrappedADKForDevice(account, sender, target, wrapped, signature)
+}
+func (s *ServerStore) GetWrappedADK(account, device string, signature []byte) ([]byte, error) {
+	return s.server.GetWrappedADK(account, device, signature)
+}
+func (s *ServerStore) GetRecoverySalt(account, device string, signature []byte) ([]byte, error) {
+	return s.server.GetRecoverySalt(account, device, signature)
+}
+func (s *ServerStore) SetRecoveryWrap(account, device string, wrapped, signature []byte) error {
+	return s.server.SetRecoveryWrap(account, device, wrapped, signature)
+}
+func (s *ServerStore) GetRecoveryWrap(account, device string, signature []byte) ([]byte, error) {
+	return s.server.GetRecoveryWrap(account, device, signature)
+}
 func (s *ServerStore) DevicePublicKey(account, device string) (ed25519.PublicKey, error) {
 	s.server.mu.Lock()
 	defer s.server.mu.Unlock()
