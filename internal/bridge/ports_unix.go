@@ -6,8 +6,11 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"sync"
+	"sync/atomic"
 	"syscall"
 
+	"github.com/ebitengine/purego"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/host"
 )
@@ -57,36 +60,49 @@ func (b *darwinBridge) callInline(ev host.InlineKeyEvent) bool {
 	b.inlineMu.RUnlock()
 	return fn != nil && fn(ev)
 }
-func (b *darwinBridge) isIMKInputSource() bool {
-	cur, e := b.CurrentInputSource(context.Background())
-	return e == nil && cur.ID == "com.yeisme.clavis.inputmethod"
+func (b *darwinBridge) observeInlineInputSource(source host.InputSourceInfo) {
+	b.inlineSourceAllowed.Store(source.ID != "" && inlineIMEGateFor(source))
 }
 
-// inlineIMEGate decides whether the own input engine may consume a key on macOS.
-//
-// The engine auto-commits candidates and injects text itself, so it must never run
-// while another IME owns composition: that produces two competing preedits. Two
-// independent signals are required, cheapest first:
-//
-//  1. Our own IMK input source is active → the IMK helper owns typing, stand down.
-//  2. The active input source is not ASCII-capable (Apple Pinyin, Squirrel, Sogou …)
-//     → the system IME is composing, stand down even if no marked text is visible yet
-//     (marked-text detection needs Accessibility and returns false without it, which
-//     is exactly the case where we would otherwise double-compose).
-//
-// The gate is only consulted on the typing hot path when the engine is enabled, and
-// CurrentInputSource is a cached Carbon read, so this stays off the AX/IPC path.
+var (
+	inputSourceObservers  sync.Map // observer token -> *darwinBridge
+	inputSourceObserverID atomic.Uintptr
+	inputSourceCallback   = sync.OnceValue(func() uintptr {
+		return purego.NewCallback(func(_, observer, _, _, _ uintptr) {
+			if value, ok := inputSourceObservers.Load(observer); ok {
+				source, _ := currentDarwinInputSource()
+				value.(*darwinBridge).observeInlineInputSource(source)
+			}
+		})
+	})
+)
+
+func (b *darwinBridge) startInputSourceObserver(ctx context.Context) error {
+	return onMainThread(ctx, func() {
+		id := inputSourceObserverID.Add(1)
+		inputSourceObservers.Store(id, b)
+		b.inputSourceObserver.Store(id)
+		const deliverImmediately = 4
+		cfNotificationCenterAddObserver(cfNotificationCenterGetDistributedCenter(), id, inputSourceCallback(), kTISNotifySelectedKeyboardInputSourceChanged, 0, deliverImmediately)
+		source, _ := currentDarwinInputSource()
+		b.observeInlineInputSource(source)
+	})
+}
+
+func (b *darwinBridge) stopInputSourceObserver() {
+	_ = onMainThread(context.Background(), func() {
+		if id := b.inputSourceObserver.Swap(0); id != 0 {
+			cfNotificationCenterRemoveObserver(cfNotificationCenterGetDistributedCenter(), id, kTISNotifySelectedKeyboardInputSourceChanged, 0)
+			inputSourceObservers.Delete(id)
+		}
+		b.inlineSourceAllowed.Store(false)
+	})
+}
+
+// inlineIMEGate reads the last main-thread TIS observation without handing off
+// the hook thread. Unknown sources stand down unless takeover was forced.
 func (b *darwinBridge) inlineIMEGate() bool {
-	if b.inlineForced.Load() {
-		return true
-	}
-	cur, err := b.CurrentInputSource(context.Background())
-	if err != nil {
-		// Unknown input source: fail closed. Typing through the system IME still works;
-		// silently taking over would corrupt composition we cannot observe.
-		return false
-	}
-	return inlineIMEGateFor(cur)
+	return b.inlineForced.Load() || b.inlineSourceAllowed.Load()
 }
 
 // inlineIMEGateFor is the pure decision behind inlineIMEGate, split out so the rule is

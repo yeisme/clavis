@@ -233,18 +233,15 @@ func (r *triggerRouter) HandleModifier(mod string, isDown bool, otherModifiersDo
 	return events
 }
 
-// HandleKeyDown evaluates a keyDown event against CapsuleShortcut and inline snippet triggers.
-// Returns (eventsToEmit, consumeKeyEvent).
-func (r *triggerRouter) mayNeedMarkedText(unicodeStr string) bool {
-	if unicodeStr == "" {
-		return false
-	}
+func (r *triggerRouter) snippetExpansionEnabled() bool {
 	r.mu.RLock()
 	enabled := r.cfg.SnippetExpansionEnabled
 	r.mu.RUnlock()
 	return enabled
 }
 
+// HandleKeyDown evaluates a keyDown event against CapsuleShortcut and inline snippet triggers.
+// Returns (eventsToEmit, consumeKeyEvent).
 func (r *triggerRouter) HandleKeyDown(key string, unicodeStr string, modifiers []string, isBackspace bool, secureInputActive bool, nowMs int64) ([]host.TriggerEvent, bool) {
 	return r.HandleKeyDownWithIME(key, unicodeStr, modifiers, isBackspace, secureInputActive, false, nowMs)
 }

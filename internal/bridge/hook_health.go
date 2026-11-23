@@ -122,3 +122,8 @@ func (f *cachedFlag) Load(now time.Time, maxAge time.Duration) (bool, bool) {
 	}
 	return f.val.Load(), now.Sub(time.Unix(0, at)) <= maxAge
 }
+
+func (f *cachedFlag) activeOrUnknown(now time.Time, maxAge time.Duration) bool {
+	active, fresh := f.Load(now, maxAge)
+	return !fresh || active
+}

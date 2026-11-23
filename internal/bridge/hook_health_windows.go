@@ -274,13 +274,10 @@ func (b *windowsBridge) hookSecureInput(now time.Time) bool {
 	return fresh && v
 }
 
-// hookIMEComposing reads the cached native-conversion flag; only a stale cache falls back to
-// the synchronous (≤2×100ms) IME query.
+// Unknown conversion state keeps inline composition and snippets out until
+// the observer can query the foreground IME again.
 func (b *windowsBridge) hookIMEComposing(now time.Time) bool {
-	if v, fresh := b.health.native.Load(now, nativeFlagMaxAge); fresh {
-		return v
-	}
-	return winIsNativeConversionMode()
+	return b.health.native.activeOrUnknown(now, nativeFlagMaxAge)
 }
 
 func (b *windowsBridge) hookHealthDetails() map[string]string {

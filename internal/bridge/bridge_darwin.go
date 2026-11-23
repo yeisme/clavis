@@ -183,25 +183,28 @@ var (
 	poolPopFn  uintptr
 
 	// CoreFoundation
-	cfRelease                     func(cf uintptr)
-	cfRetain                      func(cf uintptr) uintptr
-	cfGetTypeID                   func(cf uintptr) uintptr
-	cfStringGetTypeID             func() uintptr
-	cfURLGetTypeID                func() uintptr
-	cfURLGetString                func(anURL uintptr) uintptr
-	cfStringCreateWithCString     func(alloc uintptr, cStr *byte, encoding uint32) uintptr
-	cfStringGetCString            func(str uintptr, buf *byte, bufSize int, encoding uint32) bool
-	cfStringGetLength             func(str uintptr) int
-	cfArrayGetCount               func(arr uintptr) int
-	cfArrayGetValueAtIndex        func(arr uintptr, idx int) uintptr
-	cfBooleanGetValue             func(b uintptr) bool
-	cfDictionaryCreate            func(alloc uintptr, keys *uintptr, vals *uintptr, numValues int, keyCB uintptr, valCB uintptr) uintptr
-	cfMachPortCreateRunLoopSource func(alloc uintptr, port uintptr, order int) uintptr
-	cfRunLoopGetCurrent           func() uintptr
-	cfRunLoopAddSource            func(rl uintptr, src uintptr, mode uintptr)
-	cfRunLoopRemoveSource         func(rl uintptr, src uintptr, mode uintptr)
-	cfRunLoopRun                  func()
-	cfRunLoopStop                 func(rl uintptr)
+	cfRelease                                func(cf uintptr)
+	cfRetain                                 func(cf uintptr) uintptr
+	cfGetTypeID                              func(cf uintptr) uintptr
+	cfStringGetTypeID                        func() uintptr
+	cfURLGetTypeID                           func() uintptr
+	cfURLGetString                           func(anURL uintptr) uintptr
+	cfStringCreateWithCString                func(alloc uintptr, cStr *byte, encoding uint32) uintptr
+	cfStringGetCString                       func(str uintptr, buf *byte, bufSize int, encoding uint32) bool
+	cfStringGetLength                        func(str uintptr) int
+	cfArrayGetCount                          func(arr uintptr) int
+	cfArrayGetValueAtIndex                   func(arr uintptr, idx int) uintptr
+	cfBooleanGetValue                        func(b uintptr) bool
+	cfDictionaryCreate                       func(alloc uintptr, keys *uintptr, vals *uintptr, numValues int, keyCB uintptr, valCB uintptr) uintptr
+	cfMachPortCreateRunLoopSource            func(alloc uintptr, port uintptr, order int) uintptr
+	cfRunLoopGetCurrent                      func() uintptr
+	cfRunLoopAddSource                       func(rl uintptr, src uintptr, mode uintptr)
+	cfRunLoopRemoveSource                    func(rl uintptr, src uintptr, mode uintptr)
+	cfRunLoopRun                             func()
+	cfRunLoopStop                            func(rl uintptr)
+	cfNotificationCenterGetDistributedCenter func() uintptr
+	cfNotificationCenterAddObserver          func(center, observer, callback, name, object uintptr, behavior int)
+	cfNotificationCenterRemoveObserver       func(center, observer, name, object uintptr)
 
 	kCFBooleanTrue                  uintptr
 	kCFRunLoopCommonModes           uintptr
@@ -243,20 +246,21 @@ var (
 	cgGetActiveDisplayList       func(maxDisplays uint32, activeDisplays *uint32, displayCount *uint32) int32
 
 	// Carbon (Secure Input + Text Input Sources)
-	isSecureEventInputEnabled         func() bool
-	tisCreateInputSourceList          func(properties uintptr, includeAllInstalled bool) uintptr
-	tisCopyCurrentKeyboardInputSource func() uintptr
-	tisSelectInputSource              func(source uintptr) int32
-	tisGetInputSourceProperty         func(source uintptr, key uintptr) uintptr
-	pthreadMainNP                     func() int32 // libSystem: non-zero on the main thread
-	kTISPropertyInputSourceID         uintptr
-	kTISPropertyLocalizedName         uintptr
-	kTISPropertyInputSourceLanguages  uintptr
-	kTISPropertyInputSourceCategory   uintptr
-	kTISCategoryKeyboardInputSource   uintptr
-	kTISPropertyInputSourceIsSelect   uintptr
-	kTISPropertyInputSourceIsEnable   uintptr
-	kTISPropertyInputSourceIsASCIICap uintptr
+	isSecureEventInputEnabled                    func() bool
+	tisCreateInputSourceList                     func(properties uintptr, includeAllInstalled bool) uintptr
+	tisCopyCurrentKeyboardInputSource            func() uintptr
+	tisSelectInputSource                         func(source uintptr) int32
+	tisGetInputSourceProperty                    func(source uintptr, key uintptr) uintptr
+	pthreadMainNP                                func() int32 // libSystem: non-zero on the main thread
+	kTISPropertyInputSourceID                    uintptr
+	kTISPropertyLocalizedName                    uintptr
+	kTISPropertyInputSourceLanguages             uintptr
+	kTISPropertyInputSourceCategory              uintptr
+	kTISCategoryKeyboardInputSource              uintptr
+	kTISPropertyInputSourceIsSelect              uintptr
+	kTISPropertyInputSourceIsEnable              uintptr
+	kTISPropertyInputSourceIsASCIICap            uintptr
+	kTISNotifySelectedKeyboardInputSourceChanged uintptr
 
 	// Cached CFStrings for AX attribute names
 	axAttrMu    sync.Mutex
@@ -346,6 +350,9 @@ func initDarwin() error {
 		reg(&cfRunLoopRemoveSource, libCF, "CFRunLoopRemoveSource")
 		reg(&cfRunLoopRun, libCF, "CFRunLoopRun")
 		reg(&cfRunLoopStop, libCF, "CFRunLoopStop")
+		reg(&cfNotificationCenterGetDistributedCenter, libCF, "CFNotificationCenterGetDistributedCenter")
+		reg(&cfNotificationCenterAddObserver, libCF, "CFNotificationCenterAddObserver")
+		reg(&cfNotificationCenterRemoveObserver, libCF, "CFNotificationCenterRemoveObserver")
 
 		kCFBooleanTrue = symPtr(libCF, "kCFBooleanTrue")
 		kCFRunLoopCommonModes = symPtr(libCF, "kCFRunLoopCommonModes")
@@ -403,6 +410,7 @@ func initDarwin() error {
 		kTISPropertyInputSourceIsSelect = symPtr(libCarbon, "kTISPropertyInputSourceIsSelectCapable")
 		kTISPropertyInputSourceIsEnable = symPtr(libCarbon, "kTISPropertyInputSourceIsEnableCapable")
 		kTISPropertyInputSourceIsASCIICap = symPtr(libCarbon, "kTISPropertyInputSourceIsASCIICapable")
+		kTISNotifySelectedKeyboardInputSourceChanged = symPtr(libCarbon, "kTISNotifySelectedKeyboardInputSourceChanged")
 
 		darwinInitErr = err
 	})
@@ -528,10 +536,13 @@ type darwinBridge struct {
 	inlineEnabled atomic.Bool
 	// inlineForced bypasses the system-input-source gate: the user explicitly asked
 	// the own engine to take over Chinese typing while another IME stays active.
-	inlineForced atomic.Bool
-	ime          inputEngineState
-	shiftDown    bool
-	shiftHadKey  bool
+	inlineForced        atomic.Bool
+	inlineSourceAllowed atomic.Bool
+	inputSourceObserver atomic.Uintptr
+	markedText          cachedFlag
+	ime                 inputEngineState
+	shiftDown           bool
+	shiftHadKey         bool
 	// shiftSide remembers which shift is actually held ("left_shift"/"right_shift").
 	// shiftDown alone is not enough: pressing left, then tapping right, used to look like a
 	// single right-shift tap and flipped 中/英 by accident.
@@ -743,11 +754,24 @@ func (b *darwinBridge) Start(ctx context.Context, onTrigger func(host.TriggerEve
 	b.mu.Unlock()
 
 	go b.runTriggerWorker(runCtx, triggerQueue, triggerDone, onTrigger)
+	if err := b.startInputSourceObserver(runCtx); err != nil {
+		cancel()
+		b.stopInputSourceObserver()
+		close(b.tapDone)
+		close(b.imeDone)
+		<-triggerDone
+		b.mu.Lock()
+		b.started = false
+		b.triggerQueue = nil
+		b.mu.Unlock()
+		return err
+	}
 
 	tapReady := make(chan error, 1)
 	go b.runEventTap(runCtx, tapReady)
 	if err := <-tapReady; err != nil {
 		cancel()
+		b.stopInputSourceObserver()
 		<-b.tapDone
 		close(b.imeDone)
 		<-triggerDone
@@ -759,6 +783,7 @@ func (b *darwinBridge) Start(ctx context.Context, onTrigger func(host.TriggerEve
 	}
 
 	go b.runIMEObserver(runCtx)
+	go b.runMarkedTextObserver(runCtx)
 	return nil
 }
 
@@ -782,6 +807,7 @@ func (b *darwinBridge) Stop() error {
 	if cancel != nil {
 		cancel()
 	}
+	b.stopInputSourceObserver()
 	if tapPort != 0 {
 		cgEventTapEnable(tapPort, false)
 	}
@@ -1024,15 +1050,11 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 		isBackspace := keyCode == kVK_Delete
 		secure := isSecureEventInputEnabled()
 
-		// IME preedit detection is AX-bound and comparatively slow: only probe it for plain
-		// (non-shortcut) keystrokes, which are the only ones that feed the snippet buffer.
-		// AX marked-text queries are cross-process IPC. Avoid them on the typing hot path;
-		// only query when a snippet-enabled trigger could actually complete.
 		imeComposing := false
-		if !hasNonShiftModifier(mods) && b.router.mayNeedMarkedText(unicodeStr) {
-			imeComposing = darwinHasMarkedText()
+		if !secure && !hasNonShiftModifier(mods) && unicodeStr != "" && b.router.snippetExpansionEnabled() {
+			imeComposing = b.hookMarkedText(time.Now())
 		}
-		if b.inlineEnabled.Load() && !isSecureEventInputEnabled() && b.inlineIMEGate() {
+		if b.inlineEnabled.Load() && !secure && b.inlineIMEGate() {
 			if b.callInline(host.InlineKeyEvent{KeyName: keyName, Rune: unicodeStr, KeyCode: keyCode, Modifiers: mods, IsDown: true, TimestampMs: nowMs}) {
 				return 0
 			}
@@ -1190,6 +1212,28 @@ func (b *darwinBridge) applyIMEDecision(ctx context.Context, decision IMEDecisio
 		return false
 	}
 	return b.SetIMEMode(ctx, decision.TargetMode) == nil
+}
+
+func (b *darwinBridge) hookMarkedText(now time.Time) bool {
+	if b.inlineSourceAllowed.Load() {
+		return false
+	}
+	return b.markedText.activeOrUnknown(now, 250*time.Millisecond)
+}
+
+func (b *darwinBridge) runMarkedTextObserver(ctx context.Context) {
+	ticker := time.NewTicker(75 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !b.inlineSourceAllowed.Load() && b.router.snippetExpansionEnabled() {
+				b.markedText.Store(darwinHasMarkedText(), time.Now())
+			}
+		}
+	}
 }
 
 // darwinHasMarkedText reports whether the system-wide focused UI element currently holds IME
@@ -1974,12 +2018,7 @@ func (b *darwinBridge) CurrentInputSource(ctx context.Context) (host.InputSource
 	var info host.InputSourceInfo
 	found := false
 	if err := onMainThread(ctx, func() {
-		src := tisCopyCurrentKeyboardInputSource()
-		if src == 0 {
-			return
-		}
-		defer cfRelease(src)
-		info, found = tisInputSourceToInfo(src), true
+		info, found = currentDarwinInputSource()
 	}); err != nil {
 		return host.InputSourceInfo{}, err
 	}
@@ -2029,11 +2068,24 @@ func (b *darwinBridge) SelectInputSource(ctx context.Context, id string) error {
 		src := cfArrayGetValueAtIndex(list, 0)
 		if rc := tisSelectInputSource(src); rc != 0 {
 			err = fmt.Errorf("darwin: TISSelectInputSource(%q) failed (%d)", trimmed, rc)
+		} else {
+			current, _ := currentDarwinInputSource()
+			b.observeInlineInputSource(current)
 		}
 	}); mainErr != nil {
 		return mainErr
 	}
 	return err
+}
+
+// currentDarwinInputSource must run on the main thread when the app is running.
+func currentDarwinInputSource() (host.InputSourceInfo, bool) {
+	source := tisCopyCurrentKeyboardInputSource()
+	if source == 0 {
+		return host.InputSourceInfo{}, false
+	}
+	defer cfRelease(source)
+	return tisInputSourceToInfo(source), true
 }
 
 // SetIMEMode switches to an ASCII-capable input source for IMEModeASCII,

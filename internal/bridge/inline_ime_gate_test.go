@@ -3,10 +3,48 @@
 package bridge
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/yeisme/clavis/pkg/core/host"
 )
+
+func TestHookMarkedTextUsesFreshObservation(t *testing.T) {
+	b := &darwinBridge{}
+	now := time.Now()
+	if !b.hookMarkedText(now) {
+		t.Fatal("unobserved native IME state allowed snippet expansion")
+	}
+	b.markedText.Store(false, now)
+	if b.hookMarkedText(now) || !b.hookMarkedText(now.Add(time.Second)) {
+		t.Fatal("only a fresh negative observation may allow snippet expansion")
+	}
+	b.markedText.Store(true, now)
+	if !b.hookMarkedText(now) {
+		t.Fatal("active preedit allowed snippet expansion")
+	}
+	b.observeInlineInputSource(host.InputSourceInfo{ID: "abc", IsASCII: true})
+	if b.hookMarkedText(now) {
+		t.Fatal("ASCII input source must bypass native preedit observation")
+	}
+}
+
+func TestInlineIMEGateUsesOnlyObservedSource(t *testing.T) {
+	b := &darwinBridge{}
+	current, err := b.CurrentInputSource(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.observeInlineInputSource(host.InputSourceInfo{ID: "different", IsASCII: !inlineIMEGateFor(current)})
+	if got := b.inlineIMEGate(); got == inlineIMEGateFor(current) {
+		t.Fatalf("hook queried live source %q instead of the observed source", current.ID)
+	}
+	b.observeInlineInputSource(host.InputSourceInfo{})
+	if b.inlineIMEGate() {
+		t.Fatal("unknown source permitted takeover")
+	}
+}
 
 func TestInlineIMEGateFor(t *testing.T) {
 	cases := []struct {

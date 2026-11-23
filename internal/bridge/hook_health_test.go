@@ -97,6 +97,22 @@ func TestIsSecureField(t *testing.T) {
 	}
 }
 
+func TestCachedFlagTreatsUnknownAsActive(t *testing.T) {
+	var flag cachedFlag
+	now := time.Now()
+	if !flag.activeOrUnknown(now, time.Second) {
+		t.Fatal("missing observation was treated as inactive")
+	}
+	flag.Store(false, now)
+	if flag.activeOrUnknown(now, time.Second) || !flag.activeOrUnknown(now.Add(2*time.Second), time.Second) {
+		t.Fatal("fresh and expired negative observations must be distinguished")
+	}
+	flag.Store(true, now)
+	if !flag.activeOrUnknown(now, time.Second) {
+		t.Fatal("active observation was treated as inactive")
+	}
+}
+
 func TestCachedFlagFreshness(t *testing.T) {
 	var f cachedFlag
 	now := time.Unix(1000, 0)
