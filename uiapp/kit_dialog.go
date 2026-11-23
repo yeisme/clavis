@@ -77,13 +77,13 @@ type dialogAction struct {
 	OnClick  func()
 }
 
-// kitDialogFooter is the bottom bar: a hairline, a one-line hint that takes
-// the leading space, and the buttons at the trailing edge.
+// kitDialogFooter is the bottom bar: a hairline, a hint that wraps neatly when
+// narrow instead of clipping mid-word, and the buttons at the trailing edge.
 func kitDialogFooter(c *ui.Context, t *ui.Theme, hint string, actions ...dialogAction) {
 	kitDivider(c, t)
 	ui.Row(c).FillWidth().Height(footerHeight).Padding(space0, dialogPadX).Gap(space8).AlignItems(ui.Center).Children(func() {
 		if hint != "" {
-			ui.Text(c, hint).FontSize(typeMeta).TextColor(secondaryInk(t)).SingleLine().Grow(1).Shrink(1)
+			ui.Text(c, hint).FontSize(typeMeta).TextColor(secondaryInk(t)).Wrap().Grow(1).Shrink(1)
 		} else {
 			ui.Spacer(c)
 		}

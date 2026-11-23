@@ -224,11 +224,10 @@ func onboardingStep(c *ui.Context, theme *ui.Theme, n int, title string, done bo
 	})
 }
 
-// onboardingNote is a status line: an icon and a sentence in one color.
+// onboardingNote is a status line: one semantic icon and a sentence in one color.
 func onboardingNote(c *ui.Context, theme *ui.Theme, icon string, color ui.Color, text string) {
 	ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
-		kitStatusDot(c, color, false)
-		renderSemanticIcon(c, icon, typeLabel, color)
+		renderSemanticIcon(c, icon, typeBody, color)
 		applyProseLineHeight(ui.Text(c, text)).FontSize(typeLabel).TextColor(color).Grow(1).Shrink(1)
 	})
 }
@@ -323,10 +322,13 @@ func (a *AppController) renderOnboardingLeader(c *ui.Context, theme *ui.Theme, c
 	trig := cfg.Main.Trigger
 	onboardingStep(c, theme, 2, i18n.T("onboarding.step.leader"), seen, func() {
 		kitInsetWell(c, theme, func() {
-			ui.Row(c).FillWidth().Wrap().Gap(space6).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, i18n.T("onboarding.leader.press_before")).FontSize(typeBody).TextColor(theme.Text).SingleLine()
-				onboardingKeycap(c, theme, triggerKeyLabel(trig.LeaderKey, goos))
-				ui.Text(c, i18n.T("onboarding.leader.press_after")).FontSize(typeBody).TextColor(theme.Text).SingleLine()
+			ui.Column(c).FillWidth().Gap(space6).Children(func() {
+				ui.Row(c).FillWidth().Wrap().Gap(space6).AlignItems(ui.Center).Children(func() {
+					ui.Text(c, i18n.T("onboarding.leader.press_before")).FontSize(typeBody).TextColor(theme.Text).SingleLine()
+					onboardingKeycap(c, theme, triggerKeyLabel(trig.LeaderKey, goos))
+				})
+				after := formatOnboardingLeaderAfter(i18n.T("onboarding.leader.press_after"))
+				applyProseLineHeight(ui.Text(c, after)).FontSize(typeLabel).TextColor(theme.TextMuted).Wrap()
 			})
 		})
 		if nodes := cfg.Leader.Nodes; len(nodes) > 0 {
@@ -420,6 +422,17 @@ func (a *AppController) renderOnboardingLeaderPicker(c *ui.Context, theme *ui.Th
 			}
 		}
 	})
+}
+
+// formatOnboardingLeaderAfter trims any leading comma/whitespace when the
+// continuation sentence sits on its own line below the keycap, so neither
+// Chinese nor English starts a line with an orphan comma.
+func formatOnboardingLeaderAfter(s string) string {
+	trimmed := strings.TrimSpace(strings.TrimLeft(s, ",， "))
+	if len(trimmed) > 0 && trimmed[0] >= 'a' && trimmed[0] <= 'z' {
+		return strings.ToUpper(trimmed[:1]) + trimmed[1:]
+	}
+	return trimmed
 }
 
 // onboardingKeycap is the Leader key in the sentence that asks for it:
