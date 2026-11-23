@@ -16,6 +16,7 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/internal/apps"
 	"github.com/yeisme/clavis/internal/secrets"
+	internalstorage "github.com/yeisme/clavis/internal/storage"
 	"github.com/yeisme/clavis/pkg/core/ai"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/config"
@@ -48,13 +49,14 @@ func newInteractionFixture(t *testing.T, doer ai.HTTPDoer) *interactionFixture {
 		t.Fatalf("LoadOrInitialize: %v", err)
 	}
 
-	clipStore := clipboard.NewMemoryStore(clipboard.NewPrivacyFilter())
+	memStore := clipboard.NewMemoryStore(clipboard.NewPrivacyFilter())
+	clipStore := statsMemoryStore{memStore}
 	secStore := secrets.NewMemoryAPIKeyStore()
 	_ = secStore.SaveKey(cfgStore.Current().Main.AI.KeychainAccount, "sk-test-key")
 	br := newMockBridge()
 	mockApps := apps.NewMockAppProvider()
 
-	f := &interactionFixture{bridge: br, clips: clipStore, apps: mockApps}
+	f := &interactionFixture{bridge: br, clips: memStore, apps: mockApps}
 	f.ctrl = NewAppController(Options{
 		ConfigStore:    cfgStore,
 		ClipboardStore: clipStore,
@@ -533,4 +535,62 @@ func TestAIStreamingProfileCycleShortcut(t *testing.T) {
 	if after != "ollama" {
 		t.Fatalf("expected cycling deepseek -> ollama, got %q", after)
 	}
+}
+
+// statsMemoryStore wraps the in-memory clipboard store with the two aggregate
+// queries the stats band needs. MemoryStore itself cannot implement them:
+// ClipboardDay/ClipboardKindStat live in internal/storage, and pkg/core/clipboard
+// must not depend on internal/. Keeping the shim in the test file lets the visual
+// snapshots exercise the real strip instead of always showing "statistics
+// unavailable" — before this, the P2-1 type strip was never rendered in any
+// snapshot because the fixture's store failed the clipboardStatsReader assertion.
+type statsMemoryStore struct {
+	*clipboard.MemoryStore
+}
+
+func (s statsMemoryStore) ClipboardDaily(ctx context.Context, n int) ([]internalstorage.ClipboardDay, error) {
+	items, err := s.Recent(ctx, 500)
+	if err != nil {
+		return nil, err
+	}
+	counts := map[string]int{}
+	for _, it := range items {
+		if n > 0 {
+			cutoff := time.Now().AddDate(0, 0, -(n - 1)).Truncate(24 * time.Hour)
+			if it.CreatedAt.Before(cutoff) {
+				continue
+			}
+		}
+		counts[it.CreatedAt.Format("2006-01-02")]++
+	}
+	out := make([]internalstorage.ClipboardDay, 0, n)
+	for i := n - 1; i >= 0; i-- {
+		day := time.Now().AddDate(0, 0, -i).Format("2006-01-02")
+		out = append(out, internalstorage.ClipboardDay{Day: day, Count: counts[day]})
+	}
+	return out, nil
+}
+
+func (s statsMemoryStore) ClipboardKindStats(ctx context.Context) ([]internalstorage.ClipboardKindStat, error) {
+	items, err := s.Recent(ctx, 500)
+	if err != nil {
+		return nil, err
+	}
+	stats := map[string]internalstorage.ClipboardKindStat{}
+	for _, it := range items {
+		kind := string(it.Kind)
+		if kind == "" {
+			kind = string(clipboard.KindText)
+		}
+		cur := stats[kind]
+		cur.Kind = kind
+		cur.Count++
+		cur.Bytes += int64(len(it.Content)) + it.ByteSize
+		stats[kind] = cur
+	}
+	out := make([]internalstorage.ClipboardKindStat, 0, len(stats))
+	for _, v := range stats {
+		out = append(out, v)
+	}
+	return out, nil
 }
