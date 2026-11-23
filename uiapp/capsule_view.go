@@ -198,7 +198,14 @@ func (a *AppController) renderCapsuleHeader(
 
 		case engine.PhaseAIStreaming:
 			activeOrb := !state.AIComplete && state.AIError == ""
-			RenderLiquidOrb(c, 24, activeOrb, effectiveSpatialAppearance(c, cfg.Main.Appearance))
+			switch {
+			case activeOrb:
+				RenderLiquidOrb(c, 20, true, effectiveSpatialAppearance(c, cfg.Main.Appearance))
+			case state.AIError != "":
+				renderSemanticIcon(c, "exclamationmark.circle", IconSize16, kitStateErrorColor(theme))
+			default:
+				renderSemanticIcon(c, "sparkles", IconSize16, secondaryInk(theme))
+			}
 			modeLabel := aiModeLabel(state.AIMode)
 			ui.Text(c, i18n.Tf("ai.header", modeLabel)).FontSize(typeBody).FontWeight(600).
 				TextColor(theme.Text).SingleLine()
@@ -212,7 +219,7 @@ func (a *AppController) renderCapsuleHeader(
 				Background(tileFill(theme)).Border(space1, hairline(theme)).FocusRing(false)
 			profile.Children(func() {
 				ui.Row(c).Gap(space4).AlignItems(ui.Center).Children(func() {
-					renderSemanticIcon(c, "sparkles", typeMeta, theme.Accent)
+					renderSemanticIcon(c, "sparkles", typeMeta, secondaryInk(theme))
 					ui.Text(c, profLabel).FontSize(typeMeta).FontWeight(600).TextColor(theme.Text).SingleLine()
 				})
 			})
@@ -316,7 +323,7 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 		FocusRing(false).
 		FillWidth().
 		Grow(1).
-		Padding(space8, space14).
+		Padding(space0, space14).
 		Gap(space0)
 
 	if a.uiState.lastPhase != engine.PhaseLeader || !a.uiState.leaderHandle.Focused(c) {
@@ -340,7 +347,7 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 			// requires clear names with the shortcut shown as supporting information. A grid also
 			// forced four visual weights (keycap, icon, label, group count) into one row of a
 			// 180pt card. See docs/design/leader-panel-visual-research.md §最小改动清单 (1).
-			ui.Column(c).FillWidth().Gap(float32(leaderGridGap)).Children(func() {
+			ui.Column(c).FillWidth().Padding(space6, space0).Gap(float32(leaderGridGap)).Children(func() {
 				for _, node := range state.LeaderNodes {
 					n := node
 					isGroup := n.Action.Type == config.ActionGroup
@@ -1420,26 +1427,24 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 	ui.Column(c).FillWidth().Grow(1).Padding(space12, space14).Gap(8).Children(func() {
 		if profiles := cfg.Main.AI.Profiles; len(profiles) > 1 {
 			active := a.ActiveAIProfile()
-			selected := 0
-			for i, p := range profiles {
-				if strings.EqualFold(p.ID, active.ID) {
-					selected = i
-					break
-				}
-			}
-			CoverFlowDeck3D(c, len(profiles), selected, effectiveSpatialAppearance(c, cfg.Main.Appearance), func(i int, active bool) {
-				p := profiles[i]
-				button := ui.ButtonBase(c).Width(180).Height(34).Radius(radiusPill).FocusRing(false)
-				if active {
-					button.Background(theme.Accent)
-				} else {
-					button.Background(tileFill(theme)).Border(space1, hairline(theme))
-				}
-				button.Children(func() {
-					ui.Text(c, p.ID).FontSize(typeMeta).FontWeight(600).TextColor(map[bool]ui.Color{true: theme.AccentText, false: theme.Text}[active]).SingleLine()
-				})
-				if button.Clicked() {
-					_ = a.SelectAIProfile(p.ID)
+			ui.Row(c).FillWidth().Wrap().Gap(space6).AlignItems(ui.Center).Children(func() {
+				for _, p := range profiles {
+					prof := p
+					isActive := strings.EqualFold(prof.ID, active.ID)
+					button := ui.ButtonBase(c).Key("ai-profile:"+prof.ID).Height(space24).Padding(space2, space10).Radius(radiusChip).FocusRing(false)
+					ink := secondaryInk(theme)
+					if isActive {
+						button.Background(theme.Accent)
+						ink = theme.AccentText
+					} else {
+						button.Background(tileFill(theme)).Border(space1, hairline(theme))
+					}
+					button.Children(func() {
+						ui.Text(c, prof.ID).FontSize(typeMeta).FontWeight(600).TextColor(ink).SingleLine()
+					})
+					if button.Clicked() {
+						_ = a.SelectAIProfile(prof.ID)
+					}
 				}
 			})
 		}
