@@ -84,6 +84,31 @@ func TestSQLiteClipboardStore_BackfillsKindAndByteSizeIdempotently(t *testing.T)
 	}
 }
 
+func TestSQLiteClipboardStore_BackfillsAndIndexesAllLegacyRows(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	store := openTestStore(t, path, clipboard.NewPrivacyFilter())
+	if _, err := store.DB().Transaction(ctx, []sqlite.Statement{
+		{SQL: "DROP TRIGGER clipboard_items_ai"},
+		{SQL: "WITH RECURSIVE ids(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM ids WHERE i<257) INSERT INTO clipboard_items(id,content,content_hash,created_at_ns,updated_at_ns) SELECT 'legacy-'||i,'中文','hash-'||i,1,1 FROM ids"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openTestStore(t, path, clipboard.NewPrivacyFilter())
+	defer store.Close()
+	rows, err := store.DB().Query(ctx, "SELECT COUNT(*), SUM(byte_size) FROM clipboard_items WHERE kind='text'")
+	if err != nil || len(rows.Values) != 1 || int64val(rows.Values[0], 0) != 257 || int64val(rows.Values[0], 1) != 257*int64(len("中文")) {
+		t.Fatalf("legacy text metadata: rows=%v err=%v", rows.Values, err)
+	}
+	rows, err = store.DB().Query(ctx, "SELECT COUNT(*) FROM clipboard_fts WHERE clipboard_fts MATCH ?", "中文")
+	if err != nil || len(rows.Values) != 1 || int64val(rows.Values[0], 0) != 257 {
+		t.Fatalf("legacy FTS index: rows=%v err=%v", rows.Values, err)
+	}
+}
+
 func TestSQLiteClipboardStore_DailyAndKindStats(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t, ":memory:", clipboard.NewPrivacyFilter())

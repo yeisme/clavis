@@ -156,6 +156,60 @@ func TestLearningWriterDropsAfterRetries(t *testing.T) {
 	_ = w.Close(context.Background())
 }
 
+func TestLearningWriterCloseHonorsDeadlineDuringBackgroundFlush(t *testing.T) {
+	store := mirrorOnlyStore()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	backgroundCanceled := make(chan struct{})
+	var persisted int64
+	w := newLearningWriter(store, LearningWriterOptions{MaxPendingOps: 1}, func(ctx context.Context, batch *learningBatch) error {
+		select {
+		case <-started:
+			persisted += batch.uses["item"].count
+			return ctx.Err()
+		default:
+			close(started)
+		}
+		select {
+		case <-ctx.Done():
+			close(backgroundCanceled)
+			return ctx.Err()
+		case <-release:
+			return nil
+		}
+	})
+	w.QueueItemUse("item", time.Now())
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("background flush did not start")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.Close(ctx) }()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Close returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close blocked past its deadline")
+	}
+	select {
+	case <-backgroundCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("background flush was not canceled")
+	}
+	if err := w.Close(context.Background()); err != nil {
+		t.Fatalf("retry Close: %v", err)
+	}
+	if persisted != 1 {
+		t.Fatalf("retry persisted %d events, want 1", persisted)
+	}
+}
+
 // TestLearningWriterPersistsDeltas checks the SQL side on a real database:
 // coalesced counters land as deltas in one transaction and reload intact.
 // It costs a handful of native round trips, fine on Windows too.

@@ -2,55 +2,76 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"time"
 	"unicode"
 
+	"github.com/egoist/mygo/plugins/sqlite"
 	"github.com/yeisme/clavis/pkg/core/engine"
 )
 
+const maxPinnedWordReadings = 4096
+
 // InjectUserWords writes configured words into the pinned lexicon. Single-character
-// entries are skipped because pinning them would distort ordinary character ranking.
+// entries are rejected because pinning them would distort ordinary character ranking.
+// A word is also rejected when its readings cannot all be persisted.
 func InjectUserWords(ctx context.Context, store *LearningStore, words []string) (rejected []string) {
 	if store == nil {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	for _, raw := range words {
 		word := strings.TrimSpace(raw)
-		if !validPinnedWord(word) {
-			if word != "" {
-				rejected = append(rejected, word)
-			}
+		if word == "" {
 			continue
 		}
-		for _, reading := range wordReadings(word) {
-			key := compactReading(reading)
-			if key != "" {
-				_ = store.RecordIMECommit(ctx, key, word, "", true)
-			}
+		if !validPinnedWord(word) {
+			rejected = append(rejected, word)
+			continue
+		}
+		readings := wordReadings(word)
+		if len(readings) == 0 || store.recordPinnedReadings(ctx, word, readings) != nil {
+			rejected = append(rejected, word)
 		}
 	}
 	return rejected
 }
 
+func (s *LearningStore) recordPinnedReadings(ctx context.Context, word string, readings []string) error {
+	if s.db == nil {
+		return fmt.Errorf("pin user word: database unavailable")
+	}
+	now := time.Now().UTC().UnixNano()
+	statements := make([]sqlite.Statement, 0, len(readings))
+	for _, reading := range readings {
+		statements = append(statements, imeWordCommitStatement(reading, word, true, now))
+	}
+	if _, err := s.db.Transaction(ctx, statements); err != nil {
+		return err
+	}
+	for _, reading := range readings {
+		s.mirrorIMECommit(reading, word, "", true, now)
+	}
+	return nil
+}
+
 func wordReadings(word string) []string {
-	choices := make([][]string, 0, len([]rune(word)))
+	readings := []string{""}
 	for _, r := range word {
 		syllables := engine.HanziSyllables(r)
-		if len(syllables) == 0 {
+		if len(syllables) == 0 || len(readings) > maxPinnedWordReadings/len(syllables) {
 			return nil
 		}
-		choices = append(choices, syllables)
-	}
-	readings := []string{""}
-	for _, options := range choices {
-		next := make([]string, 0, len(readings)*len(options))
+		next := make([]string, 0, len(readings)*len(syllables))
 		for _, prefix := range readings {
-			for _, syllable := range options {
-				if prefix == "" {
-					next = append(next, syllable)
-				} else {
-					next = append(next, prefix+" "+syllable)
+			for _, syllable := range syllables {
+				if len(prefix)+len(syllable) > MaxMirrorKeyBytes {
+					return nil
 				}
+				next = append(next, prefix+syllable)
 			}
 		}
 		readings = next
@@ -59,24 +80,17 @@ func wordReadings(word string) []string {
 }
 
 func validPinnedWord(word string) bool {
-	runes := []rune(word)
-	if len(runes) < 2 {
+	if len(word) > MaxMirrorKeyBytes {
 		return false
 	}
-	for _, r := range runes {
+	count := 0
+	for _, r := range word {
 		if !engine.IsHanzi(r) {
 			return false
 		}
+		count++
 	}
-	return true
-}
-
-func compactReading(reading string) string {
-	var b strings.Builder
-	for _, syl := range strings.Fields(reading) {
-		b.WriteString(syl)
-	}
-	return b.String()
+	return count >= 2
 }
 
 // HasHanzi reports whether name contains at least one Chinese character.

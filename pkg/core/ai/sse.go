@@ -28,13 +28,13 @@ type SSEEvent struct {
 // It buffers partial lines and multi-byte UTF-8 sequences safely across Feed calls,
 // and supports OpenAI-compatible, Anthropic, and Gemini SSE wire formats.
 type SSEStreamParser struct {
-	Protocol    config.AIProtocol
-	buf         []byte
-	eventName   string
-	eventID     string
-	dataLines   []string
-	didEmitDone bool
-	usage       ProviderUsage
+	Protocol         config.AIProtocol
+	buf              []byte
+	eventName        string
+	eventID          string
+	dataLines        []string
+	finishReasonSeen bool
+	usage            ProviderUsage
 }
 
 // Feed appends incoming bytes and returns any complete SSEEvents parsed so far.
@@ -55,6 +55,10 @@ func (p *SSEStreamParser) Finish() []SSEEvent {
 		events = append(events, p.processLine(line)...)
 	}
 	events = append(events, p.dispatchCurrentEvent()...)
+	if p.finishReasonSeen {
+		p.finishReasonSeen = false
+		events = append(events, SSEEvent{Kind: SSEDone})
+	}
 	return events
 }
 
@@ -149,7 +153,6 @@ func (p *SSEStreamParser) dispatchCurrentEvent() []SSEEvent {
 	}
 
 	if proto == config.ProtocolAnthropic && eventName == "message_stop" && len(lines) == 0 {
-		p.didEmitDone = true
 		return []SSEEvent{{Kind: SSEDone}}
 	}
 
@@ -163,7 +166,7 @@ func (p *SSEStreamParser) dispatchCurrentEvent() []SSEEvent {
 		return nil
 	}
 	if trimmed == "[DONE]" {
-		p.didEmitDone = true
+		p.finishReasonSeen = false
 		return []SSEEvent{{Kind: SSEDone}}
 	}
 
@@ -189,7 +192,6 @@ func (p *SSEStreamParser) dispatchCurrentEvent() []SSEEvent {
 	case config.ProtocolAnthropic:
 		msgType, _ := rawMap["type"].(string)
 		if eventName == "message_stop" || msgType == "message_stop" {
-			p.didEmitDone = true
 			return []SSEEvent{{Kind: SSEDone}}
 		}
 		if eventName == "content_block_delta" || msgType == "content_block_delta" {
@@ -231,7 +233,6 @@ func (p *SSEStreamParser) dispatchCurrentEvent() []SSEEvent {
 					}
 				}
 				if fr, ok := first["finishReason"].(string); ok && fr != "" {
-					p.didEmitDone = true
 					out = append(out, SSEEvent{Kind: SSEDone})
 				}
 			}
@@ -245,6 +246,10 @@ func (p *SSEStreamParser) dispatchCurrentEvent() []SSEEvent {
 		var out []SSEEvent
 		if choices, ok := rawMap["choices"].([]any); ok && len(choices) > 0 {
 			if first, ok := choices[0].(map[string]any); ok {
+				if reason, ok := first["finish_reason"].(string); ok && reason != "" {
+					// Remaining chunks can still carry the provider's usage totals.
+					p.finishReasonSeen = true
+				}
 				if delta, ok := first["delta"].(map[string]any); ok {
 					if content, ok := delta["content"].(string); ok && content != "" {
 						out = append(out, SSEEvent{Kind: SSEDelta, Text: content})
