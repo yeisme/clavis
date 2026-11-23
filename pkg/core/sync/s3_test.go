@@ -118,3 +118,21 @@ func TestSQLiteSyncStoreCanBackClientObjectPath(t *testing.T) {
 	var _ SyncStore = (*ServerStore)(nil)
 	_ = context.Background()
 }
+
+func TestClientTombstonePurgesConflictAndObjectMirrors(t *testing.T) {
+	client := &Client{
+		cache: NewLocalCache(), vault: NewVault("test authorization"),
+		localObjects: map[string]localObject{"removed": {version: 1, payload: []byte("old")}, "other": {version: 2}},
+		conflicts:    []ConflictEntry{{ObjectID: "removed", ConflictID: "conflict-removed", LocalPayload: []byte("old")}, {ObjectID: "other"}},
+	}
+	client.applyTombstone(Tombstone{ObjectID: "removed"})
+	if _, exists := client.localObjects["removed"]; exists {
+		t.Fatal("tombstoned plaintext remains in the local object mirror")
+	}
+	if got := client.Conflicts(); len(got) != 1 || got[0].ObjectID != "other" {
+		t.Fatalf("tombstone did not purge corresponding conflicts: %+v", got)
+	}
+	if _, exists := client.localObjects["other"]; !exists {
+		t.Fatal("unrelated object was deleted")
+	}
+}

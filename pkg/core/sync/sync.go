@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1359,6 +1360,8 @@ func (c *Client) Pull(object string) (PulledObject, error) {
 }
 
 func (c *Client) PullObjects(objects ...string) (PullResult, error) {
+	c.syncMu.Lock()
+	defer c.syncMu.Unlock()
 	store, err := c.syncStore()
 	if err != nil {
 		return PullResult{}, err
@@ -1405,7 +1408,7 @@ func (c *Client) PullObjects(objects ...string) (PullResult, error) {
 		c.mu.Unlock()
 		if hasLocal && local.version != envelope.Version && !bytes.Equal(local.payload, payload) {
 			conflictID := conflictObjectID(object, envelope.DeviceID, envelope.Version)
-			conflict := ConflictEntry{ObjectID: object, ConflictID: conflictID, LocalVersion: local.version, RemoteVersion: envelope.Version, LocalPayload: local.payload, RemotePayload: payload}
+			conflict := ConflictEntry{ObjectID: object, ConflictID: conflictID, LocalVersion: local.version, RemoteVersion: envelope.Version, LocalPayload: bytes.Clone(local.payload), RemotePayload: payload}
 			c.recordConflict(conflict)
 			out.Conflicts = append(out.Conflicts, conflict)
 			continue
@@ -1448,11 +1451,18 @@ func (c *Client) GenerateDeleteInstruction(object string) (DeleteInstruction, er
 }
 func (c *Client) applyTombstone(t Tombstone) CleanupReport {
 	r := c.cache.ApplyTombstones([]Tombstone{t})
-	_ = c.vault.Delete(t.ObjectID)
 	c.vault.deleteForTombstone(t.ObjectID)
+	c.mu.Lock()
+	delete(c.localObjects, t.ObjectID)
+	c.conflicts = slices.DeleteFunc(c.conflicts, func(conflict ConflictEntry) bool {
+		return conflict.ObjectID == t.ObjectID || conflict.ConflictID == t.ObjectID
+	})
+	c.mu.Unlock()
 	return r
 }
 func (c *Client) Delete(object string) error {
+	c.syncMu.Lock()
+	defer c.syncMu.Unlock()
 	d, err := c.GenerateDeleteInstruction(object)
 	if err != nil {
 		return err
@@ -1552,6 +1562,8 @@ func (c *Client) UploadClipboard(object string, version uint64, candidate clipbo
 }
 
 func (c *Client) UploadClass(class DataClass, object string, version uint64, payload []byte) error {
+	c.syncMu.Lock()
+	defer c.syncMu.Unlock()
 	c.mu.Lock()
 	a, d, enabled, p := c.accountID, c.deviceID, c.syncEnabled, c.plan
 	priv := append(ed25519.PrivateKey(nil), c.privateKey...)
