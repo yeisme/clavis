@@ -33,6 +33,21 @@ type ProviderUsage struct {
 	Reported     bool
 }
 
+type providerUsageFields struct {
+	PromptTokens     *int `json:"prompt_tokens"`
+	CompletionTokens *int `json:"completion_tokens"`
+	InputTokens      *int `json:"input_tokens"`
+	OutputTokens     *int `json:"output_tokens"`
+	CachedTokens     *int `json:"cached_tokens"`
+	CacheReadTokens  *int `json:"cache_read_input_tokens"`
+	PromptDetails    struct {
+		CachedTokens *int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+	InputDetails struct {
+		CachedTokens *int `json:"cached_tokens"`
+	} `json:"input_tokens_details"`
+}
+
 // UsageRecord is the safe, pricing-independent accounting event emitted after
 // an AI request. At is the request start time; callers persist it asynchronously.
 type UsageRecord struct {
@@ -66,26 +81,35 @@ type RequestMetadata struct {
 // of a JSON usage object sets Reported even when all reported counts are zero.
 // Missing or malformed usage returns the zero, unavailable value.
 func ParseProviderUsage(payload []byte) ProviderUsage {
+	return mergeProviderUsage(ProviderUsage{}, payload)
+}
+
+func mergeProviderUsage(prior ProviderUsage, payload []byte) ProviderUsage {
 	var envelope struct {
-		Usage *struct {
-			PromptTokens     *int `json:"prompt_tokens"`
-			CompletionTokens *int `json:"completion_tokens"`
-			InputTokens      *int `json:"input_tokens"`
-			OutputTokens     *int `json:"output_tokens"`
-			CachedTokens     *int `json:"cached_tokens"`
-			CacheReadTokens  *int `json:"cache_read_input_tokens"`
-			PromptDetails    struct {
-				CachedTokens *int `json:"cached_tokens"`
-			} `json:"prompt_tokens_details"`
-			InputDetails struct {
-				CachedTokens *int `json:"cached_tokens"`
-			} `json:"input_tokens_details"`
-		} `json:"usage"`
+		Usage   *providerUsageFields `json:"usage"`
+		Message struct {
+			Usage *providerUsageFields `json:"usage"`
+		} `json:"message"`
+		Gemini *struct {
+			InputTokens  *int `json:"promptTokenCount"`
+			OutputTokens *int `json:"candidatesTokenCount"`
+			CachedTokens *int `json:"cachedContentTokenCount"`
+		} `json:"usageMetadata"`
 	}
-	if err := json.Unmarshal(payload, &envelope); err != nil || envelope.Usage == nil {
+	if err := json.Unmarshal(payload, &envelope); err != nil {
 		return ProviderUsage{}
 	}
-	u := ProviderUsage{Reported: true}
+	if envelope.Usage == nil {
+		envelope.Usage = envelope.Message.Usage
+	}
+	if envelope.Usage == nil && envelope.Gemini != nil {
+		envelope.Usage = &providerUsageFields{InputTokens: envelope.Gemini.InputTokens, OutputTokens: envelope.Gemini.OutputTokens, CachedTokens: envelope.Gemini.CachedTokens}
+	}
+	if envelope.Usage == nil {
+		return ProviderUsage{}
+	}
+	u := prior
+	u.Reported = true
 	if envelope.Usage.InputTokens != nil {
 		u.InputTokens = *envelope.Usage.InputTokens
 	}
@@ -109,6 +133,9 @@ func ParseProviderUsage(payload []byte) ProviderUsage {
 	}
 	if envelope.Usage.InputDetails.CachedTokens != nil {
 		u.CachedTokens = *envelope.Usage.InputDetails.CachedTokens
+	}
+	if u.InputTokens < 0 || u.OutputTokens < 0 || u.CachedTokens < 0 {
+		return ProviderUsage{}
 	}
 	return u
 }

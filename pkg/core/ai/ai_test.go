@@ -94,6 +94,29 @@ func TestSSEStreamParserErrorJSON(t *testing.T) {
 	}
 }
 
+func TestAnthropicStreamCombinesUsageAcrossEvents(t *testing.T) {
+	cfg := config.DefaultAIConfig()
+	profile, _ := cfg.ProfileByID("claude")
+	stream := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":12,\"cache_read_input_tokens\":4,\"output_tokens\":0}}}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	doer := mockDoer{fn: func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}, nil
+	}}
+	client := ai.NewOpenAICompatibleClient(cfg, engine.GlossaryEngine{}, doer, func(context.Context) (string, error) { return "fixture", nil })
+	got, err := client.StreamCompletionWithUsage(context.Background(), ai.CompletionRequest{Prompt: "test", Profile: &profile}, nil)
+	if want := (ai.ProviderUsage{InputTokens: 12, OutputTokens: 7, CachedTokens: 4, Reported: true}); got != want || err != nil {
+		t.Fatalf("usage=%+v, err=%v, want %+v", got, err, want)
+	}
+}
+
+func TestGeminiUsageMetadata(t *testing.T) {
+	got := ai.ParseProviderUsage([]byte(`{"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":7,"cachedContentTokenCount":4}}`))
+	if want := (ai.ProviderUsage{InputTokens: 12, OutputTokens: 7, CachedTokens: 4, Reported: true}); got != want {
+		t.Fatalf("usage=%+v, want %+v", got, want)
+	}
+}
+
 type mockDoer struct {
 	fn func(req *http.Request) (*http.Response, error)
 }

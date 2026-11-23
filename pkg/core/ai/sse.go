@@ -34,6 +34,7 @@ type SSEStreamParser struct {
 	eventID     string
 	dataLines   []string
 	didEmitDone bool
+	usage       ProviderUsage
 }
 
 // Feed appends incoming bytes and returns any complete SSEEvents parsed so far.
@@ -174,21 +175,16 @@ func (p *SSEStreamParser) dispatchCurrentEvent() []SSEEvent {
 		return []SSEEvent{{Kind: SSEError, Text: "Malformed SSE JSON payload: " + err.Error()}}
 	}
 
-	usage := ParseProviderUsage([]byte(trimmed))
+	usage := mergeProviderUsage(p.usage, []byte(trimmed))
+	if usage.Reported {
+		p.usage = usage
+	}
 	if errMsg := extractErrorMessage(rawMap); errMsg != "" {
 		return []SSEEvent{{Kind: SSEError, Text: errMsg}}
 	}
 	if eventName == "error" || rawMap["type"] == "error" {
 		return []SSEEvent{{Kind: SSEError, Text: trimmed}}
 	}
-	// OpenAI-compatible providers normally send usage in a final chunk with
-	// choices=[]; expose it without guessing when it is absent.
-	if usage.Reported {
-		if choices, ok := rawMap["choices"].([]any); !ok || len(choices) == 0 {
-			return []SSEEvent{{Kind: SSEUsage, Usage: usage}}
-		}
-	}
-
 	switch proto {
 	case config.ProtocolAnthropic:
 		msgType, _ := rawMap["type"].(string)
