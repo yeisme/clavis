@@ -337,7 +337,7 @@ func (a *AppController) renderOmniboxPreviewCard(
 		flashFrames = []ui.Keyframe{{At: 0, Value: 1}, {At: profile.flash, Value: 0, Ease: ui.EaseOut}}
 	}
 
-	card := ui.Column(c).FillWidth().Padding(space0, space0).Gap(space6).Background(theme.Background).Children(func() {
+	card := ui.Column(c).FillWidth().Padding(space0, space0).Gap(space6).Background(ui.Transparent).Children(func() {
 		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 			// Neutral: the card's title icon is a label, not a selection.
 			renderSemanticIcon(c, previewIcon(item), typeLabel, secondaryInk(theme))

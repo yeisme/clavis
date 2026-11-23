@@ -87,10 +87,8 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 
 	card.Children(func() {
 		if state.Phase == engine.PhaseHUD {
-			// HUD keeps the same compact context header as the interactive
-			// phases, so transient notices do not change the window's identity.
-			a.renderCapsuleHeader(c, theme, cfg, state, diag)
-			ui.Divider(c)
+			// The 56pt HUD surface is a single compact notice row; rendering the
+			// 40pt interactive header above it clipped the message below the frame.
 			a.renderHUDView(c, theme, state)
 			return
 		}
@@ -926,19 +924,21 @@ func (a *AppController) renderOmniboxView(
 				// click restores the default. Each pane keeps a little air
 				// from the 1px line between them.
 				pct := a.previewListPercent()
-				split := ui.SplitPercent(c, &pct, func() {
-					ui.Column(c).Fill().Padding(space0, space6, space0, space0).Children(renderList)
-				}, func() {
-					// The preview shares the content surface. Its former elevated
-					// card consumed horizontal width and created a second frame.
-					ui.Column(c).Fill().Padding(space0, space8, space4, space0).Children(func() {
-						a.renderOmniboxPreviewCard(c, theme, state, previewItem)
-					})
-				}).FillWidth().Grow(1).SplitReset(defaultPreviewListPercent)
-				a.renderPreviewDividerState(c, theme, &pct)
-				if split.Changed() {
-					a.setPreviewListPercent(pct)
-				}
+				ui.Box(c).FillWidth().Grow(1).MinHeight(0).Children(func() {
+					split := ui.SplitPercent(c, &pct, func() {
+						ui.Column(c).Fill().Padding(space0, space8, space0, space0).Children(renderList)
+					}, func() {
+						// The preview shares the content surface. Its former elevated
+						// card consumed horizontal width and created a second frame.
+						ui.Column(c).Fill().Padding(space0, space4, space4, space10).Children(func() {
+							a.renderOmniboxPreviewCard(c, theme, state, previewItem)
+						})
+					}).Fill().SplitReset(defaultPreviewListPercent)
+					a.renderPreviewDividerState(c, theme, &pct)
+					if split.Changed() {
+						a.setPreviewListPercent(pct)
+					}
+				})
 			} else {
 				renderList()
 			}
@@ -971,8 +971,12 @@ func (a *AppController) renderOmniboxView(
 // MyGo split remains the source of drag/reset behavior and pointer capture.
 func (a *AppController) renderPreviewDividerState(c *ui.Context, theme *ui.Theme, pct *float32) {
 	width, _ := c.Size()
-	dividerX := width * *pct / 100
-	if dividerX < 0 || dividerX > width {
+	splitWidth := width - 2*space14
+	if splitWidth <= 0 {
+		return
+	}
+	dividerX := splitWidth * *pct / 100
+	if dividerX < 0 || dividerX > splitWidth {
 		return
 	}
 	hit := ui.Box(c).Absolute().Left(dividerX - space4).Top(0).Width(space8).FillHeight()
@@ -1030,8 +1034,7 @@ func (a *AppController) renderPreviewDividerState(c *ui.Context, theme *ui.Theme
 		a.uiState.previewDividerDragging = false
 	}
 	hit.DrawOver(func(p *ui.Painter, r ui.Rect) {
-		if lineWidth == 1 {
-			p.Fill(ui.Rect{X: r.X + space4 - 0.5, Y: r.Y, W: 1, H: r.H}, lineColor, 0)
+		if progress <= 0 && !dragging {
 			return
 		}
 		p.Fill(ui.Rect{X: r.X + space4 - lineWidth/2, Y: r.Y, W: lineWidth, H: r.H}, lineColor, 0)
@@ -1683,16 +1686,13 @@ func hudIconForMessage(msg string) string {
 }
 
 func (a *AppController) renderHUDView(c *ui.Context, theme *ui.Theme, state engine.State) {
-	hud := kitCard(c, theme, cardFlat, func() {
-		ui.Row(c).Fill().Center().Gap(space8).Children(func() {
-			// Same vocabulary as the floating pill: success, failure, input
-			// method or info, each in its readable semantic color.
-			icon, color := pillMessageIcon(theme, state.HUDMessage)
-			renderSemanticIcon(c, icon, typeBody, color)
-			ui.Text(c, state.HUDMessage).FontSize(typeBody).FontWeight(600).TextColor(theme.Text).SingleLine().Shrink(1)
-		})
+	ui.Row(c).Fill().Padding(space0, space14).Center().Gap(space8).Children(func() {
+		// Same vocabulary as the floating pill: success, failure, input
+		// method or info, each in its readable semantic color.
+		icon, color := pillMessageIcon(theme, state.HUDMessage)
+		renderSemanticIcon(c, icon, typeBody, color)
+		ui.Text(c, state.HUDMessage).FontSize(typeBody).FontWeight(600).TextColor(theme.Text).SingleLine().Shrink(1)
 	})
-	hud.Fill()
 }
 
 func omniboxTabLabel(tab config.CapsuleTab) string {
