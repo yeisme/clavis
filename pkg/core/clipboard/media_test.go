@@ -125,6 +125,36 @@ func TestQuotaEvictionsOldestUnpinnedImagesOnly(t *testing.T) {
 	}
 }
 
+func TestQuotaEvictionsBoundaryKeepsPinnedAndExternalMedia(t *testing.T) {
+	t0 := time.Unix(2000, 0)
+	items := []ClipboardItem{
+		{ID: "new-image", UpdatedAt: t0.Add(30 * time.Second), Media: Media{Kind: KindImage, ByteSize: 40}},
+		{ID: "pinned-image", UpdatedAt: t0, IsPinned: true, Media: Media{Kind: KindImage, ByteSize: 100}},
+		{ID: "old-image", UpdatedAt: t0.Add(10 * time.Second), Media: Media{Kind: KindImage, ByteSize: 40}},
+		{ID: "file", UpdatedAt: t0, Media: Media{Kind: KindFile, ByteSize: 1 << 30}},
+		{ID: "video", UpdatedAt: t0, Media: Media{Kind: KindVideo, ByteSize: 1 << 30}},
+	}
+	const quota int64 = 140
+	got := QuotaEvictions(items, quota)
+	if len(got) != 1 || got[0] != "old-image" {
+		t.Fatalf("evictions=%v, want oldest unpinned image only", got)
+	}
+	for _, id := range got {
+		if id == "pinned-image" || id == "file" || id == "video" {
+			t.Fatalf("evicted protected/external media %q", id)
+		}
+	}
+	var remaining int64
+	for _, item := range items {
+		if item.Kind == KindImage && item.ID != got[0] {
+			remaining += item.ByteSize
+		}
+	}
+	if remaining > quota {
+		t.Fatalf("remaining image bytes=%d, want <= quota %d", remaining, quota)
+	}
+}
+
 func TestMediaStoreGCRemovesOnlyUnreferencedManagedFiles(t *testing.T) {
 	ms := NewMediaStore(t.TempDir())
 	keep, err := ms.SaveImage(pngBytes(t, 8, 8))

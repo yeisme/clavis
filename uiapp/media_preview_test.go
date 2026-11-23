@@ -1,11 +1,74 @@
 package uiapp
 
 import (
+	"bytes"
+	"image"
+	"image/color"
+	"image/png"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/engine"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
+
+func regressionPreviewPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 12, 12))
+	for y := 0; y < 12; y++ {
+		for x := 0; x < 12; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: 12, G: 180, B: 240, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// renderMediaFallbackAfterFailure primes the real original-image cache with a
+// failed decode. Removing the source models a missing file after the
+// asynchronous decode has completed without changing production state.
+func renderMediaFallbackAfterFailure(t *testing.T, thumbPath string, removeOriginal bool) *ui.Tester {
+	t.Helper()
+	dir := t.TempDir()
+	original := filepath.Join(dir, "original.png")
+	if err := os.WriteFile(original, []byte("not a valid image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctrl, _, _, _ := newTestController(t, nil)
+	if got := ctrl.OriginalBitmap(original); got != nil {
+		t.Fatal("invalid original unexpectedly decoded")
+	}
+	if removeOriginal {
+		if err := os.Remove(original); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := engine.ClipboardMedia{Kind: "image", Path: original, ThumbPath: thumbPath, Width: 12, Height: 12}
+	tt := ui.NewTester(func(c *ui.Context) {
+		ctrl.renderClipboardMediaCanvas(c, ui.LightTheme(), m)
+	}, 320, 180)
+	tt.Frame()
+	return tt
+}
+
+func previewImagePixels(tt *ui.Tester) int {
+	img := tt.Image()
+	count := 0
+	for y := img.Bounds().Min.Y; y < img.Bounds().Max.Y; y++ {
+		for x := img.Bounds().Min.X; x < img.Bounds().Max.X; x++ {
+			r, g, b, a := img.At(x, y).RGBA()
+			if a > 0 && r < 80<<8 && g > 120<<8 && b > 180<<8 {
+				count++
+			}
+		}
+	}
+	return count
+}
 
 func TestMediaZoomClampAndModes(t *testing.T) {
 	cases := []struct {
@@ -76,6 +139,39 @@ func TestMediaPreviewOriginalFailureFallsBack(t *testing.T) {
 	if !p.loading {
 		t.Fatal("missing original did not enter the loading state")
 	}
+}
+
+func TestMediaPreviewMissingOriginalUsesThumbnail(t *testing.T) {
+	thumb := filepath.Join(t.TempDir(), "thumb.png")
+	if err := os.WriteFile(thumb, regressionPreviewPNG(t), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tt := renderMediaFallbackAfterFailure(t, thumb, true)
+	if tt.HasText(i18n.T("preview.media.unavailable")) {
+		t.Fatalf("missing original discarded a valid thumbnail; texts %q", tt.Texts())
+	}
+	if got := previewImagePixels(tt); got == 0 {
+		t.Fatalf("missing original rendered no visible thumbnail; texts %q", tt.Texts())
+	}
+}
+
+func TestMediaPreviewMissingOriginalAndThumbnailShowsUnavailable(t *testing.T) {
+	tt := renderMediaFallbackAfterFailure(t, "", true)
+	if !tt.HasText(i18n.T("preview.media.unavailable")) {
+		t.Fatalf("both media files missing had no unavailable message; texts %q", tt.Texts())
+	}
+}
+
+func TestMediaPreviewCorruptOriginalFallsBackWithoutPanic(t *testing.T) {
+	thumb := filepath.Join(t.TempDir(), "thumb.png")
+	if err := os.WriteFile(thumb, regressionPreviewPNG(t), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tt := renderMediaFallbackAfterFailure(t, thumb, false)
+	if tt.HasText(i18n.T("preview.media.unavailable")) || previewImagePixels(tt) > 0 {
+		return
+	}
+	t.Fatalf("corrupt original produced blank media canvas; texts %q", tt.Texts())
 }
 
 func TestMediaPreviewPointerZoomAndPan(t *testing.T) {

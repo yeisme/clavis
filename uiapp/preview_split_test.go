@@ -191,6 +191,26 @@ func TestClampPreviewListPercent(t *testing.T) {
 	}
 }
 
+func TestInvalidPersistedPreviewSplitValuesUseDefault(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	path := filepath.Join(ctrl.ConfigStore.Directory(), uiStateFileName)
+	for _, raw := range []string{
+		`{"previewListPercent":-1}`,
+		`{"previewListPercent":"1.5"}`,
+		`{"previewListPercent":"NaN"}`,
+	} {
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ctrl.mu.Lock()
+		ctrl.uiPersist = uiPersistState{}
+		ctrl.mu.Unlock()
+		if got := ctrl.previewListPercent(); got != defaultPreviewListPercent {
+			t.Fatalf("persisted %s: clamp=%v, want default %v", raw, got, defaultPreviewListPercent)
+		}
+	}
+}
+
 func TestPreviewDividerHoverAndDragStatesRenderWithSpecCursor(t *testing.T) {
 	f := newInteractionFixture(t, nil)
 	mediaPath := filepath.Join(t.TempDir(), "divider.png")
