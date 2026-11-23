@@ -30,6 +30,8 @@ type capsuleEphemeralStore struct {
 	actionMenuOpen    map[*AppController]bool
 	actionMenuIdx     map[*AppController]int
 	followUpComposing map[*AppController]bool
+	aiStepsExpanded   map[*AppController]bool
+	aiReviseOpen      map[*AppController]bool
 }
 
 var capsuleUI = &capsuleEphemeralStore{
@@ -37,6 +39,8 @@ var capsuleUI = &capsuleEphemeralStore{
 	actionMenuOpen:    make(map[*AppController]bool),
 	actionMenuIdx:     make(map[*AppController]int),
 	followUpComposing: make(map[*AppController]bool),
+	aiStepsExpanded:   make(map[*AppController]bool),
+	aiReviseOpen:      make(map[*AppController]bool),
 }
 
 func (s *capsuleEphemeralStore) reset(ctrl *AppController) {
@@ -46,6 +50,42 @@ func (s *capsuleEphemeralStore) reset(ctrl *AppController) {
 	delete(s.actionMenuOpen, ctrl)
 	delete(s.actionMenuIdx, ctrl)
 	delete(s.followUpComposing, ctrl)
+	delete(s.aiStepsExpanded, ctrl)
+	delete(s.aiReviseOpen, ctrl)
+}
+
+func (s *capsuleEphemeralStore) stepsExpanded(ctrl *AppController) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.aiStepsExpanded[ctrl]
+}
+
+func (s *capsuleEphemeralStore) toggleStepsExpanded(ctrl *AppController) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := !s.aiStepsExpanded[ctrl]
+	if next {
+		s.aiStepsExpanded[ctrl] = true
+	} else {
+		delete(s.aiStepsExpanded, ctrl)
+	}
+	return next
+}
+
+func (s *capsuleEphemeralStore) reviseOpen(ctrl *AppController) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.aiReviseOpen[ctrl]
+}
+
+func (s *capsuleEphemeralStore) setReviseOpen(ctrl *AppController, open bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if open {
+		s.aiReviseOpen[ctrl] = true
+		return
+	}
+	delete(s.aiReviseOpen, ctrl)
 }
 
 func (s *capsuleEphemeralStore) previewFor(ctrl *AppController, configured bool) bool {

@@ -2,7 +2,9 @@ package uiapp
 
 import (
 	"context"
+	"fmt"
 	"image/png"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -205,26 +207,57 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, m
 	w, h = PreferredCapsuleSizeForState(f.ctrl.State(), appearance)
 	shoot("05c-preview-media-deck", f.ctrl.CapsuleView, w, h, 2, nil)
 
-	f.ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Context: ctx})
-	tt := ui.NewTester(f.ctrl.CapsuleView, w, h)
-	tt.Frame()
-	tt.Type("?解释这段代码")
-	tt.Frame()
-	tt.Key(0, ui.KeyEnter)
-	// Capture the active orb as soon as the AI phase opens.
-	w, h = PreferredCapsuleSizeForState(f.ctrl.State(), appearance)
-	shoot("06a-ai-streaming", f.ctrl.CapsuleView, w, h, 2, nil)
+	// AI active streaming (running) + clean completion (done) via a real held pipe
+	// so 06a-ai-streaming deterministically captures the live step log & Stop CTA.
+	applySnapAppearance := func(ctrl *AppController) {
+		_ = ctrl.UpdateMainConfig(func(m *config.MainConfig) {
+			m.Appearance.VisualPreset = preset
+			m.Appearance.Animations = motion
+			m.Appearance.ObliqueRows = true
+			m.Appearance.Language = string(lang)
+		})
+	}
+	streamRelease := make(chan struct{})
+	sf := newInteractionFixture(t, mockHTTPDoer{fn: func(*http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			_, _ = fmt.Fprint(pw, "data: {\"choices\":[{\"delta\":{\"content\":\"这段代码的作用是：\\n\\n1. 读取配置文件；\"}}]}\n\n")
+			<-streamRelease
+			_, _ = fmt.Fprint(pw, "data: {\"choices\":[{\"delta\":{\"content\":\"\\n2. 校验字段并返回错误；\\n3. 原子写回磁盘。\"}}]}\n\ndata: [DONE]\n\n")
+			_ = pw.Close()
+		}()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       pr,
+		}, nil
+	}})
+	applySnapAppearance(sf.ctrl)
+	sf.ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Context: ctx})
+	stTester := ui.NewTester(sf.ctrl.CapsuleView, w, h)
+	stTester.Frame()
+	stTester.Type("?解释这段代码")
+	stTester.Frame()
+	stTester.Key(0, ui.KeyEnter)
 	waitUntil(t, 2*time.Second, func() bool {
-		st := f.ctrl.State()
+		st := sf.ctrl.State()
+		return st.Phase == engine.PhaseAIStreaming && !st.AIComplete && st.AIOutput != ""
+	}, "AI active streaming chunk")
+	w, h = PreferredCapsuleSizeForState(sf.ctrl.State(), appearance)
+	shoot("06a-ai-streaming", sf.ctrl.CapsuleView, w, h, 2, nil)
+	close(streamRelease)
+	waitUntil(t, 2*time.Second, func() bool {
+		st := sf.ctrl.State()
 		return st.Phase == engine.PhaseAIStreaming && st.AIComplete
 	}, "AI completion")
-	w, h = PreferredCapsuleSizeForState(f.ctrl.State(), appearance)
-	shoot("06-ai", f.ctrl.CapsuleView, w, h, 2, nil)
+	w, h = PreferredCapsuleSizeForState(sf.ctrl.State(), appearance)
+	shoot("06-ai", sf.ctrl.CapsuleView, w, h, 2, nil)
 
-	// AI rewrite review: a close edit opens on the changes view.
+	// AI rewrite review: a close edit opens on the awaiting_human blocking approval gate.
 	rf := newInteractionFixture(t, mockHTTPDoer{fn: func(*http.Request) (*http.Response, error) {
 		return sseResponse("这段代码负责读取配置文件，并校验所有字段后原子写回磁盘。"), nil
 	}})
+	applySnapAppearance(rf.ctrl)
 	rf.ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Context: &engine.CapsuleContext{
 		AppName: "Notes", SelectedText: "这段代码的作用是读取配置文件，然后校验字段并写回磁盘。",
 	}})
@@ -239,6 +272,76 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, m
 	}, "AI review completion")
 	w, h = PreferredCapsuleSizeForState(rf.ctrl.State(), appearance)
 	shoot("06b-ai-review", rf.ctrl.CapsuleView, w, h, 2, nil)
+
+	// AI failure & recovery state: error banner, retry CTA (⌘R), and editable retry input.
+	ef := newInteractionFixture(t, mockHTTPDoer{fn: func(*http.Request) (*http.Response, error) {
+		return nil, context.DeadlineExceeded
+	}})
+	applySnapAppearance(ef.ctrl)
+	ef.ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Context: ctx})
+	et := ui.NewTester(ef.ctrl.CapsuleView, w, h)
+	et.Frame()
+	et.Type("?分析这段配置加载超时原因")
+	et.Frame()
+	et.Key(0, ui.KeyEnter)
+	waitUntil(t, 2*time.Second, func() bool {
+		st := ef.ctrl.State()
+		return st.Phase == engine.PhaseAIStreaming && st.AIError != ""
+	}, "AI error state")
+	w, h = PreferredCapsuleSizeForState(ef.ctrl.State(), appearance)
+	shoot("06c-ai-error", ef.ctrl.CapsuleView, w, h, 2, nil)
+
+	// AI multi-turn follow-up state: Turn 1 history + Turn 2 prompt + refined output.
+	turn := 0
+	mf := newInteractionFixture(t, mockHTTPDoer{fn: func(*http.Request) (*http.Response, error) {
+		turn++
+		if turn == 1 {
+			return sseResponse("这段代码负责读取配置、校验字段并原子写回磁盘。"), nil
+		}
+		return sseResponse("浓缩版：", "\\n- 读取配置", "\\n- 校验字段", "\\n- 原子落盘"), nil
+	}})
+	applySnapAppearance(mf.ctrl)
+	mf.ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Context: ctx})
+	mt := ui.NewTester(mf.ctrl.CapsuleView, w, h)
+	mt.Frame()
+	mt.Type("?解释这段代码")
+	mt.Frame()
+	mt.Key(0, ui.KeyEnter)
+	waitUntil(t, 2*time.Second, func() bool {
+		st := mf.ctrl.State()
+		return st.Phase == engine.PhaseAIStreaming && st.AIComplete
+	}, "AI turn 1 completion")
+	mf.ctrl.Dispatch(engine.Event{Type: engine.EventFollowUpAI, Prompt: "用三点极简总结"})
+	waitUntil(t, 2*time.Second, func() bool {
+		st := mf.ctrl.State()
+		return st.Phase == engine.PhaseAIStreaming && st.AIComplete && len(st.AIHistory) >= 2
+	}, "AI turn 2 follow-up completion")
+	w, h = PreferredCapsuleSizeForState(mf.ctrl.State(), appearance)
+	shoot("06d-ai-followup", mf.ctrl.CapsuleView, w, h, 2, nil)
+
+	// AI pending/empty state: ready to compose a multi-line prompt before sending.
+	pf := newInteractionFixture(t, mockHTTPDoer{fn: func(*http.Request) (*http.Response, error) {
+		return sseResponse("ok"), nil
+	}})
+	applySnapAppearance(pf.ctrl)
+	pwAI, phAI := PreferredCapsuleSize(engine.PhaseAIStreaming, appearance)
+	shoot("06e-ai-pending", func(c *ui.Context) {
+		cfgSnap := pf.ctrl.Config()
+		theme := resolveAppearanceTheme(c, cfgSnap.Main.Appearance.Theme)
+		c.SetTheme(theme)
+		pendingState := engine.State{
+			Phase:   engine.PhaseAIStreaming,
+			AIMode:  "",
+			Context: *ctx,
+		}
+		radius := NormalizeCornerRadius(cfgSnap.Main.Appearance)
+		card := applyCapsuleCardSurface(c, applyTextLocale(ui.Column(c).Fill().Radius(radius).Clip()), theme, cfgSnap.Main.Appearance)
+		card.Children(func() {
+			pf.ctrl.renderCapsuleHeader(c, theme, cfgSnap, pendingState, pf.ctrl.Diagnostics())
+			ui.Divider(c)
+			pf.ctrl.renderAIStreamingView(c, theme, cfgSnap, pendingState)
+		})
+	}, pwAI, phAI, 2, nil)
 
 	f.ctrl.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.T("hud.copied")})
 	w, h = PreferredCapsuleSizeForState(f.ctrl.State(), appearance)

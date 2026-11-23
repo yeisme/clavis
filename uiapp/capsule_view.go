@@ -10,7 +10,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/egoist/mygo/ui/markdown"
 	"github.com/yeisme/clavis/pkg/core/agentsession"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
@@ -197,11 +196,11 @@ func (a *AppController) renderCapsuleHeader(
 			})
 
 		case engine.PhaseAIStreaming:
-			activeOrb := !state.AIComplete && state.AIError == ""
-			switch {
-			case activeOrb:
+			aiPhase := resolveAIInteractionPhase(state, false)
+			switch aiPhase {
+			case aiPhaseRunning:
 				RenderLiquidOrb(c, 20, true, effectiveSpatialAppearance(c, cfg.Main.Appearance))
-			case state.AIError != "":
+			case aiPhaseFailed:
 				renderSemanticIcon(c, "exclamationmark.circle", IconSize16, kitStateErrorColor(theme))
 			default:
 				renderSemanticIcon(c, "sparkles", IconSize16, secondaryInk(theme))
@@ -246,13 +245,7 @@ func (a *AppController) renderCapsuleHeader(
 			kitChipGroup(c, theme, items)
 		}
 		if state.Phase == engine.PhaseAIStreaming {
-			statusText := i18n.T("ai.status.streaming")
-			tone := chipAccent
-			if state.AIError != "" {
-				statusText, tone = i18n.T("common.error"), chipDanger
-			} else if state.AIComplete {
-				statusText, tone = i18n.T("common.done"), chipSuccess
-			}
+			statusText, tone := a.aiCenterPhaseStatus(state)
 			kitStatusPill(c, theme, statusText, tone)
 		}
 	})
@@ -1442,302 +1435,7 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 	return false
 }
 
-func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig, state engine.State) {
-	profile := appMotionProfile(c, cfg.Main.Appearance)
-	c.OnWindowShortcut(0, ui.KeyEscape, func() {
-		if a.followUpComposing() {
-			return
-		}
-		a.Dispatch(engine.Event{Type: engine.EventEscape})
-	})
-	// Cycle AI profiles with ⌘⇧M / Ctrl+Shift+M.
-	c.OnWindowShortcut(primaryMod()|ui.Shift, ui.KeyM, func() {
-		activeProf := a.ActiveAIProfile()
-		if nextID := nextAIProfileID(a.Config().Main.AI, activeProf.ID); nextID != "" {
-			_ = a.SelectAIProfile(nextID)
-		}
-	})
-	if state.AIComplete && state.AIError == "" {
-		c.OnWindowShortcut(0, ui.KeyTab, func() {
-			a.uiState.followUpHandle.RequestFocus(c)
-		})
-	}
-	if state.AIError == "" && state.AIOutput != "" {
-		c.OnWindowShortcut(0, ui.KeyEnter, func() {
-			if a.followUpComposing() {
-				return
-			}
-			trimmed := strings.TrimSpace(a.uiState.followUpQuery)
-			if trimmed != "" {
-				a.uiState.followUpQuery = ""
-				a.Dispatch(engine.Event{Type: engine.EventFollowUpAI, Prompt: trimmed})
-				return
-			}
-			a.Dispatch(engine.Event{Type: engine.EventAcceptAIOutput})
-		})
-	}
-	if state.AIOutput != "" {
-		c.OnWindowShortcut(primaryMod(), ui.KeyC, func() {
-			a.Dispatch(engine.Event{Type: engine.EventCopyAIOutput})
-		})
-	}
-	review, hasReview := a.aiReview(state)
-	if hasReview {
-		c.OnWindowShortcut(primaryMod(), ui.KeyD, func() {
-			a.toggleAIReview(review)
-		})
-	}
-
-	ui.Column(c).FillWidth().Grow(1).Padding(space12, space14).Gap(8).Children(func() {
-		if profiles := cfg.Main.AI.Profiles; len(profiles) > 1 {
-			active := a.ActiveAIProfile()
-			ui.Row(c).FillWidth().Wrap().Gap(space6).AlignItems(ui.Center).Children(func() {
-				for _, p := range profiles {
-					prof := p
-					isActive := strings.EqualFold(prof.ID, active.ID)
-					button := ui.ButtonBase(c).Key("ai-profile:"+prof.ID).Height(space24).Padding(space2, space10).Radius(radiusChip).FocusRing(false)
-					ink := secondaryInk(theme)
-					if isActive {
-						button.Background(theme.Accent)
-						ink = theme.AccentText
-					} else {
-						button.Background(tileFill(theme)).Border(space1, hairline(theme))
-					}
-					button.Children(func() {
-						ui.Text(c, prof.ID).FontSize(typeMeta).FontWeight(600).TextColor(ink).SingleLine()
-					})
-					if button.Clicked() {
-						_ = a.SelectAIProfile(prof.ID)
-					}
-				}
-			})
-		}
-		if state.AISourceText != "" {
-			srcRunes := utf8.RuneCountInString(state.AISourceText)
-			headerLabel := i18n.Tf("ai.source_text", srcRunes)
-			toggle := ui.ButtonBase(c).
-				FillWidth().
-				Padding(space6, space10).
-				Radius(radius8).
-				Background(theme.Surface).
-				Border(1, theme.Border)
-			toggle.Children(func() {
-				ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-					ui.Text(c, headerLabel).FontSize(typeLabel).FontWeight(500).TextColor(theme.TextMuted).SingleLine()
-					ui.Spacer(c)
-					chevron := "▸"
-					if a.uiState.sourceExpanded {
-						chevron = "▾"
-					}
-					ui.Text(c, chevron).FontSize(typeLabel).TextColor(theme.TextMuted).SingleLine()
-				})
-			})
-			if toggle.Clicked() {
-				a.uiState.sourceExpanded = !a.uiState.sourceExpanded
-			}
-			if a.uiState.sourceExpanded {
-				ui.Box(c).
-					FillWidth().
-					MaxHeight(84).
-					Padding(space8, space10).
-					Radius(radius8).
-					Background(theme.Surface).
-					Border(1, withAlpha(theme.Border, alphaStrong)).
-					Children(func() {
-						ui.Scroll(c).FillWidth().Children(func() {
-							ui.Text(c, state.AISourceText).FontSize(typeLabel).TextColor(theme.TextMuted)
-						})
-					})
-			}
-		}
-
-		// Render previous multi-turn history pills when present
-		if len(state.AIHistory) > 0 {
-			ui.Box(c).
-				FillWidth().
-				MaxHeight(96).
-				Padding(space6, space8).
-				Radius(radius8).
-				Background(withAlpha(theme.Surface, alphaStrong)).
-				Border(1, withAlpha(theme.Border, alphaStrong)).
-				Children(func() {
-					ui.Scroll(c).FillWidth().Children(func() {
-						ui.Column(c).FillWidth().Gap(4).Children(func() {
-							for idx, turn := range state.AIHistory {
-								roleLabel := i18n.T("ai.role_you")
-								roleColor := theme.Accent
-								if strings.EqualFold(turn.Role, "assistant") {
-									roleLabel = i18n.T("omnibox.tab.ai")
-									roleColor = theme.TextMuted
-								}
-								ui.Row(c).
-									Key(fmt.Sprintf("ai-turn:%d", idx)).
-									FillWidth().
-									Gap(6).
-									AlignItems(ui.Center).
-									Children(func() {
-										ui.Box(c).
-											Padding(space1, space6).
-											Radius(radius4).
-											Background(withAlpha(roleColor, alphaSubtle)).
-											Children(func() {
-												ui.Text(c, roleLabel).FontSize(typeMicro).FontWeight(700).TextColor(roleColor).SingleLine()
-											})
-										ui.Text(c, turn.Content).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().Grow(1)
-									})
-							}
-						})
-					})
-				})
-		}
-
-		if hasReview {
-			a.renderAIReviewToggle(c, theme, review)
-		}
-
-		applyProseLineHeight(ui.Scroll(c).
-			FillWidth().
-			Grow(1).
-			Padding(space10, space12).
-			Radius(radiusCard).
-			Background(theme.Surface).
-			Border(1, theme.Border)).
-			Children(func() {
-				switch {
-				case state.AIError != "":
-					// Two quick jolts (2 × 60ms) whenever a new error lands.
-					if state.AIError != a.uiState.lastAIError {
-						a.uiState.lastAIError = state.AIError
-						a.uiState.aiShakeRun++
-					}
-					errBox := ui.Column(c).FillWidth().Children(func() {
-						kitStateView(c, theme, kitStateError, "exclamationmark.circle", i18n.T("common.error"), state.AIError, func() {
-							a.Dispatch(engine.Event{Type: engine.EventFollowUpAI, Prompt: state.AIPrompt})
-						})
-					})
-					if frames := shakeKeyframes(profile); frames != nil {
-						jolt := errBox.Keyframes("ai-error-shake", frames, ui.KeyframeOptions{Run: a.uiState.aiShakeRun})
-						errBox.Translate(jolt*3, 0)
-					}
-				case state.AIOutput == "":
-					kitStateView(c, theme, kitStateLoading, "arrow.clockwise", i18n.T("ai.generating"), "", nil)
-				case hasReview && a.aiReviewShowsChanges(review):
-					renderAIReviewChanges(c, theme, review)
-				default:
-					markdown.View(c, state.AIOutput, &a.uiState.mdOpts)
-					if !state.AIComplete {
-						// Pulsing caret while the answer streams in (900ms loop).
-						caret := ui.Box(c).Width(7).Height(15).Radius(radius4)
-						caret.Background(theme.Accent.Alpha(cursorOpacity(caret, profile)))
-					}
-				}
-			})
-
-		// Follow-up input shown when AI completion finishes cleanly
-		if state.AIComplete && state.AIError == "" {
-			followUp := a.uiState.followUpQuery
-			in := ui.TextInput(c, &followUp).
-				Bind(&a.uiState.followUpHandle).
-				Placeholder(i18n.T("ai.followup_placeholder")).
-				Label(i18n.T("ai.followup_label")).
-				FillWidth()
-
-			// Track IME composition so candidate selection never sends or closes.
-			in.ObserveInput(func(ev ui.InputEvent) {
-				switch ev.Kind {
-				case ui.InputCompose:
-					capsuleUI.setFollowUpComposing(a, ev.Text != "")
-				case ui.InputText, ui.InputCommand:
-					capsuleUI.setFollowUpComposing(a, false)
-				}
-			})
-			if !in.Focused() {
-				capsuleUI.setFollowUpComposing(a, false)
-			} else {
-				capsuleUI.setFollowUpComposing(a, in.Composing())
-			}
-
-			// Quick chords (⌥1..⌥9 / Alt+1..9) must be taken before the text
-			// editor types the Option+digit character.
-			in.HandleInput(func(ev ui.InputEvent) bool {
-				if ev.Kind != ui.InputKeyDown {
-					return false
-				}
-				if a.followUpComposing() && ev.Mods == 0 {
-					return false
-				}
-				return a.handleOmniboxKey(ev.Key, ev.Mods, state)
-			})
-
-			in.OnTextKey(func(k ui.TextKey) bool {
-				if a.followUpComposing() && k.Mods == 0 {
-					switch k.Key {
-					case ui.KeyEnter, ui.KeyEscape, ui.KeyUp, ui.KeyDown, ui.KeyTab:
-						// IME candidate selection keys belong to the input method.
-						return true
-					default:
-						return false
-					}
-				}
-				switch {
-				case k.Key == ui.KeyTab && k.Mods == 0:
-					return true
-				case k.Key == ui.KeyEscape && k.Mods == 0:
-					a.Dispatch(engine.Event{Type: engine.EventEscape})
-					return true
-				case k.Key == ui.KeyEnter && k.Mods == 0:
-					trimmed := strings.TrimSpace(k.Text())
-					if trimmed == "" {
-						trimmed = strings.TrimSpace(a.uiState.followUpQuery)
-					}
-					if trimmed != "" {
-						k.SetText("")
-						a.uiState.followUpQuery = ""
-						a.Dispatch(engine.Event{
-							Type:   engine.EventFollowUpAI,
-							Prompt: trimmed,
-						})
-						return true
-					}
-					a.Dispatch(engine.Event{Type: engine.EventAcceptAIOutput})
-					return true
-				}
-				return false
-			})
-
-			if in.Changed() {
-				a.uiState.followUpQuery = followUp
-			}
-		}
-
-		ui.Divider(c)
-		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-			canAccept := state.AIError == "" && state.AIOutput != ""
-			canCopy := state.AIOutput != ""
-
-			replaceBtn := ui.PrimaryButton(c, i18n.T("ai.replace")).Disabled(!canAccept)
-			if replaceBtn.Clicked() && canAccept {
-				a.Dispatch(engine.Event{Type: engine.EventAcceptAIOutput})
-			}
-
-			copyLabel := modPrefix() + "C " + i18n.T("common.copy")
-			copyBtn := ui.Button(c, copyLabel).Disabled(!canCopy)
-			if copyBtn.Clicked() && canCopy {
-				a.Dispatch(engine.Event{Type: engine.EventCopyAIOutput})
-			}
-
-			ui.Spacer(c)
-
-			cancelLabel := i18n.T("ai.cancel")
-			if state.AIComplete {
-				cancelLabel = i18n.T("ai.close")
-			}
-			if ui.Button(c, cancelLabel).Clicked() {
-				a.Dispatch(engine.Event{Type: engine.EventEscape})
-			}
-		})
-	})
-}
+// renderAIStreamingView lives in ai_center_view.go.
 
 // hudIconForMessage picks the semantic icon for a HUD notice: a checkmark
 // for copy/success notices, a keyboard for IME switches, an xmark for
