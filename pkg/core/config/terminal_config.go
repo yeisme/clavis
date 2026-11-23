@@ -1,17 +1,18 @@
 package config
 
 import (
-	"github.com/yeisme/clavis/pkg/core/toml"
 	"strings"
+
+	"github.com/yeisme/clavis/pkg/core/toml"
 )
 
 // TerminalProfile describes how to open a terminal at a directory. Command is
 // an app name for open -na or an executable; ArgTemplate may contain {dir}.
 type TerminalProfile struct {
-	Name        string `json:"name"`
-	BundleID    string `json:"bundleId"`
-	Command     string `json:"command"`
-	ArgTemplate string `json:"argTemplate"`
+	Name        string `json:"name" toml:"name"`
+	BundleID    string `json:"bundleId" toml:"bundle_id"`
+	Command     string `json:"command" toml:"command"`
+	ArgTemplate string `json:"argTemplate" toml:"arg_template"`
 }
 
 type TerminalConfig struct {

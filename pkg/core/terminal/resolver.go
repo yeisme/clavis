@@ -104,18 +104,46 @@ func makePlan(p config.TerminalProfile, dir string) TerminalPlan {
 	if template == "" {
 		template = "--working-directory={dir}"
 	}
-	arg := strings.ReplaceAll(template, "{dir}", dir)
-	args := []string{"-na"}
+	args := templateArgs(template, dir)
+	if filepath.IsAbs(p.Command) && p.BundleID == "" {
+		return TerminalPlan{Profile: p, Program: p.Command, Args: args, Dir: dir}
+	}
+	openArgs := []string{"-na"}
 	if p.BundleID != "" {
-		args = append(args, "-b", p.BundleID)
+		openArgs = append(openArgs, "-b", p.BundleID)
 	} else {
-		args = append(args, p.Command)
+		openArgs = append(openArgs, p.Command)
 	}
-	args = append(args, "--args")
-	if arg != "" {
-		args = append(args, strings.Fields(arg)...)
+	openArgs = append(openArgs, "--args")
+	openArgs = append(openArgs, args...)
+	return TerminalPlan{Profile: p, Program: "open", Args: openArgs, Dir: dir}
+}
+
+func templateArgs(template, dir string) []string {
+	fields := strings.Fields(template)
+	args := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.Trim(field, "\\\"")
+		args = append(args, strings.ReplaceAll(field, "{dir}", dir))
 	}
-	return TerminalPlan{Profile: p, Program: "open", Args: args, Dir: dir}
+	return args
+}
+
+// OpenLeaderTerminal resolves and executes the terminal action through the
+// injected runner. It is the UI-independent Leader action boundary.
+func OpenLeaderTerminal(cfg config.TerminalConfig, dir string, runner Runner) (host.OperationResult, error) {
+	plan, result, err := ResolveTerminal(cfg, dir)
+	if err != nil {
+		return result, err
+	}
+	if err := Execute(plan, runner); err != nil {
+		result.State = host.StateFailed
+		result.Code = "terminal_open_failed"
+		result.Message = err.Error()
+		result.Retryable = true
+		return result, err
+	}
+	return result, nil
 }
 
 func Execute(plan TerminalPlan, runner Runner) error {

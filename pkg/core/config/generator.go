@@ -111,6 +111,22 @@ capsule_shortcut = "option+space"
 # Shortcut to open Clipboard History directly (Maccy style); press again to close
 clipboard_shortcut = "alt+shift+c"
 snippet_expansion_enabled = true
+# Terminal profile used by Leader terminal action.
+[terminal]
+default = "ghostty"
+
+[[terminal.profiles]]
+name = "ghostty"
+bundle_id = "com.mitchellh.ghostty"
+command = "Ghostty"
+arg_template = "--working-directory={dir}"
+
+[[terminal.profiles]]
+name = "terminal"
+bundle_id = "com.apple.Terminal"
+command = "Terminal"
+arg_template = "--working-directory={dir}"
+
 # Backspace right after an expansion restores the typed trigger
 snippet_backspace_undo = true
 # Leader menu appears only after this pause (ms); keys typed sooner run at once. 0 = immediately
