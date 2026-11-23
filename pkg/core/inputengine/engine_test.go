@@ -251,6 +251,7 @@ func TestAICandidatesCopyCallerSlice(t *testing.T) {
 		t.Fatal("fresh AI result rejected")
 	}
 	words[0] = "caller mutation"
+	e.SetBlockedWords(nil)
 	if got := texts(e.View()); !slices.Contains(got, "你好呀") || slices.Contains(got, "caller mutation") {
 		t.Fatalf("engine retained caller-owned AI slice: %v", got)
 	}
