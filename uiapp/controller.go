@@ -964,9 +964,6 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 		}
 		c.clipboardPasteGen++
 	}
-	if ev.Type == engine.EventOpenOmnibox && ev.Tab == config.TabAgent {
-		go c.refreshAgentSessions()
-	}
 	prev := c.StateMachine.State()
 	// A HUD notice must never destroy an active Capsule session. When a floating pill sink is
 	// wired up and the Capsule is open (Leader / Omnibox / AI Streaming), route the notice
@@ -1013,7 +1010,13 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 			cancelSearchSeq = c.clipSearchSeq.Add(1)
 		}
 	}
+	enteredAgent := next.Phase == engine.PhaseOmnibox && next.OmniboxTab == config.TabAgent &&
+		(ev.Type == engine.EventOpenOmnibox || prev.Phase != engine.PhaseOmnibox || prev.OmniboxTab != config.TabAgent)
 	c.mu.Unlock()
+
+	if enteredAgent {
+		go c.refreshAgentSessions()
+	}
 
 	if ev.Type == engine.EventSelectAIProfile {
 		c.refreshAPIKeySource()
@@ -1336,7 +1339,11 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 		// Media GC remains on the serialized desktop poller/prune path. Running it
 		// here could race a just-captured blob that has not yet been persisted.
 		c.enqueueClipboardTask(func(ctx context.Context) error {
-			return c.ClipboardStore.Delete(ctx, id)
+			err := c.ClipboardStore.Delete(ctx, id)
+			if err == nil {
+				c.invalidateClipboardStats()
+			}
+			return err
 		})
 
 	case engine.EffectRunAction:
@@ -2162,6 +2169,7 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 			return
 		}
 
+		c.invalidateAIUsage()
 		c.Dispatch(engine.Event{
 			Type: engine.EventAICompleted,
 		})
@@ -2284,6 +2292,7 @@ func (c *AppController) syncClipboardEntries(ctx context.Context) {
 	c.clipSyncedLimit = limit
 	c.clipSyncMu.Unlock()
 
+	c.invalidateClipboardStats()
 	c.Dispatch(engine.Event{
 		Type:             engine.EventSetClipboardEntries,
 		ClipboardEntries: clipboardItemsToEntries(items),

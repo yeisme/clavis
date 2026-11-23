@@ -201,3 +201,56 @@ func TestAgentDiagnosticTextIsRedactedBeforeUI(t *testing.T) {
 		t.Fatalf("diagnostic leaked secret/path: %+v", items)
 	}
 }
+
+func TestAgentSwitchTabTriggersRefreshAndRendersPreview(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions})
+	ctrl.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: config.TabAgent})
+	waitUntil(t, 3*time.Second, func() bool {
+		res := ctrl.agentRecordedOperationResult()
+		return !ctrl.agentRefreshing() && res.State != "" && res.State != host.StateRefreshing
+	}, "switching to Agent tab should trigger and finish session refresh")
+
+	ctrl.agentMu.Lock()
+	ctrl.agentSessions = []agentsession.Session{{
+		ID:             "cx-preview-1",
+		Provider:       "codex",
+		Title:          "Frontend Polish",
+		Status:         agentsession.StatusRunning,
+		LastActivityAt: time.Now(),
+		Workspace:      "/workspace/clavis",
+		LastMessage:    "Preview pane renders session details",
+		PendingReview:  true,
+	}}
+	ctrl.agentDiagnostics = nil
+	setAgentOperationResult(ctrl, host.OperationResult{State: host.StateReady, ObservedAt: time.Now()})
+	ctrl.agentMu.Unlock()
+
+	w, h := PreferredCapsuleSize(engine.PhaseOmnibox, ctrl.Config().Main.Appearance)
+	tt := ui.NewTester(ctrl.CapsuleView, w, h)
+	tt.Frame()
+	if !tt.HasText("Preview pane renders session details") {
+		t.Fatalf("agent preview body missing last message: %v", tt.Texts())
+	}
+	if !tt.HasText("ID: cx-preview-1") {
+		t.Fatalf("agent preview body missing session ID: %v", tt.Texts())
+	}
+	if !tt.HasText("R") {
+		t.Fatalf("agent footer missing refresh shortcut hint: %v", tt.Texts())
+	}
+}
+
+func TestAgentVisibleItemsIsolatesControllerResults(t *testing.T) {
+	ctrlA, _, _, _ := newTestController(t, nil)
+	ctrlB, _, _, _ := newTestController(t, nil)
+	setAgentOperationResult(ctrlA, host.OperationResult{State: host.StateReady, ObservedAt: time.Now()})
+	setAgentOperationResult(ctrlB, host.OperationResult{State: host.StateFailed, Message: "Codex 数据源不可用", Retryable: true})
+	itemsA := ctrlA.agentVisibleItems("")
+	if len(itemsA) != 0 {
+		t.Fatalf("ctrlA leaked ctrlB failure result: %+v", itemsA)
+	}
+	itemsB := ctrlB.agentVisibleItems("")
+	if len(itemsB) != 1 || itemsB[0].UtilityValue != "agent-refresh-status" {
+		t.Fatalf("ctrlB missing its own failure status row: %+v", itemsB)
+	}
+}

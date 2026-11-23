@@ -923,7 +923,13 @@ func (a *AppController) renderOmniboxView(
 			}
 
 			// Side-by-side split: results list on the left, rich preview on the right.
-			previewItem, hasPreview := omniboxPreviewItem(state)
+			// Derive preview from the visible list (which includes Agent rows and
+			// kind-filtered Clipboard rows) rather than raw state.OmniboxItems.
+			var previewItem engine.OmniboxItem
+			var hasPreview bool
+			if selectedIdx >= 0 && selectedIdx < len(items) {
+				previewItem, hasPreview = previewableOmniboxItem(items[selectedIdx])
+			}
 			if !hasPreview || previewItem.ClipboardMedia == nil || !previewItem.ClipboardMedia.IsMedia() {
 				// Media zoom/pan is scoped to the selected media candidate; never
 				// leak it through a text candidate or a later selection.
@@ -962,7 +968,7 @@ func (a *AppController) renderOmniboxView(
 		ui.Divider(c)
 		ui.Row(c).FillWidth().Gap(space12).AlignItems(ui.Center).Children(func() {
 			prefix := modPrefix()
-			a.renderOmniboxFooterHints(c, theme, cfg, state)
+			a.renderOmniboxFooterHints(c, theme, cfg, state, items, selectedIdx)
 			ui.Spacer(c)
 
 			a.renderOmniboxFooterFrameToggle(c, theme, "eye", prefix+i18n.T("omnibox.footer.preview"),
@@ -1084,11 +1090,39 @@ func renderAgentRowBadge(c *ui.Context, theme *ui.Theme, item engine.OmniboxItem
 // while the query shows a completion, "⇧Tab Switch tab" otherwise. When the
 // row would not fit beside the footer toggles, the quick select gives way
 // first, then the secondary action; a truncated caption helps no one.
-func (a *AppController) renderOmniboxFooterHints(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig, state engine.State) {
+func (a *AppController) renderOmniboxFooterHints(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig, state engine.State, items []engine.OmniboxItem, selectedIdx int) {
 	_, completing := omniboxCompletion(state)
 	tab := searchTabHint(completing)
 	tab.drop = 1
+	if state.OmniboxTab == config.TabAgent {
+		var hints []footerHint
+		if selectedIdx >= 0 && selectedIdx < len(items) {
+			hints = append(hints, agentItemFooterHints(items[selectedIdx], a.agentRefreshRetryable())...)
+		} else {
+			refreshCaption := "Refresh"
+			if i18n.IsChinese() {
+				refreshCaption = "刷新"
+			}
+			hints = append(hints, footerHint{keys: modPrefix() + "R", caption: refreshCaption, drop: 0})
+		}
+		if cfg.Main.Appearance.ShowKeyHints && len(items) > 1 {
+			tone := keyToneNeutral
+			if c.Modifiers()&ui.Alt != 0 {
+				tone = keyToneAccent
+			}
+			hints = append(hints, footerHint{keys: altPrefix() + "1–9", caption: i18n.T("omnibox.footer.quick_select"), tone: tone, drop: 3})
+		}
+		hints = append(hints, tab)
+		if len(items) == 0 {
+			hints = append(hints, footerHint{keys: "esc", caption: i18n.T("omnibox.footer.close"), drop: 2})
+		}
+		renderFooterHints(c, theme, fitFooterHints(c, hints, omniboxFooterRoom(c)))
+		return
+	}
 	selected, ok := selectedOmniboxItem(state)
+	if selectedIdx >= 0 && selectedIdx < len(items) {
+		selected, ok = items[selectedIdx], true
+	}
 	if !ok {
 		renderFooterHints(c, theme, []footerHint{tab, {keys: "esc", caption: i18n.T("omnibox.footer.close")}})
 		return
@@ -1100,7 +1134,7 @@ func (a *AppController) renderOmniboxFooterHints(c *ui.Context, theme *ui.Theme,
 		}
 		hints = append(hints, footerHint{keys: adaptActionShortcut(spec.Shortcut), caption: spec.Label, drop: 2 * i})
 	}
-	if cfg.Main.Appearance.ShowKeyHints && len(state.OmniboxItems) > 1 {
+	if cfg.Main.Appearance.ShowKeyHints && len(items) > 1 {
 		tone := keyToneNeutral
 		if c.Modifiers()&ui.Alt != 0 {
 			tone = keyToneAccent
@@ -1290,9 +1324,19 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 
 	// Direct row quick-select: ⌥1..⌥9 copies the row, ⌥⌘1..⌥⌘9 runs the secondary action.
 	if mods == ui.Alt {
-		if idx, ok := rowQuickKeyIndex(key); ok && idx < len(state.OmniboxItems) {
-			a.Dispatch(engine.Event{Type: engine.EventSelectAndConfirmIndex, Index: idx})
-			return true
+		if idx, ok := rowQuickKeyIndex(key); ok {
+			if state.OmniboxTab == config.TabAgent {
+				items := a.agentVisibleItems(state.OmniboxQuery)
+				if idx < len(items) {
+					a.mu.Lock()
+					a.uiState.agentSelected = idx
+					a.mu.Unlock()
+					return a.agentItemAction(items[idx])
+				}
+			} else if idx < len(state.OmniboxItems) {
+				a.Dispatch(engine.Event{Type: engine.EventSelectAndConfirmIndex, Index: idx})
+				return true
+			}
 		}
 	}
 	if mods == (ui.Alt|primaryMod()) || mods == (ui.Alt|ui.Cmd) || mods == (ui.Alt|ui.Ctrl) {
@@ -1751,7 +1795,10 @@ func omniboxTabIcon(tab config.CapsuleTab) string {
 func omniboxPlaceholder(tab config.CapsuleTab) string {
 	switch tab {
 	case config.TabAgent:
-		return "搜索 Agent 会话，输入 / 补全命令"
+		if i18n.IsChinese() {
+			return "搜索 Agent 会话，输入 / 补全命令"
+		}
+		return "Search Agent sessions, type / for commands"
 	case config.TabClipboard:
 		return i18n.T("omnibox.placeholder.clipboard")
 	case config.TabSnippets:

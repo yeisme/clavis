@@ -54,6 +54,12 @@ func (c *AppController) ensureAIUsageRefresh() {
 	}()
 }
 
+func (c *AppController) invalidateAIUsage() {
+	c.aiUsageMu.Lock()
+	c.aiUsageLoaded = false
+	c.aiUsageMu.Unlock()
+}
+
 func (c *AppController) aiUsageSnapshot() ([]AIUsageDay, error, bool, bool) {
 	c.aiUsageMu.RLock()
 	defer c.aiUsageMu.RUnlock()

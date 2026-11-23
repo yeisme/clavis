@@ -170,9 +170,19 @@ func setAgentOperationResult(c *AppController, result host.OperationResult) {
 	agentLatestResult.Unlock()
 }
 
+func (c *AppController) agentRecordedOperationResult() host.OperationResult {
+	if value, ok := agentOperationResults.Load(c); ok {
+		return value.(host.OperationResult)
+	}
+	if c.agentRefreshing() {
+		return host.OperationResult{State: host.StateRefreshing}
+	}
+	return host.OperationResult{}
+}
+
 func (c *AppController) agentVisibleItems(query string) []engine.OmniboxItem {
 	sessions, diagnostics := c.cachedAgentData()
-	return agentItems(sessions, diagnostics, query)
+	return agentItemsForResult(sessions, diagnostics, query, c.agentRecordedOperationResult())
 }
 
 func agentSessionForItem(item engine.OmniboxItem, sessions []agentsession.Session) (agentsession.Session, bool) {
@@ -230,6 +240,13 @@ func agentProviderLabel(p string) string {
 }
 
 func agentItems(sessions []agentsession.Session, diagnostics []agentsession.Diagnostic, query string) []engine.OmniboxItem {
+	agentLatestResult.RLock()
+	result := agentLatestResult.result
+	agentLatestResult.RUnlock()
+	return agentItemsForResult(sessions, diagnostics, query, result)
+}
+
+func agentItemsForResult(sessions []agentsession.Session, diagnostics []agentsession.Diagnostic, query string, result host.OperationResult) []engine.OmniboxItem {
 	trimmed := strings.TrimSpace(query)
 	if strings.HasPrefix(trimmed, "/") {
 		rest := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(trimmed, "/")))
@@ -243,9 +260,6 @@ func agentItems(sessions []agentsession.Session, diagnostics []agentsession.Diag
 		return items
 	}
 	items := make([]engine.OmniboxItem, 0, len(sessions)+len(diagnostics)+1)
-	agentLatestResult.RLock()
-	result := agentLatestResult.result
-	agentLatestResult.RUnlock()
 	// 刷新中且列表为空时，状态交给「居中加载态」渲染（capsule_view 的 len(items)==0 分支），
 	// 不要在这种情况再塞一条状态行——否则 items 永不为空，居中加载态成了死代码，
 	// 用户只看到列表里孤零零一行「刷新中…」。有缓存会话时仍保留状态行，否则用户看不到刷新中的提示。

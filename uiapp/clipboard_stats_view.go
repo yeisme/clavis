@@ -75,6 +75,12 @@ func (a *AppController) finishClipboardStats(days []storage.ClipboardDay, kinds 
 	}
 }
 
+func (a *AppController) invalidateClipboardStats() {
+	a.clipboardStatsMu.Lock()
+	a.clipboardStats.loaded = false
+	a.clipboardStatsMu.Unlock()
+}
+
 func (a *AppController) clipboardStatsSnapshot() (clipboardStatsState, bool) {
 	a.clipboardStatsMu.RLock()
 	defer a.clipboardStatsMu.RUnlock()
