@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	clipboardStatsBandHeight float32 = 36
+	clipboardStatsBandHeight float32 = 54
 	clipboardStripHeight     float32 = 6
 	clipboardStripRadius     float32 = 3
 	clipboardStripGap        float32 = 1.5
@@ -192,7 +192,7 @@ func darkClipboardStatAlpha(index int) float32 {
 }
 
 func renderClipboardStatsBand(c *ui.Context, theme *ui.Theme, state clipboardStatsState, onFilter func(string)) {
-	band := ui.Column(c).Key("clipboard-stats-band").Label("clipboard-stats-band").FillWidth().Height(clipboardStatsBandHeight).Gap(space2).Padding(space2, space0)
+	band := ui.Column(c).Key("clipboard-stats-band").Label("clipboard-stats-band").FillWidth().Height(clipboardStatsBandHeight).Gap(space4).Padding(space4, space0)
 	band.Children(func() {
 		if state.err != nil {
 			ui.Text(c, "剪贴板统计暂不可用").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
@@ -203,7 +203,7 @@ func renderClipboardStatsBand(c *ui.Context, theme *ui.Theme, state clipboardSta
 			return
 		}
 		segments := clipboardStatSegments(state.kinds, 240, state.filter)
-		legend := ui.Row(c).FillWidth().Gap(space6).Height(typeMeta).Children(func() {
+		legend := ui.Row(c).Key("clipboard-stats-legend").Label("clipboard-stats-legend").FillWidth().Gap(space6).Height(typeMeta).Children(func() {
 			for _, segment := range segments {
 				ui.Text(c, clipboardKindLabel(segment.Kind)).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 			}
@@ -235,8 +235,8 @@ func renderClipboardStatsBand(c *ui.Context, theme *ui.Theme, state clipboardSta
 			return false
 		})
 		count, bytes := clipboardStatsTotals(state.kinds)
-		ui.Row(c).FillWidth().Height(typeMeta).Gap(space8).Children(func() {
-			ui.Text(c, fmt.Sprintf("%d 条 · %s", count, formatClipboardBytes(bytes))).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+		ui.Row(c).Key("clipboard-stats-count-row").Label("clipboard-stats-count-row").FillWidth().Height(clipboardSparkHeight).Gap(space8).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, fmt.Sprintf("%d 条 · %s", count, formatClipboardBytes(bytes))).Key("clipboard-stats-count").Label("clipboard-stats-count").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 			if len(state.days) >= 7 && count >= 5 {
 				renderClipboardSparkline(c, theme, state.days)
 			}

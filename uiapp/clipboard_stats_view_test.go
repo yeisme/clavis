@@ -2,6 +2,7 @@ package uiapp
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -18,14 +19,33 @@ func TestClipboardStatsBandGeometryAndSparklineThreshold(t *testing.T) {
 	tt.Frame()
 	band, ok := tt.Find("clipboard-stats-band")
 	if !ok || band.H != clipboardStatsBandHeight {
-		t.Fatalf("band=%+v ok=%v, want height 36", band, ok)
+		t.Fatalf("band=%+v ok=%v, want height 54", band, ok)
 	}
 	strip, ok := tt.Find("clipboard-kind-strip")
 	if !ok || strip.H != clipboardStripHeight {
 		t.Fatalf("strip=%+v ok=%v, want height 6", strip, ok)
 	}
-	if _, ok := tt.Find("clipboard-sparkline"); !ok {
-		t.Fatal("sparkline should render with at least five total entries")
+	sparkline, sparkOK := tt.Find("clipboard-sparkline")
+	legend, legendOK := tt.Find("clipboard-stats-legend")
+	countRow, countRowOK := tt.Find("clipboard-stats-count-row")
+	countText, countTextOK := tt.Find("clipboard-stats-count")
+	if !sparkOK || !legendOK || !countRowOK || !countTextOK {
+		t.Fatalf("missing stats geometry: legend=%+v sparkline=%+v countRow=%+v count=%+v", legend, sparkline, countRow, countText)
+	}
+	if sparkline.Y < band.Y || sparkline.Y+sparkline.H > band.Y+band.H {
+		t.Fatalf("sparkline=%+v escapes band=%+v", sparkline, band)
+	}
+	strip, stripOK := tt.Find("clipboard-kind-strip")
+	if !stripOK {
+		t.Fatal("strip missing")
+	}
+	if legend.Y+legend.H > strip.Y || strip.Y+strip.H > countRow.Y {
+		t.Fatalf("stats rows overlap: legend=%+v strip=%+v countRow=%+v", legend, strip, countRow)
+	}
+	centerDelta := float64((sparkline.Y + sparkline.H/2) - (countText.Y + countText.H/2))
+	t.Logf("stats geometry: band=%+v legend=%+v strip=%+v countRow=%+v count=%+v sparkline=%+v centerDelta=%.2f", band, legend, strip, countRow, countText, sparkline, centerDelta)
+	if math.Abs(centerDelta) > 1 {
+		t.Fatalf("sparkline/count are not vertically centered: sparkline=%+v count=%+v", sparkline, countText)
 	}
 	state.kinds = []storage.ClipboardKindStat{{Kind: "image", Count: 2, Bytes: 2048}, {Kind: "text", Count: 2, Bytes: 1024}}
 	state.days = []storage.ClipboardDay{{Count: 1}, {Count: 1}, {Count: 1}, {Count: 1}, {Count: 0}, {Count: 0}, {Count: 0}}
@@ -33,6 +53,16 @@ func TestClipboardStatsBandGeometryAndSparklineThreshold(t *testing.T) {
 	tt.Frame()
 	if _, ok := tt.Find("clipboard-sparkline"); ok {
 		t.Fatal("sparkline must be hidden below five total entries")
+	}
+}
+
+func TestClipboardStatsBandAddsOnly18PointsToClipboardCapsule(t *testing.T) {
+	appearance := config.DefaultConfig().Main.Appearance
+	state := engine.State{Phase: engine.PhaseOmnibox, OmniboxTab: config.TabClipboard}
+	_, baseHeight := PreferredCapsuleSize(state.Phase, appearance)
+	_, clipboardHeight := PreferredCapsuleSizeForState(state, appearance)
+	if got := clipboardHeight - baseHeight; got != int(clipboardStatsBandHeight) {
+		t.Fatalf("clipboard height delta=%d, want %d; list area should lose no extra height", got, int(clipboardStatsBandHeight))
 	}
 }
 
