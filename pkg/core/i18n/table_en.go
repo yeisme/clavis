@@ -315,6 +315,7 @@ var enTable = map[string]string{
 	"omnibox.empty.snippets":        "No matching snippets",
 	"omnibox.empty.ai":              "Type a prompt to ask AI",
 	"omnibox.empty.glossary":        "No matching glossary terms",
+	"omnibox.empty.agent":           "No agent sessions found",
 	"omnibox.empty.default":         "No matching results",
 
 	// ---- omnibox preview pane (uiapp/capsule_preview.go) ----

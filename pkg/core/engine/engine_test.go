@@ -158,6 +158,56 @@ func TestCapsuleLeaderAndAutoDowngrade(t *testing.T) {
 	}
 }
 
+func TestOmniboxEscapeClearsQueryBeforeClosing(t *testing.T) {
+	sm := engine.NewStateMachine(config.DefaultConfig())
+	sm.Handle(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions})
+	allItems := len(sm.State().OmniboxItems)
+	sm.Handle(engine.Event{Type: engine.EventUpdateQuery, Query: "window"})
+	if sm.State().OmniboxQuery != "window" || len(sm.State().OmniboxItems) >= allItems {
+		t.Fatalf("query setup did not narrow results: query=%q items=%d all=%d", sm.State().OmniboxQuery, len(sm.State().OmniboxItems), allItems)
+	}
+	if effects := sm.Handle(engine.Event{Type: engine.EventEscape}); len(effects) != 0 {
+		t.Fatalf("clear escape emitted effects: %+v", effects)
+	}
+	if st := sm.State(); st.Phase != engine.PhaseOmnibox || st.OmniboxQuery != "" || len(st.OmniboxItems) != allItems {
+		t.Fatalf("first escape did not clear query: phase=%s query=%q items=%d all=%d", st.Phase, st.OmniboxQuery, len(st.OmniboxItems), allItems)
+	}
+	effects := sm.Handle(engine.Event{Type: engine.EventEscape})
+	if len(effects) != 1 || effects[0].Type != engine.EffectClose || sm.State().Phase != engine.PhaseHidden {
+		t.Fatalf("second escape did not close: effects=%+v state=%+v", effects, sm.State())
+	}
+}
+
+func TestOmniboxSelectIndexOnlyChangesSelection(t *testing.T) {
+	sm := engine.NewStateMachine(config.DefaultConfig())
+	sm.Handle(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions})
+	last := len(sm.State().OmniboxItems) - 1
+	for _, tc := range []struct{ index, want int }{{last, last}, {last + 1, last}, {-1, last}, {0, 0}} {
+		effects := sm.Handle(engine.Event{Type: engine.EventSelectIndex, Index: tc.index})
+		if st := sm.State(); len(effects) != 0 || st.Phase != engine.PhaseOmnibox || st.SelectedIndex != tc.want {
+			t.Fatalf("index %d: phase=%s selection=%d effects=%v, want Omnibox with selection %d", tc.index, st.Phase, st.SelectedIndex, effects, tc.want)
+		}
+	}
+}
+
+func TestOmniboxEscapeRestoresClipboardAfterExternalSearch(t *testing.T) {
+	sm := engine.NewStateMachine(config.DefaultConfig())
+	sm.SetExternalClipboardSearch(true)
+	entries := []engine.OmniboxClipboardEntry{{ID: "one", Content: "match"}, {ID: "two", Content: "other"}}
+	sm.Handle(engine.Event{Type: engine.EventSetClipboardEntries, ClipboardEntries: entries})
+	sm.Handle(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabClipboard, Query: "match"})
+	result := engine.Event{Type: engine.EventSetClipboardSearchResults, Query: "match", ClipboardEntries: entries[:1]}
+	sm.Handle(result)
+	if st := sm.State(); st.ClipboardSearchQuery != "match" || len(st.OmniboxItems) != 1 {
+		t.Fatalf("external search not applied: query=%q rows=%d", st.ClipboardSearchQuery, len(st.OmniboxItems))
+	}
+	sm.Handle(engine.Event{Type: engine.EventEscape})
+	sm.Handle(result) // An in-flight search may complete after Esc.
+	if st := sm.State(); st.Phase != engine.PhaseOmnibox || st.OmniboxQuery != "" || st.ClipboardSearchQuery != "" || len(st.ClipboardSearchEntries) != 0 || len(st.OmniboxItems) != 2 {
+		t.Fatalf("clipboard mirror was not restored: phase=%s query=%q search=%q matches=%d rows=%d", st.Phase, st.OmniboxQuery, st.ClipboardSearchQuery, len(st.ClipboardSearchEntries), len(st.OmniboxItems))
+	}
+}
+
 func TestCapsuleFreeformAIAndClipboardAndGlossary(t *testing.T) {
 	sm := engine.NewStateMachine(config.DefaultConfig())
 

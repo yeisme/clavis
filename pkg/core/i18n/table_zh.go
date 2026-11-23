@@ -316,6 +316,7 @@ var zhTable = map[string]string{
 	"omnibox.empty.snippets":        "没有匹配的代码片段",
 	"omnibox.empty.ai":              "输入内容向 AI 提问",
 	"omnibox.empty.glossary":        "没有匹配的术语",
+	"omnibox.empty.agent":           "没有发现 Agent 会话",
 	"omnibox.empty.default":         "没有匹配结果",
 
 	// ---- Omnibox 预览面板（uiapp/capsule_preview.go）----

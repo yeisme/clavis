@@ -232,9 +232,11 @@ const (
 	EventSetListeningPorts         EventType = "set_listening_ports"
 	EventLeaderKeyPress            EventType = "leader_key_press"
 	EventUpdateQuery               EventType = "update_query"
+	EventClearQuery                EventType = "clear_query"
 	EventSwitchTab                 EventType = "switch_tab"
 	EventSelectNext                EventType = "select_next"
 	EventSelectPrevious            EventType = "select_previous"
+	EventSelectIndex               EventType = "select_index"
 	// EventHoverItem selects the item under the pointer without confirming it.
 	// Hovering is selection only: it must never emit copy, paste or delete.
 	EventHoverItem                      EventType = "hover_item"
@@ -569,13 +571,17 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		next.SelectedIndex = 0
 		return next, nil
 
-	case EventUpdateQuery:
+	case EventUpdateQuery, EventClearQuery:
 		if state.Phase != PhaseOmnibox {
 			return next, nil
 		}
+		query := event.Query
+		if event.Type == EventClearQuery {
+			query = ""
+		}
 		if state.OmniboxTab == config.TabClipboard && next.ClipboardSearchExternal {
-			next.OmniboxQuery = event.Query
-			trimmed := strings.TrimSpace(event.Query)
+			next.OmniboxQuery = query
+			trimmed := strings.TrimSpace(query)
 			if trimmed == "" {
 				next.ClipboardSearchQuery = ""
 				next.ClipboardSearchEntries = nil
@@ -595,9 +601,8 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 			}
 			return next, nil
 		}
-		items := buildOmniboxItems(state.OmniboxTab, event.Query, next, cfg)
-		next.OmniboxQuery = event.Query
-		next.OmniboxItems = items
+		next.OmniboxQuery = query
+		next.OmniboxItems = buildOmniboxItems(state.OmniboxTab, query, next, cfg)
 		next.SelectedIndex = 0
 		return next, nil
 
@@ -637,10 +642,9 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		}
 		return next, nil
 
-	case EventHoverItem:
-		// Pointer hover moves the selection so the preview and the keyboard
-		// cursor agree. It deliberately produces no effects: only a click or
-		// Enter confirms the item.
+	case EventHoverItem, EventSelectIndex:
+		// Moving the selection keeps the preview and keyboard cursor in sync.
+		// Activation is a separate event.
 		if state.Phase != PhaseOmnibox || event.Index < 0 || event.Index >= len(state.OmniboxItems) {
 			return next, nil
 		}
@@ -884,6 +888,9 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 			return next, nil
 
 		case PhaseOmnibox, PhaseHUD:
+			if state.Phase == PhaseOmnibox && state.OmniboxQuery != "" {
+				return Reduce(state, Event{Type: EventClearQuery}, cfg)
+			}
 			clearPhaseFields(&next)
 			next.Phase = PhaseHidden
 			return next, []Effect{{Type: EffectClose}}
