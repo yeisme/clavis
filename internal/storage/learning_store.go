@@ -266,10 +266,7 @@ func (s *LearningStore) RecordIMECommit(ctx context.Context, pinyinKey, word, pr
 		return nil
 	}
 	now := time.Now().UTC().UnixNano()
-	wordUpdate := sqlite.Statement{
-		SQL:  `INSERT INTO ime_user_lexicon(pinyin_key,word,frequency,last_used_ns,pinned) VALUES(?,?,?,?,?) ON CONFLICT(pinyin_key,word) DO UPDATE SET frequency=frequency+1,last_used_ns=MAX(last_used_ns,excluded.last_used_ns),pinned=MAX(pinned,excluded.pinned)`,
-		Args: []any{pinyinKey, word, 1, now, boolInt(pinned)},
-	}
+	wordUpdate := imeWordCommitStatement(pinyinKey, word, pinned, now)
 	if prevWord != "" {
 		bigramUpdate := sqlite.Statement{
 			SQL:  `INSERT INTO ime_bigrams(prev_word,word,transition_count,last_used_ns) VALUES(?,?,1,?) ON CONFLICT(prev_word,word) DO UPDATE SET transition_count=transition_count+1,last_used_ns=MAX(last_used_ns,excluded.last_used_ns)`,
@@ -285,6 +282,13 @@ func (s *LearningStore) RecordIMECommit(ctx context.Context, pinyinKey, word, pr
 	// cancelled or failed write cannot make the hot path observe phantom data.
 	s.mirrorIMECommit(pinyinKey, word, prevWord, pinned, now)
 	return nil
+}
+
+func imeWordCommitStatement(pinyinKey, word string, pinned bool, now int64) sqlite.Statement {
+	return sqlite.Statement{
+		SQL:  `INSERT INTO ime_user_lexicon(pinyin_key,word,frequency,last_used_ns,pinned) VALUES(?,?,?,?,?) ON CONFLICT(pinyin_key,word) DO UPDATE SET frequency=frequency+1,last_used_ns=MAX(last_used_ns,excluded.last_used_ns),pinned=MAX(pinned,excluded.pinned)`,
+		Args: []any{pinyinKey, word, 1, now, boolInt(pinned)},
+	}
 }
 
 // LookupBoost is the allocation-free RAM mirror lookup used by the typing hot path.
