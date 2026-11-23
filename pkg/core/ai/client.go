@@ -555,6 +555,16 @@ func (c *OpenAICompatibleClient) StreamCompletionWithUsage(
 			}
 		}
 	}
+	if !didFinish {
+		if err := ctx.Err(); err != nil {
+			return usage, err
+		}
+		// A clean transport EOF is not a completed streaming response. Treating
+		// truncated output as success lets callers persist and automate against
+		// an incomplete answer, and also reports misleading usage. Providers must
+		// emit [DONE] or their protocol-specific finish event.
+		return usage, &ClientError{Kind: "stream_incomplete", Message: "AI stream ended before completion"}
+	}
 
 	if c.UsageRecorder != nil {
 		profileName := profile.ID

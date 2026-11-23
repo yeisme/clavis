@@ -217,6 +217,26 @@ func TestOpenAIClientCancellation(t *testing.T) {
 	}
 }
 
+func TestOpenAIClientRejectsTruncatedStream(t *testing.T) {
+	cfg := config.DefaultAIConfig()
+	doer := mockDoer{
+		fn: func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")),
+			}, nil
+		},
+	}
+	client := ai.NewOpenAICompatibleClient(cfg, engine.GlossaryEngine{}, doer, func(context.Context) (string, error) {
+		return "sk-test", nil
+	})
+	err := client.StreamCompletion(context.Background(), ai.CompletionRequest{Prompt: "hello"}, nil)
+	var clientErr *ai.ClientError
+	if !errors.As(err, &clientErr) || clientErr.Kind != "stream_incomplete" {
+		t.Fatalf("expected stream_incomplete, got %v", err)
+	}
+}
+
 func TestAnthropicGeminiAndKeylessOllamaStreaming(t *testing.T) {
 	cfg := config.DefaultAIConfig()
 	glossary := engine.GlossaryEngine{}
