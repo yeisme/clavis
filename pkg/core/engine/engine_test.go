@@ -291,6 +291,48 @@ func TestCapsuleFreeformAIAndClipboardAndGlossary(t *testing.T) {
 	}
 }
 
+func TestAIApprovalRequiresCompletedOutput(t *testing.T) {
+	cfg := config.DefaultConfig()
+	state := engine.State{
+		Phase:             engine.PhaseAIStreaming,
+		AIPrompt:          "rewrite",
+		AIOutput:          "partial",
+		AIComplete:        false,
+		ActiveAIProfileID: cfg.Main.AI.ActiveProfileID,
+	}
+	next, effects := engine.Reduce(state, engine.Event{Type: engine.EventAcceptAIOutput}, cfg)
+	if len(effects) != 0 || !reflect.DeepEqual(next, state) {
+		t.Fatalf("streaming output was accepted before completion: next=%+v effects=%+v", next, effects)
+	}
+}
+
+func TestAIFailureWithoutMessageCannotBecomeSuccessfulCompletion(t *testing.T) {
+	cfg := config.DefaultConfig()
+	state := engine.State{Phase: engine.PhaseAIStreaming, AIPrompt: "ask"}
+	next, effects := engine.Reduce(state, engine.Event{Type: engine.EventAIFailed}, cfg)
+	if len(effects) != 0 || !next.AIComplete || strings.TrimSpace(next.AIError) == "" {
+		t.Fatalf("empty failure was not surfaced: next=%+v effects=%+v", next, effects)
+	}
+}
+
+func TestAICompletionWithoutOutputIsSurfacedAsError(t *testing.T) {
+	cfg := config.DefaultConfig()
+	state := engine.State{Phase: engine.PhaseAIStreaming, AIPrompt: "ask", ActiveAIProfileID: cfg.Main.AI.ActiveProfileID}
+	next, effects := engine.Reduce(state, engine.Event{Type: engine.EventAICompleted}, cfg)
+	if len(effects) != 0 || !next.AIComplete || strings.TrimSpace(next.AIError) == "" {
+		t.Fatalf("empty completion was treated as success: next=%+v effects=%+v", next, effects)
+	}
+}
+
+func TestAIFollowUpRequiresSettledTurn(t *testing.T) {
+	cfg := config.DefaultConfig()
+	state := engine.State{Phase: engine.PhaseAIStreaming, AIPrompt: "ask", AIOutput: "partial", AIComplete: false, ActiveAIProfileID: cfg.Main.AI.ActiveProfileID}
+	next, effects := engine.Reduce(state, engine.Event{Type: engine.EventFollowUpAI, Prompt: "continue"}, cfg)
+	if len(effects) != 0 || !reflect.DeepEqual(next, state) {
+		t.Fatalf("follow-up superseded active stream: next=%+v effects=%+v", next, effects)
+	}
+}
+
 func TestSnippetEngineAndRenderer(t *testing.T) {
 	snippets := []config.SnippetItem{
 		{ID: "sig", Trigger: ";sig", Content: "Best regards,", WordBoundary: true},

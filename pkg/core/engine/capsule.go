@@ -910,7 +910,11 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 			return next, nil
 		}
 		next.AIComplete = true
-		next.AIError = ""
+		if strings.TrimSpace(state.AIOutput) == "" {
+			next.AIError = "AI completed without output"
+		} else {
+			next.AIError = ""
+		}
 		return next, nil
 
 	case EventAIFailed:
@@ -918,11 +922,14 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 			return next, nil
 		}
 		next.AIComplete = true
-		next.AIError = event.Error
+		next.AIError = strings.TrimSpace(event.Error)
+		if next.AIError == "" {
+			next.AIError = "AI request failed without an error"
+		}
 		return next, nil
 
 	case EventFollowUpAI:
-		if state.Phase != PhaseAIStreaming {
+		if state.Phase != PhaseAIStreaming || !state.AIComplete {
 			return next, nil
 		}
 		followUpPrompt := strings.TrimSpace(event.Prompt)
@@ -970,7 +977,7 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		}
 
 	case EventAcceptAIOutput:
-		if state.Phase != PhaseAIStreaming || state.AIError != "" || state.AIOutput == "" {
+		if state.Phase != PhaseAIStreaming || !state.AIComplete || state.AIError != "" || state.AIOutput == "" {
 			return next, nil
 		}
 		output := state.AIOutput
