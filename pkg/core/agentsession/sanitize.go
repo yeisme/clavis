@@ -45,22 +45,30 @@ func basename(path string) string {
 }
 
 func statusFromActivity(now, at time.Time, explicit string, pending bool) Status {
-	switch strings.ToLower(explicit) {
-	case "running", "active", "in_progress":
-		return StatusRunning
+	explicit = strings.ToLower(strings.TrimSpace(explicit))
+	switch explicit {
 	case "stopped", "completed", "closed", "done":
 		return StatusStopped
-	case "waiting", "idle", "paused":
+	case "unknown":
+		return StatusUnknown
+	}
+	if pending {
+		return StatusWaiting
+	}
+	switch explicit {
+	case "running", "active", "in_progress":
+		return StatusRunning
+	case "waiting", "idle", "paused", "pending", "awaiting_human", "needs_confirmation":
 		return StatusWaiting
 	}
 	if at.IsZero() {
 		return StatusUnknown
 	}
+	if at.After(now) {
+		return StatusUnknown
+	}
 	if now.Sub(at) <= 2*time.Minute {
 		return StatusRunning
-	}
-	if pending {
-		return StatusWaiting
 	}
 	return StatusWaiting
 }

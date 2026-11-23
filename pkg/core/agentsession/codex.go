@@ -2,6 +2,7 @@ package agentsession
 
 import (
 	"context"
+	"errors"
 	"strings"
 )
 
@@ -14,7 +15,13 @@ func discoverCodex(ctx context.Context, opts Options) ([]Session, []Diagnostic) 
 	}
 	threads, err := opts.CodexReader.Threads(ctx, 500)
 	if err != nil {
-		return nil, []Diagnostic{{"codex", "query_failed", "threads could not be read"}}
+		code := "query_failed"
+		if errors.Is(err, context.DeadlineExceeded) {
+			code = "timeout"
+		} else if errors.Is(err, context.Canceled) {
+			code = "cancelled"
+		}
+		return nil, []Diagnostic{{"codex", code, "threads could not be read"}}
 	}
 	now := opts.Now()
 	out := make([]Session, 0, len(threads))
@@ -24,10 +31,13 @@ func discoverCodex(ctx context.Context, opts Options) ([]Session, []Diagnostic) 
 		}
 		out = append(out, Session{
 			ID: thread.ID, Provider: "codex", Title: thread.Title,
-			Status:         statusFromActivity(now, thread.LastActivityAt, thread.Status, thread.PendingReview),
+			Status:         statusFromActivity(now, thread.LastActivityAt, thread.Status, thread.PendingReview || thread.AwaitingHuman),
 			LastActivityAt: thread.LastActivityAt,
 			LastMessage:    sanitizeMessage(thread.LastMessage),
 			PendingReview:  thread.PendingReview,
+			CurrentAction:  sanitizeMessage(thread.CurrentAction),
+			ResultLine:     sanitizeMessage(firstNonEmpty(thread.ResultLine, thread.LastMessage)),
+			AwaitingHuman:  thread.AwaitingHuman || thread.PendingReview,
 			Workspace:      basename(thread.Workspace), Source: opts.CodexDB, ObservedAt: now,
 		})
 	}

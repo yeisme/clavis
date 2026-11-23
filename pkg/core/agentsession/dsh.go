@@ -71,8 +71,9 @@ func dshSession(raw map[string]any, source string, now time.Time) Session {
 		workspace = firstString(rows, "workingDirectory", "cwd")
 	}
 	message := firstString(rows, "lastMessage", "summary")
-	pending := containsPending(rows)
-	return Session{ID: id, Provider: "dsh", Title: title, Status: statusFromActivity(now, at, firstString(rows, "status", "state"), pending), LastActivityAt: at, LastMessage: sanitizeMessage(message), PendingReview: pending, Workspace: basename(workspace), TargetRef: firstString(identity, "targetRef", "pane", "sessionId"), Source: source, ObservedAt: now}
+	compat := compatibilityFromMap(rows)
+	message = firstNonEmpty(compat.resultLine, message)
+	return Session{ID: id, Provider: "dsh", Title: title, Status: statusFromActivity(now, at, firstString(rows, "status", "state"), compat.pendingReview || compat.awaitingHuman), LastActivityAt: at, LastMessage: sanitizeMessage(message), PendingReview: compat.pendingReview, CurrentAction: sanitizeMessage(compat.currentAction), ResultLine: sanitizeMessage(message), AwaitingHuman: compat.awaitingHuman, Workspace: basename(workspace), TargetRef: firstString(identity, "targetRef", "pane", "sessionId"), Source: source, ObservedAt: now}
 }
 
 func dshThread(file string, now time.Time) (Session, bool, *Diagnostic) {
@@ -81,12 +82,15 @@ func dshThread(file string, now time.Time) (Session, bool, *Diagnostic) {
 		return Session{}, false, &Diagnostic{"dsh", "read_failed", "thread log unreadable"}
 	}
 	defer f.Close()
-	var id, cwd, title, message string
+	var id, cwd, title, message, currentAction, resultLine, explicitStatus string
+	var awaitingHuman, pendingReview bool
+	invalidJSON := false
 	var last time.Time
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		var row map[string]any
 		if json.Unmarshal(sc.Bytes(), &row) != nil {
+			invalidJSON = true
 			continue
 		}
 		typ := strings.ToLower(firstString(row, "type"))
@@ -94,6 +98,18 @@ func dshThread(file string, now time.Time) (Session, bool, *Diagnostic) {
 			id = firstString(row, "id", "session_id")
 			cwd = firstString(row, "cwd", "workingDirectory")
 			title = firstString(row, "title")
+		}
+		compat := compatibilityFromMap(row)
+		if compat.currentAction != "" {
+			currentAction = compat.currentAction
+		}
+		if compat.resultLine != "" {
+			resultLine = compat.resultLine
+		}
+		awaitingHuman = awaitingHuman || compat.awaitingHuman
+		pendingReview = pendingReview || compat.pendingReview
+		if status := firstString(row, "status", "state"); status != "" {
+			explicitStatus = status
 		}
 		at := firstTime(row, "timestamp", "updatedAt", "createdAt")
 		if !at.IsZero() && at.After(last) {
@@ -114,7 +130,12 @@ func dshThread(file string, now time.Time) (Session, bool, *Diagnostic) {
 	if id == "" {
 		return Session{}, false, nil
 	}
-	return Session{ID: id, Provider: "dsh", Title: title, Status: statusFromActivity(now, last, "", false), LastActivityAt: last, LastMessage: sanitizeMessage(message), Workspace: basename(cwd), Source: file, ObservedAt: now}, true, nil
+	message = firstNonEmpty(resultLine, message)
+	var diagnostic *Diagnostic
+	if invalidJSON {
+		diagnostic = &Diagnostic{"dsh", "invalid_json", "thread log contains invalid entries"}
+	}
+	return Session{ID: id, Provider: "dsh", Title: title, Status: statusFromActivity(now, last, explicitStatus, pendingReview || awaitingHuman), LastActivityAt: last, LastMessage: sanitizeMessage(message), PendingReview: pendingReview, CurrentAction: sanitizeMessage(currentAction), ResultLine: sanitizeMessage(message), AwaitingHuman: awaitingHuman, Workspace: basename(cwd), Source: file, ObservedAt: now}, true, diagnostic
 }
 
 func mapValue(root map[string]any, path ...string) map[string]any {
@@ -146,10 +167,13 @@ func firstTime(m map[string]any, keys ...string) time.Time {
 	}
 	return time.Time{}
 }
-func containsPending(m map[string]any) bool {
-	b, _ := json.Marshal(m)
-	text := strings.ToLower(string(b))
-	return strings.Contains(text, "pending_review") || strings.Contains(text, "action_request") || strings.Contains(text, "needs_confirmation")
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 func dedupe(items []Session) []Session {
 	seen := map[string]bool{}

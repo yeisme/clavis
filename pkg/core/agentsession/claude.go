@@ -28,9 +28,16 @@ func discoverClaude(ctx context.Context, opts Options) ([]Session, []Diagnostic)
 		if !project.IsDir() {
 			continue
 		}
-		files, _ := filepath.Glob(filepath.Join(opts.ClaudeDir, project.Name(), "*.jsonl"))
+		files, globErr := filepath.Glob(filepath.Join(opts.ClaudeDir, project.Name(), "*.jsonl"))
+		if globErr != nil {
+			diags = append(diags, Diagnostic{"claude", "glob_failed", "project session files could not be enumerated"})
+			continue
+		}
 		for _, file := range files {
-			s, ok := claudeFile(file, project.Name(), now)
+			s, ok, diag := claudeFileWithDiagnostic(file, project.Name(), now)
+			if diag != nil {
+				diags = append(diags, *diag)
+			}
 			if ok {
 				out = append(out, s)
 			}
@@ -40,20 +47,37 @@ func discoverClaude(ctx context.Context, opts Options) ([]Session, []Diagnostic)
 }
 
 func claudeFile(file, workspace string, now time.Time) (Session, bool) {
+	session, ok, _ := claudeFileWithDiagnostic(file, workspace, now)
+	return session, ok
+}
+
+func claudeFileWithDiagnostic(file, workspace string, now time.Time) (Session, bool, *Diagnostic) {
 	f, err := os.Open(file)
 	if err != nil {
-		return Session{}, false
+		return Session{}, false, &Diagnostic{"claude", "read_failed", "session log unreadable"}
 	}
 	defer f.Close()
-	var id, title, message, state string
+	var id, title, message, currentAction, resultLine, state string
 	var last time.Time
-	pending := false
+	var pending, awaitingHuman bool
+	invalidJSON := false
 	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
 		var row map[string]any
 		if json.Unmarshal(sc.Bytes(), &row) != nil {
+			invalidJSON = true
 			continue
 		}
+		compat := compatibilityFromMap(row)
+		if compat.currentAction != "" {
+			currentAction = compat.currentAction
+		}
+		if compat.resultLine != "" {
+			resultLine = compat.resultLine
+		}
+		awaitingHuman = awaitingHuman || compat.awaitingHuman
+		pending = pending || compat.pendingReview
 		if id == "" {
 			id = firstString(row, "sessionId", "session_id", "id")
 		}
@@ -66,16 +90,23 @@ func claudeFile(file, workspace string, now time.Time) (Session, bool) {
 		if status := firstString(row, "status", "state"); status != "" {
 			state = status
 		}
-		pending = pending || containsPending(row)
 		if at := firstTime(row, "timestamp", "updatedAt", "createdAt"); !at.IsZero() && at.After(last) {
 			last = at
 		}
+	}
+	if err := sc.Err(); err != nil {
+		return Session{}, false, &Diagnostic{"claude", "read_failed", "session log could not be read"}
 	}
 	if id == "" {
 		id = strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
 	}
 	if id == "" {
-		return Session{}, false
+		return Session{}, false, nil
 	}
-	return Session{ID: id, Provider: "claude", Title: title, Status: statusFromActivity(now, last, state, pending), LastActivityAt: last, LastMessage: sanitizeMessage(message), PendingReview: pending, Workspace: basename(workspace), Source: file, ObservedAt: now}, true
+	message = firstNonEmpty(resultLine, message)
+	var diagnostic *Diagnostic
+	if invalidJSON {
+		diagnostic = &Diagnostic{"claude", "invalid_json", "session log contains invalid entries"}
+	}
+	return Session{ID: id, Provider: "claude", Title: title, Status: statusFromActivity(now, last, state, pending || awaitingHuman), LastActivityAt: last, LastMessage: sanitizeMessage(message), PendingReview: pending, CurrentAction: sanitizeMessage(currentAction), ResultLine: sanitizeMessage(message), AwaitingHuman: awaitingHuman, Workspace: basename(workspace), Source: file, ObservedAt: now}, true, diagnostic
 }
