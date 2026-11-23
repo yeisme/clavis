@@ -534,20 +534,6 @@ func (a *AppController) renderOmniboxView(
 			days, err, loaded, _ := a.lexiconHitsSnapshot()
 			renderLexiconStatsBand(c, theme, days, loaded, err, len(cfg.Glossary.Terms))
 		}
-		if state.OmniboxTab == config.TabClipboard {
-			a.ensureClipboardStatsRefresh()
-			stats, _ := a.clipboardStatsSnapshot()
-			renderClipboardStatsBand(c, theme, stats, func(kind string) {
-				a.clipboardStatsMu.Lock()
-				if a.clipboardStats.filter == kind {
-					a.clipboardStats.filter = ""
-				} else {
-					a.clipboardStats.filter = kind
-				}
-				a.clipboardStatsMu.Unlock()
-				a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: state.OmniboxQuery})
-			})
-		}
 		searchRow := ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center)
 		searchRow.Children(func() {
 			in := ui.TextInput(c, &query).
@@ -647,6 +633,20 @@ func (a *AppController) renderOmniboxView(
 			}
 		})
 
+		if state.OmniboxTab == config.TabClipboard {
+			a.ensureClipboardStatsRefresh()
+			stats, _ := a.clipboardStatsSnapshot()
+			renderClipboardStatsBand(c, theme, stats, func(kind string) {
+				a.clipboardStatsMu.Lock()
+				if a.clipboardStats.filter == kind {
+					a.clipboardStats.filter = ""
+				} else {
+					a.clipboardStats.filter = kind
+				}
+				a.clipboardStatsMu.Unlock()
+				a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: state.OmniboxQuery})
+			})
+		}
 		if a.omniboxActionMenuOpen(state) {
 			a.renderOmniboxActionMenu(c, theme, state)
 		} else if capsuleUI.actionMenuShown(a) {
