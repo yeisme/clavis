@@ -433,15 +433,13 @@ func (a *AppController) renderSettingsSection(
 	}
 }
 
-// These wrappers keep the existing section renderers unchanged while exposing
-// the grouped navigation's secondary pages. The appearance page currently
-// reuses the established general editor until its controls are split.
+// These wrappers expose the grouped navigation's dedicated secondary pages.
 func (a *AppController) renderSettingsClipboardSection(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
 	a.renderClipboardCard(c, theme, cfg)
 }
 
 func (a *AppController) renderSettingsAppearanceSection(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
-	a.renderSettingsGeneralSection(c, theme, cfg)
+	a.renderSettingsAppearanceCard(c, theme, cfg)
 }
 
 func (a *AppController) renderSettingsAboutSection(c *ui.Context, theme *ui.Theme) {
@@ -455,7 +453,6 @@ func (a *AppController) renderSettingsAboutSection(c *ui.Context, theme *ui.Them
 func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
 	se := a.settingsEditor()
 	trigger := cfg.Main.Trigger
-	appearance := cfg.Main.Appearance
 	keys := triggerKeyOptions(runtime.GOOS)
 
 	settingsSourceCard(c, theme, i18n.T("settings.card.trigger"), "[trigger]", func() {
@@ -500,6 +497,23 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 		}
 	})
 
+	a.renderSettingsAppearanceCard(c, theme, cfg)
+
+	a.mu.Lock()
+	statusMsg := a.settingsStatus
+	a.mu.Unlock()
+	ui.Row(c).FillWidth().Gap(10).AlignItems(ui.Center).Children(func() {
+		if ui.PrimaryButton(c, i18n.T("common.reload")).Clicked() {
+			a.ReloadConfig()
+		}
+		if statusMsg != "" {
+			ui.Text(c, statusMsg).FontSize(typeLabel).TextColor(theme.TextMuted)
+		}
+	})
+}
+
+func (a *AppController) renderSettingsAppearanceCard(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
+	appearance := cfg.Main.Appearance
 	settingsSourceCard(c, theme, i18n.T("settings.card.appearance"), "[appearance]", func() {
 		if v, changed := settingChoiceRow(c, theme, i18n.T("settings.appearance.theme"), "theme", "",
 			themeOptions(), appearance.Theme); changed {
@@ -559,18 +573,6 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 		if v, changed := settingSliderRow(c, theme, i18n.T("settings.appearance.glass_clarity"), "glass_clarity", "",
 			appearance.GlassClarity, 0, 1, 0.05); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.GlassClarity = v })
-		}
-	})
-
-	a.mu.Lock()
-	statusMsg := a.settingsStatus
-	a.mu.Unlock()
-	ui.Row(c).FillWidth().Gap(10).AlignItems(ui.Center).Children(func() {
-		if ui.PrimaryButton(c, i18n.T("common.reload")).Clicked() {
-			a.ReloadConfig()
-		}
-		if statusMsg != "" {
-			ui.Text(c, statusMsg).FontSize(typeLabel).TextColor(theme.TextMuted)
 		}
 	})
 }
@@ -647,6 +649,17 @@ func (a *AppController) renderSettingsAISection(
 			settingsKeyValuePair(c, theme, "keychain_account", activeProfile.KeychainAccount)
 			settingsKeyValuePair(c, theme, "api_key_env_var", envVarStr)
 		})
+
+		settingsCardDivider(c, theme)
+		continueLabel := "Allow AI continuation"
+		continueHelp := "Enable shortcut-triggered AI continuation in text fields (off by default)."
+		if i18n.IsChinese() {
+			continueLabel = "允许续写"
+			continueHelp = "开启输入框快捷 AI 续写（默认关闭，仅在显式触发时请求模型）。"
+		}
+		if v, changed := settingSwitchRow(c, theme, continueLabel, "continue_enabled", continueHelp, cfg.Main.AI.ContinueEnabled); changed {
+			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.AI.ContinueEnabled = v })
+		}
 	})
 
 	ui.Grid(c).Columns(settingsTwoColumns(c)).Gap(10).FillWidth().Children(func() {
@@ -724,11 +737,15 @@ func (a *AppController) renderAIKeychainCard(
 			}
 		})
 
-		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 			svc := c.Services()
 			testLabel := i18n.T("settings.ai.test_connection")
 			if testStatus == AITestLoading {
-				testLabel = "Testing..."
+				if i18n.IsChinese() {
+					testLabel = "测试中…"
+				} else {
+					testLabel = "Testing…"
+				}
 			}
 			profID := activeProfile.ID
 			if ui.Button(c, testLabel).Disabled(testStatus == AITestLoading).Clicked() {
@@ -736,6 +753,9 @@ func (a *AppController) renderAIKeychainCard(
 					_ = a.TestAIConnectionForProfile(context.Background(), profID)
 					svc.Invalidate()
 				}()
+			}
+			if testStatus == AITestLoading {
+				kitStatusDot(c, kitStateLoadingColor(theme), true)
 			}
 		})
 
@@ -828,14 +848,17 @@ func renderConfigValidationCard(c *ui.Context, a *AppController, theme *ui.Theme
 	warns := a.ConfigStore.LastWarnings()
 	settingsEditorCard(c, theme, i18n.T("settings.card.validation"), func() {
 		if len(errs) == 0 && len(warns) == 0 {
-			ui.Text(c, i18n.T("settings.validation.ok")).FontSize(typeLabel).TextColor(theme.Success)
+			ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
+				renderSemanticIcon(c, "checkmark", typeLabel, theme.Success)
+				ui.Text(c, i18n.T("settings.validation.ok")).FontSize(typeLabel).TextColor(theme.Success).Wrap().Grow(1)
+			})
 			return
 		}
 		for _, err := range errs {
 			kitErrorBanner(c, theme, i18n.Tf("settings.validation.error", err.Error()))
 		}
 		for _, w := range warns {
-			kitErrorBanner(c, theme, i18n.Tf("settings.validation.warning", w.File, w.KeyPath, w.Message))
+			kitWarningBanner(c, theme, i18n.Tf("settings.validation.warning", w.File, w.KeyPath, w.Message))
 		}
 	})
 }

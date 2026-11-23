@@ -1828,7 +1828,7 @@ func (a *AppController) renderGlossarySection(c *ui.Context, theme *ui.Theme, cf
 			})
 			settingsDivider(c)
 			if len(terms) == 0 {
-				kitEmptyState(c, theme, "character.book.closed", i18n.T("settings.section.glossary"), "")
+				kitEmptyState(c, theme, "character.book.closed", i18n.T("omnibox.empty.glossary"), "")
 			}
 			for _, term := range terms {
 				t := term

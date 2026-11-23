@@ -56,7 +56,7 @@ func (a *AppController) renderUserWordsCard(c *ui.Context, theme *ui.Theme, cfg 
 			}
 		})
 		if msg := strings.TrimSpace(st.myWordError); msg != "" {
-			ui.Text(c, msg).FontSize(typeMeta).TextColor(theme.Danger).SingleLine()
+			kitErrorBanner(c, theme, msg)
 		}
 	})
 }

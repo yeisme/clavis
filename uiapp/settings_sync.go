@@ -53,11 +53,19 @@ func (a *AppController) renderSyncStatusCard(c *ui.Context, theme *ui.Theme) {
 	settingsSourceCard(c, theme, "同步", "只读", func() {
 		switch {
 		case result.State == host.StateUnknown:
-			settingsHint(c, theme, "同步本地状态暂不可用，当前未执行任何同步操作。")
+			kitWarningBanner(c, theme, "同步本地状态暂不可用，当前未执行任何同步操作。")
 		case !snapshot.LoggedIn:
-			settingsHint(c, theme, "未配置同步")
+			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+				kitStatusDot(c, kitStateEmptyColor(theme), false)
+				kitStatusPill(c, theme, "未配置同步", chipNeutral)
+			})
+			settingsHint(c, theme, "当前未登录同步账号，配置与数据仅保存在本地。")
 		default:
-			settingsKeyValueRow(c, theme, "登录状态", "已登录")
+			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, "登录状态").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+				ui.Spacer(c)
+				kitStatusPill(c, theme, "已登录", chipSuccess)
+			})
 			settingsKeyValueRow(c, theme, "账号", snapshot.Account)
 			settingsKeyValueRow(c, theme, "设备 ID", snapshot.DeviceID)
 			settingsKeyValueRow(c, theme, "本地版本", fmt.Sprintf("%d", snapshot.LocalVersion))
@@ -68,7 +76,7 @@ func (a *AppController) renderSyncStatusCard(c *ui.Context, theme *ui.Theme) {
 		}
 		if err != nil && result.State != host.StateUnknown {
 			// Keep diagnostics neutral and avoid rendering raw implementation errors.
-			settingsHint(c, theme, "同步状态读取暂不可用。")
+			kitWarningBanner(c, theme, "同步状态读取暂不可用。")
 		}
 	})
 }
