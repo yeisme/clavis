@@ -76,6 +76,19 @@ func TestHerdrFocuserUnknownIsNotRetryable(t *testing.T) {
 	}
 }
 
+func TestHerdrFocuserRejectsSubstringAndAmbiguousMatches(t *testing.T) {
+	for _, fixture := range []string{
+		`[{"agent_session":{"value":"/tmp/session-abc-longer.jsonl"},"pane_id":"pane-7"}]`,
+		`[{"agent_session":{"value":"/tmp/session-abc.jsonl"},"pane_id":"pane-7"},{"agent_session":{"value":"/other/session-abc.jsonl"},"pane_id":"pane-8"}]`,
+	} {
+		fake := &fakeFocusExecutor{list: []byte(fixture)}
+		result, err := NewHerdrFocuserWithExecutor(fake).Focus(context.Background(), "session-abc")
+		if err != nil || result.State != host.StateUnknown || len(fake.calls) != 2 {
+			t.Fatalf("unsafe focus result=%+v err=%v calls=%v", result, err, fake.calls)
+		}
+	}
+}
+
 func TestHerdrFocuserFocusTimeoutIsObservable(t *testing.T) {
 	fake := &fakeFocusExecutor{list: []byte(`[{"agent_session":{"value":"/tmp/session-abc.jsonl"},"pane_id":"pane-7"}]`), block: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)

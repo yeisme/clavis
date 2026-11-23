@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -98,24 +99,47 @@ func (h *HerdrFocuser) Focus(ctx context.Context, sessionID string) (host.Operat
 		result.State, result.Code, result.Message, result.Retryable = host.StateFailed, "agent_list_invalid", "herdr 会话列表不可解析", false
 		return result, nil
 	}
+	// Match the session identifier exactly, never as a substring.
+	//
+	// Substring matching sent the user to the wrong terminal: asking for
+	// `session-abc` also matched `/tmp/session-abc-longer.jsonl`, focused that pane, and
+	// reported "已跳转到该会话" — a false success, which is worse than an honest miss
+	// because the user believes they are looking at the right window.
+	//
+	// herdr reports the session file, whose base name is either the bare id
+	// (`<id>.jsonl`) or `<timestamp>_<id>.jsonl`, so the id matches when the base name
+	// equals it or ends with `_<id>`. Anything else is a different session.
+	var exact []herdrAgent
 	for _, agent := range agents {
-		if strings.Contains(agent.AgentSession.Value, sessionID) {
-			if strings.TrimSpace(agent.PaneID) == "" {
-				result.State, result.Code, result.Message, result.Retryable = host.StateUnknown, "pane_missing", "未找到该会话的面板", false
-				return result, nil
-			}
-			focusCtx, focusCancel := context.WithTimeout(ctx, 3*time.Second)
-			_, focusErr := h.executor.Output(focusCtx, path, "agent", "focus", agent.PaneID)
-			focusCancel()
-			if focusErr != nil {
-				result.State, result.Code, result.Message, result.Retryable = host.StateFailed, "focus_failed", "无法聚焦该会话", true
-				return result, nil
-			}
-			result.State, result.Code, result.Message, result.Retryable = host.StateReady, "focused", "已跳转到该会话", false
-			return result, nil
+		if sessionFileMatchesID(agent.AgentSession.Value, sessionID) {
+			exact = append(exact, agent)
 		}
 	}
-	result.State, result.Code, result.Message, result.Retryable = host.StateUnknown, "session_not_found", "未找到该会话的面板", false
+	switch len(exact) {
+	case 0:
+		result.State, result.Code, result.Message, result.Retryable = host.StateUnknown, "session_not_found", "未找到该会话的面板", false
+		return result, nil
+	case 1:
+		// exactly one candidate — safe to focus
+	default:
+		// Two panes claim the same session id (e.g. the same session opened twice).
+		// Picking one at random is how the wrong window gets focused, so refuse and
+		// say so; the caller can fall back to copying the id.
+		result.State, result.Code, result.Message, result.Retryable = host.StateUnknown, "session_ambiguous", "该会话在多个面板中打开，无法确定要跳转哪一个", false
+		return result, nil
+	}
+	if strings.TrimSpace(exact[0].PaneID) == "" {
+		result.State, result.Code, result.Message, result.Retryable = host.StateUnknown, "pane_missing", "未找到该会话的面板", false
+		return result, nil
+	}
+	focusCtx, focusCancel := context.WithTimeout(ctx, 3*time.Second)
+	_, focusErr := h.executor.Output(focusCtx, path, "agent", "focus", exact[0].PaneID)
+	focusCancel()
+	if focusErr != nil {
+		result.State, result.Code, result.Message, result.Retryable = host.StateFailed, "focus_failed", "无法聚焦该会话", true
+		return result, nil
+	}
+	result.State, result.Code, result.Message, result.Retryable = host.StateReady, "focused", "已跳转到该会话", false
 	return result, nil
 }
 
@@ -146,4 +170,20 @@ func parseHerdrAgents(data []byte) ([]herdrAgent, error) {
 		return envelope.Data, nil
 	}
 	return nil, errors.New("herdr agent list: missing agents")
+}
+
+// sessionFileMatchesID reports whether the herdr session file belongs to id exactly.
+// Substring matching is deliberately rejected: it turned `session-abc` into a match for
+// `session-abc-longer` and focused the wrong pane.
+func sessionFileMatchesID(value, id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	base := filepath.Base(strings.TrimSpace(value))
+	base = strings.TrimSuffix(base, ".jsonl")
+	if base == id {
+		return true
+	}
+	return strings.HasSuffix(base, "_"+id)
 }

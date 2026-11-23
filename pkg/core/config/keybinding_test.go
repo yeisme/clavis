@@ -4,9 +4,9 @@ import "testing"
 
 func TestValidateKeyBindings(t *testing.T) {
 	cases := []struct {
-		name    string
+		name     string
 		bindings []KeyBinding
-		wantErr bool
+		wantErr  bool
 	}{
 		{"valid chord", []KeyBinding{{Keys: []string{"ctrl+option+return"}, Action: "ai_continue"}}, false},
 		{"unknown action", []KeyBinding{{Keys: []string{"ctrl+option+x"}, Action: "ai_nope"}}, true},
