@@ -217,6 +217,45 @@ func TestOpenAIClientCancellation(t *testing.T) {
 	}
 }
 
+func TestOpenAIClientKeepsCompletedStreamSuccessfulWhenContextCancelsAfterDone(t *testing.T) {
+	cfg := config.DefaultAIConfig()
+	ctx, cancel := context.WithCancel(context.Background())
+	body := &cancelAfterReadBody{
+		Reader: strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n"),
+		cancel: cancel,
+	}
+	doer := mockDoer{fn: func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: body}, nil
+	}}
+	client := ai.NewOpenAICompatibleClient(cfg, engine.GlossaryEngine{}, doer, func(context.Context) (string, error) {
+		return "sk-test", nil
+	})
+	var output strings.Builder
+	_, err := client.StreamCompletionWithUsage(ctx, ai.CompletionRequest{Prompt: "hello"}, func(delta string) {
+		_, _ = output.WriteString(delta)
+	})
+	if err != nil || output.String() != "done" {
+		t.Fatalf("completed stream was reported as failed: output=%q err=%v", output.String(), err)
+	}
+}
+
+type cancelAfterReadBody struct {
+	*strings.Reader
+	cancel context.CancelFunc
+	done   bool
+}
+
+func (b *cancelAfterReadBody) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	if n > 0 && !b.done {
+		b.done = true
+		b.cancel()
+	}
+	return n, err
+}
+
+func (b *cancelAfterReadBody) Close() error { return nil }
+
 func TestOpenAIClientRejectsTruncatedStream(t *testing.T) {
 	cfg := config.DefaultAIConfig()
 	doer := mockDoer{

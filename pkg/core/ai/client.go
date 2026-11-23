@@ -219,8 +219,11 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 		return nil, err
 	}
 
-	var ctxParts []string
-	if req.Context != nil {
+	var contextText string
+	// An explicit policy owns every ambient field. The legacy concatenation is
+	// deliberately retained only for callers that did not opt into the allowlist.
+	if req.ContextPolicy == (ContextPolicy{}) && req.Context != nil {
+		var ctxParts []string
 		if req.Context.AppName != "" {
 			ctxParts = append(ctxParts, req.Context.AppName)
 		}
@@ -236,8 +239,8 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 		if req.Context.SurroundingText != "" {
 			ctxParts = append(ctxParts, req.Context.SurroundingText)
 		}
+		contextText = strings.Join(ctxParts, "\n")
 	}
-	contextText := strings.Join(ctxParts, "\n")
 
 	systemBase := profile.SystemPrompt
 	if strings.TrimSpace(req.SystemPromptOverride) != "" {
@@ -573,7 +576,10 @@ func (c *OpenAICompatibleClient) StreamCompletionWithUsage(
 		}
 		c.UsageRecorder.RecordAIUsage(UsageRecord{At: startedAt, Profile: profileName, Provider: profile.Provider, Model: profile.Model, Action: req.Mode, Usage: usage, Latency: time.Since(startedAt)})
 	}
-	return usage, ctx.Err()
+	// Once the provider emitted its terminal event the response is complete.
+	// A cancellation racing with that terminal event must not turn a confirmed
+	// completion into a false cancellation result.
+	return usage, nil
 }
 
 func structuredOutputRequested(req CompletionRequest) bool {

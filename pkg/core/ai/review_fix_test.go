@@ -1,10 +1,54 @@
 package ai
 
 import (
+	"context"
+	"encoding/json"
 	"math/big"
 	"strings"
 	"testing"
+
+	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/engine"
 )
+
+func TestBuildRequestExplicitContextPolicyDoesNotLeakLegacyAmbientFields(t *testing.T) {
+	cfg := config.DefaultAIConfig()
+	profile := cfg.ActiveProfile()
+	client := NewOpenAICompatibleClient(cfg, engine.GlossaryEngine{}, nil, nil)
+	req, err := client.BuildRequest(context.Background(), CompletionRequest{
+		Prompt: "summarize",
+		Context: &engine.CapsuleContext{
+			AppName:          "Notes",
+			BundleID:         "com.apple.Notes",
+			WindowTitle:      "Private window",
+			ActiveURL:        "https://private.example",
+			SurroundingText:  "secret surrounding text",
+			SelectedText:     "selected text",
+			ClipboardPreview: "clipboard secret",
+		},
+		ContextPolicy: ContextPolicy{IncludeApp: true},
+		Profile:       &profile,
+	}, "sk-test")
+	if err != nil {
+		t.Fatalf("BuildRequest: %v", err)
+	}
+	var payload struct {
+		Messages []struct {
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	if len(payload.Messages) == 0 || !strings.Contains(payload.Messages[0].Content, "App: Notes") {
+		t.Fatalf("allowlisted app context missing: %+v", payload.Messages)
+	}
+	for _, secret := range []string{"com.apple.Notes", "Private window", "private.example", "secret surrounding text", "selected text", "clipboard secret"} {
+		if strings.Contains(payload.Messages[0].Content, secret) {
+			t.Fatalf("context policy leaked %q: %s", secret, payload.Messages[0].Content)
+		}
+	}
+}
 
 func TestIsKeylessAllowedRequiresLocalEndpoint(t *testing.T) {
 	if !IsKeylessAllowed("ollama", "http://127.0.0.1:11434/v1") {
