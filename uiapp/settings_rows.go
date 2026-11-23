@@ -245,6 +245,23 @@ func settingSelectRow(
 	return chosen, changed
 }
 
+// settingsTwoColumns keeps the standard two-column Settings layout at the
+// supported 760px minimum width and collapses only when narrower than that.
+func settingsTwoColumns(c *ui.Context) int {
+	if w, _ := c.Size(); w > 0 && w < 720 {
+		return 1
+	}
+	return 2
+}
+
+// settingsNarrowCard reports whether a two-column Settings card is narrow
+// enough (e.g. at the 760px minimum window width) that nested two-column input
+// rows inside the card should stack to a single readable column.
+func settingsNarrowCard(c *ui.Context) bool {
+	w, _ := c.Size()
+	return w > 0 && w < 860
+}
+
 // settingsListRow is one row of a master list (Leader tree, snippets,
 // glossary, workflows): a button, the chosen row tinted as the Omnibox's is.
 // The row keeps its natural keyboard focus ring so a keyboard user can see

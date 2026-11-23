@@ -649,7 +649,7 @@ func (a *AppController) renderSettingsAISection(
 		})
 	})
 
-	ui.Grid(c).Columns(2).Gap(10).FillWidth().Children(func() {
+	ui.Grid(c).Columns(settingsTwoColumns(c)).Gap(10).FillWidth().Children(func() {
 		ui.Column(c).FillWidth().Gap(10).Children(func() {
 			a.renderAIKeychainCard(c, theme, activeProfile, keySource, testStatus, testMsg)
 			a.renderAIAddProfileCard(c, theme)
@@ -780,7 +780,7 @@ func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *u
 		})
 	})
 
-	ui.Grid(c).Columns(2).Gap(10).FillWidth().Children(func() {
+	ui.Grid(c).Columns(settingsTwoColumns(c)).Gap(10).FillWidth().Children(func() {
 		settingsEditorCard(c, theme, i18n.T("settings.card.diagnostics"), func() {
 			secureInput := "false"
 			if v, ok := diag.Permissions.Details["secureInput"]; ok && v != "" {

@@ -348,12 +348,16 @@ func (a *AppController) renderKeymapControls(c *ui.Context, theme *ui.Theme, cfg
 			i18n.T("settings.keymap.tap_hold_threshold_help"), float64(keymap.TapHoldThresholdMs), 80, 500, 10, "ms"); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.TapHoldThresholdMs = int(v) })
 		}
+		capsSelectW := float32(104)
+		if settingsNarrowCard(c) {
+			capsSelectW = 0
+		}
 		if v, changed := settingSelectRow(c, theme, i18n.T("settings.keymap.caps_lock_tap"), "caps_lock_tap", "",
-			capsLockActionOptions(), keymap.CapsLockTap, 104); changed {
+			capsLockActionOptions(), keymap.CapsLockTap, capsSelectW); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.CapsLockTap = v })
 		}
 		if v, changed := settingSelectRow(c, theme, i18n.T("settings.keymap.caps_lock_hold"), "caps_lock_hold", "",
-			capsLockActionOptions(), keymap.CapsLockHold, 104); changed {
+			capsLockActionOptions(), keymap.CapsLockHold, capsSelectW); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.CapsLockHold = v })
 		}
 
@@ -367,7 +371,11 @@ func (a *AppController) renderKeymapControls(c *ui.Context, theme *ui.Theme, cfg
 			return [4]string{s.remapFrom, s.remapTap, s.remapHold, s.remapApps}
 		})
 		from, tap, hold, apps := remapDrafts[0], remapDrafts[1], remapDrafts[2], remapDrafts[3]
-		ui.Grid(c).Columns(2).Gap(6).FillWidth().Children(func() {
+		remapCols := 2
+		if settingsNarrowCard(c) {
+			remapCols = 1
+		}
+		ui.Grid(c).Columns(remapCols).Gap(6).FillWidth().Children(func() {
 			if v, changed := settingsTextInput(c, i18n.T("settings.keymap.remap_from"), i18n.T("settings.keymap.remap_from")+": "+"caps_lock", from); changed {
 				seSet(se, func(s *settingsEditorState) { s.remapFrom = v })
 			}
@@ -550,18 +558,31 @@ func (a *AppController) renderIMERuleForm(c *ui.Context, theme *ui.Theme) {
 			a.mu.Unlock()
 		}
 	}
-	ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
-		draftInput(&targetDraft, i18n.T("settings.ime.rule_target"), i18n.T("settings.ime.rule_target_ph"), 3,
-			func(v string) { a.uiState.imeRuleTargetDraft = v })
-		draftInput(&urlDraft, i18n.T("settings.ime.url_pattern"), i18n.T("settings.ime.url_pattern_ph"), 2,
-			func(v string) { a.uiState.imeRuleURLDraft = v })
-	})
-	ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
-		draftInput(&titleDraft, i18n.T("settings.ime.title_pattern"), i18n.T("settings.ime.title_pattern_ph"), 2,
-			func(v string) { a.uiState.imeRuleTitleDraft = v })
-		draftInput(&sourceDraft, i18n.T("settings.ime.source_id"), i18n.T("settings.ime.source_id_ph"), 3,
-			func(v string) { a.uiState.imeRuleSourceDraft = v })
-	})
+	if settingsNarrowCard(c) {
+		ui.Column(c).FillWidth().Gap(space6).Children(func() {
+			draftInput(&targetDraft, i18n.T("settings.ime.rule_target"), i18n.T("settings.ime.rule_target_ph"), 1,
+				func(v string) { a.uiState.imeRuleTargetDraft = v })
+			draftInput(&urlDraft, i18n.T("settings.ime.url_pattern"), i18n.T("settings.ime.url_pattern_ph"), 1,
+				func(v string) { a.uiState.imeRuleURLDraft = v })
+			draftInput(&titleDraft, i18n.T("settings.ime.title_pattern"), i18n.T("settings.ime.title_pattern_ph"), 1,
+				func(v string) { a.uiState.imeRuleTitleDraft = v })
+			draftInput(&sourceDraft, i18n.T("settings.ime.source_id"), i18n.T("settings.ime.source_id_ph"), 1,
+				func(v string) { a.uiState.imeRuleSourceDraft = v })
+		})
+	} else {
+		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
+			draftInput(&targetDraft, i18n.T("settings.ime.rule_target"), i18n.T("settings.ime.rule_target_ph"), 3,
+				func(v string) { a.uiState.imeRuleTargetDraft = v })
+			draftInput(&urlDraft, i18n.T("settings.ime.url_pattern"), i18n.T("settings.ime.url_pattern_ph"), 2,
+				func(v string) { a.uiState.imeRuleURLDraft = v })
+		})
+		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
+			draftInput(&titleDraft, i18n.T("settings.ime.title_pattern"), i18n.T("settings.ime.title_pattern_ph"), 2,
+				func(v string) { a.uiState.imeRuleTitleDraft = v })
+			draftInput(&sourceDraft, i18n.T("settings.ime.source_id"), i18n.T("settings.ime.source_id_ph"), 3,
+				func(v string) { a.uiState.imeRuleSourceDraft = v })
+		})
+	}
 
 	if msg := regexIssue(titleDraft); msg != "" {
 		settingsBanner(c, theme.Danger, i18n.Tf("settings.ime.title_regex_bad", msg))
@@ -676,7 +697,7 @@ func regexIssue(pattern string) string {
 func (a *AppController) renderIMEKeymapSection(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
 	// Global behavior on the left, per-app rules on the right: the rule form
 	// and the newest rules stay in view without scrolling.
-	ui.Grid(c).Columns(2).Gap(10).FillWidth().Children(func() {
+	ui.Grid(c).Columns(settingsTwoColumns(c)).Gap(10).FillWidth().Children(func() {
 		ui.Column(c).FillWidth().Gap(10).Children(func() {
 			a.renderKeymapControls(c, theme, cfg)
 			a.renderIMEConfig(c, theme, cfg)
@@ -1204,7 +1225,7 @@ func (a *AppController) renderLeaderSection(c *ui.Context, theme *ui.Theme, cfg 
 		}
 	}
 
-	ui.Grid(c).Columns(2).Gap(10).FillWidth().Children(func() {
+	ui.Grid(c).Columns(settingsTwoColumns(c)).Gap(10).FillWidth().Children(func() {
 		settingsEditorCard(c, theme, i18n.Tf("settings.leader.card_title", len(cfg.Leader.Nodes)), func() {
 			a.renderLeaderTree(c, theme, cfg.Leader.Nodes, nil, selectedPath)
 
@@ -1592,7 +1613,7 @@ func (a *AppController) renderSnippetsSection(c *ui.Context, theme *ui.Theme, cf
 		}
 	}
 
-	ui.Grid(c).Columns(2).Gap(10).FillWidth().Children(func() {
+	ui.Grid(c).Columns(settingsTwoColumns(c)).Gap(10).FillWidth().Children(func() {
 		settingsEditorCard(c, theme, i18n.Tf("settings.snippets.card_title", len(items)), func() {
 			query := seGet(se, func(s *settingsEditorState) string { return s.snippetQuery })
 			search := ui.SearchField(c, &query).Label(i18n.T("omnibox.placeholder.snippets")).Placeholder(i18n.T("omnibox.placeholder.snippets")).FillWidth()
@@ -1793,7 +1814,7 @@ func (a *AppController) renderGlossarySection(c *ui.Context, theme *ui.Theme, cf
 		})
 	}
 
-	ui.Grid(c).Columns(2).Gap(10).FillWidth().Children(func() {
+	ui.Grid(c).Columns(settingsTwoColumns(c)).Gap(10).FillWidth().Children(func() {
 		settingsEditorCard(c, theme, i18n.Tf("settings.glossary.card_title", len(terms)), func() {
 			ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 				if ui.PrimaryButton(c, i18n.T("settings.glossary.new_term")).Clicked() {
