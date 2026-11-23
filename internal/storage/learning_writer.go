@@ -43,10 +43,11 @@ type LearningWriter struct {
 	mu      sync.Mutex
 	pending *learningBatch
 
-	kick chan struct{}
-	stop chan struct{}
-	done chan struct{}
-	once sync.Once
+	kick             chan struct{}
+	stop             chan struct{}
+	done             chan struct{}
+	once             sync.Once
+	cancelBackground context.CancelFunc
 
 	flushes atomic.Uint64
 	dropped atomic.Uint64
@@ -180,17 +181,19 @@ func newLearningWriter(store *LearningStore, opts LearningWriterOptions, persist
 	if opts.MaxPendingOps <= 0 {
 		opts.MaxPendingOps = defaultLearningMaxOps
 	}
+	background, cancel := context.WithCancel(context.Background())
 	w := &LearningWriter{
-		store:    store,
-		interval: opts.FlushInterval,
-		maxOps:   opts.MaxPendingOps,
-		pending:  newLearningBatch(),
-		kick:     make(chan struct{}, 1),
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+		store:            store,
+		interval:         opts.FlushInterval,
+		maxOps:           opts.MaxPendingOps,
+		pending:          newLearningBatch(),
+		kick:             make(chan struct{}, 1),
+		stop:             make(chan struct{}),
+		done:             make(chan struct{}),
+		cancelBackground: cancel,
 	}
 	w.persist = persist
-	go w.loop()
+	go w.loop(background)
 	return w
 }
 
@@ -341,8 +344,9 @@ func (w *LearningWriter) wake() {
 	}
 }
 
-func (w *LearningWriter) loop() {
+func (w *LearningWriter) loop(ctx context.Context) {
 	defer close(w.done)
+	defer w.cancelBackground()
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 	for {
@@ -352,13 +356,21 @@ func (w *LearningWriter) loop() {
 		case <-ticker.C:
 		case <-w.kick:
 		}
-		_ = w.flushOnce(context.Background())
+		select {
+		case <-w.stop:
+			return
+		default:
+			_ = w.flushOnce(ctx)
+		}
 	}
 }
 
 // flushOnce persists what is pending. A failed batch is merged back in
 // front of newer updates and retried on the next flush, up to flushRetries.
 func (w *LearningWriter) flushOnce(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	w.mu.Lock()
 	batch := w.pending
 	if batch.empty() {
@@ -374,10 +386,12 @@ func (w *LearningWriter) flushOnce(ctx context.Context) error {
 		return nil
 	}
 	w.lastErr.Store(err.Error())
-	batch.retries++
-	if batch.retries >= flushRetries || errors.Is(err, sqlite.ErrClosed) {
-		w.dropped.Add(uint64(batch.ops))
-		return err
+	if ctx.Err() == nil {
+		batch.retries++
+		if batch.retries >= flushRetries || errors.Is(err, sqlite.ErrClosed) {
+			w.dropped.Add(uint64(batch.ops))
+			return err
+		}
 	}
 	w.mu.Lock()
 	w.pending.merge(batch)
@@ -394,10 +408,19 @@ func (w *LearningWriter) Flush(ctx context.Context) error {
 // Close stops the flusher and persists what is pending.
 func (w *LearningWriter) Close(ctx context.Context) error {
 	w.once.Do(func() { close(w.stop) })
-	<-w.done
+	select {
+	case <-w.done:
+	case <-ctx.Done():
+		w.cancelBackground()
+		return ctx.Err()
+	}
 	var err error
 	for attempt := 0; attempt < flushRetries; attempt++ {
-		if err = w.flushOnce(ctx); err == nil {
+		err = w.flushOnce(ctx)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err == nil {
 			w.mu.Lock()
 			empty := w.pending.empty()
 			w.mu.Unlock()
