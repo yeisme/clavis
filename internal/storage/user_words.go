@@ -22,11 +22,18 @@ func InjectUserWords(ctx context.Context, store *LearningStore, words []string) 
 			}
 			continue
 		}
+		failed := false
 		for _, reading := range wordReadings(word) {
 			key := compactReading(reading)
 			if key != "" {
-				_ = store.RecordIMECommit(ctx, key, word, "", true)
+				if err := store.RecordIMECommit(ctx, key, word, "", true); err != nil {
+					failed = true
+					break
+				}
 			}
+		}
+		if failed {
+			rejected = append(rejected, word)
 		}
 	}
 	return rejected

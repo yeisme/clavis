@@ -8,6 +8,23 @@ import (
 	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
 
+func TestInjectUserWordsReportsPersistenceFailure(t *testing.T) {
+	db, err := sqlite.Open(context.Background(), ":memory:", sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewLearningStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if rejected := InjectUserWords(ctx, store, []string{"叶树根"}); len(rejected) != 1 || rejected[0] != "叶树根" {
+		t.Fatalf("rejected=%v, want the word whose persistence failed", rejected)
+	}
+}
+
 func TestInjectUserWordsPinsAndRejectsSingleCharacters(t *testing.T) {
 	db, err := sqlite.Open(context.Background(), ":memory:", sqlite.OpenOptions{})
 	if err != nil {
