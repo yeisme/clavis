@@ -10,10 +10,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/yeisme/clavis/pkg/core/agentsession"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
-	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
@@ -32,6 +30,8 @@ type capsuleEphemeralStore struct {
 	followUpComposing map[*AppController]bool
 	aiStepsExpanded   map[*AppController]bool
 	aiReviseOpen      map[*AppController]bool
+	agentLaneFilter   map[*AppController]string
+	agentDrawerOpen   map[*AppController]bool
 }
 
 var capsuleUI = &capsuleEphemeralStore{
@@ -41,6 +41,8 @@ var capsuleUI = &capsuleEphemeralStore{
 	followUpComposing: make(map[*AppController]bool),
 	aiStepsExpanded:   make(map[*AppController]bool),
 	aiReviseOpen:      make(map[*AppController]bool),
+	agentLaneFilter:   make(map[*AppController]string),
+	agentDrawerOpen:   make(map[*AppController]bool),
 }
 
 func (s *capsuleEphemeralStore) reset(ctrl *AppController) {
@@ -52,6 +54,42 @@ func (s *capsuleEphemeralStore) reset(ctrl *AppController) {
 	delete(s.followUpComposing, ctrl)
 	delete(s.aiStepsExpanded, ctrl)
 	delete(s.aiReviseOpen, ctrl)
+	delete(s.agentLaneFilter, ctrl)
+	delete(s.agentDrawerOpen, ctrl)
+}
+
+func (s *capsuleEphemeralStore) laneFilter(ctrl *AppController) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.agentLaneFilter[ctrl]
+}
+
+func (s *capsuleEphemeralStore) setLaneFilter(ctrl *AppController, lane string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if lane == "" {
+		delete(s.agentLaneFilter, ctrl)
+		return
+	}
+	s.agentLaneFilter[ctrl] = lane
+}
+
+func (s *capsuleEphemeralStore) drawerOpen(ctrl *AppController) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.agentDrawerOpen[ctrl]
+}
+
+func (s *capsuleEphemeralStore) toggleDrawerOpen(ctrl *AppController) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := !s.agentDrawerOpen[ctrl]
+	if next {
+		s.agentDrawerOpen[ctrl] = true
+	} else {
+		delete(s.agentDrawerOpen, ctrl)
+	}
+	return next
 }
 
 func (s *capsuleEphemeralStore) stepsExpanded(ctrl *AppController) bool {
@@ -619,141 +657,7 @@ func (a *AppController) renderPreviewActionHints(c *ui.Context, theme *ui.Theme,
 	})
 }
 
-func (a *AppController) renderAgentPreviewBody(c *ui.Context, theme *ui.Theme, item engine.OmniboxItem) {
-	sessions, _ := a.cachedAgentData()
-	if session, ok := agentSessionForItem(item, sessions); ok {
-		ui.Text(c, session.Title).FontSize(typeBody).FontWeight(700).TextColor(theme.Text).Wrap()
-		ui.Row(c).FillWidth().Wrap().Gap(space4).AlignItems(ui.Center).Children(func() {
-			if provider := agentProviderLabel(session.Provider); provider != "" {
-				previewBadge(c, theme, "person.crop.circle", provider, false)
-			}
-			statusColor := kitStateEmptyColor(theme)
-			running := session.Status == agentsession.StatusRunning
-			if running {
-				statusColor = kitStateLoadingColor(theme)
-			}
-			ui.Box(c).Padding(space1, space6).Radius(radius4).Background(tileFill(theme)).Border(space1, hairline(theme)).Children(func() {
-				ui.Row(c).Gap(space4).AlignItems(ui.Center).Children(func() {
-					kitStatusDot(c, statusColor, running)
-					ui.Text(c, agentStatusLabel(session.Status)).FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
-				})
-			})
-			if session.PendingReview {
-				pendingLabel := "Pending review"
-				if i18n.IsChinese() {
-					pendingLabel = "待验收"
-				}
-				previewBadge(c, theme, "checkmark", pendingLabel, false)
-			}
-			previewBadge(c, theme, "", agentRelativeTime(session.LastActivityAt, time.Now()), false)
-		})
-		if ws := strings.TrimSpace(session.Workspace); ws != "" {
-			wsLabel := "Workspace"
-			if i18n.IsChinese() {
-				wsLabel = "工作区"
-			}
-			ui.Text(c, wsLabel).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
-			ui.Text(c, agentsession.SanitizeDiagnosticText(ws)).Font("monospace").FontSize(typeMicro).TextColor(theme.Text).Wrap()
-		}
-		if id := strings.TrimSpace(session.ID); id != "" {
-			ui.Text(c, "ID: "+id).Font("monospace").FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
-		}
-		if msg := strings.TrimSpace(agentsession.SanitizeDiagnosticText(session.LastMessage)); msg != "" {
-			msgLabel := "Latest message"
-			if i18n.IsChinese() {
-				msgLabel = "最近消息"
-			}
-			ui.Text(c, msgLabel).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
-			kitInsetWell(c, theme, func() {
-				renderPreviewLines(c, theme, msg, 12)
-			})
-		}
-		return
-	}
-
-	if strings.HasPrefix(item.UtilityValue, "agent-command:") {
-		cmdLabel := "Command"
-		if i18n.IsChinese() {
-			cmdLabel = "快捷命令"
-		}
-		ui.Row(c).FillWidth().Gap(space4).AlignItems(ui.Center).Children(func() {
-			previewBadge(c, theme, "command", cmdLabel, false)
-		})
-		ui.Text(c, item.Title).FontSize(typeBody).FontWeight(700).TextColor(theme.Text).Wrap()
-		if item.Subtitle != "" {
-			kitInsetWell(c, theme, func() {
-				renderPreviewLines(c, theme, item.Title+"\n"+item.Subtitle, 8)
-			})
-		}
-		return
-	}
-
-	if item.UtilityValue == "agent-refresh-status" {
-		res := a.agentRecordedOperationResult()
-		statusBadge := "Status"
-		if i18n.IsChinese() {
-			statusBadge = "同步状态"
-		}
-		ui.Row(c).FillWidth().Gap(space4).AlignItems(ui.Center).Children(func() {
-			previewBadge(c, theme, "info.circle", statusBadge, false)
-		})
-		ui.Text(c, item.Title).FontSize(typeBody).FontWeight(600).TextColor(theme.Text).Wrap()
-		if item.Subtitle != "" {
-			ui.Text(c, item.Subtitle).FontSize(typeMeta).TextColor(theme.TextMuted).Wrap()
-		}
-		if res.State == host.StateFailed && res.Message != "" {
-			kitInsetWell(c, theme, func() {
-				renderPreviewLines(c, theme, agentsession.SanitizeDiagnosticText(res.Message), 8)
-			})
-		}
-		return
-	}
-
-	diagBadge := "Diagnostic"
-	if i18n.IsChinese() {
-		diagBadge = "数据源诊断"
-	}
-	ui.Row(c).FillWidth().Gap(space4).AlignItems(ui.Center).Children(func() {
-		previewBadge(c, theme, "info.circle", diagBadge, false)
-	})
-	ui.Text(c, item.Title).FontSize(typeBody).FontWeight(700).TextColor(theme.Text).SingleLine()
-	if item.Subtitle != "" {
-		kitInsetWell(c, theme, func() {
-			renderPreviewLines(c, theme, item.Subtitle, 8)
-		})
-	}
-}
-
-func agentItemFooterHints(item engine.OmniboxItem, retryable bool) []footerHint {
-	zh := i18n.IsChinese()
-	refreshCaption := "Refresh"
-	if zh {
-		refreshCaption = "刷新"
-	}
-	var hints []footerHint
-	switch {
-	case strings.HasPrefix(item.UtilityValue, "agent-session:"):
-		cap := "Focus / Copy ID"
-		if zh {
-			cap = "跳转 / 复制 ID"
-		}
-		hints = append(hints, footerHint{keys: "↵", caption: cap, drop: 0})
-	case strings.HasPrefix(item.UtilityValue, "agent-command:"):
-		cap := "Copy prompt"
-		if zh {
-			cap = "复制命令"
-		}
-		hints = append(hints, footerHint{keys: "↵", caption: cap, drop: 0})
-	case item.UtilityValue == "agent-refresh-status" && retryable:
-		cap := "Retry"
-		if zh {
-			cap = "重试"
-		}
-		hints = append(hints, footerHint{keys: "↵", caption: cap, drop: 0})
-	}
-	hints = append(hints, footerHint{keys: modPrefix() + "R", caption: refreshCaption, drop: 2})
-	return hints
-}
+// renderAgentPreviewBody and agentItemFooterHints live in agent_workbench_view.go.
 
 func previewBadge(c *ui.Context, theme *ui.Theme, iconName, label string, _ bool) {
 	// Passive metadata badges stay strictly neutral gray (clavis-visual-spec.md §0:

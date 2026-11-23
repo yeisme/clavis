@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/yeisme/clavis/pkg/core/agentsession"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
@@ -206,6 +207,105 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, m
 	}
 	w, h = PreferredCapsuleSizeForState(f.ctrl.State(), appearance)
 	shoot("05c-preview-media-deck", f.ctrl.CapsuleView, w, h, 2, nil)
+
+	// Agent Workbench snapshots: parallel task lanes (list), approval blocking gate,
+	// completed state, and redacted failure/retry state.
+	agentSessionsFixture := []agentsession.Session{
+		{
+			ID:             "cx-build-01",
+			Provider:       "codex",
+			Title:          "输入法候选窗 GPU 排版优化",
+			Status:         agentsession.StatusRunning,
+			LastActivityAt: snapNow.Add(-1 * time.Minute),
+			LastMessage:    "正在运行 go test ./uiapp/... 并核对 12pt 基准线",
+			Workspace:      "/Users/alice/workspace/clavis",
+			TargetRef:      "branch:main",
+			Source:         "codex-sqlite",
+		},
+		{
+			ID:             "dsh-review-02",
+			Provider:       "dsh",
+			Title:          "AI 交互中心五态改写验收",
+			Status:         agentsession.StatusWaiting,
+			PendingReview:  true,
+			LastActivityAt: snapNow.Add(-6 * time.Minute),
+			LastMessage:    "已完成 5 态渲染快照与 IME 回归测试，等待人工验收合并",
+			Workspace:      "/Users/alice/workspace/clavis",
+			TargetRef:      "commit:fbf5b15",
+			Source:         "dsh-thread",
+		},
+		{
+			ID:             "cl-done-03",
+			Provider:       "claude",
+			Title:          "剪贴板 SQLite 索引与脱敏审计",
+			Status:         agentsession.StatusStopped,
+			LastActivityAt: snapNow.Add(-42 * time.Minute),
+			LastMessage:    "全部 18 项脱敏与 FTS5 查询用例通过，无敏感信息泄漏",
+			Workspace:      "/Users/alice/workspace/clavis",
+			TargetRef:      "pr:#42",
+			Source:         "claude-project",
+		},
+	}
+	aw := newInteractionFixture(t, doer)
+	_ = aw.ctrl.UpdateMainConfig(func(m *config.MainConfig) {
+		m.Appearance.VisualPreset = preset
+		m.Appearance.Animations = motion
+		m.Appearance.ObliqueRows = true
+		m.Appearance.Language = string(lang)
+	})
+	// Let NewAppController's startup refresh and TabAgent open refresh settle
+	// before seeding deterministic workbench sessions so background discovery
+	// cannot race the rendered snapshots.
+	waitUntil(t, 3*time.Second, func() bool {
+		r := aw.ctrl.agentRecordedOperationResult()
+		return !aw.ctrl.agentRefreshing() && r.State != "" && r.State != host.StateRefreshing
+	}, "startup agent refresh settle")
+	beforeAgentOpen := aw.ctrl.agentRecordedOperationResult().ObservedAt
+	aw.ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabAgent, Context: ctx})
+	waitUntil(t, 3*time.Second, func() bool {
+		r := aw.ctrl.agentRecordedOperationResult()
+		return !aw.ctrl.agentRefreshing() && r.ObservedAt.After(beforeAgentOpen)
+	}, "open agent tab refresh settle")
+	aw.ctrl.agentMu.Lock()
+	aw.ctrl.agentSessions = agentSessionsFixture
+	aw.ctrl.agentDiagnostics = nil
+	setAgentOperationResult(aw.ctrl, host.OperationResult{State: host.StateReady, ObservedAt: snapNow})
+	aw.ctrl.agentMu.Unlock()
+	w, h = PreferredCapsuleSizeForState(aw.ctrl.State(), appearance)
+	aw.ctrl.mu.Lock()
+	aw.ctrl.uiState.agentSelected = 0
+	aw.ctrl.mu.Unlock()
+	shoot("05d-agent-workbench", aw.ctrl.CapsuleView, w, h, 2, nil)
+
+	aw.ctrl.mu.Lock()
+	aw.ctrl.uiState.agentSelected = 1
+	aw.ctrl.mu.Unlock()
+	shoot("05e-agent-approval", aw.ctrl.CapsuleView, w, h, 2, nil)
+
+	aw.ctrl.mu.Lock()
+	aw.ctrl.uiState.agentSelected = 2
+	aw.ctrl.mu.Unlock()
+	shoot("05f-agent-done", aw.ctrl.CapsuleView, w, h, 2, nil)
+
+	// Agent error & redacted diagnostic retry state.
+	aw.ctrl.agentMu.Lock()
+	aw.ctrl.agentSessions = nil
+	aw.ctrl.agentDiagnostics = []agentsession.Diagnostic{
+		{Provider: "codex", Code: "read_failed", Message: "token=sk-secretvalue123456 /Users/alice/.codex/state_5.sqlite locked"},
+		{Provider: "claude", Code: "unavailable", Message: "/Users/alice/.claude/projects directory unreadable"},
+	}
+	setAgentOperationResult(aw.ctrl, host.OperationResult{
+		State:      host.StateFailed,
+		Code:       "read_failed",
+		Message:    "Codex、Claude 数据源不可用",
+		Retryable:  true,
+		ObservedAt: snapNow,
+	})
+	aw.ctrl.agentMu.Unlock()
+	aw.ctrl.mu.Lock()
+	aw.ctrl.uiState.agentSelected = 0
+	aw.ctrl.mu.Unlock()
+	shoot("05g-agent-error", aw.ctrl.CapsuleView, w, h, 2, nil)
 
 	// AI active streaming (running) + clean completion (done) via a real held pipe
 	// so 06a-ai-streaming deterministically captures the live step log & Stop CTA.

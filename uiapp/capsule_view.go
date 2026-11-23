@@ -471,6 +471,10 @@ func (a *AppController) renderOmniboxView(
 	selectedIdx := state.SelectedIndex
 	if state.OmniboxTab == config.TabAgent {
 		items = a.agentVisibleItems(state.OmniboxQuery)
+		if lane := agentLaneKind(capsuleUI.laneFilter(a)); lane != agentLaneAll {
+			sessions, _ := a.cachedAgentData()
+			items = filterAgentItemsByLane(items, sessions, lane)
+		}
 		a.mu.Lock()
 		selectedIdx = a.uiState.agentSelected
 		a.mu.Unlock()
@@ -515,6 +519,11 @@ func (a *AppController) renderOmniboxView(
 			a.clipboardStats.filter = ""
 			a.clipboardStatsMu.Unlock()
 			a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: ""})
+			a.uiState.searchHandle.RequestFocus(c)
+			return
+		}
+		if current.OmniboxTab == config.TabAgent && capsuleUI.laneFilter(a) != "" {
+			capsuleUI.setLaneFilter(a, "")
 			a.uiState.searchHandle.RequestFocus(c)
 			return
 		}
@@ -712,6 +721,10 @@ func (a *AppController) renderOmniboxView(
 		})
 
 		renderClipboardStats := func() {
+			if state.OmniboxTab == config.TabAgent {
+				a.renderAgentWorkbenchBand(c, theme)
+				return
+			}
 			if state.OmniboxTab != config.TabClipboard {
 				return
 			}
@@ -737,15 +750,19 @@ func (a *AppController) renderOmniboxView(
 		if len(items) == 0 {
 			renderClipboardStats()
 			hasClipboardFilter := state.OmniboxTab == config.TabClipboard && a.clipboardStatsFilter() != ""
+			hasAgentLaneFilter := state.OmniboxTab == config.TabAgent && capsuleUI.laneFilter(a) != ""
 			hasQuery := strings.TrimSpace(state.OmniboxQuery) != ""
-			if state.OmniboxTab == config.TabAgent && a.agentRefreshing() && !hasQuery {
+			if state.OmniboxTab == config.TabAgent && a.agentRefreshing() && !hasQuery && !hasAgentLaneFilter {
 				kitStateView(c, theme, kitStateLoading, "arrow.clockwise", "正在加载 Agent 会话…", "", nil)
-			} else if hasQuery || hasClipboardFilter {
-				kitSearchEmptyState(c, theme, omniboxEmptyText(state.OmniboxTab), state.OmniboxQuery, hasClipboardFilter, func() {
+			} else if hasQuery || hasClipboardFilter || hasAgentLaneFilter {
+				kitSearchEmptyState(c, theme, omniboxEmptyText(state.OmniboxTab), state.OmniboxQuery, hasClipboardFilter || hasAgentLaneFilter, func() {
 					if hasClipboardFilter {
 						a.clipboardStatsMu.Lock()
 						a.clipboardStats.filter = ""
 						a.clipboardStatsMu.Unlock()
+					}
+					if hasAgentLaneFilter {
+						capsuleUI.setLaneFilter(a, "")
 					}
 					a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: ""})
 					a.uiState.searchHandle.RequestFocus(c)
@@ -830,19 +847,8 @@ func (a *AppController) renderOmniboxView(
 
 						row.Children(func() {
 							if state.OmniboxTab == config.TabAgent {
-								status := agentsession.StatusUnknown
 								sessions, _ := a.cachedAgentData()
-								if true {
-									if session, ok := agentSessionForItem(item, sessions); ok {
-										status = session.Status
-									}
-								}
-								color := secondaryInk(theme)
-								if status == agentsession.StatusRunning {
-									color = theme.Accent
-								}
-								ui.Box(c).Size(space8, space8).Radius(radiusChip).Background(color).Shrink(0)
-								renderAgentRowBadge(c, theme, item, sessions)
+								renderAgentRowLeading(c, theme, item, sessions)
 							} else {
 								a.renderOmniboxRowLeadingIcon(c, theme, item)
 							}
@@ -887,6 +893,11 @@ func (a *AppController) renderOmniboxView(
 						// mouse immediately; the row is confirmed only by a click,
 						// Enter or an explicit action.
 						if row.Hovered() {
+							if state.OmniboxTab == config.TabAgent {
+								a.mu.Lock()
+								a.uiState.agentSelected = i
+								a.mu.Unlock()
+							}
 							a.hoverSelect(itemIndex(i))
 						}
 
