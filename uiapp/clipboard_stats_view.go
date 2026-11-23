@@ -81,6 +81,14 @@ func (a *AppController) invalidateClipboardStats() {
 	a.clipboardStatsMu.Unlock()
 }
 
+func (a *AppController) retryClipboardStats() {
+	a.clipboardStatsMu.Lock()
+	a.clipboardStats.loaded = false
+	a.clipboardStats.err = nil
+	a.clipboardStatsMu.Unlock()
+	a.ensureClipboardStatsRefresh()
+}
+
 func (a *AppController) clipboardStatsSnapshot() (clipboardStatsState, bool) {
 	a.clipboardStatsMu.RLock()
 	defer a.clipboardStatsMu.RUnlock()
@@ -199,14 +207,22 @@ func darkClipboardStatAlpha(index int) float32 {
 }
 
 func renderClipboardStatsBand(c *ui.Context, theme *ui.Theme, state clipboardStatsState, onFilter func(string)) {
+	renderClipboardStatsBandWithRetry(c, theme, state, onFilter, nil)
+}
+
+func renderClipboardStatsBandWithRetry(c *ui.Context, theme *ui.Theme, state clipboardStatsState, onFilter func(string), onRetry func()) {
 	band := ui.Column(c).Key("clipboard-stats-band").Label("clipboard-stats-band").FillWidth().Height(clipboardStatsBandHeight).Gap(space4).Padding(space4, space0)
 	band.Children(func() {
 		if state.err != nil {
-			ui.Text(c, clipboardStatsErrorText()).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+			ui.Row(c).FillWidth().Grow(1).AlignItems(ui.Center).Children(func() {
+				kitInlineError(c, theme, "clipboard-stats-error", clipboardStatsErrorText(), onRetry)
+			})
 			return
 		}
 		if !state.loaded || state.loading {
-			ui.Text(c, clipboardStatsLoadingText()).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+			ui.Row(c).FillWidth().Grow(1).AlignItems(ui.Center).Children(func() {
+				kitInlineLoading(c, theme, "clipboard-stats-loading", clipboardStatsLoadingText())
+			})
 			return
 		}
 		stripWidth := float32(240)

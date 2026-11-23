@@ -138,6 +138,14 @@ func (a *AppController) ensureLexiconHitsRefresh() {
 	}()
 }
 
+func (a *AppController) retryLexiconHits() {
+	a.lexiconHitsMu.Lock()
+	a.lexiconHitsLoaded = false
+	a.lexiconHitsErr = nil
+	a.lexiconHitsMu.Unlock()
+	a.ensureLexiconHitsRefresh()
+}
+
 func (a *AppController) lexiconHitsSnapshot() ([]LexiconHitDay, error, bool, bool) {
 	a.lexiconHitsMu.RLock()
 	defer a.lexiconHitsMu.RUnlock()
@@ -204,6 +212,10 @@ func lexiconOverallHitRate(days []LexiconHitDay) (int, bool) {
 }
 
 func renderLexiconStatsBand(c *ui.Context, theme *ui.Theme, days []LexiconHitDay, loaded bool, err error, catalogCount int) {
+	renderLexiconStatsBandWithRetry(c, theme, days, loaded, err, catalogCount, nil)
+}
+
+func renderLexiconStatsBandWithRetry(c *ui.Context, theme *ui.Theme, days []LexiconHitDay, loaded bool, err error, catalogCount int, onRetry func()) {
 	ui.Row(c).Key("lexicon-stats-band").Label("lexicon-stats-band").FillWidth().Height(lexiconStatsBandHeight).Padding(space8, space0).Gap(space12).AlignItems(ui.Center).Children(func() {
 		ui.Column(c).Width(92).Gap(2).AlignItems(ui.Start).Children(func() {
 			if rate, ok := lexiconOverallHitRate(days); ok {
@@ -216,9 +228,9 @@ func renderLexiconStatsBand(c *ui.Context, theme *ui.Theme, days []LexiconHitDay
 		ui.Spacer(c)
 		switch {
 		case err != nil:
-			ui.Text(c, "词库统计暂不可用").Key("lexicon-stats-error").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+			kitInlineError(c, theme, "lexicon-stats-error", "词库统计暂不可用", onRetry)
 		case !loaded:
-			ui.Text(c, "正在加载词库统计…").Key("lexicon-stats-loading").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+			kitInlineLoading(c, theme, "lexicon-stats-loading", "正在加载词库统计…")
 		case lexiconTotalEvents(days) == 0:
 			// No activity means no chart. The KPI remains the useful catalog count.
 		default:

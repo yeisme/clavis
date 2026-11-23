@@ -1,9 +1,12 @@
 package uiapp
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/engine"
 )
 
 func TestKitStateSemanticColorsFollowVisualSpec(t *testing.T) {
@@ -33,5 +36,66 @@ func TestKitStateViewRendersRetryInBothThemes(t *testing.T) {
 				t.Fatalf("error state should expose reason and retry action, got %v", tt.Texts())
 			}
 		})
+	}
+}
+
+func TestKitWarningBannerAndInlineErrorRetry(t *testing.T) {
+	retried := false
+	tt := ui.NewTester(func(c *ui.Context) {
+		ui.Column(c).FillWidth().Gap(space8).Children(func() {
+			kitWarningBanner(c, c.Theme(), "Config warning: deprecated key")
+			kitInlineLoading(c, c.Theme(), "test-loading", "Loading stats…")
+			kitInlineError(c, c.Theme(), "test-err", "Stats unavailable", func() { retried = true })
+		})
+	}, 420, 180)
+	tt.Frame()
+	if !tt.HasText("Config warning: deprecated key") || !tt.HasText("Loading stats…") || !tt.HasText("Stats unavailable") {
+		t.Fatalf("missing expected state texts: %v", tt.Texts())
+	}
+	rect, ok := tt.Find("Retry")
+	if !ok {
+		t.Fatalf("retry button missing: %v", tt.Texts())
+	}
+	tt.ClickAt(rect.X+rect.W/2, rect.Y+rect.H/2)
+	if !retried {
+		t.Fatal("clicking inline error retry did not invoke callback")
+	}
+}
+
+func TestOmniboxSearchEmptyClearFilterButton(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabClipboard})
+	ctrl.clipboardStatsMu.Lock()
+	ctrl.clipboardStats.loaded = true
+	ctrl.clipboardStats.filter = "image"
+	ctrl.clipboardStatsMu.Unlock()
+	ctrl.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: "nonexistent-needle-xyz"})
+
+	w, h := PreferredCapsuleSize(engine.PhaseOmnibox, ctrl.Config().Main.Appearance)
+	tt := ui.NewTester(ctrl.CapsuleView, w, h)
+	tt.Frame()
+	btn, ok := tt.Find("Clear filter")
+	if !ok {
+		t.Fatalf("clear filter button missing on empty search: %v", tt.Texts())
+	}
+	tt.ClickAt(btn.X+btn.W/2, btn.Y+btn.H/2)
+	if ctrl.State().OmniboxQuery != "" || ctrl.clipboardStatsFilter() != "" {
+		t.Fatalf("clear filter failed: query=%q filter=%q", ctrl.State().OmniboxQuery, ctrl.clipboardStatsFilter())
+	}
+}
+
+func TestStatsBandErrorExposesRetryAction(t *testing.T) {
+	retried := false
+	tt := ui.NewTester(func(c *ui.Context) {
+		renderLexiconStatsBandWithRetry(c, ui.LightTheme(), nil, true, errors.New("db closed"), 10, func() { retried = true })
+	}, 360, 72)
+	tt.Frame()
+	btn, ok := tt.Find("Retry")
+	if !ok {
+		t.Fatalf("lexicon stats error retry button missing: %v", tt.Texts())
+	}
+	tt.ClickAt(btn.X+btn.W/2, btn.Y+btn.H/2)
+	if !retried {
+		t.Fatal("lexicon stats retry callback not invoked")
 	}
 }

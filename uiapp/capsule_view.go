@@ -517,6 +517,14 @@ func (a *AppController) renderOmniboxView(
 			a.uiState.searchHandle.RequestFocus(c)
 			return
 		}
+		if current.OmniboxTab == config.TabClipboard && a.clipboardStatsFilter() != "" {
+			a.clipboardStatsMu.Lock()
+			a.clipboardStats.filter = ""
+			a.clipboardStatsMu.Unlock()
+			a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: ""})
+			a.uiState.searchHandle.RequestFocus(c)
+			return
+		}
 		a.Dispatch(engine.Event{Type: engine.EventEscape})
 	}
 	page := func(key ui.Key, mods ui.Modifiers) bool {
@@ -612,7 +620,7 @@ func (a *AppController) renderOmniboxView(
 			a.ensureLexiconHitsRefresh()
 			a.ensureLexiconTopWordsRefresh()
 			days, err, loaded, _ := a.lexiconHitsSnapshot()
-			renderLexiconStatsBand(c, theme, days, loaded, err, len(cfg.Glossary.Terms))
+			renderLexiconStatsBandWithRetry(c, theme, days, loaded, err, len(cfg.Glossary.Terms), a.retryLexiconHits)
 		}
 		searchRow := ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center)
 		searchRow.Children(func() {
@@ -716,7 +724,7 @@ func (a *AppController) renderOmniboxView(
 			}
 			a.ensureClipboardStatsRefresh()
 			stats, _ := a.clipboardStatsSnapshot()
-			renderClipboardStatsBand(c, theme, stats, func(kind string) {
+			renderClipboardStatsBandWithRetry(c, theme, stats, func(kind string) {
 				a.clipboardStatsMu.Lock()
 				if a.clipboardStats.filter == kind {
 					a.clipboardStats.filter = ""
@@ -725,7 +733,7 @@ func (a *AppController) renderOmniboxView(
 				}
 				a.clipboardStatsMu.Unlock()
 				a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: state.OmniboxQuery})
-			})
+			}, a.retryClipboardStats)
 		}
 		if a.omniboxActionMenuOpen(state) {
 			a.renderOmniboxActionMenu(c, theme, state)
@@ -735,8 +743,20 @@ func (a *AppController) renderOmniboxView(
 
 		if len(items) == 0 {
 			renderClipboardStats()
-			if state.OmniboxTab == config.TabAgent && a.agentRefreshing() {
+			hasClipboardFilter := state.OmniboxTab == config.TabClipboard && a.clipboardStatsFilter() != ""
+			hasQuery := strings.TrimSpace(state.OmniboxQuery) != ""
+			if state.OmniboxTab == config.TabAgent && a.agentRefreshing() && !hasQuery {
 				kitStateView(c, theme, kitStateLoading, "arrow.clockwise", "正在加载 Agent 会话…", "", nil)
+			} else if hasQuery || hasClipboardFilter {
+				kitSearchEmptyState(c, theme, omniboxEmptyText(state.OmniboxTab), state.OmniboxQuery, hasClipboardFilter, func() {
+					if hasClipboardFilter {
+						a.clipboardStatsMu.Lock()
+						a.clipboardStats.filter = ""
+						a.clipboardStatsMu.Unlock()
+					}
+					a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: ""})
+					a.uiState.searchHandle.RequestFocus(c)
+				})
 			} else {
 				kitStateView(c, theme, kitStateEmpty, omniboxTabIcon(state.OmniboxTab), omniboxEmptyText(state.OmniboxTab), "", nil)
 			}

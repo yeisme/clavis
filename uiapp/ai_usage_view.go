@@ -60,6 +60,14 @@ func (c *AppController) invalidateAIUsage() {
 	c.aiUsageMu.Unlock()
 }
 
+func (c *AppController) retryAIUsage() {
+	c.aiUsageMu.Lock()
+	c.aiUsageLoaded = false
+	c.aiUsageErr = nil
+	c.aiUsageMu.Unlock()
+	c.ensureAIUsageRefresh()
+}
+
 func (c *AppController) aiUsageSnapshot() ([]AIUsageDay, error, bool, bool) {
 	c.aiUsageMu.RLock()
 	defer c.aiUsageMu.RUnlock()
@@ -79,9 +87,9 @@ func (a *AppController) renderAIUsageBand(c *ui.Context, theme *ui.Theme) {
 		ui.Spacer(c)
 		switch {
 		case err != nil:
-			ui.Text(c, "AI 用量暂不可用").Key("ai-usage-error").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+			kitInlineError(c, theme, "ai-usage-error", "AI 用量暂不可用", a.retryAIUsage)
 		case !loaded || refreshing:
-			ui.Text(c, "正在加载 AI 用量…").Key("ai-usage-loading").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+			kitInlineLoading(c, theme, "ai-usage-loading", "正在加载 AI 用量…")
 		case aiUsageTotalRequests(days) == 0:
 			ui.Text(c, "近 7 日无 AI 调用记录").Key("ai-usage-empty").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 		default:
