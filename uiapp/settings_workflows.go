@@ -503,7 +503,7 @@ func (a *AppController) renderWorkflowsSection(c *ui.Context, theme *ui.Theme, c
 				item := workflows[i]
 				row := settingsListRow(c, theme, "workflow:"+item.ID, !isNew && item.ID == selected)
 				row.Children(func() {
-					ui.Text(c, item.ID).FontSize(typeLabel).FontWeight(600).TextColor(accentInk(theme, theme.Surface)).SingleLine().Shrink(0)
+					ui.Text(c, item.ID).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Shrink(0)
 					if item.Name != "" {
 						ui.Text(c, item.Name).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().Grow(1).MinWidth(0)
 					} else {
@@ -668,7 +668,7 @@ func (a *AppController) renderWorkflowStepsCard(c *ui.Context, theme *ui.Theme) 
 			step := steps[i]
 			row := settingsListRow(c, theme, fmt.Sprintf("workflow-step:%d", i), i == index)
 			row.Children(func() {
-				ui.Text(c, workflowStepTitle(step, i)).FontSize(typeLabel).FontWeight(600).TextColor(accentInk(theme, theme.Surface)).SingleLine().Shrink(0)
+				ui.Text(c, workflowStepTitle(step, i)).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Shrink(0)
 				if step.Action != "" {
 					ui.Text(c, step.Action).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().Grow(1).MinWidth(0)
 				} else {

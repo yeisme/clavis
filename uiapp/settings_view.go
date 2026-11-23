@@ -378,7 +378,7 @@ func (a *AppController) renderSettingsPaneHeader(c *ui.Context, theme *ui.Theme,
 	// stays deliberately tight so the first card of every section is reachable
 	// without scrolling at the window's default size.
 	ui.Row(c).FillWidth().Height(controlHeight).Gap(space8).AlignItems(ui.Center).Children(func() {
-		renderSemanticIcon(c, meta.Icon, IconSize16, theme.Accent)
+		renderSemanticIcon(c, meta.Icon, IconSize16, secondaryInk(theme))
 		ui.Column(c).Gap(space1).Grow(1).Children(func() {
 			ui.Text(c, groupLabel+" / "+meta.Label).FontSize(typeTitle).FontWeight(600).TextColor(theme.Text).SingleLine()
 			ui.Text(c, meta.Hint).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
@@ -387,7 +387,7 @@ func (a *AppController) renderSettingsPaneHeader(c *ui.Context, theme *ui.Theme,
 			if settingsStatusIsFailure(statusMsg) {
 				settingsBanner(c, theme.Danger, statusMsg)
 			} else {
-				kitStatusPill(c, theme, statusMsg, chipAccent)
+				kitStatusPill(c, theme, statusMsg, chipNeutral)
 			}
 		}
 	})
@@ -593,7 +593,7 @@ func (a *AppController) renderSettingsAISection(
 
 	settingsEditorCard(c, theme, i18n.T("settings.card.ai_profiles"), func() {
 		settingsInsetGroup(c, theme, func() {
-			ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
+			ui.Column(c).FillWidth().Gap(space6).Children(func() {
 				ui.Text(c, i18n.T("settings.ai.active_profile")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 				selected := 0
 				for i, prof := range profiles {
@@ -602,30 +602,24 @@ func (a *AppController) renderSettingsAISection(
 						break
 					}
 				}
-				ui.Row(c).Gap(space6).Children(func() {
+				ui.Row(c).FillWidth().Wrap().Gap(space8).AlignItems(ui.Center).Children(func() {
 					for i, prof := range profiles {
 						p, active := prof, i == selected
-						clicked := false
-						TiltCard3D(c, "settings-ai-prof:"+p.ID, effectiveSpatialAppearance(c, cfg.Main.Appearance), TiltCardOpts{
-							Width: 180, Height: 54, Radius: radiusChip, Accent: theme.Accent, Interactive: true,
-						}, func() {
-							pill := ui.ButtonBase(c).FillWidth().FillHeight().Padding(space2, space10).Radius(radiusChip).FocusRing(false)
+						pill := ui.ButtonBase(c).Key("settings-ai-prof:"+p.ID).Height(space32).Padding(space4, space14).Radius(radiusChip).FocusRing(false)
+						if active {
+							pill.Background(theme.Accent)
+						} else {
+							pill.Background(theme.Surface).Border(space1, hairline(theme))
+						}
+						pill.Children(func() {
+							txt := ui.Text(c, p.ID).FontSize(typeLabel).SingleLine()
 							if active {
-								pill.Background(theme.Accent)
+								txt.TextColor(theme.AccentText).FontWeight(600)
 							} else {
-								pill.Background(theme.Background).Border(1, theme.Border)
+								txt.TextColor(theme.Text)
 							}
-							pill.Children(func() {
-								txt := ui.Text(c, p.ID).FontSize(typeLabel).SingleLine()
-								if active {
-									txt.TextColor(theme.AccentText).FontWeight(600)
-								} else {
-									txt.TextColor(theme.Text)
-								}
-							})
-							clicked = pill.Clicked()
 						})
-						if clicked {
+						if pill.Clicked() {
 							_ = a.SelectAIProfile(p.ID)
 						}
 					}
@@ -767,10 +761,6 @@ func (a *AppController) renderAIKeychainCard(
 func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *ui.Theme, diag DiagnosticsSnapshot) {
 	settingsEditorCard(c, theme, i18n.T("settings.card.permissions"), func() {
 		svc := c.Services()
-		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
-			TelemetryGauge3D(c, "permission-accessibility", boolGauge(diag.Permissions.Accessibility), i18n.T("settings.perm.accessibility"), strconv.FormatBool(diag.Permissions.Accessibility), theme.Accent, effectiveSpatialAppearance(c, a.Config().Main.Appearance))
-			TelemetryGauge3D(c, "permission-input-monitoring", boolGauge(diag.Permissions.InputMonitoring), i18n.T("settings.perm.input_monitoring"), strconv.FormatBool(diag.Permissions.InputMonitoring), theme.Accent, effectiveSpatialAppearance(c, a.Config().Main.Appearance))
-		})
 		renderPermRow(c, theme, i18n.T("settings.perm.accessibility"), diag.Permissions.Accessibility, func() {
 			go func() {
 				_, _ = a.PromptPermission("accessibility")
@@ -792,7 +782,6 @@ func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *u
 
 	ui.Grid(c).Columns(2).Gap(10).FillWidth().Children(func() {
 		settingsEditorCard(c, theme, i18n.T("settings.card.diagnostics"), func() {
-			TelemetryGauge3D(c, "monitor-health", boolGauge(diag.MonitorRunning), i18n.T("settings.diag.monitor"), strconv.FormatBool(diag.MonitorRunning), theme.Accent, effectiveSpatialAppearance(c, a.Config().Main.Appearance))
 			secureInput := "false"
 			if v, ok := diag.Permissions.Details["secureInput"]; ok && v != "" {
 				secureInput = v
@@ -860,7 +849,7 @@ func (a *AppController) renderSettingsConfigsSection(c *ui.Context, theme *ui.Th
 
 	settingsEditorCard(c, theme, i18n.T("settings.card.config_dir"), func() {
 		ui.Row(c).FillWidth().Gap(10).AlignItems(ui.Center).Children(func() {
-			renderSemanticIcon(c, "folder", 14, theme.Accent)
+			renderSemanticIcon(c, "folder", 14, secondaryInk(theme))
 			ui.Text(c, dir).FontSize(typeLabel).TextColor(theme.Text).Grow(1)
 			if ui.PrimaryButton(c, i18n.T("settings.configs.open_dir")).Clicked() {
 				_ = a.OpenConfigDirectory()
@@ -990,6 +979,16 @@ func configFileDescription(kind config.ConfigFileKind) string {
 		return i18n.T("settings.configs.desc.glossary")
 	case config.FileIMERules:
 		return i18n.T("settings.configs.desc.ime_rules")
+	case config.FilePrompts:
+		if i18n.IsChinese() {
+			return "带参数槽位的 AI 提示词模板"
+		}
+		return "AI prompt templates with interactive slots"
+	case config.FileComponents:
+		if i18n.IsChinese() {
+			return "扩展脚本与自定义面板组件"
+		}
+		return "Custom scripts and panel components"
 	case config.FileWorkflows:
 		return i18n.T("settings.configs.desc.workflows")
 	default:

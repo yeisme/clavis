@@ -722,9 +722,6 @@ func (a *AppController) renderIMERulesCard(c *ui.Context, theme *ui.Theme, cfg c
 				details = append(details, i18n.T("settings.ime.restore_on_leave"))
 			}
 			tone := chipNeutral
-			if rule.PreferredMode == config.IMEModeNative {
-				tone = chipAccent
-			}
 
 			ui.Row(c).Key(fmt.Sprintf("ime-rule:%d:%s", idx, targetLabel)).FillWidth().Gap(space8).AlignItems(ui.Center).Padding(space2, 0).Children(func() {
 				ui.Column(c).Grow(1).MinWidth(0).Gap(space2).Children(func() {
@@ -1268,7 +1265,7 @@ func (a *AppController) renderLeaderTree(
 				// A fixed indent: a Spacer would grow into the free width.
 				ui.Box(c).Width(float32(depth) * 18).Shrink(0)
 			}
-			keycap(c, theme, node.Key, keyToneAccent)
+			keycap(c, theme, node.Key, keyToneNeutral)
 			ui.Text(c, node.Label).FontSize(typeLabel).TextColor(theme.Text).SingleLine().Grow(1).MinWidth(0)
 			ui.Text(c, string(node.Action.Type)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 		})
@@ -1622,7 +1619,7 @@ func (a *AppController) renderSnippetsSection(c *ui.Context, theme *ui.Theme, cf
 				matches++
 				row := settingsListRow(c, theme, "snippet:"+item.ID, item.ID == selected)
 				row.Children(func() {
-					ui.Text(c, item.Trigger).FontSize(typeLabel).FontWeight(600).TextColor(accentInk(theme, theme.Surface)).SingleLine().Shrink(0)
+					ui.Text(c, item.Trigger).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Shrink(0)
 					ui.Text(c, item.Description).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().Grow(1).MinWidth(0)
 				})
 				if row.Clicked() {
