@@ -2,6 +2,7 @@ package uiapp
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"strings"
 	"sync"
@@ -391,13 +392,21 @@ func (a *AppController) renderOmniboxPreviewBody(
 		if content == "" {
 			content = item.Title
 		}
-		source := strings.TrimSpace(item.Subtitle)
-		ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
-			previewBadge(c, theme, "clipboard", source, false)
-			if item.KeyHint == engine.KeyHintPinned {
-				previewBadge(c, theme, "pin.fill", i18n.T("common.pinned"), true)
-			}
-		})
+		source := strings.TrimSpace(item.ClipboardSourceApp)
+		if source != "" || item.KeyHint == engine.KeyHintPinned {
+			ui.Row(c).FillWidth().Gap(space4).AlignItems(ui.Center).Children(func() {
+				if source != "" {
+					previewBadge(c, theme, "macwindow", source, false)
+				}
+				if item.KeyHint == engine.KeyHintPinned {
+					previewBadge(c, theme, "pin.fill", i18n.T("common.pinned"), false)
+				}
+			})
+		}
+		if col, ok := parseHexSwatch(content); ok {
+			renderColorPreviewCard(c, theme, content, col)
+			return
+		}
 		ui.Text(c, i18n.Tf("preview.clipboard_stats", utf8.RuneCountInString(content), previewLineCount(content))).
 			FontSize(typeMicro).
 			TextColor(theme.TextMuted).
@@ -527,7 +536,8 @@ func (a *AppController) renderOmniboxPreviewBody(
 	}
 }
 
-// renderPreviewActionHints lists the primary and secondary contextual actions.
+// renderPreviewActionHints lists the primary and secondary contextual actions
+// on one compact row so the preview keeps its vertical budget for content.
 func (a *AppController) renderPreviewActionHints(c *ui.Context, theme *ui.Theme, item engine.OmniboxItem) {
 	specs := engine.AvailableItemActions(item)
 	if len(specs) == 0 {
@@ -538,30 +548,80 @@ func (a *AppController) renderPreviewActionHints(c *ui.Context, theme *ui.Theme,
 		shown = shown[:2]
 	}
 	ui.Divider(c)
-	ui.Column(c).FillWidth().Gap(space4).Children(func() {
+	ui.Row(c).FillWidth().Wrap().Gap(space12).AlignItems(ui.Center).Children(func() {
 		for _, spec := range shown {
 			keyHint(c, theme, adaptActionShortcut(spec.Shortcut), spec.Label, keyToneNeutral)
 		}
 	})
 }
 
-func previewBadge(c *ui.Context, theme *ui.Theme, iconName, label string, accent bool) {
-	fg := theme.TextMuted
-	bg := theme.Background
-	border := withAlpha(theme.Border, alphaStrong)
-	if accent {
-		fg = theme.Accent
-		bg = withAlpha(theme.Accent, alphaSubtle)
-		border = withAlpha(theme.Accent, alphaHalf)
-	}
+func previewBadge(c *ui.Context, theme *ui.Theme, iconName, label string, _ bool) {
+	// Passive metadata badges stay strictly neutral gray (clavis-visual-spec.md §0:
+	// system blue is reserved for selection, focus, actionable feedback, and running state).
+	fg := secondaryInk(theme)
+	bg := tileFill(theme)
+	border := hairline(theme)
 	ui.Box(c).Padding(space1, space6).Radius(radius4).Background(bg).Border(space1, border).Children(func() {
-		ui.Row(c).Gap(space2).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).Gap(space4).AlignItems(ui.Center).Children(func() {
 			if iconName != "" {
 				renderSemanticIcon(c, iconName, typeMicro-1, fg)
 			}
 			ui.Text(c, label).FontSize(typeMicro).FontWeight(600).TextColor(fg).SingleLine()
 		})
 	})
+}
+
+func renderColorPreviewCard(c *ui.Context, theme *ui.Theme, raw string, col ui.Color) {
+	ui.Box(c).FillWidth().Height(88).Radius(radiusCard).Background(col).Border(space1, hairline(theme))
+	hexStr := strings.ToUpper(strings.TrimSpace(raw))
+	rgbStr := fmt.Sprintf("rgb(%d, %d, %d)", col.R, col.G, col.B)
+	if col.A < 255 {
+		rgbStr = fmt.Sprintf("rgba(%d, %d, %d, %.2f)", col.R, col.G, col.B, float64(col.A)/255.0)
+	}
+	h, s, l := colorToHSL(col)
+	hslStr := fmt.Sprintf("hsl(%d°, %d%%, %d%%)", h, s, l)
+	kitInsetWell(c, theme, func() {
+		colorFormatRow := func(label, value string) {
+			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, label).Width(36).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+				ui.Text(c, value).Font("monospace").FontSize(typeMeta).TextColor(theme.Text).SingleLine().Grow(1)
+			})
+		}
+		colorFormatRow("HEX", hexStr)
+		colorFormatRow("RGB", rgbStr)
+		colorFormatRow("HSL", hslStr)
+	})
+}
+
+func colorToHSL(col ui.Color) (h, s, l int) {
+	r := float64(col.R) / 255.0
+	g := float64(col.G) / 255.0
+	b := float64(col.B) / 255.0
+	maxV := math.Max(r, math.Max(g, b))
+	minV := math.Min(r, math.Min(g, b))
+	lf := (maxV + minV) / 2.0
+	var hf, sf float64
+	if maxV != minV {
+		d := maxV - minV
+		if lf > 0.5 {
+			sf = d / (2.0 - maxV - minV)
+		} else {
+			sf = d / (maxV + minV)
+		}
+		switch maxV {
+		case r:
+			hf = (g - b) / d
+			if g < b {
+				hf += 6
+			}
+		case g:
+			hf = (b-r)/d + 2
+		case b:
+			hf = (r-g)/d + 4
+		}
+		hf *= 60
+	}
+	return int(math.Round(hf)), int(math.Round(sf * 100)), int(math.Round(lf * 100))
 }
 
 // renderPreviewLines renders text line by line so long, multi-line content can
@@ -733,25 +793,23 @@ func fallbackActionIcon(explicit, title, subtitle string) string {
 // renderClipboardMediaPreview shows the thumbnail and metadata for image/file/video entries.
 func (a *AppController) renderClipboardMediaPreview(c *ui.Context, theme *ui.Theme, item engine.OmniboxItem, m engine.ClipboardMedia) {
 	a.resetMediaPreview(item)
-	source := strings.TrimSpace(item.Subtitle)
-	ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
-		previewBadge(c, theme, "app.badge", source, false)
+	source := strings.TrimSpace(item.ClipboardSourceApp)
+	if source == "" {
+		source = strings.TrimSpace(item.Subtitle)
+	}
+	meta := clipboardMediaMetaRows(m)
+	ui.Row(c).FillWidth().Wrap().Gap(space4).AlignItems(ui.Center).Children(func() {
+		if source != "" {
+			previewBadge(c, theme, "macwindow", source, false)
+		}
 		if item.KeyHint == engine.KeyHintPinned {
-			previewBadge(c, theme, "pin.fill", i18n.T("common.pinned"), true)
+			previewBadge(c, theme, "pin.fill", i18n.T("common.pinned"), false)
+		}
+		for _, row := range meta {
+			previewBadge(c, theme, "", row, false)
 		}
 	})
-	if meta := clipboardMediaMetaRows(m); len(meta) > 0 {
-		ui.Row(c).FillWidth().Gap(space2).AlignItems(ui.Center).Children(func() {
-			for _, row := range meta {
-				previewBadge(c, theme, "info.circle", row, false)
-			}
-		})
-	}
 	if m.Kind == "image" || m.Kind == "video" {
-		// Keep media metadata visually separate from the zoom controls. The
-		// 12pt breathing room also protects the footer's ⌘I action when the
-		// preview is at its compact height.
-		ui.Box(c).Height(space12)
 		a.renderClipboardMediaToolbar(c, theme, m)
 	}
 	kitInsetWell(c, theme, func() {

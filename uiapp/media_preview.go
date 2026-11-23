@@ -219,40 +219,38 @@ func (a *AppController) renderClipboardMediaToolbar(c *ui.Context, theme *ui.The
 	p := a.uiState.mediaPreview
 	canvasWidth, _ := c.Size()
 	fitPercent := mediaFitPercent(m, canvasWidth, mediaCanvasHeight)
-	ui.Row(c).FillWidth().Gap(space2).AlignItems(ui.Center).Children(func() {
-		// The preview rail is intentionally compact (especially at the minimum
-		// Capsule width), so visible text labels stay readable without relying on
-		// clipped icon+label pills. These are still real buttons with localized
-		// labels and keyboard-focus behavior.
-		button := func(label string, active bool, fn func()) {
-			b := ui.ButtonBase(c).Height(controlHeight).Padding(space2, space4).Radius(radiusPill).FocusRing(false)
-			if label != "−" && label != "+" && label != i18n.T("preview.media.fit") && label != i18n.T("preview.media.original") {
-				b.Width(42)
+	ui.Row(c).FillWidth().Gap(space4).AlignItems(ui.Center).Children(func() {
+		// Compact 24pt rounded-6pt controls matching clavis-visual-spec.md §1.3C:
+		// − / percentage / + grouped on the left, Fit / Original beside them.
+		button := func(label string, active bool, fixedW float32, fn func()) {
+			b := ui.ButtonBase(c).Height(space24).Padding(space2, space8).Radius(radiusChip).FocusRing(false)
+			if fixedW > 0 {
+				b.Width(fixedW).Padding(space2, space4)
 			}
 			if active {
 				b.Background(theme.Accent.Alpha(alphaSubtle)).Border(space1, theme.Accent.Alpha(alphaHalf))
 			} else {
 				b.Background(tileFill(theme)).Border(space1, hairline(theme))
 			}
-			color := theme.TextMuted
+			color := secondaryInk(theme)
 			if active {
 				color = accentInk(theme, surfaceBase(theme))
 			}
 			b.Children(func() {
-				ui.Text(c, label).FontSize(typeMicro).FontWeight(600).TextColor(color).SingleLine()
+				ui.Text(c, label).FontSize(typeMeta).FontWeight(600).TextColor(color).SingleLine()
 			})
 			if b.Clicked() {
 				fn()
 			}
 		}
-		button("−", false, func() { a.adjustMediaZoom(-mediaZoomStep) })
-		zoomReadout := mediaZoomLabelWithFit(p.mode, p.zoom, fitPercent)
-		button(zoomReadout, false, func() { a.setMediaZoom(MediaZoomFit, 1) })
-		button("+", false, func() { a.adjustMediaZoom(mediaZoomStep) })
-		button(i18n.T("preview.media.fit"), p.mode == MediaZoomFit, func() { a.setMediaZoom(MediaZoomFit, 1) })
-		button(i18n.T("preview.media.original"), p.mode == MediaZoomOriginal, func() { a.setMediaZoom(MediaZoomOriginal, 1) })
-		// The readout is a stable percentage between − and +. The separate Fit
-		// and Original controls remain localized action buttons.
+		ui.Row(c).Gap(space2).AlignItems(ui.Center).Children(func() {
+			button("−", false, space24, func() { a.adjustMediaZoom(-mediaZoomStep) })
+			zoomReadout := mediaZoomLabelWithFit(p.mode, p.zoom, fitPercent)
+			button(zoomReadout, false, 44, func() { a.setMediaZoom(MediaZoomFit, 1) })
+			button("+", false, space24, func() { a.adjustMediaZoom(mediaZoomStep) })
+		})
+		button(i18n.T("preview.media.fit"), p.mode == MediaZoomFit, 0, func() { a.setMediaZoom(MediaZoomFit, 1) })
+		button(i18n.T("preview.media.original"), p.mode == MediaZoomOriginal, 0, func() { a.setMediaZoom(MediaZoomOriginal, 1) })
 		ui.Spacer(c)
 	})
 }
