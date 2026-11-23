@@ -328,6 +328,9 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 		if a.followUpComposing() {
 			return
 		}
+		if a.composerDismissActiveMenu(cfg, state) {
+			return
+		}
 		a.Dispatch(engine.Event{Type: engine.EventEscape})
 	})
 	// Cycle AI profiles with ⌘⇧M / Ctrl+Shift+M.
@@ -343,6 +346,13 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 	}
 	if phase == aiPhaseDone || phase == aiPhaseFailed || phase == aiPhasePending || phase == aiPhaseAwaitingHuman {
 		c.OnWindowShortcut(0, ui.KeyTab, func() {
+			if a.followUpComposing() {
+				return
+			}
+			if a.composerTryAcceptCompletion(cfg, state) {
+				a.uiState.followUpHandle.RequestFocus(c)
+				return
+			}
 			if phase == aiPhaseAwaitingHuman {
 				capsuleUI.setReviseOpen(a, true)
 			}
@@ -362,9 +372,14 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 			if a.followUpComposing() {
 				return
 			}
+			if a.composerTryAcceptCompletion(cfg, state) {
+				a.uiState.followUpHandle.RequestFocus(c)
+				return
+			}
 			trimmed := strings.TrimSpace(a.uiState.followUpQuery)
 			if trimmed != "" {
-				a.submitAIFollowUpOrRetry(state, trimmed)
+				a.recordComposerHistory(trimmed)
+				a.submitAIFollowUpOrRetry(state, a.composePromptWithChips(trimmed))
 				return
 			}
 			a.Dispatch(engine.Event{Type: engine.EventAcceptAIOutput})
@@ -374,7 +389,11 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 			if a.followUpComposing() {
 				return
 			}
-			a.submitAIFollowUpOrRetry(state, a.uiState.followUpQuery)
+			if a.composerTryAcceptCompletion(cfg, state) {
+				a.uiState.followUpHandle.RequestFocus(c)
+				return
+			}
+			a.submitAIFollowUpOrRetry(state, a.composePromptWithChips(a.uiState.followUpQuery))
 		})
 	}
 	if state.AIOutput != "" {
@@ -466,19 +485,18 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 				}
 			})
 
-		// Blocking human-approval action zone for awaiting_human, or multi-line
-		// composer for pending / done / failed (and on-demand revision in awaiting_human).
+		// Blocking human-approval action zone for awaiting_human, or upgraded
+		// multi-line Input Composer for pending / running / done / failed
+		// (and on-demand revision in awaiting_human).
 		if phase == aiPhaseAwaitingHuman {
 			a.renderAICenterBlockingApprovalGate(c, theme, state, review)
 			if capsuleUI.reviseOpen(a) {
-				a.renderAICenterComposer(c, theme, state, phase)
+				a.renderInputComposer(c, theme, cfg, state, phase)
 			}
 			return
 		}
 
-		if phase == aiPhaseDone || phase == aiPhaseFailed || phase == aiPhasePending {
-			a.renderAICenterComposer(c, theme, state, phase)
-		}
+		a.renderInputComposer(c, theme, cfg, state, phase)
 
 		ui.Divider(c)
 		a.renderAICenterFooter(c, theme, state, phase)
@@ -813,109 +831,7 @@ func (a *AppController) renderAICenterBlockingApprovalGate(c *ui.Context, theme 
 	})
 }
 
-func (a *AppController) renderAICenterComposer(c *ui.Context, theme *ui.Theme, state engine.State, phase aiInteractionPhase) {
-	followUp := a.uiState.followUpQuery
-	placeholder := i18n.T("ai.followup_placeholder")
-	sendLabel := "Send"
-	if i18n.IsChinese() {
-		sendLabel = "发送"
-	}
-	switch phase {
-	case aiPhaseFailed:
-		if i18n.IsChinese() {
-			placeholder = "编辑问题重新发送（Shift+Enter 换行），或按 ⌘R 原样重试…"
-			sendLabel = "重试"
-		} else {
-			placeholder = "Edit prompt to retry (Shift+Enter newline), or press ⌘R…"
-			sendLabel = "Retry"
-		}
-	case aiPhasePending:
-		if i18n.IsChinese() {
-			placeholder = "输入多行提问（Enter 发送，Shift+Enter 换行）…"
-		} else {
-			placeholder = "Type a multi-line prompt (Enter to send, Shift+Enter for newline)…"
-		}
-	case aiPhaseAwaitingHuman:
-		if i18n.IsChinese() {
-			placeholder = "输入修改意见继续追问（Enter 发送，Shift+Enter 换行）…"
-		} else {
-			placeholder = "Enter revision instructions (Enter to send, Shift+Enter for newline)…"
-		}
-	}
-
-	ui.Row(c).Key("ai-center-composer").Label("ai-center-composer").FillWidth().Gap(space8).AlignItems(ui.End).Children(func() {
-		in := ui.TextArea(c, &followUp).
-			Bind(&a.uiState.followUpHandle).
-			Lines(2, 4).
-			Placeholder(placeholder).
-			Label(i18n.T("ai.followup_label")).
-			Grow(1)
-
-		// Track IME composition so candidate selection never sends or closes.
-		in.ObserveInput(func(ev ui.InputEvent) {
-			switch ev.Kind {
-			case ui.InputCompose:
-				capsuleUI.setFollowUpComposing(a, ev.Text != "")
-			case ui.InputText, ui.InputCommand:
-				capsuleUI.setFollowUpComposing(a, false)
-			}
-		})
-		if !in.Focused() {
-			capsuleUI.setFollowUpComposing(a, false)
-		} else {
-			capsuleUI.setFollowUpComposing(a, in.Composing())
-		}
-
-		in.OnTextKey(func(k ui.TextKey) bool {
-			if a.followUpComposing() && k.Mods == 0 {
-				switch k.Key {
-				case ui.KeyEnter, ui.KeyEscape, ui.KeyUp, ui.KeyDown, ui.KeyTab:
-					// IME candidate selection keys belong to the input method.
-					return true
-				default:
-					return false
-				}
-			}
-			switch {
-			case k.Key == ui.KeyTab && k.Mods == 0:
-				return true
-			case k.Key == ui.KeyEscape && k.Mods == 0:
-				a.Dispatch(engine.Event{Type: engine.EventEscape})
-				return true
-			case k.Key == ui.KeyEnter && k.Mods == 0:
-				trimmed := strings.TrimSpace(k.Text())
-				if trimmed == "" {
-					trimmed = strings.TrimSpace(a.uiState.followUpQuery)
-				}
-				if trimmed != "" {
-					k.SetText("")
-					a.submitAIFollowUpOrRetry(state, trimmed)
-					return true
-				}
-				if phase == aiPhaseFailed {
-					a.submitAIFollowUpOrRetry(state, "")
-					return true
-				}
-				if phase == aiPhaseDone || phase == aiPhaseAwaitingHuman {
-					a.Dispatch(engine.Event{Type: engine.EventAcceptAIOutput})
-					return true
-				}
-				return true
-			}
-			return false
-		})
-
-		if in.Changed() {
-			a.uiState.followUpQuery = followUp
-		}
-
-		canSend := strings.TrimSpace(a.uiState.followUpQuery) != "" || (phase == aiPhaseFailed && aiRetryPrompt(state) != "")
-		sendBtn := ui.Button(c, sendLabel).Key("ai-center-send").Label(sendLabel).Disabled(!canSend).Shrink(0)
-		if sendBtn.Clicked() && canSend {
-			a.submitAIFollowUpOrRetry(state, a.uiState.followUpQuery)
-		}
-	})
-}
+// renderInputComposer lives in input_composer.go.
 
 func (a *AppController) renderAICenterFooter(c *ui.Context, theme *ui.Theme, state engine.State, phase aiInteractionPhase) {
 	ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {

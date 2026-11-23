@@ -56,6 +56,7 @@ func (s *capsuleEphemeralStore) reset(ctrl *AppController) {
 	delete(s.aiReviseOpen, ctrl)
 	delete(s.agentLaneFilter, ctrl)
 	delete(s.agentDrawerOpen, ctrl)
+	resetComposerState(ctrl)
 }
 
 func (s *capsuleEphemeralStore) laneFilter(ctrl *AppController) string {

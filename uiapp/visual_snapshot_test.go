@@ -67,7 +67,10 @@ func TestVisualSnapshots(t *testing.T) {
 func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, motion string) {
 	core := preset == "spatial_3d" && motion == "full"
 	coreFrame := func(name string) bool {
-		return name == "01-leader" || name == "02-omnibox" || (len(name) >= 2 && name[:2] == "06") || (len(name) >= 2 && name[:2] == "09") || (len(name) >= 2 && name[:2] == "18")
+		return name == "01-leader" || name == "02-omnibox" ||
+			name == "06-ai" || name == "06a-ai-streaming" || name == "06b-ai-review" ||
+			name == "06c-ai-error" || name == "06d-ai-followup" || name == "06e-ai-pending" ||
+			(len(name) >= 2 && name[:2] == "09") || (len(name) >= 2 && name[:2] == "18")
 	}
 	if core {
 		t.Log("snapshot coverage: full matrix for core frames; non-core frames are narrowed to spatial_3d/full")
@@ -442,6 +445,75 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, m
 			pf.ctrl.renderAIStreamingView(c, theme, cfgSnap, pendingState)
 		})
 	}, pwAI, phAI, 2, nil)
+
+	// Input Composer snapshots (6 distinct states: plain, multiline, @mention menu,
+	// /command menu, context chips, and running/locked state).
+	if core {
+		renderComposerSnapshot := func(name string, st engine.State, draft string, chips []composerChip, agents []agentsession.Session) {
+			cf := newInteractionFixture(t, mockHTTPDoer{fn: func(*http.Request) (*http.Response, error) {
+				return sseResponse("ok"), nil
+			}})
+			applySnapAppearance(cf.ctrl)
+			if len(agents) > 0 {
+				cf.ctrl.agentMu.Lock()
+				cf.ctrl.agentRefreshStarted = true
+				cf.ctrl.agentSessions = agents
+				cf.ctrl.agentMu.Unlock()
+			}
+			cf.ctrl.uiState.followUpQuery = draft
+			resetComposerState(cf.ctrl)
+			for _, ch := range chips {
+				cf.ctrl.addComposerChip(ch)
+			}
+			shoot(name, func(c *ui.Context) {
+				cfgSnap := cf.ctrl.Config()
+				theme := resolveAppearanceTheme(c, cfgSnap.Main.Appearance.Theme)
+				c.SetTheme(theme)
+				radius := NormalizeCornerRadius(cfgSnap.Main.Appearance)
+				card := applyCapsuleCardSurface(c, applyTextLocale(ui.Column(c).Fill().Radius(radius).Clip()), theme, cfgSnap.Main.Appearance)
+				card.Children(func() {
+					cf.ctrl.renderCapsuleHeader(c, theme, cfgSnap, st, cf.ctrl.Diagnostics())
+					ui.Divider(c)
+					cf.ctrl.renderAIStreamingView(c, theme, cfgSnap, st)
+				})
+			}, pwAI, phAI, 2, nil)
+		}
+
+		composerCtx := engine.CapsuleContext{
+			AppName:          "Visual Studio Code",
+			SelectedText:     "func loadConfig(path string) (Config, error) { ... }",
+			ClipboardPreview: "go test ./uiapp/... -count=1",
+		}
+		doneState := engine.State{
+			Phase:        engine.PhaseAIStreaming,
+			AIMode:       "",
+			AIPrompt:     "解释这段配置加载函数",
+			AISourceText: composerCtx.SelectedText,
+			AIOutput:     "该函数从磁盘读取配置并执行字段校验，失败时返回具体路径错误。",
+			AIComplete:   true,
+			Context:      composerCtx,
+		}
+		sampleChips := []composerChip{
+			{ID: "selection", Kind: "selection", Icon: "text.badge.plus", Label: "选中文本", Detail: "52", Payload: composerCtx.SelectedText},
+			{ID: "clipboard", Kind: "clipboard", Icon: "doc.on.clipboard", Label: "剪贴板", Detail: "go test ./uiapp/…", Payload: composerCtx.ClipboardPreview},
+			{ID: "app:Visual Studio Code", Kind: "app", Icon: "macwindow", Label: "Visual Studio Code", Payload: "Active application: Visual Studio Code"},
+		}
+		renderComposerSnapshot("06f-composer-plain", doneState, "再帮我补一个错误分支的单元测试", nil, nil)
+		renderComposerSnapshot("06g-composer-multiline", doneState, "请按以下 3 点改写：\n1. 使用 errors.Is 区分文件不存在\n2. 补充超时上下文\n3. 输出最小 diff", nil, nil)
+		renderComposerSnapshot("06h-composer-mention", doneState, "请结合 @", nil, agentSessionsFixture[:2])
+		renderComposerSnapshot("06i-composer-slash", doneState, "/", nil, nil)
+		renderComposerSnapshot("06j-composer-chips", doneState, "结合这些上下文给出最小修复方案", sampleChips, nil)
+		runningState := engine.State{
+			Phase:        engine.PhaseAIStreaming,
+			AIMode:       "",
+			AIPrompt:     "结合这些上下文给出最小修复方案",
+			AISourceText: composerCtx.SelectedText,
+			AIOutput:     "正在结合选中代码与剪贴板日志生成修复方案：\n\n1. 先校验文件读取权限；",
+			AIComplete:   false,
+			Context:      composerCtx,
+		}
+		renderComposerSnapshot("06k-composer-running", runningState, "", sampleChips[:2], nil)
+	}
 
 	f.ctrl.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.T("hud.copied")})
 	w, h = PreferredCapsuleSizeForState(f.ctrl.State(), appearance)
