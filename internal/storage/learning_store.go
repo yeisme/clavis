@@ -265,13 +265,20 @@ func (s *LearningStore) RecordIMECommit(ctx context.Context, pinyinKey, word, pr
 		return nil
 	}
 	now := time.Now().UTC().UnixNano()
-	if _, err := s.db.Execute(ctx, `INSERT INTO ime_user_lexicon(pinyin_key,word,frequency,last_used_ns,pinned) VALUES(?,?,?,?,?) ON CONFLICT(pinyin_key,word) DO UPDATE SET frequency=frequency+1,last_used_ns=excluded.last_used_ns,pinned=MAX(pinned,excluded.pinned)`, pinyinKey, word, 1, now, boolInt(pinned)); err != nil {
-		return err
+	wordUpdate := sqlite.Statement{
+		SQL:  `INSERT INTO ime_user_lexicon(pinyin_key,word,frequency,last_used_ns,pinned) VALUES(?,?,?,?,?) ON CONFLICT(pinyin_key,word) DO UPDATE SET frequency=frequency+1,last_used_ns=MAX(last_used_ns,excluded.last_used_ns),pinned=MAX(pinned,excluded.pinned)`,
+		Args: []any{pinyinKey, word, 1, now, boolInt(pinned)},
 	}
 	if prevWord != "" {
-		if _, err := s.db.Execute(ctx, `INSERT INTO ime_bigrams(prev_word,word,transition_count,last_used_ns) VALUES(?,?,1,?) ON CONFLICT(prev_word,word) DO UPDATE SET transition_count=transition_count+1,last_used_ns=excluded.last_used_ns`, prevWord, word, now); err != nil {
+		bigramUpdate := sqlite.Statement{
+			SQL:  `INSERT INTO ime_bigrams(prev_word,word,transition_count,last_used_ns) VALUES(?,?,1,?) ON CONFLICT(prev_word,word) DO UPDATE SET transition_count=transition_count+1,last_used_ns=MAX(last_used_ns,excluded.last_used_ns)`,
+			Args: []any{prevWord, word, now},
+		}
+		if _, err := s.db.Transaction(ctx, []sqlite.Statement{wordUpdate, bigramUpdate}); err != nil {
 			return err
 		}
+	} else if _, err := s.db.Execute(ctx, wordUpdate.SQL, wordUpdate.Args...); err != nil {
+		return err
 	}
 	// Update the write-through mirror only after persistence succeeds, so a
 	// cancelled or failed write cannot make the hot path observe phantom data.
