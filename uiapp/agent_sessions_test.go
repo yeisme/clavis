@@ -1,7 +1,9 @@
 package uiapp
 
 import (
+	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -97,6 +99,99 @@ func TestAgentOperationResultStatesAndUnknownDoesNotRetry(t *testing.T) {
 	unknown := host.OperationResult{State: host.StateUnknown, Retryable: false}
 	if unknown.Retryable || agentStatusMessage(unknown) != "状态未知" {
 		t.Fatalf("unknown result=%+v", unknown)
+	}
+}
+
+type fakeAgentFocuser struct {
+	available      bool
+	result         host.OperationResult
+	mu             sync.Mutex
+	availableCalls int
+	focusCalls     int
+	focusedID      string
+}
+
+func (f *fakeAgentFocuser) Name() string { return "fake-herdr" }
+func (f *fakeAgentFocuser) Available(context.Context) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.availableCalls++
+	return f.available, nil
+}
+func (f *fakeAgentFocuser) Focus(_ context.Context, sessionID string) (host.OperationResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.focusCalls++
+	f.focusedID = sessionID
+	return f.result, nil
+}
+
+func renderAgentToast(t *testing.T, message string) *ui.Tester {
+	t.Helper()
+	tester := ui.NewTester(func(c *ui.Context) { ui.Text(c, message).Key("agent-focus-toast") }, 420, 48)
+	tester.Frame()
+	return tester
+}
+
+func TestAgentFocusUnavailableCopiesWithHonestToast(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	var copied, toast string
+	ctrl.mu.Lock()
+	ctrl.ClipboardWriter = func(value string) { copied = value }
+	ctrl.OnShowIMEPill = func(message string, _ *host.CursorAnchor) { toast = message }
+	ctrl.mu.Unlock()
+	restore := setAgentFocuserForTest(&fakeAgentFocuser{available: false})
+	defer restore()
+	if !ctrl.agentItemAction(engine.OmniboxItem{UtilityValue: "agent-session:codex:sess-1"}) {
+		t.Fatal("session item was not handled")
+	}
+	// The action needs a matching in-memory session before it can focus/copy.
+	ctrl.agentMu.Lock()
+	ctrl.agentSessions = []agentsession.Session{{ID: "sess-1", Provider: "codex"}}
+	ctrl.agentMu.Unlock()
+	ctrl.agentItemAction(engine.OmniboxItem{UtilityValue: "agent-session:codex:sess-1"})
+	waitUntil(t, time.Second, func() bool { return strings.Contains(toast, "无法直接跳转") }, "honest unavailable focus toast")
+	if copied != "sess-1" {
+		t.Fatalf("copied=%q", copied)
+	}
+	if !renderAgentToast(t, toast).HasText("无法直接跳转") {
+		t.Fatalf("toast=%q", toast)
+	}
+}
+
+func TestAgentFocusSuccessAndUnknownUseThreeHonestBranches(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result host.OperationResult
+		want   string
+	}{
+		{name: "success", result: host.OperationResult{State: host.StateReady}, want: "已跳转到该会话"},
+		{name: "unknown", result: host.OperationResult{State: host.StateUnknown, Retryable: false}, want: "未找到该会话的面板"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl, _, _, _ := newTestController(t, nil)
+			var toast string
+			ctrl.mu.Lock()
+			ctrl.OnShowIMEPill = func(message string, _ *host.CursorAnchor) { toast = message }
+			ctrl.mu.Unlock()
+			fake := &fakeAgentFocuser{available: true, result: tc.result}
+			restore := setAgentFocuserForTest(fake)
+			defer restore()
+			ctrl.agentMu.Lock()
+			ctrl.agentSessions = []agentsession.Session{{ID: "sess-2", Provider: "codex"}}
+			ctrl.agentMu.Unlock()
+			ctrl.ClipboardWriter = func(string) {}
+			ctrl.agentItemAction(engine.OmniboxItem{UtilityValue: "agent-session:codex:sess-2"})
+			waitUntil(t, time.Second, func() bool { return strings.Contains(toast, tc.want) }, "focus branch toast")
+			if !renderAgentToast(t, toast).HasText(tc.want) {
+				t.Fatalf("toast=%q", toast)
+			}
+			fake.mu.Lock()
+			if fake.focusCalls != 1 || fake.focusedID != "sess-2" {
+				t.Fatalf("focusCalls=%d focusedID=%q", fake.focusCalls, fake.focusedID)
+			}
+			fake.mu.Unlock()
+		})
 	}
 }
 

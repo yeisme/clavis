@@ -19,6 +19,8 @@ import (
 type agentCommand struct{ ID, Label, Detail string }
 
 var agentOperationResults sync.Map
+var agentFocuserMu sync.RWMutex
+var agentFocuser agentsession.Focuser = agentsession.NewHerdrFocuser()
 var agentLatestResult struct {
 	sync.RWMutex
 	result host.OperationResult
@@ -283,6 +285,61 @@ func agentStatusSubtitle(result host.OperationResult) string {
 	return ""
 }
 func isAgentItem(item engine.OmniboxItem) bool { return strings.HasPrefix(item.ID, "agent-") }
+func currentAgentFocuser() agentsession.Focuser {
+	agentFocuserMu.RLock()
+	defer agentFocuserMu.RUnlock()
+	return agentFocuser
+}
+
+func setAgentFocuserForTest(f agentsession.Focuser) func() {
+	agentFocuserMu.Lock()
+	previous := agentFocuser
+	agentFocuser = f
+	agentFocuserMu.Unlock()
+	return func() { agentFocuserMu.Lock(); agentFocuser = previous; agentFocuserMu.Unlock() }
+}
+
+func (c *AppController) focusAgentSession(sessionID string) {
+	focuser := currentAgentFocuser()
+	if focuser == nil {
+		c.ShowToastOrHUD("已复制会话 ID（未检测到 herdr，无法直接跳转）")
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		available, err := focuser.Available(ctx)
+		if err != nil || !available {
+			c.ShowToastOrHUD("已复制会话 ID（未检测到 herdr，无法直接跳转）")
+			c.openGhosttyForAgentFallback()
+			return
+		}
+		result, focusErr := focuser.Focus(ctx, sessionID)
+		if focusErr != nil || result.State == host.StateFailed {
+			message := agentsession.SanitizeDiagnosticText(result.Message)
+			if message == "" {
+				message = "无法直接跳转"
+			}
+			c.ShowToastOrHUD("已复制会话 ID（" + message + "）")
+			return
+		}
+		if result.State == host.StateUnknown {
+			c.ShowToastOrHUD("已复制会话 ID（未找到该会话的面板）")
+			return
+		}
+		c.ShowToastOrHUD("已跳转到该会话")
+	}()
+}
+
+func (c *AppController) openGhosttyForAgentFallback() {
+	c.mu.Lock()
+	bridge := c.Bridge
+	c.mu.Unlock()
+	if bridge != nil {
+		_ = bridge.OpenApp(context.Background(), "com.mitchellh.ghostty")
+	}
+}
+
 func (c *AppController) agentItemAction(item engine.OmniboxItem) bool {
 	value := item.UtilityValue
 	if value == "agent-refresh-status" {
@@ -326,16 +383,10 @@ func (c *AppController) agentItemAction(item engine.OmniboxItem) bool {
 		return true
 	}
 	if err := c.writeClipboardText(selected.ID); err != nil {
-		c.ShowToastOrHUD(err.Error())
-	} else {
-		c.ShowToastOrHUD("已复制会话 ID，可粘贴到 Agent 窗口")
+		c.ShowToastOrHUD(agentsession.SanitizeDiagnosticText(err.Error()))
+		return true
 	}
-	c.mu.Lock()
-	bridge := c.Bridge
-	c.mu.Unlock()
-	if bridge != nil {
-		_ = bridge.OpenApp(context.Background(), "com.mitchellh.ghostty")
-	}
+	c.focusAgentSession(selected.ID)
 	return true
 }
 func (c *AppController) AgentRefresh() { go c.refreshAgentSessions() }
