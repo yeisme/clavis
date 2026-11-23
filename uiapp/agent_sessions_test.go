@@ -204,12 +204,20 @@ func TestAgentDiagnosticTextIsRedactedBeforeUI(t *testing.T) {
 
 func TestAgentSwitchTabTriggersRefreshAndRendersPreview(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
+	// Let NewAppController's startup refresh settle first so we prove
+	// EventSwitchTab itself triggers a fresh refresh.
+	waitUntil(t, 3*time.Second, func() bool {
+		res := ctrl.agentRecordedOperationResult()
+		return !ctrl.agentRefreshing() && res.State != "" && res.State != host.StateRefreshing
+	}, "startup agent refresh should settle")
+	initialObserved := ctrl.agentRecordedOperationResult().ObservedAt
+
 	ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions})
 	ctrl.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: config.TabAgent})
 	waitUntil(t, 3*time.Second, func() bool {
 		res := ctrl.agentRecordedOperationResult()
-		return !ctrl.agentRefreshing() && res.State != "" && res.State != host.StateRefreshing
-	}, "switching to Agent tab should trigger and finish session refresh")
+		return !ctrl.agentRefreshing() && res.ObservedAt.After(initialObserved)
+	}, "switching to Agent tab should trigger and finish a fresh session refresh")
 
 	ctrl.agentMu.Lock()
 	ctrl.agentSessions = []agentsession.Session{{
@@ -241,8 +249,8 @@ func TestAgentSwitchTabTriggersRefreshAndRendersPreview(t *testing.T) {
 }
 
 func TestAgentVisibleItemsIsolatesControllerResults(t *testing.T) {
-	ctrlA, _, _, _ := newTestController(t, nil)
-	ctrlB, _, _, _ := newTestController(t, nil)
+	ctrlA := &AppController{}
+	ctrlB := &AppController{}
 	setAgentOperationResult(ctrlA, host.OperationResult{State: host.StateReady, ObservedAt: time.Now()})
 	setAgentOperationResult(ctrlB, host.OperationResult{State: host.StateFailed, Message: "Codex 数据源不可用", Retryable: true})
 	itemsA := ctrlA.agentVisibleItems("")
