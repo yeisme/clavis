@@ -177,12 +177,7 @@ func (s *SQLiteClipboardStore) initSchema(ctx context.Context, enableWAL bool) e
 			INSERT INTO clipboard_fts(clipboard_fts, rowid, content, source_app_name)
 			VALUES ('delete', old.rowid, old.content, old.source_app_name);
 		END`,
-		`CREATE TRIGGER IF NOT EXISTS clipboard_items_au AFTER UPDATE ON clipboard_items BEGIN
-			INSERT INTO clipboard_fts(clipboard_fts, rowid, content, source_app_name)
-			VALUES ('delete', old.rowid, old.content, old.source_app_name);
-			INSERT INTO clipboard_fts(rowid, content, source_app_name)
-			VALUES (new.rowid, new.content, new.source_app_name);
-		END`,
+		clipboardFTSUpdateTrigger,
 	}
 	for _, stmt := range ddl {
 		if _, err := s.db.Execute(ctx, stmt); err != nil {
@@ -224,42 +219,35 @@ var mediaColumns = [][2]string{
 	{"duration_ms", "INTEGER NOT NULL DEFAULT 0"},
 }
 
-// backfillClipboardMetadata upgrades legacy rows in bounded batches. A failed
-// row is skipped so startup remains available and a later open can retry it.
+const clipboardFTSUpdateTrigger = `CREATE TRIGGER IF NOT EXISTS clipboard_items_au
+	AFTER UPDATE OF content, source_app_name ON clipboard_items BEGIN
+		INSERT INTO clipboard_fts(clipboard_fts, rowid, content, source_app_name)
+		VALUES ('delete', old.rowid, old.content, old.source_app_name);
+		INSERT INTO clipboard_fts(rowid, content, source_app_name)
+		VALUES (new.rowid, new.content, new.source_app_name);
+	END`
+
+// Backfill byte counts and repair the external-content index in one transaction.
+// Legacy rows may predate the FTS triggers, so deleting their old index entries
+// during the update can fail. Rebuild from the contents after filling metadata.
 func (s *SQLiteClipboardStore) backfillClipboardMetadata(ctx context.Context) error {
-	// Legacy databases can have an external-content FTS index without a row for
-	// every clipboard item. Its UPDATE trigger would reject an otherwise safe
-	// metadata-only backfill, so suspend that trigger for this idempotent pass.
-	if _, err := s.db.Execute(ctx, `DROP TRIGGER IF EXISTS clipboard_items_au`); err != nil {
-		return err
+	rows, err := s.db.Query(ctx, `SELECT 1 FROM sqlite_schema WHERE name='clipboard_items_au' AND instr(sql, 'AFTER UPDATE OF content, source_app_name')=0
+		UNION ALL SELECT 1 FROM clipboard_items WHERE kind='' LIMIT 1`)
+	if err != nil {
+		return fmt.Errorf("inspect clipboard metadata backfill: %w", err)
 	}
-	defer func() {
-		_, _ = s.db.Execute(context.Background(), `CREATE TRIGGER IF NOT EXISTS clipboard_items_au AFTER UPDATE ON clipboard_items BEGIN INSERT INTO clipboard_fts(clipboard_fts, rowid, content, source_app_name) VALUES ('delete', old.rowid, old.content, old.source_app_name); INSERT INTO clipboard_fts(rowid, content, source_app_name) VALUES (new.rowid, new.content, new.source_app_name); END`)
-	}()
-	for {
-		rows, err := s.db.Query(ctx, `SELECT id, content FROM clipboard_items WHERE kind='' LIMIT 256`)
-		if err != nil {
-			return fmt.Errorf("query clipboard metadata backfill: %w", err)
-		}
-		if len(rows.Values) == 0 {
-			return nil
-		}
-		for _, row := range rows.Values {
-			if len(row) < 2 {
-				continue
-			}
-			id, ok := row[0].(string)
-			if !ok || id == "" {
-				continue
-			}
-			content, _ := row[1].(string)
-			// Individual updates keep the migration retryable even for legacy
-			// databases whose FTS auxiliary tables are incomplete.
-			_, _ = s.db.Execute(ctx, `UPDATE clipboard_items SET kind=?, byte_size=? WHERE id=? AND kind=''`, string(clipboard.KindText), len([]byte(content)), id)
-		}
-		// A failed row remains blank by contract; do not spin forever during startup.
+	if len(rows.Values) == 0 {
 		return nil
 	}
+	if _, err := s.db.Transaction(ctx, []sqlite.Statement{
+		{SQL: `DROP TRIGGER IF EXISTS clipboard_items_au`},
+		{SQL: clipboardFTSUpdateTrigger},
+		{SQL: `UPDATE clipboard_items SET kind='text', byte_size=length(CAST(content AS BLOB)) WHERE kind=''`},
+		{SQL: `INSERT INTO clipboard_fts(clipboard_fts) VALUES ('rebuild')`},
+	}); err != nil {
+		return fmt.Errorf("backfill clipboard metadata and FTS index: %w", err)
+	}
+	return nil
 }
 
 func (s *SQLiteClipboardStore) migrateMediaColumns(ctx context.Context) error {
