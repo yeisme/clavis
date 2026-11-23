@@ -1653,6 +1653,7 @@ type MainConfig struct {
 	Daemon       DaemonConfig       `json:"daemon"`
 	CLI          CLIConfig          `json:"cli"`
 	MCP          MCPConfig          `json:"mcp"`
+	Terminal     TerminalConfig     `json:"terminal"`
 }
 
 func DefaultMainConfig() MainConfig {
@@ -1668,6 +1669,7 @@ func DefaultMainConfig() MainConfig {
 		Daemon:       DefaultDaemonConfig(),
 		CLI:          DefaultCLIConfig(),
 		MCP:          DefaultMCPConfig(),
+		Terminal:     DefaultTerminalConfig(),
 	}
 }
 
@@ -1722,6 +1724,10 @@ func MainConfigFromTOML(tbl *toml.Table) (MainConfig, error) {
 	if err != nil {
 		return MainConfig{}, err
 	}
+	terminalTbl, _, err := optionalTable(tbl, "terminal", "")
+	if err != nil {
+		return MainConfig{}, err
+	}
 	mcpTbl, _, err := optionalTable(tbl, "mcp", "")
 	if err != nil {
 		return MainConfig{}, err
@@ -1767,11 +1773,15 @@ func MainConfigFromTOML(tbl *toml.Table) (MainConfig, error) {
 	if err != nil {
 		return MainConfig{}, err
 	}
+	terminal, err := decodeTerminalConfig(terminalTbl, "terminal")
+	if err != nil {
+		return MainConfig{}, err
+	}
 	mcp, err := decodeMCPConfig(mcpTbl, "mcp")
 	if err != nil {
 		return MainConfig{}, err
 	}
-	return MainConfig{Trigger: trigger, Keymap: keymap, Appearance: appearance, AI: aiCfg, Clipboard: clipboard, IME: ime, InputEngine: inputEngine, SelectionBar: selectionBar, Daemon: daemon, CLI: cli, MCP: mcp}, nil
+	return MainConfig{Trigger: trigger, Keymap: keymap, Appearance: appearance, AI: aiCfg, Clipboard: clipboard, IME: ime, InputEngine: inputEngine, SelectionBar: selectionBar, Daemon: daemon, CLI: cli, MCP: mcp, Terminal: terminal}, nil
 }
 
 // Encode serializes MainConfig to deterministic TOML.
@@ -1788,5 +1798,6 @@ func (c MainConfig) Encode() string {
 	root.Set("daemon", toml.TableVal(c.Daemon.toTOML()))
 	root.Set("cli", toml.TableVal(c.CLI.toTOML()))
 	root.Set("mcp", toml.TableVal(c.MCP.toTOML()))
+	root.Set("terminal", toml.TableVal(c.Terminal.toTOML()))
 	return toml.Encode(root)
 }
