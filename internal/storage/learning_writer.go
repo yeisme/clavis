@@ -433,14 +433,16 @@ func (s *LearningStore) mirrorIMECommit(pinyinKey, word, prevWord string, pinned
 	s.mu.Lock()
 	k := lexKey{pinyinKey, word, ""}
 	v, exists := s.lex[k]
-	if !exists && len(s.lex) >= MaxLexMirrorEntries {
-		evictLexEntries(s.lex, MaxLexMirrorEntries)
+	if !exists {
+		if len(s.lex) >= MaxLexMirrorEntries {
+			s.evictLexEntriesLocked(MaxLexMirrorEntries)
+		}
+		s.indexLexKeyLocked(k)
 	}
 	v.frequency++
-	v.lastUsed = now
+	v.lastUsed = max(v.lastUsed, now)
 	v.pinned = v.pinned || pinned
 	s.lex[k] = v
-	s.addReadingLocked(word, pinyinKey)
 	if prevWord != "" {
 		bk := [2]string{prevWord, word}
 		b, bexists := s.bigrams[bk]
@@ -448,7 +450,7 @@ func (s *LearningStore) mirrorIMECommit(pinyinKey, word, prevWord string, pinned
 			evictBigramEntries(s.bigrams, MaxBigramMirrorEntries)
 		}
 		b.frequency++
-		b.lastUsed = now
+		b.lastUsed = max(b.lastUsed, now)
 		s.bigrams[bk] = b
 	}
 	s.mu.Unlock()

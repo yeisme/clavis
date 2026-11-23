@@ -96,12 +96,13 @@ type useValue struct {
 
 // LearningStore owns the learning, frecency, and prompt-history tables on a shared SQLite DB.
 type LearningStore struct {
-	db       *sqlite.DB
-	mu       sync.RWMutex
-	lex      map[lexKey]lexValue
-	bigrams  map[[2]string]lexValue
-	readings map[string]map[string]struct{}
-	uses     map[string]useValue
+	db           *sqlite.DB
+	mu           sync.RWMutex
+	lex          map[lexKey]lexValue
+	lexByInitial map[byte]map[lexKey]struct{}
+	bigrams      map[[2]string]lexValue
+	readings     map[string]map[string]struct{}
+	uses         map[string]useValue
 }
 
 // NewLearningStore creates learning tables and loads their bounded hot mirror.
@@ -215,7 +216,7 @@ func (s *LearningStore) load(ctx context.Context) error {
 			w := truncateUTF8(str(r, 1), MaxMirrorKeyBytes)
 			if py != "" && w != "" {
 				s.lex[lexKey{py, w, ""}] = lexValue{int64val(r, 2), int64val(r, 4) != 0, int64val(r, 3)}
-				s.addReadingLocked(w, py)
+				s.indexLexKeyLocked(lexKey{py, w, ""})
 			}
 		}
 	}
@@ -282,28 +283,7 @@ func (s *LearningStore) RecordIMECommit(ctx context.Context, pinyinKey, word, pr
 	}
 	// Update the write-through mirror only after persistence succeeds, so a
 	// cancelled or failed write cannot make the hot path observe phantom data.
-	lk := lexKey{pinyinKey, word, ""}
-	s.mu.Lock()
-	v, exists := s.lex[lk]
-	if !exists && len(s.lex) >= MaxLexMirrorEntries {
-		evictLexEntries(s.lex, MaxLexMirrorEntries)
-	}
-	v.frequency++
-	v.lastUsed = now
-	v.pinned = v.pinned || pinned
-	s.lex[lk] = v
-	s.addReadingLocked(word, pinyinKey)
-	if prevWord != "" {
-		bk := [2]string{prevWord, word}
-		b, bexists := s.bigrams[bk]
-		if !bexists && len(s.bigrams) >= MaxBigramMirrorEntries {
-			evictBigramEntries(s.bigrams, MaxBigramMirrorEntries)
-		}
-		b.frequency++
-		b.lastUsed = now
-		s.bigrams[bk] = b
-	}
-	s.mu.Unlock()
+	s.mirrorIMECommit(pinyinKey, word, prevWord, pinned, now)
 	return nil
 }
 
@@ -397,17 +377,34 @@ func (s *LearningStore) BigramWordsForPrefix(prevWord, syllablePrefix string) []
 	return out
 }
 
-func (s *LearningStore) addReadingLocked(word, reading string) {
-	if word == "" || reading == "" {
-		return
-	}
+func (s *LearningStore) indexLexKeyLocked(k lexKey) {
 	if s.readings == nil {
 		s.readings = make(map[string]map[string]struct{})
 	}
-	if s.readings[word] == nil {
-		s.readings[word] = make(map[string]struct{})
+	if s.readings[k.word] == nil {
+		s.readings[k.word] = make(map[string]struct{})
 	}
-	s.readings[word][reading] = struct{}{}
+	s.readings[k.word][k.pinyin] = struct{}{}
+	if s.lexByInitial == nil {
+		s.lexByInitial = make(map[byte]map[lexKey]struct{})
+	}
+	initial := k.pinyin[0]
+	if s.lexByInitial[initial] == nil {
+		s.lexByInitial[initial] = make(map[lexKey]struct{})
+	}
+	s.lexByInitial[initial][k] = struct{}{}
+}
+
+func (s *LearningStore) deleteLexKeyLocked(k lexKey) {
+	delete(s.lex, k)
+	readings := s.readings[k.word]
+	delete(readings, k.pinyin)
+	if len(readings) == 0 {
+		delete(s.readings, k.word)
+	}
+	if k.pinyin != "" {
+		delete(s.lexByInitial[k.pinyin[0]], k)
+	}
 }
 
 func (s *LearningStore) DeleteLearnedWord(ctx context.Context, pinyinKey, word string) error {
@@ -424,7 +421,7 @@ func (s *LearningStore) DeleteLearnedWord(ctx context.Context, pinyinKey, word s
 		return err
 	}
 	s.mu.Lock()
-	delete(s.lex, lexKey{pinyinKey, word, ""})
+	s.deleteLexKeyLocked(lexKey{pinyinKey, word, ""})
 	s.mu.Unlock()
 	return nil
 }
@@ -503,8 +500,9 @@ func (s *LearningStore) customUserCandidatesForPrefix(prefix string) []ime.UserC
 	}
 	s.mu.RLock()
 	var byWord map[string]int32
-	for k, v := range s.lex {
-		if k.prev == "" && strings.HasPrefix(k.pinyin, prefix) {
+	for k := range s.lexByInitial[prefix[0]] {
+		if strings.HasPrefix(k.pinyin, prefix) {
+			v := s.lex[k]
 			if byWord == nil {
 				byWord = make(map[string]int32, 8)
 			}
@@ -805,7 +803,8 @@ func evictTarget(capLimit int) int {
 	return target
 }
 
-func evictLexEntries(m map[lexKey]lexValue, capLimit int) {
+func (s *LearningStore) evictLexEntriesLocked(capLimit int) {
+	m := s.lex
 	target := evictTarget(capLimit)
 	if len(m) <= target {
 		return
@@ -830,7 +829,7 @@ func evictLexEntries(m map[lexKey]lexValue, capLimit int) {
 	})
 	drop := len(items) - target
 	for i := 0; i < drop; i++ {
-		delete(m, items[i].k)
+		s.deleteLexKeyLocked(items[i].k)
 	}
 }
 

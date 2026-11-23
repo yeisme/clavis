@@ -130,6 +130,48 @@ func TestLexiconHitsDailyIncludesZeroDaysAndBatchesAsync(t *testing.T) {
 	}
 }
 
+func TestLearningStoreDeletedReadingLeavesBigramCandidates(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, ":memory:", sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewLearningStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := store.RecordIMECommit(ctx, "women", "我们", "说", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(store.BigramWordsForPrefix("说", "men")) != 1 {
+		t.Fatal("missing initial bigram candidate")
+	}
+	if err := store.DeleteLearnedWord(ctx, "women", "我们"); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.BigramWordsForPrefix("说", "men"); len(got) != 0 {
+		t.Fatalf("deleted reading still yielded candidates: %+v", got)
+	}
+}
+
+func BenchmarkLearnedCandidatePrefix(b *testing.B) {
+	store := mirrorOnlyStore()
+	for i := range MaxLexMirrorEntries {
+		key := fmt.Sprintf("%c%04d", 'a'+rune(i%26), i)
+		store.mirrorIMECommit(key, fmt.Sprintf("word%04d", i), "", false, int64(i))
+	}
+	store.mirrorIMECommit("nihao", "你好", "", false, 1)
+	b.ReportAllocs()
+	for b.Loop() {
+		if got := store.customUserCandidatesForPrefix("ni"); len(got) != 1 || got[0].Word != "你好" {
+			b.Fatalf("unexpected candidates: %v", got)
+		}
+	}
+}
+
 func TestLearningStoreRoundTripAndFrecency(t *testing.T) {
 	ctx := context.Background()
 	db, err := sqlite.Open(ctx, ":memory:", sqlite.OpenOptions{})
@@ -487,6 +529,13 @@ func TestLearningStoreBoundedMirrorsAndStringCaps(t *testing.T) {
 	lexN, bigN, usesN := ls.MirrorCounts()
 	if lexN == 0 || lexN > MaxLexMirrorEntries {
 		t.Fatalf("lex mirror count = %d, want (0, %d]", lexN, MaxLexMirrorEntries)
+	}
+	var readingCount int
+	for _, readings := range ls.readings {
+		readingCount += len(readings)
+	}
+	if readingCount != lexN {
+		t.Fatalf("reading index has %d entries for %d mirrored unigrams", readingCount, lexN)
 	}
 	if bigN == 0 || bigN > MaxBigramMirrorEntries {
 		t.Fatalf("bigram mirror count = %d, want (0, %d]", bigN, MaxBigramMirrorEntries)
