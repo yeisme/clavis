@@ -312,7 +312,10 @@ func (e *Engine) SetAICandidates(raw string, words []string) bool {
 	if raw == "" || raw != e.raw {
 		return false
 	}
-	e.ai = words
+	// Own the asynchronous result. Providers commonly reuse or append to their
+	// response slice after delivering it, and retaining the caller's backing
+	// array would race with candidate rebuilds under e.mu.
+	e.ai = slices.Clone(words)
 	e.rebuild(false)
 	return true
 }

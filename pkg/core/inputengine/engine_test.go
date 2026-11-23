@@ -243,6 +243,19 @@ func TestAICandidatesStaleAndAppended(t *testing.T) {
 	}
 }
 
+func TestAICandidatesCopyCallerSlice(t *testing.T) {
+	e := New(Options{CandidateCount: 9})
+	typeLetters(e, "nihao")
+	words := []string{"你好呀"}
+	if !e.SetAICandidates("nihao", words) {
+		t.Fatal("fresh AI result rejected")
+	}
+	words[0] = "caller mutation"
+	if got := texts(e.View()); !slices.Contains(got, "你好呀") || slices.Contains(got, "caller mutation") {
+		t.Fatalf("engine retained caller-owned AI slice: %v", got)
+	}
+}
+
 func TestRawLengthBounded(t *testing.T) {
 	e := New(Options{CandidateCount: 5})
 	for i := 0; i < 200; i++ {
