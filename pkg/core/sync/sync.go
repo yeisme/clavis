@@ -1154,40 +1154,19 @@ func unwrapWithSharedKey(shared, wrapped []byte) ([]byte, error) {
 	}
 	return gcm.Open(nil, wrapped[:gcm.NonceSize()], wrapped[gcm.NonceSize():], nil)
 }
+
+type wrappedADKReader interface {
+	GetWrappedADK(account, device string, signature []byte) ([]byte, error)
+}
+
 func (c *Client) ensureADK() error {
 	c.mu.Lock()
-	if len(c.adk) == 32 {
-		c.mu.Unlock()
+	ready := len(c.adk) == 32
+	c.mu.Unlock()
+	if ready {
 		return nil
 	}
-	a, d := c.accountID, c.deviceID
-	xpriv := c.xPrivateKey
-	priv := append(ed25519.PrivateKey(nil), c.privateKey...)
-	c.mu.Unlock()
-	wrapped, err := c.server.GetWrappedADK(a, d, ed25519.Sign(priv, wrappedADKRequestCanonical(a, d)))
-	if err == nil && len(wrapped) >= 32 {
-		senderPub, err := ecdh.X25519().NewPublicKey(wrapped[:32])
-		if err == nil {
-			shared, err := xpriv.ECDH(senderPub)
-			if err == nil {
-				adk, err := unwrapWithSharedKey(shared, wrapped[32:])
-				if err == nil && len(adk) == 32 {
-					c.mu.Lock()
-					c.adk = append([]byte(nil), adk...)
-					c.mu.Unlock()
-					return nil
-				}
-			}
-		}
-	}
-	adk := make([]byte, 32)
-	if _, err := io.ReadFull(rand.Reader, adk); err != nil {
-		return err
-	}
-	c.mu.Lock()
-	c.adk = adk
-	c.mu.Unlock()
-	return nil
+	return c.RefreshADK()
 }
 
 func (c *Client) publishWrappedADK() error {
@@ -1213,9 +1192,45 @@ func (c *Client) publishWrappedADK() error {
 // in-memory ADK only after authentication and AEAD verification succeed.
 func (c *Client) RefreshADK() error {
 	c.mu.Lock()
-	c.adk = nil
+	account, device, store := c.accountID, c.deviceID, c.store
+	xpriv, priv := c.xPrivateKey, c.privateKey
 	c.mu.Unlock()
-	return c.ensureADK()
+	reader, ok := store.(wrappedADKReader)
+	if !ok {
+		return errors.New("sync: wrapped ADK is unsupported by this store")
+	}
+	if account == "" || device == "" || xpriv == nil || len(priv) != ed25519.PrivateKeySize {
+		return errors.New("sync: a paired device is required to refresh the ADK")
+	}
+	wrapped, err := reader.GetWrappedADK(account, device, ed25519.Sign(priv, wrappedADKRequestCanonical(account, device)))
+	if err != nil {
+		return err
+	}
+	if len(wrapped) < 32 {
+		return errors.New("sync: wrapped ADK is incomplete")
+	}
+	publicKey, err := ecdh.X25519().NewPublicKey(wrapped[:32])
+	if err != nil {
+		return err
+	}
+	shared, err := xpriv.ECDH(publicKey)
+	if err != nil {
+		return err
+	}
+	adk, err := unwrapWithSharedKey(shared, wrapped[32:])
+	if err != nil {
+		return err
+	}
+	if len(adk) != 32 {
+		return errors.New("sync: wrapped ADK has invalid key length")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.accountID != account {
+		return errors.New("sync: account changed during ADK refresh")
+	}
+	c.adk = adk
+	return nil
 }
 func (c *Client) ADK() []byte {
 	c.mu.Lock()

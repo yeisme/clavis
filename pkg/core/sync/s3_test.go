@@ -1,9 +1,39 @@
 package sync
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"testing"
 )
+
+func TestClientRefreshADKFailurePreservesExistingKey(t *testing.T) {
+	server := NewServer()
+	store, err := NewServerStore(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := newDeviceIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := NewClientWithStore(store, "device", identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Login("account"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PairDeviceWithCredential("account", "device", c.privateKey.Public().(ed25519.PublicKey), c.credential); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RefreshADK(); err == nil {
+		t.Fatal("refresh succeeded without a wrapped key")
+	}
+	if !bytes.Equal(c.ADK(), identity.ADK) {
+		t.Fatal("failed refresh replaced the existing key")
+	}
+}
 
 func TestClientStoreBackedPullVerifiesThenDecrypts(t *testing.T) {
 	server := NewServer()
