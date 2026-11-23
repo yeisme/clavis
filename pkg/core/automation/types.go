@@ -3,6 +3,8 @@
 // MCP, or plugin package.
 package automation
 
+import "time"
+
 // RiskLevel describes the amount of care an action requires before it is run.
 type RiskLevel string
 
@@ -78,24 +80,92 @@ const (
 type ResultStatus string
 
 const (
-	ResultSucceeded ResultStatus = "succeeded"
-	ResultFailed    ResultStatus = "failed"
-	ResultSkipped   ResultStatus = "skipped"
+	ResultSucceeded     ResultStatus = "succeeded"
+	ResultFailed        ResultStatus = "failed"
+	ResultSkipped       ResultStatus = "skipped"
+	ResultAwaitingHuman ResultStatus = "awaiting_human"
+	ResultUnknown       ResultStatus = "unknown"
+	ResultRolledBack    ResultStatus = "rolled_back"
 )
+
+// ExecutionStatus is the stable workflow-level state exposed to workbench and
+// input surfaces. AwaitingHuman means the workflow is paused before a gated
+// action and has not been submitted to its provider.
+type ExecutionStatus string
+
+const (
+	ExecutionPending       ExecutionStatus = "pending"
+	ExecutionRunning       ExecutionStatus = "running"
+	ExecutionAwaitingHuman ExecutionStatus = "awaiting_human"
+	ExecutionSucceeded     ExecutionStatus = "succeeded"
+	ExecutionFailed        ExecutionStatus = "failed"
+	ExecutionCanceled      ExecutionStatus = "canceled"
+	ExecutionRolledBack    ExecutionStatus = "rolled_back"
+	ExecutionUnknown       ExecutionStatus = "unknown"
+)
+
+type StepStatus string
+
+const (
+	StepPending       StepStatus = "pending"
+	StepRunning       StepStatus = "running"
+	StepAwaitingHuman StepStatus = "awaiting_human"
+	StepSucceeded     StepStatus = "succeeded"
+	StepFailed        StepStatus = "failed"
+	StepSkipped       StepStatus = "skipped"
+	StepRolledBack    StepStatus = "rolled_back"
+	StepUnknown       StepStatus = "unknown"
+)
+
+type ApprovalStatus string
+
+const (
+	ApprovalNotRequired ApprovalStatus = "not_required"
+	ApprovalPending     ApprovalStatus = "pending"
+	ApprovalApproved    ApprovalStatus = "approved"
+	ApprovalRejected    ApprovalStatus = "rejected"
+	ApprovalUnknown     ApprovalStatus = "unknown"
+)
+
+type ApprovalState struct {
+	Status      ApprovalStatus `json:"status"`
+	StepID      string         `json:"stepId,omitempty"`
+	Reason      string         `json:"reason,omitempty"`
+	RequestedAt time.Time      `json:"requestedAt,omitzero"`
+	DecidedAt   time.Time      `json:"decidedAt,omitzero"`
+}
+
+type RollbackStatus string
+
+const (
+	RollbackNotRequested RollbackStatus = "not_requested"
+	RollbackRunning      RollbackStatus = "running"
+	RollbackSucceeded    RollbackStatus = "succeeded"
+	RollbackFailed       RollbackStatus = "failed"
+	RollbackUnknown      RollbackStatus = "unknown"
+)
+
+type RollbackState struct {
+	Status RollbackStatus `json:"status"`
+	Steps  []StepResult   `json:"steps,omitempty"`
+	Error  string         `json:"error,omitempty"`
+}
 
 // ActionDescriptor is the declarative metadata needed to validate and authorize
 // an action. InputSchema and OutputSchema contain JSON-compatible schema data;
 // their shape is intentionally not prescribed by this package.
 type ActionDescriptor struct {
-	ID           string         `json:"id"`
-	Name         string         `json:"name,omitempty"`
-	Description  string         `json:"description,omitempty"`
-	Provider     ProviderType   `json:"provider"`
-	Risk         RiskLevel      `json:"risk"`
-	Permissions  []Permission   `json:"permissions,omitempty"`
-	InputSchema  map[string]any `json:"inputSchema,omitempty"`
-	OutputSchema map[string]any `json:"outputSchema,omitempty"`
-	OutputMode   OutputMode     `json:"outputMode,omitempty"`
+	ID               string         `json:"id"`
+	Name             string         `json:"name,omitempty"`
+	Description      string         `json:"description,omitempty"`
+	Provider         ProviderType   `json:"provider"`
+	Risk             RiskLevel      `json:"risk"`
+	Permissions      []Permission   `json:"permissions,omitempty"`
+	InputSchema      map[string]any `json:"inputSchema,omitempty"`
+	OutputSchema     map[string]any `json:"outputSchema,omitempty"`
+	OutputMode       OutputMode     `json:"outputMode,omitempty"`
+	RequiresApproval bool           `json:"requiresApproval,omitempty"`
+	RollbackActionID string         `json:"rollbackActionId,omitempty"`
 }
 
 // ActionInvocation is a request to run one action. Input and Metadata are
@@ -144,7 +214,9 @@ type WorkflowStep struct {
 	// Keeping the declaration on each step preserves the historical slice-shaped
 	// ExecutionPlan API while allowing the runner to enforce it independently of
 	// any UI adapter.
-	RequiredInputs []string `json:"requiredInputs,omitempty"`
+	RequiredInputs   []string `json:"requiredInputs,omitempty"`
+	RequiresApproval bool     `json:"requiresApproval,omitempty"`
+	RollbackActionID string   `json:"rollbackActionId,omitempty"`
 }
 
 // WorkflowDefinition is a declarative, serializable workflow.
@@ -152,6 +224,7 @@ type WorkflowDefinition struct {
 	ID          string `json:"id"`
 	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
+	Goal        string `json:"goal,omitempty"`
 	// FailureMode is the policy inherited by steps without an explicit policy.
 	FailureMode FailureMode     `json:"failureMode,omitempty"`
 	Inputs      []WorkflowInput `json:"inputs,omitempty"`

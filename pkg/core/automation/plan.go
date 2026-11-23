@@ -60,6 +60,17 @@ func buildExecutionPlan(workflow WorkflowDefinition, registry ActionRegistry) (E
 		}
 		issues = filtered
 	}
+	if registry != nil {
+		for stepIndex := range workflow.Steps {
+			actionID := stepAction(workflow.Steps[stepIndex])
+			if descriptor, ok := lookupAction(registry, actionID); ok {
+				workflow.Steps[stepIndex].RequiresApproval = workflow.Steps[stepIndex].RequiresApproval || descriptor.RequiresApproval
+				if workflow.Steps[stepIndex].RollbackActionID == "" {
+					workflow.Steps[stepIndex].RollbackActionID = descriptor.RollbackActionID
+				}
+			}
+		}
+	}
 	for _, input := range workflow.Inputs {
 		if !input.Required || !isEmptyWorkflowInput(input.Default) {
 			continue

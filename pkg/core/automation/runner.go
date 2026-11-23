@@ -8,7 +8,9 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/pkg/core/jsonschema"
 )
 
@@ -33,6 +35,7 @@ func (f ProviderFunc) Invoke(ctx context.Context, invocation ActionInvocation) (
 type StepResult struct {
 	StepID     string           `json:"stepId"`
 	ActionID   string           `json:"actionId"`
+	Status     StepStatus       `json:"status"`
 	Invocation ActionInvocation `json:"invocation"`
 	Result     ActionResult     `json:"result"`
 }
@@ -42,10 +45,19 @@ type StepResult struct {
 // is intentionally not exposed for discarded outputs: discarded output may be
 // used by later bindings during this run, but is not a workflow result.
 type ExecutionResult struct {
-	Steps    []StepResult   `json:"steps"`
-	Outputs  map[string]any `json:"outputs,omitempty"`
-	Stopped  bool           `json:"stopped,omitempty"`
-	Canceled bool           `json:"canceled,omitempty"`
+	Goal          string               `json:"goal,omitempty"`
+	Status        ExecutionStatus      `json:"status"`
+	Steps         []StepResult         `json:"steps"`
+	Outputs       map[string]any       `json:"outputs,omitempty"`
+	Stopped       bool                 `json:"stopped,omitempty"`
+	Canceled      bool                 `json:"canceled,omitempty"`
+	CurrentStep   string               `json:"currentStep,omitempty"`
+	CurrentAction string               `json:"currentAction,omitempty"`
+	ResultLine    string               `json:"resultLine,omitempty"`
+	AwaitingHuman bool                 `json:"awaitingHuman,omitempty"`
+	Approval      ApprovalState        `json:"approval"`
+	Rollback      RollbackState        `json:"rollback"`
+	Operation     host.OperationResult `json:"operation"`
 }
 
 // Runner executes an ExecutionPlan serially using one provider.
@@ -64,6 +76,31 @@ func (f SchemaResolverFunc) OutputSchema(actionID string) (map[string]any, bool)
 // RunnerOption configures a Runner while preserving the historical constructor.
 type RunnerOption func(*Runner)
 
+// RollbackProvider is implemented by providers that can compensate a
+// previously successful action. A missing implementation leaves rollback
+// explicitly unknown instead of claiming that state was restored.
+type RollbackProvider interface {
+	Rollback(context.Context, ActionInvocation, ActionResult) (ActionResult, error)
+}
+
+type ApprovalDecision string
+
+const (
+	ApprovalDecisionPending  ApprovalDecision = "pending"
+	ApprovalDecisionApproved ApprovalDecision = "approved"
+	ApprovalDecisionRejected ApprovalDecision = "rejected"
+)
+
+type ApprovalRequest struct {
+	StepID   string `json:"stepId"`
+	ActionID string `json:"actionId"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+type ApprovalProvider interface {
+	RequestApproval(context.Context, ApprovalRequest) (ApprovalDecision, error)
+}
+
 // WithSchemaResolver enables runtime output-schema validation.
 func WithSchemaResolver(resolver SchemaResolver) RunnerOption {
 	return func(r *Runner) { r.SchemaResolver = resolver }
@@ -74,10 +111,25 @@ func WithActionRegistry(registry ActionRegistry) RunnerOption {
 	return WithSchemaResolver(NewRegistrySchemaResolver(registry))
 }
 
+func WithRollbackProvider(provider RollbackProvider) RunnerOption {
+	return func(r *Runner) { r.RollbackProvider = provider }
+}
+
+func WithApprovalProvider(provider ApprovalProvider) RunnerOption {
+	return func(r *Runner) { r.ApprovalProvider = provider }
+}
+
+func WithGoal(goal string) RunnerOption {
+	return func(r *Runner) { r.Goal = goal }
+}
+
 // Runner executes an ExecutionPlan serially using one provider.
 type Runner struct {
-	Provider       Provider
-	SchemaResolver SchemaResolver
+	Provider         Provider
+	SchemaResolver   SchemaResolver
+	RollbackProvider RollbackProvider
+	ApprovalProvider ApprovalProvider
+	Goal             string
 }
 
 // NewRunner constructs a provider-independent workflow runner.
@@ -119,8 +171,13 @@ func (r *Runner) run(ctx context.Context, plan ExecutionPlan, inputs map[string]
 	}
 
 	result = ExecutionResult{
-		Steps:   make([]StepResult, 0, len(plan)),
-		Outputs: make(map[string]any),
+		Goal:      r.Goal,
+		Status:    ExecutionPending,
+		Steps:     make([]StepResult, 0, len(plan)),
+		Outputs:   make(map[string]any),
+		Approval:  ApprovalState{Status: ApprovalNotRequired},
+		Rollback:  RollbackState{Status: RollbackNotRequested},
+		Operation: host.OperationResult{State: host.StateRefreshing, Code: "execution_pending"},
 	}
 	// internalOutputs includes discarded values because output bindings are an
 	// execution concern. Values are copied before being retained to prevent a
@@ -136,15 +193,49 @@ func (r *Runner) run(ctx context.Context, plan ExecutionPlan, inputs map[string]
 	}()
 
 	for index, step := range plan {
+		result.Status = ExecutionRunning
+		result.CurrentStep = step.ID
+		result.CurrentAction = stepAction(step)
 		if err := ctx.Err(); err != nil {
 			result.Canceled = true
+			result.Status = ExecutionCanceled
+			result.Operation = host.OperationResult{State: host.StateUnknown, Code: "cancelled", Message: "execution was cancelled", Retryable: false}
 			appendSkipped(&result, plan[index:], err)
 			return result, err
 		}
 
-		actionID := step.ActionID
-		if actionID == "" {
-			actionID = step.Action
+		actionID := stepAction(step)
+		if step.RequiresApproval {
+			request := ApprovalRequest{StepID: step.ID, ActionID: actionID, Reason: "approval required"}
+			decision := ApprovalDecisionPending
+			var approvalErr error
+			if r.ApprovalProvider != nil {
+				decision, approvalErr = r.ApprovalProvider.RequestApproval(ctx, request)
+			}
+			if approvalErr != nil {
+				result.Status = ExecutionUnknown
+				result.Approval = ApprovalState{Status: ApprovalUnknown, StepID: step.ID, Reason: approvalErr.Error(), RequestedAt: time.Now().UTC()}
+				result.Operation = host.OperationResult{State: host.StateUnknown, Code: "approval_unknown", Message: approvalErr.Error(), Retryable: false, ObservedAt: time.Now().UTC()}
+				result.Steps = append(result.Steps, StepResult{StepID: step.ID, ActionID: actionID, Status: StepUnknown, Invocation: ActionInvocation{ActionID: actionID}, Result: ActionResult{ActionID: actionID, Status: ResultUnknown, Error: approvalErr.Error()}})
+				return result, nil
+			}
+			if decision == ApprovalDecisionRejected {
+				result.Status = ExecutionFailed
+				result.Approval = ApprovalState{Status: ApprovalRejected, StepID: step.ID, Reason: "approval rejected", RequestedAt: time.Now().UTC(), DecidedAt: time.Now().UTC()}
+				result.Operation = host.OperationResult{State: host.StateFailed, Code: "approval_rejected", Message: "approval was rejected", Retryable: false, ObservedAt: time.Now().UTC()}
+				result.Steps = append(result.Steps, StepResult{StepID: step.ID, ActionID: actionID, Status: StepFailed, Invocation: ActionInvocation{ActionID: actionID}, Result: ActionResult{ActionID: actionID, Status: ResultFailed, Error: "approval was rejected"}})
+				return result, nil
+			}
+			if decision != ApprovalDecisionApproved {
+				result.Status = ExecutionAwaitingHuman
+				result.AwaitingHuman = true
+				result.Approval = ApprovalState{Status: ApprovalPending, StepID: step.ID, Reason: "approval required", RequestedAt: time.Now().UTC()}
+				result.Operation = host.OperationResult{State: host.StateDegraded, Code: "awaiting_human", Message: "approval is required before execution", Retryable: false, ObservedAt: time.Now().UTC()}
+				result.ResultLine = "Awaiting human approval"
+				result.Steps = append(result.Steps, StepResult{StepID: step.ID, ActionID: actionID, Status: StepAwaitingHuman, Invocation: ActionInvocation{ActionID: actionID}, Result: ActionResult{ActionID: actionID, Status: ResultAwaitingHuman, Error: "approval required"}})
+				return result, nil
+			}
+			result.Approval = ApprovalState{Status: ApprovalApproved, StepID: step.ID, Reason: "approved", RequestedAt: time.Now().UTC(), DecidedAt: time.Now().UTC()}
 		}
 		rawInput := step.Input
 		if rawInput == nil {
@@ -171,6 +262,8 @@ func (r *Runner) run(ctx context.Context, plan ExecutionPlan, inputs map[string]
 			result.Steps = append(result.Steps, stepResult)
 			if step.FailureMode == FailureStop {
 				result.Stopped = true
+				result.Status = ExecutionFailed
+				result.Operation = host.OperationResult{State: host.StateFailed, Code: "step_failed", Message: err.Error(), Retryable: false, ObservedAt: time.Now().UTC()}
 				appendSkipped(&result, plan[index+1:], errStepStop)
 				return result, nil
 			}
@@ -186,13 +279,20 @@ func (r *Runner) run(ctx context.Context, plan ExecutionPlan, inputs map[string]
 			if actionResult.Error == "" {
 				actionResult.Error = invokeErr.Error()
 			}
+			if actionResult.ErrorCategory == "" {
+				actionResult.ErrorCategory = ErrorCategory(invokeErr)
+			}
 		} else if actionResult.Status == "" {
 			actionResult.Status = ResultSucceeded
 		}
-		if actionResult.Status != ResultSucceeded && actionResult.Status != ResultFailed && actionResult.Status != ResultSkipped {
-			actionResult.Status = ResultFailed
+		if actionResult.Status == ResultFailed && actionResult.ErrorCategory == "" && actionResult.Error != "" {
+			actionResult.ErrorCategory = ErrorCategory(errors.New(actionResult.Error))
+		}
+		if actionResult.Status != ResultSucceeded && actionResult.Status != ResultFailed && actionResult.Status != ResultSkipped && actionResult.Status != ResultAwaitingHuman && actionResult.Status != ResultUnknown && actionResult.Status != ResultRolledBack {
+			actionResult.Status = ResultUnknown
+			actionResult.ErrorCategory = "unknown_result"
 			if actionResult.Error == "" {
-				actionResult.Error = "provider returned an invalid result status"
+				actionResult.Error = "provider returned an unknown result status"
 			}
 		}
 		if actionResult.Status == ResultSucceeded && r.SchemaResolver != nil {
@@ -210,7 +310,7 @@ func (r *Runner) run(ctx context.Context, plan ExecutionPlan, inputs map[string]
 				}
 			}
 		}
-		stepResult := StepResult{StepID: step.ID, ActionID: actionID, Invocation: invocation, Result: cloneActionResult(actionResult)}
+		stepResult := StepResult{StepID: step.ID, ActionID: actionID, Status: stepStatusForResult(actionResult.Status), Invocation: invocation, Result: cloneActionResult(actionResult)}
 		if actionResult.Status == ResultSucceeded && step.OutputMode == OutputDiscard {
 			discardedValues = append(discardedValues, cloneValue(actionResult.Output))
 			// Keep discarded output only in internalOutputs. The deferred
@@ -218,6 +318,14 @@ func (r *Runner) run(ctx context.Context, plan ExecutionPlan, inputs map[string]
 			stepResult.Result.Output = nil
 		}
 		result.Steps = append(result.Steps, stepResult)
+		if actionResult.Status == ResultAwaitingHuman {
+			result.Status = ExecutionAwaitingHuman
+			result.AwaitingHuman = true
+			result.Approval = ApprovalState{Status: ApprovalPending, StepID: step.ID, Reason: actionResult.Error, RequestedAt: time.Now().UTC()}
+			result.Operation = host.OperationResult{State: host.StateDegraded, Code: "awaiting_human", Message: actionResult.Error, Retryable: false, ObservedAt: time.Now().UTC()}
+			result.ResultLine = "Awaiting human approval"
+			return result, nil
+		}
 
 		if actionResult.Status == ResultSucceeded {
 			internalOutputs[step.ID] = cloneValue(actionResult.Output)
@@ -227,14 +335,46 @@ func (r *Runner) run(ctx context.Context, plan ExecutionPlan, inputs map[string]
 		}
 		if err := ctx.Err(); err != nil {
 			result.Canceled = true
+			result.Status = ExecutionCanceled
+			result.Operation = host.OperationResult{State: host.StateUnknown, Code: "cancelled", Message: "execution was cancelled", Retryable: false, ObservedAt: time.Now().UTC()}
 			appendSkipped(&result, plan[index+1:], err)
 			return result, err
 		}
-		if actionResult.Status == ResultFailed && step.FailureMode == FailureStop {
+		if (actionResult.Status == ResultFailed || actionResult.Status == ResultUnknown) && step.FailureMode == FailureStop {
 			result.Stopped = true
+			if actionResult.Status == ResultUnknown {
+				result.Status = ExecutionUnknown
+				result.Operation = host.OperationResult{State: host.StateUnknown, Code: "unknown_result", Message: actionResult.Error, Retryable: false, ObservedAt: time.Now().UTC()}
+			} else {
+				result.Status = ExecutionFailed
+				result.Operation = host.OperationResult{State: host.StateFailed, Code: "step_failed", Message: actionResult.Error, Retryable: false, ObservedAt: time.Now().UTC()}
+			}
+			r.applyRollback(ctx, &result, plan[:index])
 			appendSkipped(&result, plan[index+1:], errStepStop)
 			return result, nil
 		}
+	}
+	result.Status = ExecutionSucceeded
+	result.Operation = host.OperationResult{State: host.StateReady, Code: "execution_succeeded", Message: "execution completed", Retryable: false, ObservedAt: time.Now().UTC()}
+	for _, step := range result.Steps {
+		switch step.Result.Status {
+		case ResultUnknown:
+			result.Status = ExecutionUnknown
+			result.Operation = host.OperationResult{State: host.StateUnknown, Code: "unknown_result", Message: step.Result.Error, Retryable: false, ObservedAt: time.Now().UTC()}
+		case ResultFailed:
+			if result.Status == ExecutionSucceeded {
+				result.Status = ExecutionFailed
+				result.Operation = host.OperationResult{State: host.StateFailed, Code: "step_failed", Message: step.Result.Error, Retryable: false, ObservedAt: time.Now().UTC()}
+			}
+		}
+	}
+	switch result.Status {
+	case ExecutionSucceeded:
+		result.ResultLine = "Execution completed"
+	case ExecutionFailed:
+		result.ResultLine = "Execution completed with failures"
+	case ExecutionUnknown:
+		result.ResultLine = "Execution outcome is unknown"
 	}
 	return result, nil
 }
@@ -243,10 +383,103 @@ var templatePattern = regexp.MustCompile(`\{\{([^{}]+)\}\}`)
 
 var errStepStop = errors.New("skipped because a previous step failed")
 
+func stepAction(step WorkflowStep) string {
+	if step.ActionID != "" {
+		return step.ActionID
+	}
+	return step.Action
+}
+
+func stepStatusForResult(status ResultStatus) StepStatus {
+	switch status {
+	case ResultSucceeded:
+		return StepSucceeded
+	case ResultFailed:
+		return StepFailed
+	case ResultSkipped:
+		return StepSkipped
+	case ResultAwaitingHuman:
+		return StepAwaitingHuman
+	case ResultRolledBack:
+		return StepRolledBack
+	default:
+		return StepUnknown
+	}
+}
+
+func (r *Runner) applyRollback(ctx context.Context, result *ExecutionResult, plan ExecutionPlan) {
+	var candidates []struct {
+		step   WorkflowStep
+		result ActionResult
+	}
+	for i := len(plan) - 1; i >= 0; i-- {
+		step := plan[i]
+		if step.RollbackActionID == "" {
+			continue
+		}
+		for _, completed := range result.Steps {
+			if completed.StepID == step.ID && completed.Result.Status == ResultSucceeded {
+				candidates = append(candidates, struct {
+					step   WorkflowStep
+					result ActionResult
+				}{step: step, result: completed.Result})
+				break
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	result.Rollback = RollbackState{Status: RollbackRunning}
+	if r.RollbackProvider == nil {
+		result.Rollback.Status = RollbackUnknown
+		result.Rollback.Error = "rollback provider is not configured"
+		result.Status = ExecutionUnknown
+		result.Operation = host.OperationResult{State: host.StateUnknown, Code: "rollback_unknown", Message: result.Rollback.Error, Retryable: false, ObservedAt: time.Now().UTC()}
+		return
+	}
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			result.Rollback.Status = RollbackUnknown
+			result.Rollback.Error = err.Error()
+			result.Status = ExecutionUnknown
+			result.Operation = host.OperationResult{State: host.StateUnknown, Code: "rollback_cancelled", Message: err.Error(), Retryable: false, ObservedAt: time.Now().UTC()}
+			return
+		}
+		invocation := ActionInvocation{ActionID: candidate.step.RollbackActionID, Metadata: map[string]any{"rollbackOf": candidate.step.ID}}
+		actionResult, err := r.RollbackProvider.Rollback(ctx, invocation, candidate.result)
+		if actionResult.ActionID == "" {
+			actionResult.ActionID = candidate.step.RollbackActionID
+		}
+		if err != nil {
+			actionResult.Status = ResultFailed
+			if actionResult.Error == "" {
+				actionResult.Error = err.Error()
+			}
+		}
+		if actionResult.Status == "" {
+			actionResult.Status = ResultSucceeded
+		}
+		stepResult := StepResult{StepID: "rollback:" + candidate.step.ID, ActionID: candidate.step.RollbackActionID, Status: stepStatusForResult(actionResult.Status), Invocation: invocation, Result: cloneActionResult(actionResult)}
+		result.Rollback.Steps = append(result.Rollback.Steps, stepResult)
+		if actionResult.Status != ResultSucceeded {
+			result.Rollback.Status = RollbackFailed
+			result.Rollback.Error = actionResult.Error
+			result.Status = ExecutionFailed
+			result.Operation = host.OperationResult{State: host.StateDegraded, Code: "rollback_failed", Message: actionResult.Error, Retryable: true, ObservedAt: time.Now().UTC()}
+			return
+		}
+	}
+	result.Rollback.Status = RollbackSucceeded
+	result.Status = ExecutionRolledBack
+	result.Operation = host.OperationResult{State: host.StateDegraded, Code: "rolled_back", Message: "execution failed and rollback completed", Retryable: false, ObservedAt: time.Now().UTC()}
+	result.ResultLine = "Execution failed and was rolled back"
+}
+
 func failedStep(step WorkflowStep, invocation ActionInvocation, err error) StepResult {
 	return StepResult{
-		StepID: step.ID, ActionID: invocation.ActionID, Invocation: invocation,
-		Result: ActionResult{ActionID: invocation.ActionID, Status: ResultFailed, Error: err.Error()},
+		StepID: step.ID, ActionID: invocation.ActionID, Status: StepFailed, Invocation: invocation,
+		Result: ActionResult{ActionID: invocation.ActionID, Status: ResultFailed, Error: err.Error(), ErrorCategory: ErrorCategory(err)},
 	}
 }
 
@@ -259,6 +492,7 @@ func appendSkipped(result *ExecutionResult, steps []WorkflowStep, cause error) {
 		errorText := cause.Error()
 		result.Steps = append(result.Steps, StepResult{
 			StepID: step.ID, ActionID: actionID,
+			Status:     StepSkipped,
 			Invocation: ActionInvocation{ActionID: actionID},
 			Result:     ActionResult{ActionID: actionID, Status: ResultSkipped, Error: errorText},
 		})
