@@ -22,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yeisme/clavis/pkg/core/clipboard"
 )
 
 const (
@@ -41,6 +43,10 @@ const (
 	ClipboardText  DataClass = "clipboard_text"
 	Media          DataClass = "media"
 	ApplicationCtx DataClass = "application_context"
+	Templates      DataClass = "templates"
+	Snippets       DataClass = "snippets"
+	Glossary       DataClass = "glossary"
+	ConfigBaseline DataClass = "config_baseline"
 	SensitiveVault DataClass = "sensitive_vault"
 	Passwords      DataClass = "passwords"
 	KeyManager     DataClass = "key_manager"
@@ -58,13 +64,17 @@ type SyncPlan struct {
 	ClipboardText  bool `json:"clipboardText"`
 	Media          bool `json:"media"`
 	ApplicationCtx bool `json:"applicationContext"`
+	Templates      bool `json:"templates"`
+	Snippets       bool `json:"snippets"`
+	Glossary       bool `json:"glossary"`
+	ConfigBaseline bool `json:"configBaseline"`
 	SensitiveVault bool `json:"sensitiveVault"`
 	Passwords      bool `json:"passwords"`
 	KeyManager     bool `json:"keyManager"`
 }
 
 func DefaultSyncPlan() SyncPlan {
-	return SyncPlan{InputMethod: true, LearningData: true, ClipboardText: true, Media: true, ApplicationCtx: true}
+	return SyncPlan{InputMethod: true, LearningData: true, ClipboardText: true, Media: true, ApplicationCtx: true, Templates: true, Snippets: true, Glossary: true, ConfigBaseline: true}
 }
 func (p SyncPlan) Validate() error {
 	if p.Passwords || p.KeyManager {
@@ -84,6 +94,14 @@ func (p SyncPlan) allows(c DataClass) bool {
 		return p.Media
 	case ApplicationCtx:
 		return p.ApplicationCtx
+	case Templates:
+		return p.Templates
+	case Snippets:
+		return p.Snippets
+	case Glossary:
+		return p.Glossary
+	case ConfigBaseline:
+		return p.ConfigBaseline
 	case SensitiveVault:
 		return p.SensitiveVault
 	}
@@ -91,7 +109,7 @@ func (p SyncPlan) allows(c DataClass) bool {
 }
 func (p SyncPlan) Items() []SyncItem {
 	return []SyncItem{
-		{Class: InputMethod, Label: "Input method", Allowed: p.InputMethod}, {Class: LearningData, Label: "Learning data", Allowed: p.LearningData}, {Class: ClipboardText, Label: "Clipboard text", Allowed: p.ClipboardText}, {Class: Media, Label: "Media", Allowed: p.Media}, {Class: ApplicationCtx, Label: "Application context", Allowed: p.ApplicationCtx}, {Class: SensitiveVault, Label: "Sensitive vault", Sensitive: true, Allowed: p.SensitiveVault}, {Class: Passwords, Label: "Passwords (never synchronized)", Sensitive: true}, {Class: KeyManager, Label: "Key manager (never synchronized)", Sensitive: true},
+		{Class: InputMethod, Label: "Input method", Allowed: p.InputMethod}, {Class: LearningData, Label: "Learning data", Allowed: p.LearningData}, {Class: ClipboardText, Label: "Clipboard text", Allowed: p.ClipboardText}, {Class: Media, Label: "Media", Allowed: p.Media}, {Class: ApplicationCtx, Label: "Application context", Allowed: p.ApplicationCtx}, {Class: Templates, Label: "Templates", Allowed: p.Templates}, {Class: Snippets, Label: "Snippets", Allowed: p.Snippets}, {Class: Glossary, Label: "Glossary", Allowed: p.Glossary}, {Class: ConfigBaseline, Label: "Config baseline", Allowed: p.ConfigBaseline}, {Class: SensitiveVault, Label: "Sensitive vault", Sensitive: true, Allowed: p.SensitiveVault}, {Class: Passwords, Label: "Passwords (never synchronized)", Sensitive: true}, {Class: KeyManager, Label: "Key manager (never synchronized)", Sensitive: true},
 	}
 }
 
@@ -292,12 +310,19 @@ func (e EncryptedEnvelope) canonical() []byte {
 func (e EncryptedEnvelope) Verify(pub ed25519.PublicKey) bool {
 	return e.ProtocolVersion == ProtocolVersion && len(e.Signature) == ed25519.SignatureSize && ed25519.Verify(pub, e.canonical(), e.Signature)
 }
-func validClass(c DataClass) bool {
+func knownClass(c DataClass) bool {
 	switch c {
-	case InputMethod, LearningData, ClipboardText, Media, ApplicationCtx, SensitiveVault:
+	case InputMethod, LearningData, ClipboardText, Media, ApplicationCtx, Templates, Snippets, Glossary, ConfigBaseline, SensitiveVault:
 		return true
 	}
 	return false
+}
+
+// validClass validates the wire boundary. Unknown non-secret classes are
+// intentionally accepted so an older client can retain protocol framing and
+// skip a newer class without crashing or persisting it.
+func validClass(c DataClass) bool {
+	return strings.TrimSpace(string(c)) != "" && c != Passwords && c != KeyManager
 }
 func marshalEnvelope(e EncryptedEnvelope) ([]byte, error) {
 	if e.ProtocolVersion != ProtocolVersion || e.KeyID != adkKeyID || e.AccountID == "" || e.DeviceID == "" || e.ObjectID == "" || e.Version == 0 || !validClass(e.Class) || len(e.Nonce) != 12 || len(e.Ciphertext) < 16 || len(e.Signature) != ed25519.SignatureSize {
@@ -914,6 +939,15 @@ type PullResult struct {
 	Conflicts []ConflictEntry
 }
 
+// SyncDiagnostic records a recoverable protocol event that must remain
+// observable without turning a whole pull batch into a failure.
+type SyncDiagnostic struct {
+	Kind     string
+	Class    DataClass
+	ObjectID string
+	Message  string
+}
+
 type localObject struct {
 	version uint64
 	payload []byte
@@ -941,6 +975,7 @@ type Client struct {
 	vault               *Vault
 	localObjects        map[string]localObject
 	conflicts           []ConflictEntry
+	diagnostics         []SyncDiagnostic
 }
 
 func newClient(s *Server, device string, identity DeviceIdentity) (*Client, error) {
@@ -1284,6 +1319,20 @@ func (c *Client) recordConflict(conflict ConflictEntry) {
 	c.conflicts = append(c.conflicts, ConflictEntry{ObjectID: conflict.ObjectID, ConflictID: conflict.ConflictID, LocalVersion: conflict.LocalVersion, RemoteVersion: conflict.RemoteVersion, LocalPayload: append([]byte(nil), conflict.LocalPayload...), RemotePayload: append([]byte(nil), conflict.RemotePayload...)})
 }
 
+func (c *Client) recordDiagnostic(diagnostic SyncDiagnostic) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.diagnostics = append(c.diagnostics, diagnostic)
+}
+
+// Diagnostics returns a copy of recoverable sync diagnostics, including
+// unsupported classes skipped during pull. It never includes payload contents.
+func (c *Client) Diagnostics() []SyncDiagnostic {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]SyncDiagnostic(nil), c.diagnostics...)
+}
+
 func (c *Client) Conflicts() []ConflictEntry {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1341,6 +1390,10 @@ func (c *Client) PullObjects(objects ...string) (PullResult, error) {
 		}
 		if !envelope.Verify(pub) {
 			return out, errors.New("sync: invalid envelope signature")
+		}
+		if !knownClass(envelope.Class) {
+			c.recordDiagnostic(SyncDiagnostic{Kind: "unsupported_class", Class: envelope.Class, ObjectID: envelope.ObjectID, Message: "unknown data class skipped without local persistence"})
+			continue
 		}
 		payload, err := DecryptEnvelope(adk, envelope, pub)
 		if err != nil {
@@ -1478,6 +1531,26 @@ func (c *Client) Sync() ([]Tombstone, CleanupReport, error) {
 func (c *Client) Upload(object string, version uint64, payload []byte) error {
 	return c.UploadClass(InputMethod, object, version, payload)
 }
+
+var ErrClipboardPrivacy = errors.New("sync: clipboard item rejected by privacy filter")
+
+// ClipboardCandidateAllowed centralizes the existing clipboard privacy policy
+// at the sync boundary, so sensitive pasteboard types cannot become encrypted
+// sync objects even when a caller bypasses clipboard history persistence.
+func ClipboardCandidateAllowed(candidate clipboard.CaptureCandidate) bool {
+	return clipboard.NewPrivacyFilter().ShouldRecord(candidate)
+}
+
+// UploadClipboard applies clipboard privacy filtering before encrypting or
+// storing any payload. The payload is caller-provided opaque data and is never
+// inspected by the filter.
+func (c *Client) UploadClipboard(object string, version uint64, candidate clipboard.CaptureCandidate, payload []byte) error {
+	if !ClipboardCandidateAllowed(candidate) {
+		return ErrClipboardPrivacy
+	}
+	return c.UploadClass(ClipboardText, object, version, payload)
+}
+
 func (c *Client) UploadClass(class DataClass, object string, version uint64, payload []byte) error {
 	c.mu.Lock()
 	a, d, enabled, p := c.accountID, c.deviceID, c.syncEnabled, c.plan

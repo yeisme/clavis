@@ -5,17 +5,23 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/yeisme/clavis/pkg/core/clipboard"
 )
 
 func TestPlanListsExplicitBoundaries(t *testing.T) {
 	p := DefaultSyncPlan()
 	items := p.Items()
-	if len(items) != 8 || items[5].Class != SensitiveVault || !items[5].Sensitive {
+	if len(items) != 12 || items[9].Class != SensitiveVault || !items[9].Sensitive {
 		t.Fatalf("unexpected consent items: %+v", items)
 	}
-	if items[6].Allowed || items[7].Allowed {
+	if items[6].Class != Snippets || items[7].Class != Glossary || items[8].Class != ConfigBaseline {
+		t.Fatalf("new data classes missing: %+v", items)
+	}
+	if items[10].Allowed || items[11].Allowed {
 		t.Fatal("password and key-manager data must never be allowed")
 	}
 	p.Passwords = true
@@ -95,6 +101,40 @@ func TestSignedDeleteAndOldDeviceSyncBeforeUpload(t *testing.T) {
 		if event.ObjectDigest == "" || event.DeviceID != "device-one" || event.Action != "delete" {
 			t.Fatalf("unsafe audit event: %+v", event)
 		}
+	}
+}
+
+func TestUnknownClassIsSkippedAndDiagnosed(t *testing.T) {
+	s, a, b := setupClients(t)
+	e, err := clientEnvelope(a.privateKey, "acct", "a", "future-object", 1, DataClass("future_class"), []byte("future payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UploadEnvelope("acct", "a", "future-object", 1, e); err != nil {
+		t.Fatalf("server rejected forward-compatible class: %v", err)
+	}
+	result, err := b.PullObjects("future-object")
+	if err != nil {
+		t.Fatalf("old client failed on unknown class: %v", err)
+	}
+	if len(result.Objects) != 0 || len(result.Conflicts) != 0 {
+		t.Fatalf("unknown class was materialized: %+v", result)
+	}
+	diagnostics := b.Diagnostics()
+	if len(diagnostics) != 1 || diagnostics[0].Kind != "unsupported_class" || diagnostics[0].Class != DataClass("future_class") {
+		t.Fatalf("unknown class diagnostic = %+v", diagnostics)
+	}
+}
+
+func TestClipboardPrivacyFilterBlocksSensitiveUpload(t *testing.T) {
+	_, c, _ := setupClients(t)
+	sensitive := clipboard.CaptureCandidate{Content: "secret", PasteboardTypes: []string{"org.nspasteboard.ConcealedType"}}
+	if err := c.UploadClipboard("clipboard-secret", 1, sensitive, []byte("opaque")); !errors.Is(err, ErrClipboardPrivacy) {
+		t.Fatalf("sensitive clipboard upload error = %v", err)
+	}
+	normal := clipboard.CaptureCandidate{Content: "ordinary text", SourceAppName: "TextEdit"}
+	if err := c.UploadClipboard("clipboard-normal", 1, normal, []byte("opaque")); err != nil {
+		t.Fatalf("ordinary clipboard upload failed: %v", err)
 	}
 }
 
