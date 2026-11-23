@@ -237,9 +237,12 @@ func renderLexiconSparkline(c *ui.Context, theme *ui.Theme, days []LexiconHitDay
 		if theme.Dark {
 			line = ui.RGBA(161, 161, 166, 0.50)
 		}
-		for i := 1; i < len(points); i++ {
-			prev, current := points[i-1], points[i]
-			p.Line(r.X+prev.X, r.Y+prev.Y, r.X+current.X, r.Y+current.Y, lexiconSparklineLine, line)
+		pts := make([][2]float32, 0, len(points))
+		for _, pt := range points {
+			pts = append(pts, [2]float32{r.X + pt.X, r.Y + pt.Y})
+		}
+		if len(pts) >= 2 {
+			p.StrokePolyline(pts, lexiconSparklineLine, line)
 		}
 		last := points[len(points)-1]
 		if last.Day == min(len(days), 14)-1 {

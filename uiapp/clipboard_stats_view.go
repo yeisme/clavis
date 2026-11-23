@@ -10,6 +10,7 @@ import (
 	"github.com/yeisme/clavis/internal/storage"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/engine"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
 const (
@@ -195,23 +196,43 @@ func renderClipboardStatsBand(c *ui.Context, theme *ui.Theme, state clipboardSta
 	band := ui.Column(c).Key("clipboard-stats-band").Label("clipboard-stats-band").FillWidth().Height(clipboardStatsBandHeight).Gap(space4).Padding(space4, space0)
 	band.Children(func() {
 		if state.err != nil {
-			ui.Text(c, "剪贴板统计暂不可用").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, clipboardStatsErrorText()).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 			return
 		}
 		if !state.loaded || state.loading {
-			ui.Text(c, "正在加载剪贴板统计…").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, clipboardStatsLoadingText()).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 			return
 		}
-		segments := clipboardStatSegments(state.kinds, 240, state.filter)
-		legend := ui.Row(c).Key("clipboard-stats-legend").Label("clipboard-stats-legend").FillWidth().Gap(space6).Height(typeMeta).Children(func() {
-			for _, segment := range segments {
-				ui.Text(c, clipboardKindLabel(segment.Kind)).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+		stripWidth := float32(240)
+		segments := clipboardStatSegments(state.kinds, stripWidth, state.filter)
+		legend := ui.Row(c).Key("clipboard-stats-legend").Label("clipboard-stats-legend").FillWidth().Gap(space8).Height(typeMeta).AlignItems(ui.Center).Children(func() {
+			for i, segment := range segments {
+				seg := segment
+				selected := strings.EqualFold(state.filter, seg.Kind)
+				dotColor := clipboardStatColor(theme, i, selected)
+				ink := theme.TextMuted
+				if selected {
+					ink = accentInk(theme, surfaceBase(theme))
+				}
+				item := ui.Row(c).Gap(space4).AlignItems(ui.Center).OnClick(func() {
+					if onFilter != nil {
+						onFilter(seg.Kind)
+					}
+				})
+				item.Children(func() {
+					ui.Box(c).Size(space6, space6).Radius(radius2).Background(dotColor).Shrink(0)
+					ui.Text(c, clipboardKindLabel(seg.Kind)).FontSize(typeMeta).TextColor(ink).SingleLine()
+				})
 			}
 		})
 		_ = legend
 		bar := ui.Box(c).Key("clipboard-kind-strip").Label("clipboard-kind-strip").FillWidth().Height(clipboardStripHeight).Radius(clipboardStripRadius)
 		bar.Draw(func(p *ui.Painter, r ui.Rect) {
-			for i, segment := range segments {
+			if r.W > 0 {
+				stripWidth = r.W
+			}
+			drawSegs := clipboardStatSegments(state.kinds, stripWidth, state.filter)
+			for i, segment := range drawSegs {
 				selected := strings.EqualFold(state.filter, segment.Kind)
 				color := clipboardStatColor(theme, i, selected)
 				if selected {
@@ -226,7 +247,7 @@ func renderClipboardStatsBand(c *ui.Context, theme *ui.Theme, state clipboardSta
 				return false
 			}
 			x := ev.X
-			for _, segment := range segments {
+			for _, segment := range clipboardStatSegments(state.kinds, stripWidth, state.filter) {
 				if x >= segment.X && x <= segment.X+segment.W {
 					onFilter(segment.Kind)
 					return true
@@ -236,7 +257,8 @@ func renderClipboardStatsBand(c *ui.Context, theme *ui.Theme, state clipboardSta
 		})
 		count, bytes := clipboardStatsTotals(state.kinds)
 		ui.Row(c).Key("clipboard-stats-count-row").Label("clipboard-stats-count-row").FillWidth().Height(clipboardSparkHeight).Gap(space8).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, fmt.Sprintf("%d 条 · %s", count, formatClipboardBytes(bytes))).Key("clipboard-stats-count").Label("clipboard-stats-count").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, clipboardStatsCountLabel(count, bytes)).Key("clipboard-stats-count").Label("clipboard-stats-count").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+			ui.Spacer(c)
 			if len(state.days) >= 7 && count >= 5 {
 				renderClipboardSparkline(c, theme, state.days)
 			}
@@ -244,16 +266,53 @@ func renderClipboardStatsBand(c *ui.Context, theme *ui.Theme, state clipboardSta
 	})
 }
 
+func clipboardStatsErrorText() string {
+	if i18n.IsChinese() {
+		return "剪贴板统计暂不可用"
+	}
+	return "Clipboard stats unavailable"
+}
+
+func clipboardStatsLoadingText() string {
+	if i18n.IsChinese() {
+		return "正在加载剪贴板统计…"
+	}
+	return "Loading clipboard stats…"
+}
+
+func clipboardStatsCountLabel(count int, bytes int64) string {
+	if i18n.IsChinese() {
+		return fmt.Sprintf("%d 条 · %s", count, formatClipboardBytes(bytes))
+	}
+	if count == 1 {
+		return fmt.Sprintf("1 item · %s", formatClipboardBytes(bytes))
+	}
+	return fmt.Sprintf("%d items · %s", count, formatClipboardBytes(bytes))
+}
+
 func clipboardKindLabel(kind string) string {
+	zh := i18n.IsChinese()
 	switch strings.ToLower(kind) {
 	case string(clipboard.KindImage):
-		return "图片"
+		if zh {
+			return "图片"
+		}
+		return "Images"
 	case string(clipboard.KindText):
-		return "文本"
+		if zh {
+			return "文本"
+		}
+		return "Text"
 	case "file":
-		return "文件"
+		if zh {
+			return "文件"
+		}
+		return "Files"
 	case "link":
-		return "链接"
+		if zh {
+			return "链接"
+		}
+		return "Links"
 	default:
 		return kind
 	}
@@ -292,17 +351,15 @@ func renderClipboardSparkline(c *ui.Context, theme *ui.Theme, days []storage.Cli
 		if theme.Dark {
 			line = ui.RGBA(161, 161, 166, 0.85)
 		}
-		var prevX, prevY float32
+		pts := make([][2]float32, 0, len(days))
+		usableW := max(r.W-4, 1)
 		for i, day := range days {
-			x := r.X + float32(i)*r.W/float32(len(days)-1)
+			x := r.X + 2 + float32(i)*usableW/float32(len(days)-1)
 			y := r.Y + r.H - 2 - float32(day.Count)/float32(maxValue)*(r.H-4)
-			if i > 0 {
-				p.Line(prevX, prevY, x, y, 1.5, line)
-			}
-			if i == len(days)-1 {
-				p.Fill(ui.Rect{X: x - 2, Y: y - 2, W: 4, H: 4}, ui.RGBA(10, 132, 255, 1), 2)
-			}
-			prevX, prevY = x, y
+			pts = append(pts, [2]float32{x, y})
 		}
+		p.StrokePolyline(pts, 1.5, line)
+		last := pts[len(pts)-1]
+		p.Fill(ui.Rect{X: last[0] - 2, Y: last[1] - 2, W: 4, H: 4}, ui.RGBA(10, 132, 255, 1), 2)
 	})
 }

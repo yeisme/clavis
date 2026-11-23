@@ -703,7 +703,10 @@ func (a *AppController) renderOmniboxView(
 			}
 		})
 
-		if state.OmniboxTab == config.TabClipboard {
+		renderClipboardStats := func() {
+			if state.OmniboxTab != config.TabClipboard {
+				return
+			}
 			a.ensureClipboardStatsRefresh()
 			stats, _ := a.clipboardStatsSnapshot()
 			renderClipboardStatsBand(c, theme, stats, func(kind string) {
@@ -724,6 +727,7 @@ func (a *AppController) renderOmniboxView(
 		}
 
 		if len(items) == 0 {
+			renderClipboardStats()
 			if state.OmniboxTab == config.TabAgent && a.agentRefreshing() {
 				kitStateView(c, theme, kitStateLoading, "arrow.clockwise", "正在加载 Agent 会话…", "", nil)
 			} else {
@@ -926,7 +930,10 @@ func (a *AppController) renderOmniboxView(
 				pct := a.previewListPercent()
 				ui.Box(c).FillWidth().Grow(1).MinHeight(0).Children(func() {
 					split := ui.SplitPercent(c, &pct, func() {
-						ui.Column(c).Fill().Padding(space0, space8, space0, space0).Children(renderList)
+						ui.Column(c).Fill().Padding(space0, space8, space0, space0).Gap(space4).Children(func() {
+							renderClipboardStats()
+							renderList()
+						})
 					}, func() {
 						// The preview shares the content surface. Its former elevated
 						// card consumed horizontal width and created a second frame.
@@ -940,6 +947,7 @@ func (a *AppController) renderOmniboxView(
 					}
 				})
 			} else {
+				renderClipboardStats()
 				renderList()
 			}
 		}
