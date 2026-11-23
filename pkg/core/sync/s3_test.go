@@ -35,7 +35,7 @@ func TestClientStoreBackedPullVerifiesThenDecrypts(t *testing.T) {
 		if err := c.LoginWithCredential("acct", credential); err != nil {
 			t.Fatal(err)
 		}
-		if err := c.PairDevice(); err != nil {
+		if err := c.PairDeviceWithCredential(); err != nil {
 			t.Fatal(err)
 		}
 		c.mu.Lock()
@@ -86,7 +86,7 @@ func TestClientConcurrentObjectVersionsBecomeConflict(t *testing.T) {
 		if err := c.LoginWithCredential("acct", credential); err != nil {
 			t.Fatal(err)
 		}
-		if err := c.PairDevice(); err != nil {
+		if err := c.PairDeviceWithCredential(); err != nil {
 			t.Fatal(err)
 		}
 		c.mu.Lock()

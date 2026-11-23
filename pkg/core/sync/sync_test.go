@@ -41,13 +41,13 @@ func TestSignedDeleteAndOldDeviceSyncBeforeUpload(t *testing.T) {
 	if err := one.LoginWithCredential("account", credential); err != nil {
 		t.Fatal(err)
 	}
-	if err := one.PairDevice(); err != nil {
+	if err := one.PairDeviceWithCredential(); err != nil {
 		t.Fatal(err)
 	}
 	if err := two.LoginWithCredential("account", credential); err != nil {
 		t.Fatal(err)
 	}
-	if err := two.PairDevice(); err != nil {
+	if err := two.PairDeviceWithCredential(); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []*Client{one, two} {
@@ -107,7 +107,7 @@ func TestPlanAndVaultUploadBoundaries(t *testing.T) {
 	if err := c.Login("account"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.PairDevice(); err != nil {
+	if err := c.PairDeviceWithCredential(); err != nil {
 		t.Fatal(err)
 	}
 	code, err := c.PrepareRecoveryCode()
@@ -241,13 +241,13 @@ func setupClients(t *testing.T) (*Server, *Client, *Client) {
 	if err := a.LoginWithCredential("acct", credential); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.PairDevice(); err != nil {
+	if err := a.PairDeviceWithCredential(); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.LoginWithCredential("acct", credential); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.PairDevice(); err != nil {
+	if err := b.PairDeviceWithCredential(); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []*Client{a, b} {
@@ -561,10 +561,10 @@ func TestV2DevicesDecryptWithSharedADKAndRecoveryCode(t *testing.T) {
 	if string(a.privateKey) == string(b.privateKey) || string(a.xPrivateKey.Bytes()) == string(b.xPrivateKey.Bytes()) {
 		t.Fatal("test clients unexpectedly share private keys")
 	}
-	if err := a.PairDevice(); err != nil {
+	if err := a.PairDeviceWithCredential(); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.PairDevice(); err != nil {
+	if err := b.PairDeviceWithCredential(); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.WrapADKForDevice("b"); err != nil {
@@ -786,7 +786,7 @@ func TestBaselineOverlayAndAuditDoNotExposeSecrets(t *testing.T) {
 	if err := other.Login("other-account"); err != nil {
 		t.Fatal(err)
 	}
-	if err := other.PairDevice(); err != nil {
+	if err := other.PairDeviceWithCredential(); err != nil {
 		t.Fatal(err)
 	}
 	if err := other.Delete("other-object"); err != nil {

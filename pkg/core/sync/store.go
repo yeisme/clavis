@@ -49,4 +49,5 @@ var (
 	ErrStoreCursor          = errors.New("sync: invalid tombstone cursor")
 	ErrStorePlaintext       = errors.New("sync: plaintext payloads are not accepted")
 	ErrStoreConflict        = errors.New("sync: concurrent object conflict")
+	ErrStoreDeviceRevoked   = errors.New("sync: device has been revoked")
 )

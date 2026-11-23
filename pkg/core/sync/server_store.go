@@ -29,6 +29,12 @@ func (s *ServerStore) LoginWithCredential(account string, credential []byte) err
 func (s *ServerStore) PairDeviceWithCredential(account, device string, pub ed25519.PublicKey, credential []byte) error {
 	return s.server.PairDeviceWithCredential(account, device, pub, credential)
 }
+func (s *ServerStore) PairDeviceWithTicket(ticket PairingTicket) error {
+	return s.server.PairDeviceWithTicket(ticket)
+}
+func (s *ServerStore) RemoveDevice(account, device string, credential []byte) error {
+	return s.server.RemoveDevice(account, device, credential)
+}
 func (s *ServerStore) SetX25519PublicKey(account, device string, pub, credential []byte) error {
 	return s.server.SetX25519PublicKey(account, device, pub, credential)
 }

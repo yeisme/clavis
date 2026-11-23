@@ -424,13 +424,14 @@ type Server struct {
 	versions         map[string]map[string]uint64
 	watermarks       map[string]map[string]uint64
 	issued           map[string]map[string]tombstoneBatch
+	pairingNonces    map[string]map[string]struct{}
 	tombstoneLog     map[string]map[uint64]Tombstone
 	sequence         uint64
 	audit            []AuditEvent
 }
 
 func NewServer() *Server {
-	return &Server{accounts: map[string]map[string]ed25519.PublicKey{}, x25519Accounts: map[string]map[string][]byte{}, wrappedADK: map[string]map[string][]byte{}, recoverySalt: map[string][]byte{}, recoveryWrap: map[string][]byte{}, credentials: map[string][32]byte{}, accountSequences: map[string]uint64{}, tombstones: map[string]map[string]Tombstone{}, tombstoneLog: map[string]map[uint64]Tombstone{}, objects: map[string]map[string][]byte{}, versions: map[string]map[string]uint64{}, watermarks: map[string]map[string]uint64{}, issued: map[string]map[string]tombstoneBatch{}}
+	return &Server{accounts: map[string]map[string]ed25519.PublicKey{}, x25519Accounts: map[string]map[string][]byte{}, wrappedADK: map[string]map[string][]byte{}, recoverySalt: map[string][]byte{}, recoveryWrap: map[string][]byte{}, credentials: map[string][32]byte{}, accountSequences: map[string]uint64{}, tombstones: map[string]map[string]Tombstone{}, tombstoneLog: map[string]map[uint64]Tombstone{}, objects: map[string]map[string][]byte{}, versions: map[string]map[string]uint64{}, watermarks: map[string]map[string]uint64{}, issued: map[string]map[string]tombstoneBatch{}, pairingNonces: map[string]map[string]struct{}{}}
 }
 func (s *Server) initAccountLocked(a string) {
 	if s.recoverySalt[a] == nil {
@@ -460,6 +461,9 @@ func (s *Server) initAccountLocked(a string) {
 	}
 	if s.issued[a] == nil {
 		s.issued[a] = map[string]tombstoneBatch{}
+	}
+	if s.pairingNonces[a] == nil {
+		s.pairingNonces[a] = map[string]struct{}{}
 	}
 	if s.tombstoneLog[a] == nil {
 		s.tombstoneLog[a] = map[uint64]Tombstone{}
@@ -536,6 +540,44 @@ func (s *Server) pairDevice(account, device string, pub ed25519.PublicKey, crede
 }
 func (s *Server) PairDeviceWithCredential(account, device string, pub ed25519.PublicKey, credential []byte) error {
 	return s.pairDevice(account, device, pub, credential)
+}
+
+// PairDeviceWithTicket consumes a signed, time-limited authorization ticket.
+// The ticket authorizer must already be paired, and the nonce is one-shot.
+func (s *Server) PairDeviceWithTicket(ticket PairingTicket) error {
+	if err := ticket.Verify(time.Now().UTC()); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !bytes.Equal(ticket.AuthorizerPubKey, s.accounts[ticket.Account][ticket.Authorizer]) {
+		return ErrPairingTicket
+	}
+	if _, used := s.pairingNonces[ticket.Account][ticket.Nonce]; used {
+		return ErrPairingCodeUsed
+	}
+	if s.accounts[ticket.Account][ticket.Authorizer] == nil {
+		return ErrStoreDeviceMissing
+	}
+	if old, exists := s.accounts[ticket.Account][ticket.Device]; exists && !bytes.Equal(old, ticket.PublicKey) {
+		return ErrStoreDeviceKey
+	}
+	if len(ticket.X25519PublicKey) != 0 && len(ticket.X25519PublicKey) != 32 {
+		return ErrPairingTicket
+	}
+	if len(ticket.WrappedADK) != 0 && len(ticket.WrappedADK) < 60 {
+		return ErrPairingTicket
+	}
+	s.initAccountLocked(ticket.Account)
+	s.accounts[ticket.Account][ticket.Device] = append(ed25519.PublicKey(nil), ticket.PublicKey...)
+	if len(ticket.X25519PublicKey) == 32 {
+		s.x25519Accounts[ticket.Account][ticket.Device] = append([]byte(nil), ticket.X25519PublicKey...)
+	}
+	if len(ticket.WrappedADK) >= 60 {
+		s.wrappedADK[ticket.Account][ticket.Device] = append([]byte(nil), ticket.WrappedADK...)
+	}
+	s.pairingNonces[ticket.Account][ticket.Nonce] = struct{}{}
+	return nil
 }
 
 // RemoveDevice revokes a paired device after credential validation. It removes
@@ -1184,7 +1226,19 @@ func (c *Client) WrapADKForDevice(device string) error {
 	return nil
 }
 
-func (c *Client) PairDevice() error {
+func (c *Client) PairDevice(tickets ...PairingTicket) error {
+	if len(tickets) == 0 {
+		return ErrPairingTicket
+	}
+	if len(tickets) != 1 {
+		return ErrPairingTicket
+	}
+	return c.PairDeviceWithTicket(tickets[0], tickets[0].ShortCode, PairingFingerprint(ed25519.PublicKey(tickets[0].AuthorizerPubKey)), time.Now().UTC())
+}
+
+// PairDeviceWithCredential is retained only for explicit first-device/bootstrap
+// migration. New-device pairing must use PairDevice with a signed ticket.
+func (c *Client) PairDeviceWithCredential() error {
 	c.mu.Lock()
 	a, d := c.accountID, c.deviceID
 	pub := append(ed25519.PublicKey(nil), c.privateKey.Public().(ed25519.PublicKey)...)
