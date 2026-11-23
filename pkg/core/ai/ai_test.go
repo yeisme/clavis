@@ -237,6 +237,25 @@ func TestOpenAIClientRejectsTruncatedStream(t *testing.T) {
 	}
 }
 
+func TestOpenAIClientAcceptsFinishReasonAtEOFAndPreservesTrailingUsage(t *testing.T) {
+	cfg := config.DefaultAIConfig()
+	profile, _ := cfg.ProfileByID("ollama")
+	stream := "data: {\"choices\":[{\"delta\":{\"content\":\"complete\"}}]}\n\n" +
+		"data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n"
+	doer := mockDoer{fn: func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(stream))}, nil
+	}}
+	client := ai.NewOpenAICompatibleClient(cfg, engine.GlossaryEngine{}, doer, nil)
+	var output strings.Builder
+	usage, err := client.StreamCompletionWithUsage(context.Background(), ai.CompletionRequest{Prompt: "hello", Profile: &profile}, func(delta string) {
+		output.WriteString(delta)
+	})
+	if err != nil || output.String() != "complete" || usage != (ai.ProviderUsage{InputTokens: 3, OutputTokens: 1, Reported: true}) {
+		t.Fatalf("output=%q usage=%+v err=%v", output.String(), usage, err)
+	}
+}
+
 func TestAnthropicGeminiAndKeylessOllamaStreaming(t *testing.T) {
 	cfg := config.DefaultAIConfig()
 	glossary := engine.GlossaryEngine{}
