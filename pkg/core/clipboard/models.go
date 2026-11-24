@@ -62,8 +62,18 @@ func (c CaptureCandidate) DedupeHash() string {
 
 // Validate rejects candidates that cannot be safely deduplicated as media.
 func (c CaptureCandidate) Validate() error {
-	if c.IsMedia() && strings.TrimSpace(c.BlobSHA) == "" {
-		return fmt.Errorf("media candidate of kind %q is missing BlobSHA", c.Kind)
+	switch c.Kind {
+	case "", KindText:
+		return nil
+	case KindImage, KindFile, KindVideo:
+		if strings.TrimSpace(c.BlobSHA) == "" {
+			return fmt.Errorf("media candidate of kind %q is missing BlobSHA", c.Kind)
+		}
+	default:
+		return fmt.Errorf("media candidate has unsupported kind %q", c.Kind)
+	}
+	if c.ByteSize < 0 || c.DurationMs < 0 || c.Width < 0 || c.Height < 0 {
+		return fmt.Errorf("media candidate of kind %q has negative metadata", c.Kind)
 	}
 	return nil
 }

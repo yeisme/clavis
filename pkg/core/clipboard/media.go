@@ -12,6 +12,7 @@ import (
 	_ "image/gif"  // decode GIF clipboard payloads
 	_ "image/jpeg" // decode JPEG clipboard payloads
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,6 +35,7 @@ const (
 var (
 	ErrImageTooLarge = errors.New("clipboard: image exceeds size limit")
 	ErrNotImage      = errors.New("clipboard: payload is not a decodable image")
+	ErrNilImage      = errors.New("clipboard: thumbnail image is nil")
 )
 
 // MediaStore keeps <dir>/<sha256>.png blobs and <dir>/thumbs/<sha256>.png thumbnails.
@@ -103,8 +105,16 @@ func (m *MediaStore) SaveImage(data []byte) (Media, error) {
 
 func (m *MediaStore) ensureThumb(sha string, data []byte) (string, error) {
 	out := m.thumbPath(sha)
-	if _, err := os.Stat(out); err == nil {
-		return out, nil
+	if info, err := os.Lstat(out); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("thumbnail path %q is a symlink", out)
+		}
+		if !info.IsDir() {
+			return out, nil
+		}
+		return "", fmt.Errorf("thumbnail path %q is a directory", out)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
 	}
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
@@ -115,6 +125,9 @@ func (m *MediaStore) ensureThumb(sha string, data []byte) (string, error) {
 
 // SaveThumbnail downsizes img to ThumbMaxEdge and writes a PNG atomically.
 func SaveThumbnail(path string, img image.Image) error {
+	if img == nil {
+		return ErrNilImage
+	}
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, Thumbnail(img, ThumbMaxEdge)); err != nil {
 		return err
@@ -124,6 +137,12 @@ func SaveThumbnail(path string, img image.Image) error {
 
 // Thumbnail box-filters img so its longer edge is at most maxEdge (no upscaling).
 func Thumbnail(img image.Image, maxEdge int) image.Image {
+	if img == nil {
+		return image.NewRGBA(image.Rect(0, 0, 1, 1))
+	}
+	if maxEdge <= 0 {
+		maxEdge = 1
+	}
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
 	if w <= 0 || h <= 0 {
@@ -164,8 +183,16 @@ func Thumbnail(img image.Image, maxEdge int) image.Image {
 }
 
 func writeFileAtomic(path string, data []byte) error {
-	if _, err := os.Stat(path); err == nil {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("media path %q is a symlink", path)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("media path %q is a directory", path)
+		}
 		return nil // content-addressed: identical bytes already stored
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -194,13 +221,21 @@ func QuotaEvictions(items []ClipboardItem, quotaBytes int64) []string {
 	if quotaBytes <= 0 {
 		quotaBytes = defaultQuotaMiB << 20
 	}
-	var total int64
+	var total uint64
 	var candidates []ClipboardItem
 	for _, it := range items {
 		if it.Kind != KindImage {
 			continue
 		}
-		total += it.ByteSize
+		if it.ByteSize <= 0 {
+			continue
+		}
+		size := uint64(it.ByteSize)
+		if total > math.MaxUint64-size {
+			total = math.MaxUint64
+		} else {
+			total += size
+		}
 		if !it.IsPinned {
 			candidates = append(candidates, it)
 		}
@@ -208,11 +243,11 @@ func QuotaEvictions(items []ClipboardItem, quotaBytes int64) []string {
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].UpdatedAt.Before(candidates[j].UpdatedAt) })
 	var out []string
 	for _, it := range candidates {
-		if total <= quotaBytes {
+		if total <= uint64(quotaBytes) {
 			break
 		}
 		out = append(out, it.ID)
-		total -= it.ByteSize
+		total -= uint64(it.ByteSize)
 	}
 	return out
 }

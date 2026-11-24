@@ -56,6 +56,10 @@ func (s *MemoryStore) Record(ctx context.Context, candidate CaptureCandidate) (*
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	if candidate.Kind == "" || candidate.Kind == KindText {
+		candidate.Kind = KindText
+		candidate.Media = Media{}
+	}
 	hash := candidate.DedupeHash()
 
 	s.mu.Lock()

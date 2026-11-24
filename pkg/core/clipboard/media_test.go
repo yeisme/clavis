@@ -2,7 +2,10 @@ package clipboard
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
+	"errors"
 	"hash/crc32"
 	"image"
 	"image/color"
@@ -102,6 +105,19 @@ func TestThumbnailNoUpscale(t *testing.T) {
 	}
 }
 
+func TestSaveThumbnailRejectsNilImage(t *testing.T) {
+	if err := SaveThumbnail(filepath.Join(t.TempDir(), "thumb.png"), nil); !errors.Is(err, ErrNilImage) {
+		t.Fatalf("nil image error = %v, want %v", err, ErrNilImage)
+	}
+}
+
+func TestThumbnailNormalizesNonPositiveEdge(t *testing.T) {
+	got := Thumbnail(image.NewRGBA(image.Rect(0, 0, 10, 4)), 0).Bounds()
+	if got.Dx() != 1 || got.Dy() != 1 {
+		t.Fatalf("thumbnail bounds = %v, want 1x1", got)
+	}
+}
+
 func TestQuotaEvictionsOldestUnpinnedImagesOnly(t *testing.T) {
 	t0 := time.Unix(1000, 0)
 	img := func(id string, age int, size int64, pinned bool) ClipboardItem {
@@ -152,6 +168,49 @@ func TestQuotaEvictionsBoundaryKeepsPinnedAndExternalMedia(t *testing.T) {
 	}
 	if remaining > quota {
 		t.Fatalf("remaining image bytes=%d, want <= quota %d", remaining, quota)
+	}
+}
+
+func TestQuotaEvictionsHandlesOverflowAndNegativeSizes(t *testing.T) {
+	t0 := time.Unix(3000, 0)
+	items := []ClipboardItem{
+		{ID: "old", UpdatedAt: t0, Media: Media{Kind: KindImage, ByteSize: int64(^uint64(0) >> 1)}},
+		{ID: "new", UpdatedAt: t0.Add(time.Second), Media: Media{Kind: KindImage, ByteSize: int64(^uint64(0) >> 1)}},
+		{ID: "bad", UpdatedAt: t0.Add(2 * time.Second), Media: Media{Kind: KindImage, ByteSize: -1}},
+	}
+	got := QuotaEvictions(items, int64(^uint64(0)>>1))
+	if len(got) != 1 || got[0] != "old" {
+		t.Fatalf("evictions = %v, want oldest oversized image only", got)
+	}
+}
+
+func TestMediaStoreRejectsBlobPathDirectory(t *testing.T) {
+	ms := NewMediaStore(t.TempDir())
+	data := pngBytes(t, 2, 2)
+	sum := sha256.Sum256(data)
+	sha := hex.EncodeToString(sum[:])
+	if err := os.Mkdir(ms.blobPath(sha, ".png"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.SaveImage(data); err == nil {
+		t.Fatal("blob directory was treated as an existing file")
+	}
+}
+
+func TestMediaStoreRejectsBlobPathSymlink(t *testing.T) {
+	ms := NewMediaStore(t.TempDir())
+	data := pngBytes(t, 2, 2)
+	sum := sha256.Sum256(data)
+	sha := hex.EncodeToString(sum[:])
+	target := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(target, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, ms.blobPath(sha, ".png")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := ms.SaveImage(data); err == nil {
+		t.Fatal("blob symlink was treated as an existing file")
 	}
 }
 

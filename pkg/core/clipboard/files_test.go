@@ -102,3 +102,30 @@ func TestSaveFileListFailures(t *testing.T) {
 		t.Fatal("cap not applied")
 	}
 }
+
+func TestSaveFileListClampsInvalidNegativeSize(t *testing.T) {
+	ms := NewMediaStore(t.TempDir())
+	m, _, err := ms.SaveFileList([]string{"/tmp/clip.bin"}, FileProbe{
+		Size: func(string) (int64, bool) { return -1, true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.ByteSize != 0 {
+		t.Fatalf("negative probe size leaked into metadata: %d", m.ByteSize)
+	}
+}
+
+func TestSaveFileListSaturatesSizeOverflow(t *testing.T) {
+	ms := NewMediaStore(t.TempDir())
+	paths := []string{"/tmp/a.bin", "/tmp/b.bin"}
+	m, _, err := ms.SaveFileList(paths, FileProbe{
+		Size: func(string) (int64, bool) { return int64(^uint64(0) >> 1), true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.ByteSize != int64(^uint64(0)>>1) {
+		t.Fatalf("overflowed probe size: %d", m.ByteSize)
+	}
+}

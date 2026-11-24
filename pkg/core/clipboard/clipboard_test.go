@@ -103,6 +103,32 @@ func TestMemoryStoreRejectsMediaWithoutBlobSHA(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreTextCandidateCannotCarryMediaMetadata(t *testing.T) {
+	store := clipboard.NewMemoryStore(clipboard.NewPrivacyFilter())
+	item, ok, err := store.Record(context.Background(), clipboard.CaptureCandidate{
+		Content: "plain",
+		Media:   clipboard.Media{Kind: clipboard.KindText, MediaPath: "/stale/blob", BlobSHA: "stale", ByteSize: 999},
+	})
+	if err != nil || !ok {
+		t.Fatalf("record text: item=%+v ok=%v err=%v", item, ok, err)
+	}
+	if item.IsMedia() || item.MediaPath != "" || item.BlobSHA != "" || item.ByteSize != 0 {
+		t.Fatalf("text row retained media metadata: %+v", item.Media)
+	}
+}
+
+func TestMemoryStoreRejectsInvalidMediaKindAndMetadata(t *testing.T) {
+	store := clipboard.NewMemoryStore(clipboard.NewPrivacyFilter())
+	for _, candidate := range []clipboard.CaptureCandidate{
+		{Content: "x", Media: clipboard.Media{Kind: clipboard.Kind("audio"), BlobSHA: "blob"}},
+		{Content: "x", Media: clipboard.Media{Kind: clipboard.KindImage, BlobSHA: "blob", ByteSize: -1}},
+	} {
+		if item, ok, err := store.Record(context.Background(), candidate); err == nil || ok || item != nil {
+			t.Fatalf("invalid media accepted: item=%+v ok=%v err=%v", item, ok, err)
+		}
+	}
+}
+
 func TestMemoryStoreLifecycle(t *testing.T) {
 	ctx := context.Background()
 	store := clipboard.NewMemoryStore(clipboard.NewPrivacyFilter())

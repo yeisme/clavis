@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"image"
+	"math"
 	"runtime"
 	"strings"
 )
@@ -76,7 +77,13 @@ func (m *MediaStore) SaveFileList(paths []string, probe FileProbe) (Media, strin
 			continue
 		}
 		if n, ok := probe.Size(p); ok {
-			total += n
+			if n > 0 {
+				if total > math.MaxInt64-n {
+					total = math.MaxInt64
+				} else {
+					total += n
+				}
+			}
 			present++
 		}
 	}
