@@ -405,3 +405,62 @@ func imeModeLabel(m config.IMEMode) string {
 	}
 	return string(m)
 }
+
+// aiProtocolOptions lists the supported AI wire protocols with humanized labels.
+func aiProtocolOptions() []settingOption {
+	if i18n.IsChinese() {
+		return []settingOption{
+			{string(config.ProtocolOpenAICompatible), "OpenAI 兼容"},
+			{string(config.ProtocolAnthropic), "Anthropic"},
+			{string(config.ProtocolGemini), "Gemini"},
+		}
+	}
+	return []settingOption{
+		{string(config.ProtocolOpenAICompatible), "OpenAI Compatible"},
+		{string(config.ProtocolAnthropic), "Anthropic"},
+		{string(config.ProtocolGemini), "Gemini"},
+	}
+}
+
+// aiReasoningEffortOptions lists the supported reasoning_effort choices.
+func aiReasoningEffortOptions() []settingOption {
+	if i18n.IsChinese() {
+		return []settingOption{
+			{"", "默认"},
+			{"low", "低 (low)"},
+			{"medium", "中 (medium)"},
+			{"high", "高 (high)"},
+		}
+	}
+	return []settingOption{
+		{"", "Default"},
+		{"low", "Low"},
+		{"medium", "Medium"},
+		{"high", "High"},
+	}
+}
+
+// aiProtocolShortLabel returns a compact protocol badge label.
+func aiProtocolShortLabel(proto config.AIProtocol) string {
+	switch proto {
+	case config.ProtocolAnthropic:
+		return "anthropic"
+	case config.ProtocolGemini:
+		return "gemini"
+	default:
+		return string(config.ProtocolOpenAICompatible)
+	}
+}
+
+// aiReasoningDisplay formats a profile's effective reasoning_effort without
+// exposing empty strings as blanks.
+func aiReasoningDisplay(effort string) string {
+	trimmed := strings.TrimSpace(effort)
+	if trimmed != "" {
+		return trimmed
+	}
+	if i18n.IsChinese() {
+		return "默认（不传）"
+	}
+	return "default (omitted)"
+}

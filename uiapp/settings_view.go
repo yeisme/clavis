@@ -10,7 +10,6 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/internal/secrets"
-	"github.com/yeisme/clavis/pkg/core/ai"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/i18n"
 )
@@ -577,8 +576,8 @@ func (a *AppController) renderSettingsAppearanceCard(c *ui.Context, theme *ui.Th
 	})
 }
 
-// renderSettingsAISection draws AI profiles, the Keychain editor and the
-// active profile configuration.
+// renderSettingsAISection draws AI profiles, cc-switch impact preview, the
+// Keychain / SecretRef editor and the active profile configuration.
 func (a *AppController) renderSettingsAISection(
 	c *ui.Context,
 	theme *ui.Theme,
@@ -587,91 +586,11 @@ func (a *AppController) renderSettingsAISection(
 	testStatus AITestStatus,
 	testMsg string,
 ) {
-	activeProfile := a.ActiveAIProfile()
-	profiles := cfg.Main.AI.Profiles
-	if len(profiles) == 0 {
-		profiles = config.DefaultAIProfiles()
-	}
-
-	settingsEditorCard(c, theme, i18n.T("settings.card.ai_profiles"), func() {
-		settingsInsetGroup(c, theme, func() {
-			ui.Column(c).FillWidth().Gap(space6).Children(func() {
-				ui.Text(c, i18n.T("settings.ai.active_profile")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
-				selected := 0
-				for i, prof := range profiles {
-					if strings.EqualFold(prof.ID, activeProfile.ID) {
-						selected = i
-						break
-					}
-				}
-				ui.Row(c).FillWidth().Wrap().Gap(space8).AlignItems(ui.Center).Children(func() {
-					for i, prof := range profiles {
-						p, active := prof, i == selected
-						pill := ui.ButtonBase(c).Key("settings-ai-prof:"+p.ID).Height(space32).Padding(space4, space14).Radius(radiusChip).FocusRing(false)
-						if active {
-							pill.Background(theme.Accent)
-						} else {
-							pill.Background(theme.Surface).Border(space1, hairline(theme))
-						}
-						pill.Children(func() {
-							txt := ui.Text(c, p.ID).FontSize(typeLabel).SingleLine()
-							if active {
-								txt.TextColor(theme.AccentText).FontWeight(600)
-							} else {
-								txt.TextColor(theme.Text)
-							}
-						})
-						if pill.Clicked() {
-							_ = a.SelectAIProfile(p.ID)
-						}
-					}
-				})
-			})
-		})
-
-		protoStr := string(activeProfile.Protocol)
-		if protoStr == "" {
-			protoStr = string(config.ProtocolOpenAICompatible)
-		}
-		envVarStr := strings.TrimSpace(activeProfile.APIKeyEnvVar)
-		if envVarStr == "" {
-			envVarStr = secrets.DefaultEnvVarForProvider(activeProfile.Provider)
-		}
-		if envVarStr == "" {
-			envVarStr = i18n.T("settings.ai.none_keyless")
-		}
-
-		ui.Grid(c).Columns(2).GapX(10).GapY(2).FillWidth().Children(func() {
-			settingsKeyValuePair(c, theme, "provider", activeProfile.Provider)
-			settingsKeyValuePair(c, theme, "protocol", protoStr)
-			settingsKeyValuePair(c, theme, "base_url", activeProfile.BaseURL)
-			settingsKeyValuePair(c, theme, "model", activeProfile.Model)
-			settingsKeyValuePair(c, theme, "keychain_account", activeProfile.KeychainAccount)
-			settingsKeyValuePair(c, theme, "api_key_env_var", envVarStr)
-		})
-
-		settingsCardDivider(c, theme)
-		continueLabel := "Allow AI continuation"
-		continueHelp := "Enable shortcut-triggered AI continuation in text fields (off by default)."
-		if i18n.IsChinese() {
-			continueLabel = "允许续写"
-			continueHelp = "开启输入框快捷 AI 续写（默认关闭，仅在显式触发时请求模型）。"
-		}
-		if v, changed := settingSwitchRow(c, theme, continueLabel, "continue_enabled", continueHelp, cfg.Main.AI.ContinueEnabled); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.AI.ContinueEnabled = v })
-		}
-	})
-
-	ui.Grid(c).Columns(settingsTwoColumns(c)).Gap(10).FillWidth().Children(func() {
-		ui.Column(c).FillWidth().Gap(10).Children(func() {
-			a.renderAIKeychainCard(c, theme, activeProfile, keySource, testStatus, testMsg)
-			a.renderAIAddProfileCard(c, theme)
-		})
-		a.renderAIProfileEditor(c, theme, cfg)
-	})
+	a.renderSettingsAIProfilesSection(c, theme, cfg, keySource, testStatus, testMsg)
 }
 
-// renderAIKeychainCard draws key status, the key input and the connection test.
+// renderAIKeychainCard draws key status, the SecretRef resolution chain,
+// the password-masked key input and the connection test.
 func (a *AppController) renderAIKeychainCard(
 	c *ui.Context,
 	theme *ui.Theme,
@@ -681,27 +600,10 @@ func (a *AppController) renderAIKeychainCard(
 	testMsg string,
 ) {
 	settingsEditorCard(c, theme, i18n.T("settings.card.api_key"), func() {
-		keyStatusLabel := i18n.T("settings.ai.key_not_configured")
+		keyStatusLabel, configured, _ := aiKeySourceSummary(activeProfile, keySource)
 		keyStatusColor := theme.Warning
-		switch keySource {
-		case secrets.KeySourceKeychain:
-			keyStatusLabel = i18n.T("settings.ai.key_in_keychain")
+		if configured {
 			keyStatusColor = theme.Success
-		case secrets.KeySourceEnv:
-			envName := strings.TrimSpace(activeProfile.APIKeyEnvVar)
-			if envName == "" {
-				envName = secrets.DefaultEnvVarForProvider(activeProfile.Provider)
-			}
-			if envName == "" {
-				envName = "API_KEY"
-			}
-			keyStatusLabel = i18n.Tf("settings.ai.key_via_env", envName)
-			keyStatusColor = theme.Success
-		default:
-			if ai.IsKeylessAllowed(activeProfile.Provider, activeProfile.BaseURL) {
-				keyStatusLabel = i18n.T("settings.ai.key_local")
-				keyStatusColor = theme.Success
-			}
 		}
 
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
@@ -709,6 +611,9 @@ func (a *AppController) renderAIKeychainCard(
 			ui.Spacer(c)
 			ui.Text(c, keyStatusLabel).FontSize(typeMeta).FontWeight(600).TextColor(keyStatusColor).SingleLine()
 		})
+
+		ui.Text(c, "SecretRef: "+aiProfileSecretRef(activeProfile)+" → "+aiProfileSecretFallbackRef(activeProfile)).
+			FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 
 		a.mu.Lock()
 		draft := a.uiState.apiKeyDraft
@@ -728,16 +633,13 @@ func (a *AppController) renderAIKeychainCard(
 		currentDraft := a.uiState.apiKeyDraft
 		a.mu.Unlock()
 
-		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).FillWidth().Wrap().Gap(space8).AlignItems(ui.Center).Children(func() {
 			if ui.PrimaryButton(c, i18n.T("settings.ai.save_key")).Disabled(strings.TrimSpace(currentDraft) == "").Clicked() {
 				_ = a.SaveAPIKey(currentDraft)
 			}
 			if ui.Button(c, i18n.T("settings.ai.clear_key")).Clicked() {
 				_ = a.DeleteAPIKey()
 			}
-		})
-
-		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 			svc := c.Services()
 			testLabel := i18n.T("settings.ai.test_connection")
 			if testStatus == AITestLoading {
