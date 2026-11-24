@@ -54,6 +54,7 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 
 	if state.Phase == engine.PhaseHidden {
 		capsuleUI.reset(a)
+		a.CloseHubSurface()
 		ui.Box(c).Fill()
 		return
 	}
@@ -191,6 +192,7 @@ func (a *AppController) renderCapsuleHeader(
 			// The capsule owns the tab hit targets so a dispatch rebuild cannot
 			// retain a glass-group pane from the previous immediate-mode pass.
 			capsuleSegmentedTabs(c, theme, labels, active, func(i int) {
+				a.CloseHubSurface()
 				a.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: omniboxTabs[i]})
 				a.uiState.searchHandle.RequestFocus(c)
 			})
@@ -376,6 +378,11 @@ func (a *AppController) renderOmniboxView(
 		if current.Phase != engine.PhaseOmnibox || a.handleActionMenuKey(ui.KeyEscape, 0, current) {
 			return
 		}
+		if a.ActiveHubSurface() != HubSurfaceNone {
+			a.CloseHubSurface()
+			a.uiState.searchHandle.RequestFocus(c)
+			return
+		}
 		if current.OmniboxQuery != "" {
 			a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: ""})
 			a.uiState.searchHandle.RequestFocus(c)
@@ -449,11 +456,18 @@ func (a *AppController) renderOmniboxView(
 		{ui.KeyK},
 		{ui.KeyI},
 		{ui.KeyP},
+		{ui.Key7},
+		{ui.Key8},
 	} {
 		shortcut := shortcut
 		c.OnWindowShortcut(mods, shortcut.key, func() {
 			// Modified chords remain application-owned during IME preedit.
 			a.handleOmniboxKey(shortcut.key, mods, state)
+		})
+	}
+	if a.ActiveHubSurface() != HubSurfaceNone {
+		c.OnWindowShortcut(mods, ui.KeyR, func() {
+			a.refreshActiveHubSources()
 		})
 	}
 	// Cmd+←/→ switch tabs from anywhere in the panel (spec §3.1). The
@@ -481,6 +495,24 @@ func (a *AppController) renderOmniboxView(
 	}
 
 	rootCol.Children(func() {
+		if hub := a.ActiveHubSurface(); hub != HubSurfaceNone {
+			switch hub {
+			case HubSurfaceStats:
+				a.renderStatsHubView(c, theme, cfg)
+			case HubSurfaceManage:
+				a.renderManagementHubView(c, theme, cfg)
+			}
+			ui.Divider(c)
+			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+				renderFooterHints(c, theme, []footerHint{
+					{keys: modPrefix() + "R", caption: pickLang(i18n.IsChinese(), "刷新", "Refresh")},
+					{keys: "esc", caption: pickLang(i18n.IsChinese(), "返回列表", "Back")},
+				})
+				ui.Spacer(c)
+				a.renderOmniboxHubToggles(c, theme)
+			})
+			return
+		}
 		query := state.OmniboxQuery
 		if state.OmniboxTab == config.TabAI {
 			a.renderAIUsageBand(c, theme)
@@ -857,11 +889,12 @@ func (a *AppController) renderOmniboxView(
 		}
 
 		ui.Divider(c)
-		ui.Row(c).FillWidth().Gap(space12).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 			prefix := modPrefix()
 			a.renderOmniboxFooterHints(c, theme, cfg, state, items, selectedIdx)
 			ui.Spacer(c)
 
+			a.renderOmniboxHubToggles(c, theme)
 			a.renderOmniboxFooterFrameToggle(c, theme, "eye", prefix+i18n.T("omnibox.footer.preview"),
 				a.previewPaneVisible(cfg), func() {
 					capsuleUI.togglePreview(a, cfg.Main.Appearance.ShowPreviewPane)
@@ -1289,7 +1322,11 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 			capsuleUI.togglePreview(a, cfg.Main.Appearance.ShowPreviewPane)
 			return true
 		}
+		if a.handleHubShortcutKey(key, mods) {
+			return true
+		}
 		if idx, ok := numberKeyIndex(key); ok && idx < len(omniboxTabs) {
+			a.CloseHubSurface()
 			capsuleUI.setActionMenuShown(a, false)
 			a.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: omniboxTabs[idx]})
 			return true
