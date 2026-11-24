@@ -88,15 +88,43 @@ func TestStateMachineCommitKeys(t *testing.T) {
 	if r := e.HandleKey(Key{Kind: KeySpace}); r.Consume {
 		t.Fatal("idle space consumed")
 	}
-	// Out-of-range digit passes through, with no commit.
+	// Out-of-range digit is cleanly consumed without leaking mid-composition or committing.
 	typeLetters(e, "ni")
-	if r := e.HandleKey(Key{Kind: KeyDigit, Rune: '9'}); r.Consume || r.Commit != "" || e.Raw() != "ni" {
-		t.Fatalf("digit 9 > page size: %+v raw=%q", r, e.Raw())
+	for _, rDigit := range []rune{'0', '6', '9'} {
+		if r := e.HandleKey(Key{Kind: KeyDigit, Rune: rDigit}); !r.Consume || r.Commit != "" || e.Raw() != "ni" {
+			t.Fatalf("digit %q out of range: %+v raw=%q", rDigit, r, e.Raw())
+		}
 	}
 	// Digit picks candidate n.
 	want := e.View().Candidates[1].Text
 	if r := e.HandleKey(Key{Kind: KeyDigit, Rune: '2'}); r.Commit != want {
 		t.Fatalf("digit 2: %+v want %q", r, want)
+	}
+}
+
+func TestOutOfBoundsDigitsConsistentWithShortCandidatePage(t *testing.T) {
+	e := New(Options{
+		CandidateCount: 5,
+		Dictionary:     stubOnlyDict{singles: map[string][]string{"ni": {"你", "泥"}}},
+	})
+	// Idle digits still pass through untouched.
+	for _, d := range []rune{'0', '1', '9'} {
+		if r := e.HandleKey(Key{Kind: KeyDigit, Rune: d}); r.Consume || r.Commit != "" {
+			t.Fatalf("idle digit %q should pass through: %+v", d, r)
+		}
+	}
+	// While composing with only 2 candidates on a 5-slot page:
+	// 0, 3..5 (> len(candidates)), and 6..9 (> CandidateCount) must all consume cleanly.
+	typeLetters(e, "ni")
+	for _, d := range []rune{'0', '3', '4', '5', '6', '8', '9'} {
+		r := e.HandleKey(Key{Kind: KeyDigit, Rune: d})
+		if !r.Consume || r.Commit != "" || e.Raw() != "ni" {
+			t.Fatalf("out-of-bounds digit %q while composing: %+v raw=%q", d, r, e.Raw())
+		}
+	}
+	// Valid digit 2 still selects the 2nd candidate.
+	if r := e.HandleKey(Key{Kind: KeyDigit, Rune: '2'}); !r.Consume || r.Commit != "泥" || e.Raw() != "" {
+		t.Fatalf("valid digit 2 after out-of-bounds digits: %+v raw=%q", r, e.Raw())
 	}
 }
 

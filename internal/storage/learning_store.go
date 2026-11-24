@@ -12,6 +12,7 @@ import (
 
 	"github.com/egoist/mygo/plugins/sqlite"
 	"github.com/yeisme/clavis/pkg/core/ime"
+	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
 
 const (
@@ -350,6 +351,11 @@ func (s *LearningStore) BigramWordsForPrefix(prevWord, syllablePrefix string) []
 	if s == nil || prevWord == "" || syllablePrefix == "" {
 		return nil
 	}
+	syllablePrefix = strings.ToLower(strings.TrimSpace(syllablePrefix))
+	if syllablePrefix == "" {
+		return nil
+	}
+	var prefixSegs []string
 	s.mu.RLock()
 	byWord := make(map[string]ime.UserCandidate, 8)
 	for key, value := range s.bigrams {
@@ -357,9 +363,7 @@ func (s *LearningStore) BigramWordsForPrefix(prevWord, syllablePrefix string) []
 			continue
 		}
 		for reading := range s.readings[key[1]] {
-			// The learned lexicon stores the complete compact reading (for example
-			// women); the current composition is the continuation suffix (men).
-			if !strings.HasSuffix(reading, syllablePrefix) {
+			if !matchesBigramReadingPrefix(reading, syllablePrefix, &prefixSegs) {
 				continue
 			}
 			frequency := value.frequency
@@ -367,7 +371,7 @@ func (s *LearningStore) BigramWordsForPrefix(prevWord, syllablePrefix string) []
 				frequency = math.MaxInt32
 			}
 			candidate := ime.UserCandidate{PinyinKey: reading, Word: key[1], Frequency: int32(frequency)}
-			if prior, ok := byWord[candidate.Word]; !ok || candidate.Frequency > prior.Frequency {
+			if prior, ok := byWord[candidate.Word]; !ok || betterBigramCandidate(candidate, prior, syllablePrefix) {
 				byWord[candidate.Word] = candidate
 			}
 		}
@@ -377,8 +381,54 @@ func (s *LearningStore) BigramWordsForPrefix(prevWord, syllablePrefix string) []
 	for _, candidate := range byWord {
 		out = append(out, candidate)
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Frequency > out[j].Frequency })
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Frequency != out[j].Frequency {
+			return out[i].Frequency > out[j].Frequency
+		}
+		return out[i].Word < out[j].Word
+	})
 	return out
+}
+
+func matchesBigramReadingPrefix(reading, syllablePrefix string, prefixSegs *[]string) bool {
+	if reading == "" || syllablePrefix == "" {
+		return false
+	}
+	if strings.HasPrefix(reading, syllablePrefix) {
+		return true
+	}
+	if reading[0] != syllablePrefix[0] || len(syllablePrefix) < 2 {
+		return false
+	}
+	if *prefixSegs == nil {
+		*prefixSegs = inputengine.Segment(syllablePrefix)
+	}
+	psegs := *prefixSegs
+	if len(psegs) == 0 {
+		return false
+	}
+	rsegs := inputengine.Segment(strings.ReplaceAll(reading, " ", "'"))
+	if len(rsegs) < len(psegs) {
+		return false
+	}
+	for i, seg := range psegs {
+		if !strings.HasPrefix(rsegs[i], seg) {
+			return false
+		}
+	}
+	return true
+}
+
+func betterBigramCandidate(a, b ime.UserCandidate, syllablePrefix string) bool {
+	if a.Frequency != b.Frequency {
+		return a.Frequency > b.Frequency
+	}
+	aExact := a.PinyinKey == syllablePrefix
+	bExact := b.PinyinKey == syllablePrefix
+	if aExact != bExact {
+		return aExact
+	}
+	return a.PinyinKey < b.PinyinKey
 }
 
 func (s *LearningStore) indexLexKeyLocked(k lexKey) {

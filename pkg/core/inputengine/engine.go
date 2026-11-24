@@ -411,7 +411,7 @@ func (e *Engine) HandleKey(k Key) Result {
 	case KeyDigit:
 		n := int(k.Rune - '0')
 		if n < 1 || n > e.opts.CandidateCount {
-			return Result{}
+			return Result{Consume: true}
 		}
 		return e.selectIndex(n - 1)
 	case KeyPagePrev:
@@ -798,6 +798,11 @@ func (e *Engine) buildCandidates() {
 		segAlts = e.expandSegmentAlts(segs)
 	}
 
+	var bigramCands []UserCandidate
+	if uf != nil && e.prevCommit != "" {
+		bigramCands = uf.BigramWordsForPrefix(e.prevCommit, joinCompact(segs))
+	}
+
 	// 1. Words covering all syllables, then 2. words covering a prefix (longest first).
 	fullCovered := false
 	for n := len(segs); n >= 2; n-- {
@@ -814,6 +819,11 @@ func (e *Engine) buildCandidates() {
 							customScores[u.Word] = u.Frequency
 							e.addCandidate(u.Word, n, false)
 						}
+					}
+				}
+				for _, u := range bigramCands {
+					if u.Word != "" && bigramExactSyllableMatch(u.PinyinKey, segs) {
+						e.addCandidate(u.Word, n, false)
 					}
 				}
 			}
@@ -848,8 +858,8 @@ func (e *Engine) buildCandidates() {
 	// fallback so a learned continuation can surface even when it is absent from
 	// the current phrase slice. The optional interface keeps the no-data path
 	// byte-for-byte equivalent to the cold-start candidate list.
-	if uf != nil && e.prevCommit != "" && len(e.cands) < maxCandidates {
-		for _, u := range uf.BigramWordsForPrefix(e.prevCommit, joinCompact(segs)) {
+	if len(bigramCands) > 0 && len(e.cands) < maxCandidates {
+		for _, u := range bigramCands {
 			if consumed := bigramConsumed(u.PinyinKey, segs); consumed > 0 {
 				e.addCandidate(u.Word, consumed, false)
 			}
@@ -1014,15 +1024,21 @@ func bigramConsumed(reading string, segs []string) int {
 		return 0
 	}
 	full := splitIMEPinyin(reading)
-	for start := range full {
-		if len(full)-start < len(segs) {
-			continue
-		}
-		if matchKey(full[start:start+len(segs)], segs) {
-			return len(segs)
-		}
+	if len(full) < len(segs) {
+		return 0
+	}
+	if matchKey(full[:len(segs)], segs) {
+		return len(segs)
 	}
 	return 0
+}
+
+func bigramExactSyllableMatch(reading string, segs []string) bool {
+	if reading == "" || len(segs) == 0 {
+		return false
+	}
+	full := splitIMEPinyin(reading)
+	return len(full) == len(segs) && matchKey(full, segs)
 }
 
 func joinCompact(segs []string) string {

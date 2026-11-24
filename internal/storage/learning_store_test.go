@@ -146,13 +146,22 @@ func TestLearningStoreDeletedReadingLeavesBigramCandidates(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(store.BigramWordsForPrefix("说", "men")) != 1 {
-		t.Fatal("missing initial bigram candidate")
+	if got := store.BigramWordsForPrefix("说", "men"); len(got) != 0 {
+		t.Fatalf("suffix-only prefix unexpectedly matched: %+v", got)
+	}
+	if len(store.BigramWordsForPrefix("说", "wo")) != 1 {
+		t.Fatal("missing initial bigram candidate for prefix wo")
+	}
+	if len(store.BigramWordsForPrefix("说", "women")) != 1 {
+		t.Fatal("missing initial bigram candidate for full reading women")
 	}
 	if err := store.DeleteLearnedWord(ctx, "women", "我们"); err != nil {
 		t.Fatal(err)
 	}
-	if got := store.BigramWordsForPrefix("说", "men"); len(got) != 0 {
+	if got := store.BigramWordsForPrefix("说", "wo"); len(got) != 0 {
+		t.Fatalf("deleted reading still yielded candidates: %+v", got)
+	}
+	if got := store.BigramWordsForPrefix("说", "women"); len(got) != 0 {
 		t.Fatalf("deleted reading still yielded candidates: %+v", got)
 	}
 }
@@ -234,39 +243,155 @@ func TestLearningStoreBigramWordsForPrefixUsesRAMMirror(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Realistic commits: "我" then "们" (pinyin="men"), plus an accidental/other
+	// "我们" (pinyin="women") entry that must NOT be suggested when typing "men" after "我".
 	for i := 0; i < 2; i++ {
+		if err := store.RecordIMECommit(ctx, "men", "们", "我", false); err != nil {
+			t.Fatal(err)
+		}
 		if err := store.RecordIMECommit(ctx, "women", "我们", "我", false); err != nil {
 			t.Fatal(err)
 		}
 	}
 	adapter := NewUserFrequencyAdapter(store)
-	got := adapter.BigramWordsForPrefix("我", "men")
-	if len(got) != 1 || got[0].Word != "我们" || got[0].Frequency != 2 {
-		t.Fatalf("bigram candidates = %+v", got)
+	for _, prefix := range []string{"m", "me", "men"} {
+		got := adapter.BigramWordsForPrefix("我", prefix)
+		if len(got) != 1 || got[0].Word != "们" || got[0].PinyinKey != "men" || got[0].Frequency != 2 {
+			t.Fatalf("BigramWordsForPrefix(我, %q) = %+v, want only 们 (not 我们)", prefix, got)
+		}
 	}
 	if got := adapter.BigramWordsForPrefix("你", "men"); len(got) != 0 {
 		t.Fatalf("wrong previous word returned candidates: %+v", got)
 	}
+
 	eng := inputengine.New(inputengine.Options{CandidateCount: 7, UserFrequency: adapter})
-	typeEngineLetters(eng, "wo")
-	previous := eng.View()
-	previousIndex := -1
-	for i, candidate := range previous.Candidates {
-		if candidate.Text == "我" {
-			previousIndex = i
+	commitWo := func() {
+		t.Helper()
+		eng.Reset()
+		typeEngineLetters(eng, "wo")
+		previous := eng.View()
+		previousIndex := -1
+		for i, candidate := range previous.Candidates {
+			if candidate.Text == "我" {
+				previousIndex = i
+				break
+			}
+		}
+		if previousIndex < 0 {
+			t.Fatalf("previous-word candidate missing: %+v", previous.Candidates)
+		}
+		if r := eng.HandleKey(inputengine.Key{Kind: inputengine.KeyDigit, Rune: rune('1' + previousIndex)}); r.Commit != "我" {
+			t.Fatalf("commit previous word: %+v", r)
+		}
+	}
+	for _, typed := range []string{"m", "me", "men"} {
+		commitWo()
+		typeEngineLetters(eng, typed)
+		candidates := eng.View().Candidates
+		if len(candidates) == 0 || candidates[0].Text != "们" {
+			t.Fatalf("after 我 + %q expected 们 at #0, got %+v", typed, candidates)
+		}
+		for _, c := range candidates {
+			if c.Text == "我们" {
+				t.Fatalf("after 我 + %q erroneously suggested 我们 (would produce 我我们): %+v", typed, candidates)
+			}
+		}
+	}
+}
+
+func TestLearningStoreBigramMultiSyllablePrefixAndJianpin(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, ":memory:", sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewLearningStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := store.RecordIMECommit(ctx, "xihuan", "喜欢", "我", false); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.RecordIMECommit(ctx, "xiaohong", "晓红", "我", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adapter := NewUserFrequencyAdapter(store)
+	for _, prefix := range []string{"x", "xi", "xih", "xihuan", "xh"} {
+		got := adapter.BigramWordsForPrefix("我", prefix)
+		found := false
+		for _, c := range got {
+			if c.Word == "喜欢" && c.PinyinKey == "xihuan" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("BigramWordsForPrefix(我, %q) = %+v, want 喜欢", prefix, got)
+		}
+	}
+	for _, suffix := range []string{"huan", "hu", "hong"} {
+		if got := adapter.BigramWordsForPrefix("我", suffix); len(got) != 0 {
+			t.Fatalf("BigramWordsForPrefix(我, %q) erroneously matched suffix: %+v", suffix, got)
+		}
+	}
+
+	eng := inputengine.New(inputengine.Options{CandidateCount: 7, UserFrequency: adapter})
+	commitWo := func() {
+		t.Helper()
+		eng.Reset()
+		typeEngineLetters(eng, "wo")
+		for i, c := range eng.View().Candidates {
+			if c.Text == "我" {
+				if r := eng.HandleKey(inputengine.Key{Kind: inputengine.KeyDigit, Rune: rune('1' + i)}); r.Commit != "我" {
+					t.Fatalf("commit 我 failed: %+v", r)
+				}
+				return
+			}
+		}
+		t.Fatal("candidate 我 missing")
+	}
+
+	for _, typed := range []string{"xi", "xh", "xihuan"} {
+		commitWo()
+		typeEngineLetters(eng, typed)
+		cands := eng.View().Candidates
+		found := false
+		for _, c := range cands {
+			if c.Text == "喜欢" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("after 我 + %q expected 喜欢 on page 1, got %+v", typed, cands)
+		}
+	}
+
+	// Non-dictionary learned bigram also surfaces via jianpin ("xh").
+	commitWo()
+	typeEngineLetters(eng, "xh")
+	xhCands := eng.View().Candidates
+	foundCustom := false
+	for _, c := range xhCands {
+		if c.Text == "晓红" {
+			foundCustom = true
 			break
 		}
 	}
-	if previousIndex < 0 {
-		t.Fatalf("previous-word candidate missing: %+v", previous.Candidates)
+	if !foundCustom {
+		t.Fatalf("after 我 + xh expected learned custom bigram 晓红 on page 1, got %+v", xhCands)
 	}
-	if r := eng.HandleKey(inputengine.Key{Kind: inputengine.KeyDigit, Rune: rune('1' + previousIndex)}); r.Commit != "我" {
-		t.Fatalf("commit previous word: %+v", r)
-	}
-	typeEngineLetters(eng, "men")
-	candidates := eng.View().Candidates
-	if len(candidates) == 0 || candidates[0].Text != "我们" {
-		t.Fatalf("bigram candidate generation = %+v", candidates)
+
+	// Typing the second syllable ("huan") must NOT suggest "喜欢".
+	commitWo()
+	typeEngineLetters(eng, "huan")
+	for _, c := range eng.View().Candidates {
+		if c.Text == "喜欢" {
+			t.Fatalf("after 我 + huan erroneously suggested 喜欢: %+v", eng.View().Candidates)
+		}
 	}
 }
 

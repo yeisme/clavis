@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/yeisme/clavis/pkg/core/ime"
@@ -101,4 +102,85 @@ func TestLoadDictionaryDiagnosticsFallsBackWithoutPartialCustom(t *testing.T) {
 	if len(got) == 0 || got[0] != "自定义诊断词" {
 		t.Fatalf("valid custom dictionary was not retained: %v", got)
 	}
+}
+
+func TestLoadDictionaryWithDiagnosticsPreservesUserDiagnostics(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	userDir := filepath.Join(home, ".config", "clavis", "dicts")
+	if err := os.MkdirAll(userDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	badUser := filepath.Join(userDir, "broken.clvdict")
+	if err := os.WriteFile(badUser, []byte("not a valid clvdict"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Even with no customPaths, user-directory diagnostics must be reported and preserved.
+	var reportedNoCustom []DictionaryDiagnostic
+	dict, status, err := LoadDictionaryWithStatus(nil, "", func(d DictionaryDiagnostic) {
+		reportedNoCustom = append(reportedNoCustom, d)
+	})
+	if err != nil || dict == nil {
+		t.Fatalf("load with nil customPaths: dict=%v err=%v", dict, err)
+	}
+	if len(reportedNoCustom) != 1 || reportedNoCustom[0].Path != badUser || reportedNoCustom[0].Kind != "malformed" {
+		t.Fatalf("user diagnostic not reported when customPaths empty: %+v", reportedNoCustom)
+	}
+	if len(status.Diagnostics) == 0 {
+		t.Fatalf("status.Diagnostics lost user diagnostics: %+v", status)
+	}
+
+	// With both a bad user dict and a bad custom dict, both are reported and preserved.
+	customDir := t.TempDir()
+	badCustom := filepath.Join(customDir, "bad.dict.yaml")
+	if err := os.WriteFile(badCustom, []byte("invalid line without tabs\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var reportedBoth []DictionaryDiagnostic
+	_, statusBoth, err := LoadDictionaryWithStatus([]string{badCustom}, filepath.Join(customDir, "cache"), func(d DictionaryDiagnostic) {
+		reportedBoth = append(reportedBoth, d)
+	})
+	if err != nil {
+		t.Fatalf("load both: %v", err)
+	}
+	if len(reportedBoth) != 2 {
+		t.Fatalf("expected 2 diagnostics (user + custom), got %+v", reportedBoth)
+	}
+	if reportedBoth[0].Path != badUser || reportedBoth[1].Path != badCustom {
+		t.Fatalf("unexpected diagnostic paths: %+v", reportedBoth)
+	}
+	hasUserDiag, hasCustomDiag := false, false
+	for _, msg := range statusBoth.Diagnostics {
+		if strings.Contains(msg, badUser) {
+			hasUserDiag = true
+		}
+		if strings.Contains(msg, badCustom) {
+			hasCustomDiag = true
+		}
+	}
+	if !hasUserDiag || !hasCustomDiag {
+		t.Fatalf("status.Diagnostics did not preserve both user and custom diagnostics: %+v", statusBoth.Diagnostics)
+	}
+}
+
+func TestEmbeddedDictionaryCountCachedAndConcurrent(t *testing.T) {
+	first := embeddedDictionaryCount()
+	if first <= 0 {
+		t.Fatalf("embeddedDictionaryCount() = %d, want > 0", first)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				if got := embeddedDictionaryCount(); got != first {
+					t.Errorf("embeddedDictionaryCount() = %d, want %d", got, first)
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }

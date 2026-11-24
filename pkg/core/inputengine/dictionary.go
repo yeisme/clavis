@@ -142,6 +142,7 @@ const commonClvDigest = "sha256:86d7962f4bd037be31795f5390fec21a503db470361fba2c
 var (
 	commonDictOnce sync.Once
 	commonDict     Dictionary
+	commonDictLen  int
 )
 
 // commonDictionary returns the embedded common-word layer, or nil when the artifact is
@@ -157,6 +158,7 @@ func commonDictionary() Dictionary {
 		if err != nil || l == nil || l.Len() == 0 {
 			return
 		}
+		commonDictLen = l.Len()
 		commonDict = newIMEDictionary(l, false)
 	})
 	return commonDict
@@ -256,11 +258,26 @@ type DictionaryDiagnostic struct {
 // loaded and indexed before returning, so Dictionary lookups never perform disk
 // I/O. Files are sorted by name and earlier layers have higher priority.
 func LoadUserDictionary() (Dictionary, DictionaryStatus) {
+	dict, status, _ := loadUserDictionaryWithDiagnostics()
+	return dict, status
+}
+
+func loadUserDictionaryWithDiagnostics() (Dictionary, DictionaryStatus, []DictionaryDiagnostic) {
 	dir := userDictionaryDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		// An absent directory is the normal first-run state, not a load failure.
-		return defaultDictionary(), DictionaryStatus{Source: "embedded", Path: "embedded", Count: embeddedDictionaryCount()}
+		if os.IsNotExist(err) {
+			// An absent directory is the normal first-run state, not a load failure.
+			return defaultDictionary(), DictionaryStatus{Source: "embedded", Path: "embedded", Count: embeddedDictionaryCount()}, nil
+		}
+		diag := DictionaryDiagnostic{Path: dir, Kind: "unreadable", Message: err.Error(), Fallback: "starter+builtin"}
+		status := DictionaryStatus{
+			Source:      "embedded",
+			Path:        "embedded",
+			Count:       embeddedDictionaryCount(),
+			Diagnostics: []string{fmt.Sprintf("user dictionary %s: %v", dir, err)},
+		}
+		return defaultDictionary(), status, []DictionaryDiagnostic{diag}
 	}
 	paths := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -270,23 +287,30 @@ func LoadUserDictionary() (Dictionary, DictionaryStatus) {
 	}
 	sort.Strings(paths)
 	if len(paths) == 0 {
-		return defaultDictionary(), DictionaryStatus{Source: "embedded", Path: "embedded", Count: embeddedDictionaryCount()}
+		return defaultDictionary(), DictionaryStatus{Source: "embedded", Path: "embedded", Count: embeddedDictionaryCount()}, nil
 	}
 	layers := make([]Dictionary, 0, len(paths))
 	loadedPaths := make([]string, 0, len(paths))
+	var userDiags []DictionaryDiagnostic
 	status := DictionaryStatus{Source: "embedded", Path: "embedded", Count: 0}
 	for _, path := range paths {
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
 			status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("user dictionary %s: %v", path, readErr))
+			userDiags = append(userDiags, DictionaryDiagnostic{Path: path, Kind: "unreadable", Message: readErr.Error(), Fallback: "starter+builtin"})
 			continue
 		}
 		lex, loadErr := ime.LoadClvDict(data)
 		if loadErr != nil || lex == nil || lex.Len() == 0 {
+			kind := "malformed"
 			if loadErr == nil {
 				loadErr = fmt.Errorf("empty dictionary")
+				kind = "empty"
+			} else if len(bytes.TrimSpace(data)) == 0 {
+				kind = "empty"
 			}
 			status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("user dictionary %s: %v", path, loadErr))
+			userDiags = append(userDiags, DictionaryDiagnostic{Path: path, Kind: kind, Message: loadErr.Error(), Fallback: "starter+builtin"})
 			continue
 		}
 		layers = append(layers, NewIMEDictionary(lex))
@@ -296,11 +320,11 @@ func LoadUserDictionary() (Dictionary, DictionaryStatus) {
 	if len(layers) == 0 {
 		status.Count = embeddedDictionaryCount()
 		status.Diagnostics = append(status.Diagnostics, "all user dictionaries failed; using embedded dictionaries")
-		return defaultDictionary(), status
+		return defaultDictionary(), status, userDiags
 	}
 	status.Source = "user"
 	status.Path = strings.Join(loadedPaths, ", ")
-	return ChainDictionaries(append(layers, defaultDictionary())...), status
+	return ChainDictionaries(append(layers, defaultDictionary())...), status, userDiags
 }
 
 // LoadDictionaryWithDiagnostics resolves every explicit custom source independently. A
@@ -308,16 +332,29 @@ func LoadUserDictionary() (Dictionary, DictionaryStatus) {
 // The returned dictionary is fully indexed before this function returns, so its
 // lookup path performs no disk I/O.
 func LoadDictionaryWithDiagnostics(customPaths []string, cacheDir string, report func(DictionaryDiagnostic)) (Dictionary, error) {
-	user, status := LoadUserDictionary()
+	dict, _, err := LoadDictionaryWithStatus(customPaths, cacheDir, report)
+	return dict, err
+}
+
+// LoadDictionaryWithStatus resolves user and explicit custom dictionary layers,
+// preserving diagnostics from both LoadUserDictionary and customPaths and
+// reporting every diagnostic consistently.
+func LoadDictionaryWithStatus(customPaths []string, cacheDir string, report func(DictionaryDiagnostic)) (Dictionary, DictionaryStatus, error) {
+	user, status, userDiags := loadUserDictionaryWithDiagnostics()
+	for _, diag := range userDiags {
+		emitDictionaryDiagnostic(diag, report)
+	}
 	clean := cleanDictionaryPaths(customPaths)
 	if len(clean) == 0 {
-		return user, nil
+		return user, status, nil
 	}
 	resolvedCache := strings.TrimSpace(cacheDir)
 	if resolvedCache == "" {
 		resolvedCache = defaultDictCacheDir()
 	}
 	layers := make([]Dictionary, 0, len(clean))
+	loadedCustomPaths := make([]string, 0, len(clean))
+	customCount := 0
 	for _, path := range clean {
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
@@ -328,10 +365,7 @@ func LoadDictionaryWithDiagnostics(customPaths []string, cacheDir string, report
 		if kind, valid := validateDictionaryData(data); !valid {
 			message := "dictionary contains invalid or missing fields"
 			diagnostic := DictionaryDiagnostic{Path: path, Kind: kind, Message: message, Fallback: "starter+builtin"}
-			status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("%s: %s", path, message))
-			if report != nil {
-				report(diagnostic)
-			}
+			recordDictionaryDiagnostic(&status, diagnostic, report)
 			continue
 		}
 		lex, loadErr := ime.LoadOrCompileDicts([]string{path}, resolvedCache)
@@ -342,23 +376,36 @@ func LoadDictionaryWithDiagnostics(customPaths []string, cacheDir string, report
 				message = loadErr.Error()
 			}
 			diagnostic := DictionaryDiagnostic{Path: path, Kind: kind, Message: message, Fallback: "starter+builtin"}
-			status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("%s: %s", path, message))
-			if report != nil {
-				report(diagnostic)
-			}
+			recordDictionaryDiagnostic(&status, diagnostic, report)
 			continue
 		}
 		layers = append(layers, NewIMEDictionary(lex))
+		loadedCustomPaths = append(loadedCustomPaths, path)
+		customCount += lex.Len()
 	}
 	if len(layers) == 0 {
-		return user, nil
+		return user, status, nil
+	}
+	status.Source = "custom"
+	if status.Path != "" && status.Path != "embedded" {
+		status.Path = strings.Join(append(loadedCustomPaths, status.Path), ", ")
+		status.Count += customCount
+	} else {
+		status.Path = strings.Join(loadedCustomPaths, ", ")
+		status.Count = customCount
 	}
 	// Explicit custom layers outrank user, learned, starter, and builtin layers.
-	return ChainDictionaries(append(layers, user)...), nil
+	return ChainDictionaries(append(layers, user)...), status, nil
 }
 
 func recordDictionaryDiagnostic(status *DictionaryStatus, diagnostic DictionaryDiagnostic, report func(DictionaryDiagnostic)) {
-	status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("%s: %s", diagnostic.Path, diagnostic.Message))
+	if status != nil {
+		status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("%s: %s", diagnostic.Path, diagnostic.Message))
+	}
+	emitDictionaryDiagnostic(diagnostic, report)
+}
+
+func emitDictionaryDiagnostic(diagnostic DictionaryDiagnostic, report func(DictionaryDiagnostic)) {
 	if report != nil {
 		report(diagnostic)
 		return
@@ -474,24 +521,32 @@ func cleanDictionaryPaths(paths []string) []string {
 }
 
 func userDictionaryDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(home) == "" {
-		return filepath.Join(".config", "clavis", "dicts")
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".config", "clavis", "dicts")
 	}
-	return filepath.Join(home, ".config", "clavis", "dicts")
+	if cfgDir, err := os.UserConfigDir(); err == nil && strings.TrimSpace(cfgDir) != "" {
+		return filepath.Join(cfgDir, "clavis", "dicts")
+	}
+	return filepath.Join(".config", "clavis", "dicts")
 }
 
+var (
+	embeddedDictCountOnce sync.Once
+	embeddedDictCount     int
+)
+
 func embeddedDictionaryCount() int {
-	count := 0
-	if lex := ime.StarterLexicon(); lex != nil {
-		count += lex.Len()
-	}
-	if len(commonClvDict) > 0 {
-		if lex, err := ime.LoadClvDict(commonClvDict); err == nil && lex != nil {
+	embeddedDictCountOnce.Do(func() {
+		count := 0
+		if lex := ime.StarterLexicon(); lex != nil {
 			count += lex.Len()
 		}
-	}
-	return count
+		if commonDictionary() != nil {
+			count += commonDictLen
+		}
+		embeddedDictCount = count
+	})
+	return embeddedDictCount
 }
 
 func defaultDictCacheDir() string {
