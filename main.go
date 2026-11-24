@@ -24,6 +24,8 @@ import (
 	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/internal/storage"
 	"github.com/yeisme/clavis/internal/watcher"
+	"github.com/yeisme/clavis/pkg/core/ai"
+	"github.com/yeisme/clavis/pkg/core/automation"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
@@ -162,6 +164,7 @@ type desktopApp struct {
 	learningWriter       *storage.LearningWriter
 	clipStore            clipboard.Store
 	mediaStore           *clipboard.MediaStore
+	auditLog             *automation.AuditLog
 	hostBridge           bridge.HostService
 	controller           *uiapp.AppController
 	supervisor           *daemon.ResidentSupervisor
@@ -180,6 +183,10 @@ type desktopApp struct {
 	permMenuItem         *mygo.MenuItem
 	loginMenuItem        *mygo.MenuItem
 	trayLabelItems       map[string]*mygo.MenuItem
+	permKnown            bool
+	permStatus           host.PermissionStatus
+	permErr              error
+	permCaps             host.Capabilities
 	bridgeRunning        bool
 	shuttingDown         bool
 	bgWG                 sync.WaitGroup
@@ -209,6 +216,64 @@ type desktopApp struct {
 	// (startBridgeAndFallbackShortcut runs on the main thread, the config
 	// watcher and the permission watcher).
 	bridgeStarting atomic.Bool
+}
+
+var setAppLocale = func(tag string) {
+	mygo.App.SetLocale(tag)
+}
+
+func sharedAIUsageDailyReader(store *storage.LearningStore) uiapp.AIUsageDailyReader {
+	return func(ctx context.Context, n int) ([]uiapp.AIUsageDay, error) {
+		days, err := store.AIUsageDaily(ctx, n)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]uiapp.AIUsageDay, len(days))
+		for i, day := range days {
+			out[i] = uiapp.AIUsageDay{
+				Day:          day.Day,
+				Requests:     day.Requests,
+				InputTokens:  day.InputTokens,
+				OutputTokens: day.OutputTokens,
+			}
+		}
+		return out, nil
+	}
+}
+
+func sharedLexiconHitsDailyReader(store *storage.LearningStore) uiapp.LexiconHitsDailyReader {
+	return func(ctx context.Context, n int) ([]uiapp.LexiconHitDay, error) {
+		days, err := store.LexiconHitsDaily(ctx, n)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]uiapp.LexiconHitDay, len(days))
+		for i, day := range days {
+			out[i] = uiapp.LexiconHitDay{
+				Day:    day.Day,
+				Hits:   day.Hits,
+				Misses: day.Misses,
+			}
+		}
+		return out, nil
+	}
+}
+
+func sharedLexiconTopWordsReader(store *storage.LearningStore) uiapp.LexiconTopWordsReader {
+	return func(ctx context.Context, n int) ([]uiapp.LexiconTopWord, error) {
+		words, err := store.LexiconTopWords(ctx, n)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]uiapp.LexiconTopWord, len(words))
+		for i, word := range words {
+			out[i] = uiapp.LexiconTopWord{
+				Word:     word.Word,
+				UseCount: word.UseCount,
+			}
+		}
+		return out, nil
+	}
 }
 
 func newDesktopApp() *desktopApp {
@@ -295,8 +360,8 @@ func (a *desktopApp) start() {
 	i18n.SetPreferredLanguagesProvider(mygo.App.PreferredLanguages)
 	i18n.SetLanguage(i18n.ResolveLanguage(cfg.Main.Appearance.Language, i18n.PreferredLanguages()))
 	mygo.App.SetLanguages("en", "zh-Hans")
-	if tag := i18n.Current().Tag(); tag != "en" {
-		mygo.App.SetLocale(tag)
+	if tag := i18n.Current().Tag(); tag != "" {
+		setAppLocale(tag)
 	}
 
 	var sqliteStore *storage.SQLiteClipboardStore
@@ -376,14 +441,36 @@ func (a *desktopApp) start() {
 		}),
 	)
 
+	auditLog := &automation.AuditLog{}
+	var aiUsageRecorder ai.UsageRecorder
+	if learningWriter != nil {
+		aiUsageRecorder = learningWriter
+	}
+	var aiUsageDaily uiapp.AIUsageDailyReader
+	var lexiconHitsDaily uiapp.LexiconHitsDailyReader
+	var lexiconTopWords uiapp.LexiconTopWordsReader
+	if learningStore != nil {
+		aiUsageDaily = sharedAIUsageDailyReader(learningStore)
+		lexiconHitsDaily = sharedLexiconHitsDailyReader(learningStore)
+		lexiconTopWords = sharedLexiconTopWordsReader(learningStore)
+	}
+
 	controller := uiapp.NewAppController(uiapp.Options{
-		ConfigStore:    cfgStore,
-		ClipboardStore: clipStore,
-		SecretStore:    secretStore,
-		Bridge:         hostBridge,
-		AppProvider:    appProvider,
+		ConfigStore:      cfgStore,
+		ClipboardStore:   clipStore,
+		AIUsageDaily:     aiUsageDaily,
+		AIUsageRecorder:  aiUsageRecorder,
+		LexiconHitsDaily: lexiconHitsDaily,
+		LexiconTopWords:  lexiconTopWords,
+		SecretStore:      secretStore,
+		Bridge:           hostBridge,
+		AppProvider:      appProvider,
+		AuditLog:         auditLog,
 		ClipboardWriter: func(text string) {
 			mygo.Clipboard.WriteText(text)
+		},
+		ClipboardWriterWithError: func(text string) error {
+			return mygo.Clipboard.Write(transfer.TextData(text))
 		},
 		BeforeInject: a.beforeInject,
 		OpenPath: func(p string) error {
@@ -497,7 +584,7 @@ func (a *desktopApp) start() {
 		SkipTaskbar:   true,
 		Content: ui.View(func(c *ui.Context) {
 			cfg := controller.Config()
-			uiapp.SelectionBarView(c, a.selectionBarSnapshot(), cfg.Main.Appearance)
+			uiapp.SelectionBarViewWithController(c, a.selectionBarSnapshot(), cfg.Main.Appearance, controller)
 		}),
 	}, selectionSpec))
 	uiapp.BindFloatingSurface(selectionBar, selectionSpec, uiapp.SurfaceHooks{
@@ -592,6 +679,7 @@ func (a *desktopApp) start() {
 	a.learningWriter = learningWriter
 	a.clipStore = clipStore
 	a.mediaStore = mediaStore
+	a.auditLog = auditLog
 	a.hostBridge = hostBridge
 	a.controller = controller
 	a.supervisor = sup
@@ -696,12 +784,9 @@ func (a *desktopApp) closeHides(hide func()) func(*mygo.CloseEvent) {
 	}
 }
 
-// restorePreviousAppFocus returns focus after a document-style surface closes.
-// MyGo has no API for activating an arbitrary external bundle, so the safe
-// fallback is to hide Clavis and let macOS reveal the previous application.
-// Never do this while another Clavis surface is visible, because App.Hide
-// would hide that surface as a side effect.
-func (a *desktopApp) restorePreviousAppFocus() {
+// surfaceWindows returns all windows owned by the desktop shell so focus
+// restoration can avoid hiding the app while any surface remains open.
+func (a *desktopApp) surfaceWindows() []*mygo.Window {
 	a.mu.Lock()
 	capsule := a.capsulePanel
 	prompt := a.promptPanel
@@ -709,11 +794,32 @@ func (a *desktopApp) restorePreviousAppFocus() {
 	selection := a.selectionBar
 	settings := a.settingsWin
 	onboarding := a.onboardingWin
+	annotate := a.annotateWin
+	var inputPanel *mygo.Window
+	if a.inputUI != nil {
+		inputPanel = a.inputUI.panel
+	}
 	a.mu.Unlock()
-	for _, win := range []*mygo.Window{capsule, prompt, pill, selection, settings, onboarding} {
-		if win != nil && win.IsVisible() {
-			return
+	return []*mygo.Window{capsule, prompt, pill, selection, settings, onboarding, annotate, inputPanel}
+}
+
+func (a *desktopApp) hasVisibleSurface(isVisible func(*mygo.Window) bool) bool {
+	for _, win := range a.surfaceWindows() {
+		if win != nil && isVisible(win) {
+			return true
 		}
+	}
+	return false
+}
+
+// restorePreviousAppFocus returns focus after a document-style surface closes.
+// MyGo has no API for activating an arbitrary external bundle, so the safe
+// fallback is to hide Clavis and let macOS reveal the previous application.
+// Never do this while another Clavis surface is visible, because App.Hide
+// would hide that surface as a side effect.
+func (a *desktopApp) restorePreviousAppFocus() {
+	if a.hasVisibleSurface((*mygo.Window).IsVisible) {
+		return
 	}
 	mygo.App.Hide()
 }
@@ -814,17 +920,17 @@ func (a *desktopApp) setupTray() {
 	})
 
 	// Keep the localized items addressable so a language switch can relabel
-	// them without rebuilding the tray.
+	// them without rebuilding the tray. permItem is relabeled from the last
+	// observed permission status rather than reset to permissions_checking.
 	labelled := map[string]*mygo.MenuItem{
-		"permissions_checking": permItem,
-		"open_capsule":         itemByLabel(menu, i18n.T("tray.open_capsule")),
-		"clipboard_history":    itemByLabel(menu, i18n.T("tray.clipboard_history")),
-		"reload":               itemByLabel(menu, i18n.T("common.reload")),
-		"open_config":          itemByLabel(menu, i18n.T("settings.configs.open_dir")),
-		"settings":             itemByLabel(menu, i18n.T("tray.settings")),
-		"welcome":              itemByLabel(menu, i18n.T("tray.welcome")),
-		"quit":                 itemByLabel(menu, i18n.T("tray.quit")),
-		"open_at_login":        loginItem,
+		"open_capsule":      itemByLabel(menu, i18n.T("tray.open_capsule")),
+		"clipboard_history": itemByLabel(menu, i18n.T("tray.clipboard_history")),
+		"reload":            itemByLabel(menu, i18n.T("common.reload")),
+		"open_config":       itemByLabel(menu, i18n.T("settings.configs.open_dir")),
+		"settings":          itemByLabel(menu, i18n.T("tray.settings")),
+		"welcome":           itemByLabel(menu, i18n.T("tray.welcome")),
+		"quit":              itemByLabel(menu, i18n.T("tray.quit")),
+		"open_at_login":     loginItem,
 	}
 	a.mu.Lock()
 	a.trayLabelItems = labelled
@@ -1181,24 +1287,26 @@ func (a *desktopApp) syncLanguageFromConfig(cfg config.ClavisConfig) {
 	if i18n.Current() == prev {
 		return
 	}
-	if tag := i18n.Current().Tag(); tag != "en" {
-		mygo.App.SetLocale(tag)
+	if tag := i18n.Current().Tag(); tag != "" {
+		setAppLocale(tag)
 	}
-	mygo.RunOnMain(func() {
-		a.refreshTrayLabels()
-		if a.settingsWin != nil {
-			a.settingsWin.SetTitle(i18n.T("tray.settings_window"))
-		}
-		if a.onboardingWin != nil {
-			a.onboardingWin.SetTitle(i18n.T("tray.onboarding_window"))
-		}
-		if a.imePillPanel != nil {
-			a.imePillPanel.SetTitle(i18n.T("tray.ime_window"))
-		}
-		if a.promptPanel != nil {
-			a.promptPanel.SetTitle(i18n.T("prompts.composer_title"))
-		}
-	})
+	if mygo.App.IsReady() {
+		mygo.RunOnMain(func() {
+			a.refreshTrayLabels()
+			if a.settingsWin != nil {
+				a.settingsWin.SetTitle(i18n.T("tray.settings_window"))
+			}
+			if a.onboardingWin != nil {
+				a.onboardingWin.SetTitle(i18n.T("tray.onboarding_window"))
+			}
+			if a.imePillPanel != nil {
+				a.imePillPanel.SetTitle(i18n.T("tray.ime_window"))
+			}
+			if a.promptPanel != nil {
+				a.promptPanel.SetTitle(i18n.T("prompts.composer_title"))
+			}
+		})
+	}
 	a.handleRepaint()
 }
 
@@ -1214,14 +1322,31 @@ func (a *desktopApp) handleLanguageChange() {
 	a.syncLanguageFromConfig(ctrl.Config())
 }
 
+func (a *desktopApp) currentPermissionsMenuLabel() string {
+	a.mu.Lock()
+	known := a.permKnown
+	status := a.permStatus
+	err := a.permErr
+	caps := a.permCaps
+	a.mu.Unlock()
+	if !known {
+		return i18n.T("tray.permissions_checking")
+	}
+	return formatPermissionsMenuLabel(status, err, caps)
+}
+
 func (a *desktopApp) refreshTrayLabels() {
 	a.mu.Lock()
 	items := a.trayLabelItems
+	permItem := a.permMenuItem
 	a.mu.Unlock()
 	for key, item := range items {
 		if item != nil {
 			item.SetLabel(i18n.T("tray." + key))
 		}
+	}
+	if permItem != nil {
+		permItem.SetLabel(a.currentPermissionsMenuLabel())
 	}
 }
 
@@ -1239,6 +1364,12 @@ func (a *desktopApp) refreshPermissionsAsync() {
 	if br != nil {
 		caps = br.Capabilities()
 	}
+	a.mu.Lock()
+	a.permKnown = true
+	a.permStatus = status
+	a.permErr = err
+	a.permCaps = caps
+	a.mu.Unlock()
 	label := formatPermissionsMenuLabel(status, err, caps)
 	if !mygo.App.IsReady() {
 		return // no tray yet (or tests): RunOnMain would wait for a loop
@@ -1281,25 +1412,7 @@ func (a *desktopApp) runClipboardPoller(ctx context.Context) {
 			if err != nil || cand == nil {
 				continue
 			}
-			if cand.IsMedia() && ms != nil {
-				src := mediaSource{
-					ReadPNG:   func() ([]byte, error) { return mygo.Clipboard.ReadFormat(transfer.PNG) },
-					ReadFiles: mygo.Clipboard.ReadFiles,
-				}
-				if prober, ok := br.(bridge.FileMediaProber); ok {
-					src.Probe = prober.FileProbe()
-				}
-				if seqr, ok := br.(bridge.ClipboardSequencer); ok {
-					src.Sequence = seqr.ClipboardSequence
-				}
-				src.ObservedSequence = observedSeq
-				if keep, _ := enrichMediaCandidate(cand, cfg.Main.Clipboard, ms, src); !keep {
-					continue
-				}
-			}
-			if _, changed, recErr := store.Record(ctx, *cand); recErr == nil && changed {
-				a.syncFrecency(ctx)
-			}
+			a.recordPolledClipboardCandidate(ctx, ctrl, br, store, ms, cfg, cand, observedSeq)
 		case <-pruneTicker.C:
 			a.mu.Lock()
 			ctrl := a.controller
@@ -1324,6 +1437,45 @@ func (a *desktopApp) runClipboardPoller(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (a *desktopApp) recordPolledClipboardCandidate(
+	ctx context.Context,
+	ctrl *uiapp.AppController,
+	br bridge.HostService,
+	store clipboard.Store,
+	ms *clipboard.MediaStore,
+	cfg config.ClavisConfig,
+	cand *clipboard.CaptureCandidate,
+	observedSeq int64,
+) bool {
+	if cand == nil || ctrl == nil || store == nil {
+		return false
+	}
+	if ctrl.ShouldSkipClipboardHistory(*cand) {
+		return false
+	}
+	if cand.IsMedia() && ms != nil {
+		src := mediaSource{
+			ReadPNG:   func() ([]byte, error) { return mygo.Clipboard.ReadFormat(transfer.PNG) },
+			ReadFiles: mygo.Clipboard.ReadFiles,
+		}
+		if prober, ok := br.(bridge.FileMediaProber); ok {
+			src.Probe = prober.FileProbe()
+		}
+		if seqr, ok := br.(bridge.ClipboardSequencer); ok {
+			src.Sequence = seqr.ClipboardSequence
+		}
+		src.ObservedSequence = observedSeq
+		if keep, _ := enrichMediaCandidate(cand, cfg.Main.Clipboard, ms, src); !keep {
+			return false
+		}
+	}
+	if _, changed, recErr := store.Record(ctx, *cand); recErr == nil && changed {
+		a.syncFrecency(ctx)
+		return true
+	}
+	return false
 }
 
 func promptHistoryRetentionLimit(cfg config.ClipboardConfig) int {
@@ -1471,6 +1623,8 @@ func (a *desktopApp) handleRepaint() {
 	setWin := a.settingsWin
 	pillWin := a.imePillPanel
 	guideWin := a.onboardingWin
+	annotateWin := a.annotateWin
+	selectionBar := a.selectionBar
 	ctrl := a.controller
 	imeUI := a.inputUI
 	a.mu.Unlock()
@@ -1512,6 +1666,12 @@ func (a *desktopApp) handleRepaint() {
 	}
 	if pillWin != nil && pillWin.IsVisible() {
 		pillWin.Invalidate()
+	}
+	if annotateWin != nil && annotateWin.IsVisible() {
+		annotateWin.Invalidate()
+	}
+	if selectionBar != nil && selectionBar.IsVisible() {
+		selectionBar.Invalidate()
 	}
 }
 

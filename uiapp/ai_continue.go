@@ -2,6 +2,7 @@ package uiapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/yeisme/clavis/pkg/core/ai"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/host"
+	"github.com/yeisme/clavis/pkg/core/i18n"
+	runtimecoord "github.com/yeisme/clavis/pkg/core/runtime"
 )
 
 // AI continuation ("续写"): the user finishes a thought, presses a configured chord, and gets
@@ -88,15 +91,15 @@ func containsHanOrLetter(s string) bool {
 	return false
 }
 
-// tailBeforeCaret returns at most n runes of text immediately before the caret. Continuation is
-// about what comes next, so only the preceding text matters.
+// tailBeforeCaret returns at most aiContinueContextChars runes of text immediately before
+// the caret. Continuation is about what comes next, so only the preceding text matters.
 func tailBeforeCaret(snap host.EditableFieldSnapshot) string {
-	text := snap.Value
+	runes := []rune(snap.Value)
 	caret := snap.SelectionEnd
-	if caret < 0 || caret > len(text) {
-		caret = len(text)
+	if caret < 0 || caret > len(runes) {
+		caret = len(runes)
 	}
-	runes := []rune(text[:caret])
+	runes = runes[:caret]
 	if len(runes) > aiContinueContextChars {
 		runes = runes[len(runes)-aiContinueContextChars:]
 	}
@@ -110,6 +113,10 @@ func (c *AppController) startAIContinue() {
 	cfg := c.ConfigStore.Current()
 	if !cfg.Main.AI.ContinueEnabled {
 		c.ShowToastOrHUD("AI 续写未开启（设置 → AI → 允许续写）")
+		return
+	}
+	if c.isSecureInputEnabled() {
+		c.ShowToastOrHUD(pickLang(i18n.IsChinese(), "安全输入模式已开启，已阻止 AI 续写", "Secure Input is active; AI continuation blocked"))
 		return
 	}
 	snap, err := c.captureEditable()
@@ -144,8 +151,11 @@ func (c *AppController) startAIContinue() {
 		_ = c.UpdateMainConfig(func(m *config.MainConfig) { m.AI.ContinueDisclosed = true })
 	}
 
+	regCtx, done := c.ensureRuntime().Begin(runtimecoord.AIStream, "AI continue")
+	ctx, cancel := context.WithTimeout(regCtx, aiContinueTimeout)
+
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), aiContinueTimeout)
+		defer done()
 		defer cancel()
 
 		client := *clientPtr
@@ -164,7 +174,13 @@ func (c *AppController) startAIContinue() {
 			}
 		})
 		if err != nil {
+			if errors.Is(err, context.Canceled) || ctx.Err() == context.Canceled {
+				return
+			}
 			c.ShowToastOrHUD("续写请求失败：" + err.Error())
+			return
+		}
+		if ctx.Err() != nil {
 			return
 		}
 		options := ParseAIContinuation(reply.String())
@@ -190,6 +206,30 @@ func (c *AppController) insertAtCaret(text string) error {
 	return br.InjectText(ctx, text, 0, 0)
 }
 
+// armContinuationUndo arms the 5-second Backspace undo state for inserted AI continuation
+// text. Unlike snippet triggers (where armSnippetUndo requires a non-empty typed trigger to
+// restore), continuation replaces nothing, so typed stays empty and Backspace deletes only
+// the inserted runes.
+func (c *AppController) armContinuationUndo(inserted string) bool {
+	if c.ConfigStore != nil && !c.ConfigStore.Current().Main.Trigger.SnippetBackspaceUndo {
+		c.disarmSnippetUndo()
+		return false
+	}
+	if inserted == "" || !undoSafeExpansion(inserted) {
+		c.disarmSnippetUndo()
+		return false
+	}
+	c.mu.Lock()
+	c.snippetUndo = snippetUndoState{
+		armed:    true,
+		typed:    "",
+		expanded: inserted,
+		at:       time.Now(),
+	}
+	c.mu.Unlock()
+	return true
+}
+
 // insertContinuation writes the best suggestion at the caret and tells the user what else was
 // offered, so a poor first pick is recoverable by typing rather than by re-asking.
 func (c *AppController) insertContinuation(options []string) {
@@ -198,9 +238,13 @@ func (c *AppController) insertContinuation(options []string) {
 		c.ShowToastOrHUD("插入失败：" + err.Error())
 		return
 	}
-	note := "已插入续写 · 5 秒内按退格撤销"
+	armed := c.armContinuationUndo(best)
+	note := "已插入续写"
 	if len(options) > 1 {
-		note = fmt.Sprintf("已插入续写（另有 %d 条备选未显示）· 5 秒内按退格撤销", len(options)-1)
+		note = fmt.Sprintf("已插入续写（另有 %d 条备选未显示）", len(options)-1)
+	}
+	if armed {
+		note += " · 5 秒内按退格撤销"
 	}
 	c.ShowToastOrHUD(note)
 }

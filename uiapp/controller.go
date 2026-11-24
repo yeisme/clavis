@@ -143,22 +143,32 @@ type LexiconTopWord struct {
 
 type LexiconTopWordsReader func(context.Context, int) ([]LexiconTopWord, error)
 
-func defaultAIUsageDailyReader(store clipboard.Store) AIUsageDailyReader {
-	sqliteStore, ok := store.(*internalstorage.SQLiteClipboardStore)
+type lazyLearningStore struct {
+	store clipboard.Store
+	once  sync.Once
+	ls    *internalstorage.LearningStore
+	err   error
+}
+
+func (l *lazyLearningStore) get(unavailableMsg string) (*internalstorage.LearningStore, error) {
+	sqliteStore, ok := l.store.(*internalstorage.SQLiteClipboardStore)
 	if !ok || sqliteStore == nil {
-		return func(context.Context, int) ([]AIUsageDay, error) {
-			return nil, errors.New("AI usage storage is unavailable")
-		}
+		return nil, errors.New(unavailableMsg)
 	}
-	var once sync.Once
-	var learningStore *internalstorage.LearningStore
-	var initErr error
+	l.once.Do(func() {
+		l.ls, l.err = internalstorage.NewLearningStore(sqliteStore.DB())
+	})
+	if l.err != nil {
+		return nil, l.err
+	}
+	return l.ls, nil
+}
+
+func defaultAIUsageDailyReader(shared *lazyLearningStore) AIUsageDailyReader {
 	return func(ctx context.Context, n int) ([]AIUsageDay, error) {
-		once.Do(func() {
-			learningStore, initErr = internalstorage.NewLearningStore(sqliteStore.DB())
-		})
-		if initErr != nil {
-			return nil, initErr
+		learningStore, err := shared.get("AI usage storage is unavailable")
+		if err != nil {
+			return nil, err
 		}
 		days, err := learningStore.AIUsageDaily(ctx, n)
 		if err != nil {
@@ -172,22 +182,11 @@ func defaultAIUsageDailyReader(store clipboard.Store) AIUsageDailyReader {
 	}
 }
 
-func defaultLexiconTopWordsReader(store clipboard.Store) LexiconTopWordsReader {
-	sqliteStore, ok := store.(*internalstorage.SQLiteClipboardStore)
-	if !ok || sqliteStore == nil {
-		return func(context.Context, int) ([]LexiconTopWord, error) {
-			return nil, errors.New("lexicon top words storage is unavailable")
-		}
-	}
-	var once sync.Once
-	var learningStore *internalstorage.LearningStore
-	var initErr error
+func defaultLexiconTopWordsReader(shared *lazyLearningStore) LexiconTopWordsReader {
 	return func(ctx context.Context, n int) ([]LexiconTopWord, error) {
-		once.Do(func() {
-			learningStore, initErr = internalstorage.NewLearningStore(sqliteStore.DB())
-		})
-		if initErr != nil {
-			return nil, initErr
+		learningStore, err := shared.get("lexicon top words storage is unavailable")
+		if err != nil {
+			return nil, err
 		}
 		words, err := learningStore.LexiconTopWords(ctx, n)
 		if err != nil {
@@ -201,22 +200,11 @@ func defaultLexiconTopWordsReader(store clipboard.Store) LexiconTopWordsReader {
 	}
 }
 
-func defaultLexiconHitsDailyReader(store clipboard.Store) LexiconHitsDailyReader {
-	sqliteStore, ok := store.(*internalstorage.SQLiteClipboardStore)
-	if !ok || sqliteStore == nil {
-		return func(context.Context, int) ([]LexiconHitDay, error) {
-			return nil, errors.New("lexicon hit storage is unavailable")
-		}
-	}
-	var once sync.Once
-	var learningStore *internalstorage.LearningStore
-	var initErr error
+func defaultLexiconHitsDailyReader(shared *lazyLearningStore) LexiconHitsDailyReader {
 	return func(ctx context.Context, n int) ([]LexiconHitDay, error) {
-		once.Do(func() {
-			learningStore, initErr = internalstorage.NewLearningStore(sqliteStore.DB())
-		})
-		if initErr != nil {
-			return nil, initErr
+		learningStore, err := shared.get("lexicon hit storage is unavailable")
+		if err != nil {
+			return nil, err
 		}
 		days, err := learningStore.LexiconHitsDaily(ctx, n)
 		if err != nil {
@@ -247,6 +235,7 @@ type Options struct {
 	ClipboardStore           clipboard.Store
 	ClipboardSearcher        ClipboardSearcher
 	AIUsageDaily             AIUsageDailyReader
+	AIUsageRecorder          ai.UsageRecorder
 	LexiconHitsDaily         LexiconHitsDailyReader
 	LexiconTopWords          LexiconTopWordsReader
 	SecretStore              secrets.APIKeyStore
@@ -548,6 +537,7 @@ type AppController struct {
 	aiUsageRefreshStarted bool
 	aiUsageErr            error
 	aiUsageReader         AIUsageDailyReader
+	aiUsageRecorder       ai.UsageRecorder
 
 	lexiconHitsMu             sync.RWMutex
 	lexiconHitDays            []LexiconHitDay
@@ -684,18 +674,20 @@ func NewAppController(opts Options) *AppController {
 			imeRuleModeDraft: config.IMEModeASCII,
 		},
 	}
+	sharedLearning := &lazyLearningStore{store: clipStore}
 	c.aiUsageReader = opts.AIUsageDaily
+	c.aiUsageRecorder = opts.AIUsageRecorder
 	c.initSecretVault(opts.Vault)
 	if c.aiUsageReader == nil {
-		c.aiUsageReader = defaultAIUsageDailyReader(clipStore)
+		c.aiUsageReader = defaultAIUsageDailyReader(sharedLearning)
 	}
 	c.lexiconHitsReader = opts.LexiconHitsDaily
 	if c.lexiconHitsReader == nil {
-		c.lexiconHitsReader = defaultLexiconHitsDailyReader(clipStore)
+		c.lexiconHitsReader = defaultLexiconHitsDailyReader(sharedLearning)
 	}
 	c.lexiconTopWordsReader = opts.LexiconTopWords
 	if c.lexiconTopWordsReader == nil {
-		c.lexiconTopWordsReader = defaultLexiconTopWordsReader(clipStore)
+		c.lexiconTopWordsReader = defaultLexiconTopWordsReader(sharedLearning)
 	}
 	c.clipCond = sync.NewCond(&c.clipMu)
 
@@ -705,6 +697,7 @@ func NewAppController(opts Options) *AppController {
 		opts.HTTPDoer,
 		c.resolveAPIKey,
 	)
+	c.AIClient.UsageRecorder = c.aiUsageRecorder
 
 	c.refreshAPIKeySource()
 	go c.refreshAgentSessions()
@@ -2164,6 +2157,73 @@ func convertChatHistory(turns []engine.ChatTurn) []ai.ChatMessage {
 	return out
 }
 
+// HideSelectionBar dismisses the floating selection action bar if a host callback is wired.
+func (c *AppController) HideSelectionBar() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	fn := c.OnHideSelectionBar
+	c.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+type secureInputBridge interface {
+	IsSecureInputEnabled() bool
+}
+
+// isSecureInputEnabled reports whether the host OS currently reports Secure Input active
+// (e.g. a password field or Secure Keyboard Entry). It checks the optional IsSecureInputEnabled
+// bridge method first, then falls back to PermissionStatus.Details["secureInput"].
+func (c *AppController) isSecureInputEnabled() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	br := c.Bridge
+	cached := c.permissionStatus
+	c.mu.Unlock()
+	if br != nil {
+		if checker, ok := br.(secureInputBridge); ok {
+			return checker.IsSecureInputEnabled()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+		defer cancel()
+		if status, err := br.Permissions(ctx); err == nil {
+			return strings.EqualFold(strings.TrimSpace(status.Details["secureInput"]), "true")
+		}
+	}
+	return strings.EqualFold(strings.TrimSpace(cached.Details["secureInput"]), "true")
+}
+
+var (
+	aiPEMPrivateKeyBlockRe  = regexp.MustCompile(`(?is)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----`)
+	aiPEMPrivateKeyHeaderRe = regexp.MustCompile(`(?is)-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*$`)
+	aiSecretTokenRe         = regexp.MustCompile(`\b(?:sk-[A-Za-z0-9_\-]{6,}|sk_(?:live|test)_[A-Za-z0-9_\-]{6,}|ghp_[A-Za-z0-9_]{6,}|github_pat_[A-Za-z0-9_]{6,}|xox[bp]-[A-Za-z0-9\-]{6,})`)
+)
+
+// scrubAutoAttachedSecrets removes obvious secret tokens and PEM private keys from
+// automatically attached context fields unless the user explicitly typed that exact token.
+func scrubAutoAttachedSecrets(text, userPrompt string) (string, bool) {
+	if strings.TrimSpace(text) == "" {
+		return text, false
+	}
+	changed := false
+	replaceIfNotTyped := func(match string) string {
+		if userPrompt != "" && strings.Contains(userPrompt, match) {
+			return match
+		}
+		changed = true
+		return "[REDACTED]"
+	}
+	out := aiPEMPrivateKeyBlockRe.ReplaceAllStringFunc(text, replaceIfNotTyped)
+	out = aiPEMPrivateKeyHeaderRe.ReplaceAllStringFunc(out, replaceIfNotTyped)
+	out = aiSecretTokenRe.ReplaceAllStringFunc(out, replaceIfNotTyped)
+	return out, changed
+}
+
 func (c *AppController) startAIStream(eff engine.Effect) {
 	cfg := c.ConfigStore.Current()
 	profile := c.ActiveAIProfile()
@@ -2196,6 +2256,10 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 	if eff.Mode != "custom" {
 		c.transform = nil
 	}
+	transformMode := ""
+	if c.transform != nil {
+		transformMode = c.transform.mode
+	}
 	c.aiGen++
 	gen := c.aiGen
 	c.aiDone = done
@@ -2214,6 +2278,19 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 		c.Dispatch(engine.Event{
 			Type:  engine.EventAIFailed,
 			Error: i18n.T("settings.ai.not_configured"),
+		})
+		return
+	}
+	hasSensitiveContext := strings.TrimSpace(eff.SourceText) != "" || transformMode != "" ||
+		(eff.Context != nil && (strings.TrimSpace(eff.Context.SelectedText) != "" ||
+			strings.TrimSpace(eff.Context.ClipboardPreview) != "" ||
+			strings.TrimSpace(eff.Context.SurroundingText) != ""))
+	if hasSensitiveContext && c.isSecureInputEnabled() {
+		timeoutCancel()
+		done()
+		c.Dispatch(engine.Event{
+			Type:  engine.EventAIFailed,
+			Error: pickLang(i18n.IsChinese(), "安全输入模式已开启，已阻止将选中文本或剪贴板内容发送至 AI", "Secure Input is active; sending selected or clipboard text to AI was blocked"),
 		})
 		return
 	}
@@ -2242,11 +2319,26 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 	history := convertChatHistory(eff.History)
 	profCopy := profile
 
+	var sanitizedCtx *engine.CapsuleContext
+	if eff.Context != nil {
+		ctxCopy := *eff.Context
+		if ctxCopy.SelectedText != "" {
+			ctxCopy.SelectedText, _ = scrubAutoAttachedSecrets(ctxCopy.SelectedText, eff.Prompt)
+		}
+		if ctxCopy.ClipboardPreview != "" {
+			ctxCopy.ClipboardPreview, _ = scrubAutoAttachedSecrets(ctxCopy.ClipboardPreview, eff.Prompt)
+		}
+		if ctxCopy.SurroundingText != "" {
+			ctxCopy.SurroundingText, _ = scrubAutoAttachedSecrets(ctxCopy.SurroundingText, eff.Prompt)
+		}
+		sanitizedCtx = &ctxCopy
+	}
+
 	req := ai.CompletionRequest{
 		Mode:       eff.Mode,
 		Prompt:     eff.Prompt,
 		SourceText: eff.SourceText,
-		Context:    eff.Context,
+		Context:    sanitizedCtx,
 		History:    history,
 		Profile:    &profCopy,
 		Images:     ocrImages,
@@ -2259,12 +2351,6 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 			req.Prompt = instr
 		}
 	}
-	c.mu.Lock()
-	transformMode := ""
-	if c.transform != nil {
-		transformMode = c.transform.mode
-	}
-	c.mu.Unlock()
 	if eff.Mode == "custom" && transformMode == "optimize" {
 		presetID := strings.TrimSpace(cfg.Prompts.DefaultOptimizerPreset)
 		if presetID == "" {
@@ -2280,18 +2366,18 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 		}
 		if len(history) == 0 {
 			var ctxLines []string
-			if eff.Context != nil {
-				if eff.Context.AppName != "" {
-					ctxLines = append(ctxLines, "App: "+eff.Context.AppName)
+			if sanitizedCtx != nil {
+				if sanitizedCtx.AppName != "" {
+					ctxLines = append(ctxLines, "App: "+sanitizedCtx.AppName)
 				}
-				if eff.Context.WindowTitle != "" {
-					ctxLines = append(ctxLines, "Window: "+eff.Context.WindowTitle)
+				if sanitizedCtx.WindowTitle != "" {
+					ctxLines = append(ctxLines, "Window: "+sanitizedCtx.WindowTitle)
 				}
-				if eff.Context.ActiveURL != "" {
-					ctxLines = append(ctxLines, "URL: "+eff.Context.ActiveURL)
+				if sanitizedCtx.ActiveURL != "" {
+					ctxLines = append(ctxLines, "URL: "+sanitizedCtx.ActiveURL)
 				}
-				if eff.Context.SelectedText != "" {
-					ctxLines = append(ctxLines, "Selection:\n"+eff.Context.SelectedText)
+				if sanitizedCtx.SelectedText != "" {
+					ctxLines = append(ctxLines, "Selection:\n"+sanitizedCtx.SelectedText)
 				}
 			}
 			optReq := prompt.BuildOptimizationRequest(
@@ -2317,11 +2403,13 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 		req.Mode = mode
 		req.SourceText = eff.SourceText
 		eff.Mode = mode
-		req.SystemPromptOverride = map[string]string{
-			"polish":    "Rewrite the text for clarity, grammar, and flow while preserving its meaning. Return only the rewritten text.",
-			"translate": "Translate the text between Chinese and English naturally. Return only the translation.",
-			"explain":   "Explain the text clearly and concisely. Return only the explanation.",
-		}[mode]
+		if strings.TrimSpace(req.SystemPromptOverride) == "" {
+			req.SystemPromptOverride = map[string]string{
+				"polish":    "Rewrite the text for clarity, grammar, and flow while preserving its meaning. Return only the rewritten text.",
+				"translate": "Translate the text between Chinese and English naturally. Return only the translation.",
+				"explain":   "Explain the text clearly and concisely. Return only the explanation.",
+			}[mode]
+		}
 	}
 
 	go func() {
@@ -4605,6 +4693,7 @@ func (c *AppController) ReloadConfig() bool {
 			c.httpDoer,
 			c.resolveAPIKey,
 		)
+		c.AIClient.UsageRecorder = c.aiUsageRecorder
 		c.settingsStatus = i18n.T("hud.config_reloaded")
 		br = c.Bridge
 	} else {

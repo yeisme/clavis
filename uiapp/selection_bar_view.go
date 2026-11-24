@@ -100,12 +100,53 @@ func SelectionBarSize(p SelectionBarPayload) (width, height int) {
 // actions are neutral — gray icon and digit, primary text — and take their
 // own width, so the accent stays for hover/focus feedback only.
 func SelectionBarView(c *ui.Context, p SelectionBarPayload, appearance config.AppearanceConfig) {
+	SelectionBarViewWithController(c, p, appearance, nil)
+}
+
+// SelectionBarViewWithController renders the floating selection action bar and
+// wires action pill clicks, digit shortcuts 1-5, and Esc dismissal to ctrl.
+func SelectionBarViewWithController(c *ui.Context, p SelectionBarPayload, appearance config.AppearanceConfig, ctrl *AppController) {
+	var onAction func(action, text string)
+	var onDismiss func()
+	if ctrl != nil {
+		onAction = func(action, text string) {
+			ctrl.HideSelectionBar()
+			ctrl.HandleSelectionBarAction(action, text)
+		}
+		onDismiss = ctrl.HideSelectionBar
+	}
+	selectionBarView(c, p, appearance, onAction, onDismiss)
+}
+
+func selectionBarView(
+	c *ui.Context,
+	p SelectionBarPayload,
+	appearance config.AppearanceConfig,
+	onAction func(action, text string),
+	onDismiss func(),
+) {
 	theme := resolveAppearanceTheme(c, appearance.Theme)
 	c.SetTheme(theme)
 	prefs := c.Preferences()
 
 	if !prefs.ReduceTransparency {
 		c.Root().Radius(radiusPill)
+	}
+
+	if onAction != nil {
+		digitKeys := []ui.Key{ui.Key1, ui.Key2, ui.Key3, ui.Key4, ui.Key5}
+		for i, key := range digitKeys {
+			if i >= len(p.Actions) {
+				break
+			}
+			action := p.Actions[i]
+			c.OnWindowShortcut(0, key, func() {
+				onAction(action, p.Text)
+			})
+		}
+	}
+	if onDismiss != nil {
+		c.OnWindowShortcut(0, ui.KeyEscape, onDismiss)
 	}
 
 	bar := ui.Row(c).
@@ -119,18 +160,22 @@ func SelectionBarView(c *ui.Context, p SelectionBarPayload, appearance config.Ap
 
 	bar.Children(func() {
 		for i, action := range p.Actions {
-			item := ui.Row(c).Key("selection-action:"+action).Padding(space4, selectionItemPadX).Radius(radiusPill).
-				Gap(selectionItemGap).AlignItems(ui.Center).Shrink(0)
+			act := action
+			item := ui.ButtonBase(c).Key("selection-action:"+act).Padding(space4, selectionItemPadX).Radius(radiusPill).
+				Gap(selectionItemGap).AlignItems(ui.Center).Shrink(0).FocusRing(false)
 			if item.Hovered() {
 				item.Background(tileFill(theme))
 			}
 			item.Children(func() {
-				renderSemanticIcon(c, selectionBarIcon(action), typeMeta, secondaryInk(theme))
+				renderSemanticIcon(c, selectionBarIcon(act), typeMeta, secondaryInk(theme))
 				if hint := SelectionBarActionShortcut(i); hint != "" {
 					ui.Text(c, hint).FontSize(typeMicro).TextColor(secondaryInk(theme)).SingleLine()
 				}
-				ui.Text(c, SelectionBarActionLabel(action)).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine()
+				ui.Text(c, SelectionBarActionLabel(act)).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine()
 			})
+			if item.Clicked() && onAction != nil {
+				onAction(act, p.Text)
+			}
 		}
 		if len(p.Actions) == 0 {
 			ui.Text(c, "No actions").FontSize(typeLabel).TextColor(secondaryInk(theme)).SingleLine()
