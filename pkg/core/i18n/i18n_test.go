@@ -158,6 +158,19 @@ func TestCallSiteKeysExist(t *testing.T) {
 			t.Errorf("key %q used at %s is missing from the tables", u.key, u.file)
 		}
 	}
+
+	// Verify every referenced key resolves to non-empty text in both EN and ZH.
+	prev := i18n.Current()
+	defer i18n.SetLanguage(prev)
+	for _, u := range uses {
+		for _, lang := range []i18n.Language{i18n.English, i18n.Chinese} {
+			i18n.SetLanguage(lang)
+			got := i18n.T(u.key)
+			if got == "" || got == u.key {
+				t.Errorf("key %q (%s) did not resolve for %s (got %q)", u.key, u.file, lang, got)
+			}
+		}
+	}
 }
 
 func repoRoot(t *testing.T) string {

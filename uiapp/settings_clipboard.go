@@ -98,37 +98,34 @@ func (a *AppController) ClipboardKeyManagerView(c *ui.Context) {
 // capability matrix (content / ID / path / metadata / paste / user-only
 // sensitive copy), password history isolation, and sensitive TTL auto-clear.
 func (a *AppController) renderClipboardKeyManagerCard(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
-	zh := i18n.IsChinese()
 	a.syncClipboardSensitiveTTLFromConfig(cfg.Main.Clipboard)
 	policy := a.ClipboardKeyManagerPolicy()
 	conflicts := config.DetectClipboardShortcutConflicts(cfg.Main, policy.Bindings)
 	sensitiveState := a.SensitiveClipboardState()
 	statusMsg, errMsg := a.clipboardActionStatus()
 
-	title := pickLang(zh, "剪贴板快捷键与复制能力管理", "Clipboard Shortcuts & Copy Capabilities")
+	title := i18n.T("settings.clipboard.manager.title")
 	settingsSourceCard(c, theme, title, "[trigger] · [clipboard]", func() {
 		// 1. Global Clipboard Shortcut & Live Conflict Detection.
 		normShortcut := config.NormalizeClipboardShortcut(cfg.Main.Trigger.ClipboardShortcut)
 		shortcutDisplay := normShortcut
 		if shortcutDisplay == "" {
-			shortcutDisplay = pickLang(zh, "已禁用", "Disabled")
+			shortcutDisplay = i18n.T("settings.clipboard.manager.disabled")
 		}
 		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, pickLang(zh, "全局剪贴板快捷键", "Global Clipboard Shortcut")).
+			ui.Text(c, i18n.T("settings.clipboard.manager.global_shortcut")).
 				FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine()
 			keycap(c, theme, shortcutDisplay, keyToneAccent)
 			ui.Spacer(c)
 			if len(conflicts) == 0 {
-				kitStatusPill(c, theme, pickLang(zh, "无快捷键冲突", "No conflicts"), chipSuccess)
+				kitStatusPill(c, theme, i18n.T("settings.clipboard.manager.no_conflicts"), chipSuccess)
 			} else {
-				kitStatusPill(c, theme,
-					pickLang(zh, fmt.Sprintf("%d 项冲突", len(conflicts)), fmt.Sprintf("%d conflict(s)", len(conflicts))),
-					chipWarning)
+				kitStatusPill(c, theme, i18n.Tf("settings.clipboard.manager.conflicts", len(conflicts)), chipWarning)
 			}
 		})
 
 		ui.Row(c).FillWidth().Wrap().Gap(space6).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, pickLang(zh, "快速切换:", "Quick presets:")).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, i18n.T("settings.clipboard.manager.quick_presets")).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 			for _, preset := range []struct {
 				label string
 				value string
@@ -136,11 +133,11 @@ func (a *AppController) renderClipboardKeyManagerCard(c *ui.Context, theme *ui.T
 				{"alt+shift+c", "alt+shift+c"},
 				{"ctrl+alt+v", "ctrl+alt+v"},
 				{"cmd+shift+v", "cmd+shift+v"},
-				{pickLang(zh, "禁用", "Disable"), ""},
+				{i18n.T("settings.clipboard.manager.disable"), ""},
 			} {
 				p := preset
 				active := normShortcut == config.NormalizeClipboardShortcut(p.value)
-				btn := ui.Button(c, p.label).Key("clip-shortcut-preset:" + p.label).Padding(space2, space8)
+				btn := ui.Button(c, p.label).Key("clip-shortcut-preset:"+p.label).Padding(space2, space8)
 				if active {
 					btn.Border(space1, selectionEdge(theme))
 				}
@@ -164,16 +161,16 @@ func (a *AppController) renderClipboardKeyManagerCard(c *ui.Context, theme *ui.T
 
 		// 2. Sensitive TTL Auto-Clear & Password History Guard.
 		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, pickLang(zh, "敏感内容自动清除与历史隔离", "Sensitive Copy TTL & Password History Guard")).
+			ui.Text(c, i18n.T("settings.clipboard.manager.sensitive_section")).
 				FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Grow(1)
-			kitStatusPill(c, theme, pickLang(zh, "仅用户触发 · 禁止 Agent 工具", "User-Only · No Agent Tools"), chipAccent)
+			kitStatusPill(c, theme, i18n.T("settings.clipboard.manager.user_only_badge"), chipAccent)
 		})
 
 		if v, changed := settingNumberRow(
 			c, theme,
-			pickLang(zh, "敏感内容自动清除时间 (TTL)", "Sensitive Copy Auto-Clear TTL"),
+			i18n.T("settings.clipboard.manager.ttl_label"),
 			"sensitive_copy_ttl_seconds",
-			pickLang(zh, "用户手动复制敏感内容后，到期自动清空系统剪贴板。", "Automatically wipes the system clipboard after a user-only sensitive copy."),
+			i18n.T("settings.clipboard.manager.ttl_help"),
 			float64(policy.SensitiveTTLSeconds),
 			float64(config.MinSensitiveCopyTTLSeconds),
 			float64(config.MaxSensitiveCopyTTLSeconds),
@@ -184,11 +181,11 @@ func (a *AppController) renderClipboardKeyManagerCard(c *ui.Context, theme *ui.T
 		}
 
 		ui.Row(c).FillWidth().Wrap().Gap(space4).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, pickLang(zh, "常用 TTL:", "TTL presets:")).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, i18n.T("settings.clipboard.manager.ttl_presets")).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 			for _, sec := range []int{10, 30, 60, 120} {
 				s := sec
 				lbl := fmt.Sprintf("%ds", s)
-				btn := ui.Button(c, lbl).Key("clip-ttl-preset:" + lbl).Padding(space2, space8)
+				btn := ui.Button(c, lbl).Key("clip-ttl-preset:"+lbl).Padding(space2, space8)
 				if policy.SensitiveTTLSeconds == s {
 					btn.Border(space1, selectionEdge(theme))
 				}
@@ -198,9 +195,9 @@ func (a *AppController) renderClipboardKeyManagerCard(c *ui.Context, theme *ui.T
 			}
 			ui.Spacer(c)
 			if cfg.Main.Clipboard.IgnoreConcealedTypes {
-				kitStatusPill(c, theme, pickLang(zh, "密码类条目不进入普通历史", "Password entries excluded from history"), chipSuccess)
+				kitStatusPill(c, theme, i18n.T("settings.clipboard.manager.password_excluded"), chipSuccess)
 			} else {
-				kitStatusPill(c, theme, pickLang(zh, "建议开启隐藏类型过滤", "Enable concealed filter recommended"), chipWarning)
+				kitStatusPill(c, theme, i18n.T("settings.clipboard.manager.concealed_recommended"), chipWarning)
 			}
 		})
 
@@ -213,11 +210,9 @@ func (a *AppController) renderClipboardKeyManagerCard(c *ui.Context, theme *ui.T
 				Background(theme.Warning.Alpha(alphaSubtle)).Border(space1, theme.Warning.Alpha(alphaHalf)).Children(func() {
 				ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 					renderSemanticIcon(c, "exclamationmark.triangle", IconSize16, theme.Warning)
-					ui.Text(c, pickLang(zh,
-						fmt.Sprintf("敏感内容（%s）已在剪贴板中，约 %ds 后自动清除，未写入普通历史", sensitiveState.Label, remSec),
-						fmt.Sprintf("Sensitive item (%s) on clipboard — auto-clearing in %ds, excluded from history", sensitiveState.Label, remSec))).
+					ui.Text(c, i18n.Tf("settings.clipboard.manager.sensitive_banner", sensitiveState.Label, remSec)).
 						FontSize(typeMeta).FontWeight(500).TextColor(theme.Text).Wrap().Grow(1)
-					if ui.Button(c, pickLang(zh, "立即清除", "Clear Now")).Key("clip-sensitive-clear-now").Padding(space2, space8).Shrink(0).Clicked() {
+					if ui.Button(c, i18n.T("settings.clipboard.manager.clear_now")).Key("clip-sensitive-clear-now").Padding(space2, space8).Shrink(0).Clicked() {
 						_ = a.ClearSensitiveClipboardNow()
 					}
 				})
@@ -227,7 +222,7 @@ func (a *AppController) renderClipboardKeyManagerCard(c *ui.Context, theme *ui.T
 		settingsCardDivider(c, theme)
 
 		// 3. Copy & Paste Capabilities Matrix + User-Only Action Bar.
-		ui.Text(c, pickLang(zh, "复制与粘贴能力清单", "Copy & Paste Capability Matrix")).
+		ui.Text(c, i18n.T("settings.clipboard.manager.capability_matrix")).
 			FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine()
 
 		targetItem, secretLabel, secretVal := a.resolveClipboardKeyManagerTarget()
@@ -296,8 +291,7 @@ func (a *AppController) renderClipboardCapabilityTile(
 	secretLabel string,
 	secretVal string,
 ) {
-	zh := i18n.IsChinese()
-	name, desc, btnLabel := clipboardCapabilityCopyText(binding.Action, zh)
+	name, desc, btnLabel := clipboardCapabilityCopyText(binding.Action)
 
 	ui.Box(c).Key("clip-cap:"+string(binding.Action)).FillWidth().Padding(space8, space10).Radius(radiusRow).
 		Background(theme.Surface).Border(space1, hairline(theme)).Children(func() {
@@ -311,9 +305,9 @@ func (a *AppController) renderClipboardCapabilityTile(
 			ui.Text(c, desc).FontSize(typeMicro).TextColor(theme.TextMuted).Wrap()
 			ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 				if binding.UserOnly {
-					kitStatusPill(c, theme, pickLang(zh, "仅用户", "User-Only"), chipAccent)
+					kitStatusPill(c, theme, i18n.T("settings.clipboard.manager.badge.user_only"), chipAccent)
 				} else {
-					kitStatusPill(c, theme, pickLang(zh, "Capsule 动作", "Capsule"), chipNeutral)
+					kitStatusPill(c, theme, i18n.T("settings.clipboard.manager.badge.capsule"), chipNeutral)
 				}
 				ui.Spacer(c)
 				disabled := false
@@ -351,32 +345,32 @@ func (a *AppController) renderClipboardCapabilityTile(
 	})
 }
 
-func clipboardCapabilityCopyText(action config.ClipboardActionKind, zh bool) (name, desc, btn string) {
+func clipboardCapabilityCopyText(action config.ClipboardActionKind) (name, desc, btn string) {
 	switch action {
 	case config.ClipboardActionCopyContent:
-		return pickLang(zh, "正文与媒体内容", "Entry Content"),
-			pickLang(zh, "复制正文或媒体内容到系统剪贴板", "Copy text or media payload to clipboard"),
-			pickLang(zh, "复制内容", "Copy Content")
+		return i18n.T("settings.clipboard.cap.content.name"),
+			i18n.T("settings.clipboard.cap.content.desc"),
+			i18n.T("settings.clipboard.cap.content.btn")
 	case config.ClipboardActionPaste:
-		return pickLang(zh, "直接粘贴", "Direct Paste"),
-			pickLang(zh, "写入剪贴板并向当前应用发送粘贴", "Write to clipboard and paste into frontmost app"),
-			pickLang(zh, "粘贴", "Paste")
+		return i18n.T("settings.clipboard.cap.paste.name"),
+			i18n.T("settings.clipboard.cap.paste.desc"),
+			i18n.T("settings.clipboard.cap.paste.btn")
 	case config.ClipboardActionCopyID:
-		return pickLang(zh, "条目唯一标识", "Entry Identifier"),
-			pickLang(zh, "复制剪贴板条目唯一标识，便于引用与排查", "Copy the unique entry ID for references"),
-			pickLang(zh, "复制 ID", "Copy ID")
+		return i18n.T("settings.clipboard.cap.id.name"),
+			i18n.T("settings.clipboard.cap.id.desc"),
+			i18n.T("settings.clipboard.cap.id.btn")
 	case config.ClipboardActionCopyPath:
-		return pickLang(zh, "本地文件路径", "Local File Path"),
-			pickLang(zh, "复制文件/图片/视频条目关联的本地路径", "Copy local file/image/video paths"),
-			pickLang(zh, "复制路径", "Copy Path")
+		return i18n.T("settings.clipboard.cap.path.name"),
+			i18n.T("settings.clipboard.cap.path.desc"),
+			i18n.T("settings.clipboard.cap.path.btn")
 	case config.ClipboardActionCopyMetadata:
-		return pickLang(zh, "脱敏元信息", "Redacted Metadata"),
-			pickLang(zh, "复制来源应用、时间、尺寸等脱敏元信息", "Copy redacted source app, time, and size metadata"),
-			pickLang(zh, "复制元数据", "Copy Metadata")
+		return i18n.T("settings.clipboard.cap.metadata.name"),
+			i18n.T("settings.clipboard.cap.metadata.desc"),
+			i18n.T("settings.clipboard.cap.metadata.btn")
 	case config.ClipboardActionCopySensitive:
-		return pickLang(zh, "敏感内容（自动清除）", "Sensitive Payload (TTL)"),
-			pickLang(zh, "仅允许用户触发；不进普通历史，到期自动清空", "User-only copy; excluded from history, auto-cleared by TTL"),
-			pickLang(zh, "安全复制 (TTL)", "Copy Sensitive (TTL)")
+		return i18n.T("settings.clipboard.cap.sensitive.name"),
+			i18n.T("settings.clipboard.cap.sensitive.desc"),
+			i18n.T("settings.clipboard.cap.sensitive.btn")
 	default:
 		return string(action), "", string(action)
 	}

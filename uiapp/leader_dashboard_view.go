@@ -1,7 +1,6 @@
 package uiapp
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -64,7 +63,6 @@ type leaderActivityItem struct {
 // live Agent sessions, Clipboard preview, and active selection context.
 // Never invents placeholder or synthetic records.
 func (a *AppController) leaderRecentActivity(state engine.State) []leaderActivityItem {
-	zh := i18n.IsChinese()
 	items := make([]leaderActivityItem, 0, 2)
 
 	// 1. Live Agent session (prioritize awaiting-approval, then running, then latest).
@@ -83,7 +81,7 @@ func (a *AppController) leaderRecentActivity(state engine.State) []leaderActivit
 		_, tone := agentLaneSymbolAndLabel(chosen)
 		tag := agentProviderLabel(chosen.Provider)
 		if chosen.PendingReview {
-			tag = tag + " · " + pickLang(zh, "待审", "Review")
+			tag = tag + " · " + i18n.T("leader.activity.review")
 		}
 		items = append(items, leaderActivityItem{
 			Key:      "activity:agent:" + chosen.ID,
@@ -103,7 +101,7 @@ func (a *AppController) leaderRecentActivity(state engine.State) []leaderActivit
 		items = append(items, leaderActivityItem{
 			Key:     "activity:clipboard",
 			Icon:    "doc.on.clipboard",
-			Tag:     pickLang(zh, "剪贴板", "Clipboard"),
+			Tag:     i18n.T("omnibox.tab.clipboard"),
 			Summary: truncateRunes(sanitized, 32),
 			Target:  config.TabClipboard,
 		})
@@ -112,12 +110,12 @@ func (a *AppController) leaderRecentActivity(state engine.State) []leaderActivit
 	// 3. Active selection in foreground app (opens AI rewrite/ask).
 	if sel := strings.TrimSpace(state.Context.SelectedText); sel != "" && len(items) < 2 {
 		runes := utf8.RuneCountInString(sel)
-		app := nonEmptyOr(state.Context.AppName, pickLang(zh, "当前应用", "Active app"))
+		app := nonEmptyOr(state.Context.AppName, i18n.T("leader.activity.active_app"))
 		items = append(items, leaderActivityItem{
 			Key:     "activity:selection",
 			Icon:    "sparkles",
 			Tag:     app,
-			Summary: pickLang(zh, fmt.Sprintf("已选中 %d 字 · 点击进入 AI", runes), fmt.Sprintf("%d chars selected · Open AI", runes)),
+			Summary: i18n.Tf("leader.activity.selection", runes),
 			Target:  config.TabAI,
 		})
 	}
@@ -223,7 +221,7 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 		ui.Row(c).FillWidth().Height(float32(leaderFooterHeight)).Gap(space12).AlignItems(ui.Center).Children(func() {
 			keyHint(c, theme, "a–z", i18n.T("leader.hint.trigger"), keyToneNeutral)
 			if len(state.LeaderPath) == 0 {
-				keyHint(c, theme, "1–6", pickLang(i18n.IsChinese(), "工作台", "Workbenches"), keyToneNeutral)
+				keyHint(c, theme, "1–6", i18n.T("leader.dashboard.workbenches"), keyToneNeutral)
 			}
 			keyHint(c, theme, "/", i18n.T("leader.hint.search"), keyToneNeutral)
 			// ⌫ goes up a level only inside a group; at the top it closes the
@@ -241,12 +239,11 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 }
 
 func (a *AppController) renderLeaderWorkbenches(c *ui.Context, theme *ui.Theme, state engine.State) {
-	zh := i18n.IsChinese()
 	ui.Column(c).Key("leader-workbenches").Label("leader-workbenches").FillWidth().Gap(space4).Children(func() {
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-			ui.Text(c, pickLang(zh, "工作台", "Workbenches")).FontSize(typeMicro).FontWeight(700).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, i18n.T("leader.dashboard.workbenches")).FontSize(typeMicro).FontWeight(700).TextColor(theme.TextMuted).SingleLine()
 			ui.Spacer(c)
-			ui.Text(c, pickLang(zh, "1–6 直达 · Tab 搜索", "1–6 Jump · Tab Search")).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, i18n.T("leader.dashboard.workbenches_hint")).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 		})
 		ui.Grid(c).Columns(3).GapX(space4).GapY(space4).FillWidth().Children(func() {
 			for _, spec := range omniboxTabSpecs {
@@ -275,7 +272,6 @@ func (a *AppController) renderLeaderWorkbenches(c *ui.Context, theme *ui.Theme, 
 }
 
 func (a *AppController) renderLeaderSystemStatus(c *ui.Context, theme *ui.Theme) {
-	zh := i18n.IsChinese()
 	prof := a.ActiveAIProfile()
 	diag := a.Diagnostics()
 	sessions, diagnostics := a.cachedAgentData()
@@ -287,26 +283,26 @@ func (a *AppController) renderLeaderSystemStatus(c *ui.Context, theme *ui.Theme)
 		modelLabel = modelLabel + " · " + aiUsageTodayLabel(usageDays)
 	}
 
-	agentSummary := pickLang(zh, "就绪", "Ready")
+	agentSummary := i18n.T("leader.status.ready")
 	agentDot := kitStateEmptyColor(theme)
 	switch {
 	case counts.Approval > 0:
-		agentSummary = pickLang(zh, fmt.Sprintf("%d 待审", counts.Approval), fmt.Sprintf("%d review", counts.Approval))
+		agentSummary = i18n.Tf("leader.status.review", counts.Approval)
 		agentDot = kitStateWarningColor(theme)
 	case counts.Running > 0:
-		agentSummary = pickLang(zh, fmt.Sprintf("%d 运行", counts.Running), fmt.Sprintf("%d active", counts.Running))
+		agentSummary = i18n.Tf("leader.status.active", counts.Running)
 		agentDot = kitStateLoadingColor(theme)
 	case counts.Total > 0:
-		agentSummary = pickLang(zh, fmt.Sprintf("%d 会话", counts.Total), fmt.Sprintf("%d sessions", counts.Total))
+		agentSummary = i18n.Tf("leader.status.sessions", counts.Total)
 		agentDot = theme.Success
 	case len(diagnostics) > 0:
-		agentSummary = pickLang(zh, "数据源异常", "Degraded")
+		agentSummary = i18n.T("leader.status.degraded")
 		agentDot = kitStateErrorColor(theme)
 	}
 
 	imeLabel := nonEmptyOr(diag.ActiveInputSource.Name, diag.ActiveInputSource.ID)
 	if imeLabel == "" {
-		imeLabel = pickLang(zh, "默认输入源", "Default IME")
+		imeLabel = i18n.T("leader.status.default_ime")
 	}
 
 	ui.Row(c).Key("leader-system-status").Label("leader-system-status").FillWidth().Padding(space4, space8).Gap(space8).
@@ -322,9 +318,8 @@ func (a *AppController) renderLeaderSystemStatus(c *ui.Context, theme *ui.Theme)
 }
 
 func (a *AppController) renderLeaderQuickTools(c *ui.Context, theme *ui.Theme) {
-	zh := i18n.IsChinese()
 	ui.Column(c).Key("leader-quick-tools").FillWidth().Gap(space4).Children(func() {
-		ui.Text(c, pickLang(zh, "快捷工具", "Quick Tools")).FontSize(typeMicro).FontWeight(700).TextColor(theme.TextMuted).SingleLine()
+		ui.Text(c, i18n.T("leader.dashboard.quick_tools")).FontSize(typeMicro).FontWeight(700).TextColor(theme.TextMuted).SingleLine()
 		ui.Row(c).FillWidth().Gap(space4).AlignItems(ui.Center).Children(func() {
 			tool := func(key, label string, fn func()) {
 				b := ui.ButtonBase(c).Key(key).Label(label).Grow(1).Padding(space4, space6).Radius(radiusChip).
@@ -336,12 +331,12 @@ func (a *AppController) renderLeaderQuickTools(c *ui.Context, theme *ui.Theme) {
 					fn()
 				}
 			}
-			tool("leader-tool-capture", pickLang(zh, "截图", "Capture"), func() { go a.CaptureAndAnnotate() })
+			tool("leader-tool-capture", i18n.T("leader.tool.capture"), func() { go a.CaptureAndAnnotate() })
 			tool("leader-tool-ocr", "OCR", func() { go a.CaptureAndOCR() })
-			tool("leader-tool-translate", pickLang(zh, "翻译", "Translate"), func() {
+			tool("leader-tool-translate", i18n.T("leader.tool.translate"), func() {
 				a.StartTranslation(a.State().Context.SelectedText, "")
 			})
-			tool("leader-tool-assets", pickLang(zh, "资产", "Assets"), func() {
+			tool("leader-tool-assets", i18n.T("leader.tool.assets"), func() {
 				a.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions})
 				a.SetHubSurface(HubSurfaceAssets)
 			})
@@ -350,13 +345,12 @@ func (a *AppController) renderLeaderQuickTools(c *ui.Context, theme *ui.Theme) {
 }
 
 func (a *AppController) renderLeaderRecentActivity(c *ui.Context, theme *ui.Theme, state engine.State) {
-	zh := i18n.IsChinese()
 	activities := a.leaderRecentActivity(state)
 	ui.Column(c).Key("leader-recent-activity").Label("leader-recent-activity").FillWidth().Grow(1).MinHeight(0).Gap(space4).Children(func() {
-		ui.Text(c, pickLang(zh, "最近活动", "Recent Activity")).FontSize(typeMicro).FontWeight(700).TextColor(theme.TextMuted).SingleLine()
+		ui.Text(c, i18n.T("leader.dashboard.recent_activity")).FontSize(typeMicro).FontWeight(700).TextColor(theme.TextMuted).SingleLine()
 		if len(activities) == 0 {
 			ui.Row(c).FillWidth().Padding(space6, space8).Radius(radiusChip).Background(tileFill(theme)).Border(space1, hairline(theme)).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, pickLang(zh, "暂无最近活动，按 / 或 1–6 开始", "No recent activity · press / or 1–6")).
+				ui.Text(c, i18n.T("leader.dashboard.no_activity")).
 					FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 			})
 			return

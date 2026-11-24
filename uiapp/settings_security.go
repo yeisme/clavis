@@ -2,7 +2,6 @@ package uiapp
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"strings"
 
@@ -25,7 +24,7 @@ const (
 
 // classifyVaultFailure maps Vault copy/store errors into explicit UI states
 // (locked, missing, denied, invalid) without ever exposing secrets.
-func classifyVaultFailure(receipt secrets.CopyReceipt, err error, zh bool) (vaultStatusKind, string, string) {
+func classifyVaultFailure(receipt secrets.CopyReceipt, err error, _ bool) (vaultStatusKind, string, string) {
 	code := strings.TrimSpace(receipt.ErrorCode)
 	errLower := ""
 	if err != nil {
@@ -51,7 +50,7 @@ func classifyVaultFailure(receipt secrets.CopyReceipt, err error, zh bool) (vaul
 		} else if strings.Contains(errLower, secrets.CopyErrorVersionConflict) {
 			resolvedCode = secrets.CopyErrorVersionConflict
 		}
-		return vaultStatusInvalid, resolvedCode, formatVaultInvalidInputDetail(errLower, zh)
+		return vaultStatusInvalid, resolvedCode, formatVaultInvalidInputDetail(errLower)
 
 	case code == secrets.CopyErrorRefNotFound ||
 		errors.Is(err, secrets.ErrSecretNotFound) ||
@@ -61,10 +60,7 @@ func classifyVaultFailure(receipt secrets.CopyReceipt, err error, zh bool) (vaul
 		if errors.Is(err, secrets.ErrSecretNotFound) && resolvedCode == secrets.CopyErrorKeychainLocked {
 			resolvedCode = secrets.CopyErrorRefNotFound
 		}
-		return vaultStatusMissing, resolvedCode, pickLang(zh,
-			"未找到对应的 SecretRef 或底层凭据已被移除，请重新写入凭据引用。",
-			"Target SecretRef or backing credential is missing; re-add the credential reference.",
-		)
+		return vaultStatusMissing, resolvedCode, i18n.T("vault.err.missing")
 
 	case code == secrets.CopyErrorAgentForbidden ||
 		errors.Is(err, secrets.ErrAgentForbidden) ||
@@ -74,76 +70,42 @@ func classifyVaultFailure(receipt secrets.CopyReceipt, err error, zh bool) (vaul
 		strings.Contains(errLower, "forbidden") ||
 		strings.Contains(errLower, "denied"):
 		resolvedCode := nonEmptyOr(code, secrets.CopyErrorAgentForbidden)
-		return vaultStatusDenied, resolvedCode, pickLang(zh,
-			"访问被拒绝：Agent/自动化路径不可获取 Copy，或该 SecretRef 已被吊销。",
-			"Access denied: Agent/automation paths cannot execute Copy, or this SecretRef is revoked.",
-		)
+		return vaultStatusDenied, resolvedCode, i18n.T("vault.err.denied")
 
 	case code == secrets.CopyErrorKeychainLocked ||
 		code == secrets.CopyErrorUserAuth ||
 		strings.Contains(errLower, "lock"):
 		resolvedCode := nonEmptyOr(code, secrets.CopyErrorKeychainLocked)
-		return vaultStatusLocked, resolvedCode, pickLang(zh,
-			"钥匙串已锁定或需要用户身份验证；解锁后请重试 TTL 复制。",
-			"Keychain is locked or requires user verification; unlock keychain and retry TTL Copy.",
-		)
+		return vaultStatusLocked, resolvedCode, i18n.T("vault.err.locked")
 
 	default:
 		if !receipt.Retryable && err != nil {
-			return vaultStatusDenied, nonEmptyOr(code, "access_denied"), pickLang(zh,
-				"操作未获得授权，仅允许活跃用户会话执行短时复制。",
-				"Operation denied; only an active user session may copy from Vault.",
-			)
+			return vaultStatusDenied, nonEmptyOr(code, "access_denied"), i18n.T("vault.err.session_denied")
 		}
-		return vaultStatusLocked, nonEmptyOr(code, secrets.CopyErrorKeychainLocked), pickLang(zh,
-			"安全存储暂不可用或处于锁定状态，请解锁后重试。",
-			"Secret store is currently locked or unavailable; retry after unlocking.",
-		)
+		return vaultStatusLocked, nonEmptyOr(code, secrets.CopyErrorKeychainLocked), i18n.T("vault.err.unavailable")
 	}
 }
 
-func formatVaultInvalidInputDetail(errLower string, zh bool) string {
+func formatVaultInvalidInputDetail(errLower string) string {
 	switch {
 	case strings.Contains(errLower, "label"):
-		return pickLang(zh,
-			"业务别名不合法：Label 不能包含 password / token / secret 等敏感字样，请改用中性业务别名。",
-			"Invalid alias label: Label must not contain 'password', 'token', or 'secret'; use a neutral service alias.",
-		)
+		return i18n.T("vault.err.invalid_label")
 	case strings.Contains(errLower, "duplicate") || strings.Contains(errLower, "already exists"):
-		return pickLang(zh,
-			"该记录标识（Record Key）已存在活跃引用，请更换标识或先吊销旧引用。",
-			"Record key already exists in an active reference; choose a different Record Key or revoke the existing reference first.",
-		)
+		return i18n.T("vault.err.duplicate_key")
 	case strings.Contains(errLower, "value is required"):
-		return pickLang(zh,
-			"凭据正文不能为空，请填写后再保存。",
-			"Credential value is required before saving.",
-		)
+		return i18n.T("vault.err.value_required")
 	case strings.Contains(errLower, "record_key"):
-		return pickLang(zh,
-			"请填写有效的记录标识（Record Key）。",
-			"A valid Record Key is required.",
-		)
+		return i18n.T("vault.err.record_key_required")
 	case strings.Contains(errLower, secrets.CopyErrorTTLInvalid):
-		return pickLang(zh,
-			"短时复制 TTL 超出允许范围（最长 5 分钟）。",
-			"Copy TTL is outside the allowed range (up to 5 minutes).",
-		)
+		return i18n.T("vault.err.ttl_invalid")
 	case strings.Contains(errLower, secrets.CopyErrorVersionConflict):
-		return pickLang(zh,
-			"引用版本冲突，请刷新后重试。",
-			"Reference version conflict; refresh and try again.",
-		)
+		return i18n.T("vault.err.version_conflict")
 	default:
-		return pickLang(zh,
-			"输入校验未通过，请检查记录标识、业务别名和凭据内容。",
-			"Invalid Vault input; check record key, alias label, and credential fields.",
-		)
+		return i18n.T("vault.err.invalid_input")
 	}
 }
 
 func (a *AppController) renderSettingsSecuritySection(c *ui.Context, theme *ui.Theme) {
-	zh := i18n.IsChinese()
 	ttlState := a.SensitiveClipboardState()
 	km := a.clipboardKeyManager()
 	km.mu.Lock()
@@ -153,50 +115,38 @@ func (a *AppController) renderSettingsSecuritySection(c *ui.Context, theme *ui.T
 		policyTTL = int(secrets.DefaultSecretCopyTTL.Seconds())
 	}
 
-	settingsSourceCard(c, theme, pickLang(zh, "安全边界与 User-Only 通道", "Security Boundary & User-Only Channel"), "[vault]", func() {
+	settingsSourceCard(c, theme, i18n.T("settings.security.card.boundary"), "[vault]", func() {
 		ui.Column(c).FillWidth().Gap(space6).Children(func() {
 			ui.Row(c).FillWidth().Wrap().Gap(space6).AlignItems(ui.Center).Children(func() {
 				if ttlState.Active {
 					remSec := max(1, int(ttlState.Remaining.Seconds()+0.9))
-					kitStatusPill(c, theme, pickLang(zh,
-						fmt.Sprintf("User-Only TTL 生效中 (%ds)", remSec),
-						fmt.Sprintf("User-Only TTL Active (%ds)", remSec),
-					), chipWarning)
-					clearLbl := pickLang(zh, "立即清空剪贴板", "Clear Clipboard Now")
+					kitStatusPill(c, theme, i18n.Tf("settings.security.ttl_active", remSec), chipWarning)
+					clearLbl := i18n.T("settings.security.clear_clipboard_now")
 					if ui.Button(c, clearLbl).Key("security-clear-ttl").Label(clearLbl).Padding(space2, space8).Clicked() {
 						_ = a.ClearSensitiveClipboardNow()
 					}
 				} else {
-					kitStatusPill(c, theme, pickLang(zh,
-						fmt.Sprintf("User-Only TTL 通道就绪 (%ds)", policyTTL),
-						fmt.Sprintf("User-Only TTL Ready (%ds)", policyTTL),
-					), chipSuccess)
+					kitStatusPill(c, theme, i18n.Tf("settings.security.ttl_ready", policyTTL), chipSuccess)
 				}
-				kitStatusPill(c, theme, pickLang(zh,
-					"Agent 复制已封锁 (agent_forbidden)",
-					"Agent Copy Blocked (agent_forbidden)",
-				), chipNeutral)
+				kitStatusPill(c, theme, i18n.T("settings.security.agent_copy_blocked"), chipNeutral)
 			})
 
-			ui.Text(c, pickLang(zh,
-				"列表与审计仅展示 SecretRef 元数据；凭据正文不进入 Omnibox、对话记录、诊断快照、截图或星号预览，复制仅通过 User-Only 短时 TTL 通道完成并在过期或所有权变更后自动清除。",
-				"Lists and audits show SecretRef metadata only; secret plaintext never enters Omnibox items, transcripts, diagnostics, screenshots, or asterisk previews, and copies execute strictly through the User-Only TTL channel.",
-			)).FontSize(typeMicro).TextColor(theme.TextMuted).Wrap()
+			ui.Text(c, i18n.T("settings.security.boundary_desc")).FontSize(typeMicro).TextColor(theme.TextMuted).Wrap()
 		})
 	})
 
-	settingsSourceCard(c, theme, pickLang(zh, "密码与凭据引用", "Passwords & SecretRefs"), "vault_refs.json", func() {
+	settingsSourceCard(c, theme, i18n.T("settings.security.card.vault"), "vault_refs.json", func() {
 		a.renderVaultBody(c, theme, true)
 	})
 }
 
-func renderVaultStatusCard(c *ui.Context, theme *ui.Theme, st *vaultViewState, kind vaultStatusKind, code, msg string, zh bool) {
+func renderVaultStatusCard(c *ui.Context, theme *ui.Theme, st *vaultViewState, kind vaultStatusKind, code, msg string, _ bool) {
 	if kind == vaultStatusNone || (msg == "" && code == "") {
 		return
 	}
 	if kind == vaultStatusCopied || kind == vaultStatusStored {
 		ui.Row(c).Key("vault-status-ok").FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
-			kitStatusPill(c, theme, pickLang(zh, "已完成", "OK"), chipSuccess)
+			kitStatusPill(c, theme, i18n.T("vault.status.ok"), chipSuccess)
 			ui.Text(c, msg).FontSize(typeMicro).TextColor(theme.TextMuted).Wrap().Grow(1)
 		})
 		return
@@ -206,19 +156,19 @@ func renderVaultStatusCard(c *ui.Context, theme *ui.Theme, st *vaultViewState, k
 	var stateTone chipTone
 	switch kind {
 	case vaultStatusLocked:
-		stateBadge = pickLang(zh, "已锁定 · Locked", "Locked")
+		stateBadge = i18n.T("vault.status.locked")
 		stateTone = chipWarning
 	case vaultStatusMissing:
-		stateBadge = pickLang(zh, "引用缺失 · Missing", "Missing")
+		stateBadge = i18n.T("vault.status.missing")
 		stateTone = chipWarning
 	case vaultStatusDenied:
-		stateBadge = pickLang(zh, "访问被拒绝 · Denied", "Denied")
+		stateBadge = i18n.T("vault.status.denied")
 		stateTone = chipDanger
 	case vaultStatusInvalid:
-		stateBadge = pickLang(zh, "输入无效 · Invalid", "Invalid Input")
+		stateBadge = i18n.T("vault.status.invalid")
 		stateTone = chipWarning
 	default:
-		stateBadge = pickLang(zh, "异常", "Warning")
+		stateBadge = i18n.T("vault.status.warning")
 		stateTone = chipWarning
 	}
 
@@ -231,14 +181,14 @@ func renderVaultStatusCard(c *ui.Context, theme *ui.Theme, st *vaultViewState, k
 				}
 				ui.Spacer(c)
 				if kind == vaultStatusMissing {
-					readdLbl := pickLang(zh, "重新录入", "Re-add")
+					readdLbl := i18n.T("vault.action.readd")
 					if ui.Button(c, readdLbl).Key("vault-status-readd").Label(readdLbl).Padding(space2, space8).Clicked() {
 						st.mu.Lock()
 						st.addOpen = true
 						st.mu.Unlock()
 					}
 				}
-				dismissLbl := pickLang(zh, "关闭", "Dismiss")
+				dismissLbl := i18n.T("vault.action.dismiss")
 				if ui.Button(c, dismissLbl).Key("vault-status-dismiss").Label(dismissLbl).Padding(space2, space8).Clicked() {
 					st.mu.Lock()
 					st.clearStatusLocked()

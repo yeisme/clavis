@@ -112,21 +112,21 @@ func tailBeforeCaret(snap host.EditableFieldSnapshot) string {
 func (c *AppController) startAIContinue() {
 	cfg := c.ConfigStore.Current()
 	if !cfg.Main.AI.ContinueEnabled {
-		c.ShowToastOrHUD("AI 续写未开启（设置 → AI → 允许续写）")
+		c.ShowToastOrHUD(i18n.T("ai.continue.disabled"))
 		return
 	}
 	if c.isSecureInputEnabled() {
-		c.ShowToastOrHUD(pickLang(i18n.IsChinese(), "安全输入模式已开启，已阻止 AI 续写", "Secure Input is active; AI continuation blocked"))
+		c.ShowToastOrHUD(i18n.T("ai.continue.secure_input_blocked"))
 		return
 	}
 	snap, err := c.captureEditable()
 	if err != nil {
-		c.ShowToastOrHUD("读不到当前输入框的文本")
+		c.ShowToastOrHUD(i18n.T("ai.continue.read_field_failed"))
 		return
 	}
 	contextText := tailBeforeCaret(snap)
 	if utf8.RuneCountInString(contextText) < 2 {
-		c.ShowToastOrHUD("先写一点内容，再让我猜下一句")
+		c.ShowToastOrHUD(i18n.T("ai.continue.too_short"))
 		return
 	}
 
@@ -136,7 +136,7 @@ func (c *AppController) startAIContinue() {
 	secStore := c.SecretStore
 	c.mu.Unlock()
 	if clientPtr == nil {
-		c.ShowToastOrHUD("还没有配置 AI 服务")
+		c.ShowToastOrHUD(i18n.T("ai.continue.not_configured"))
 		return
 	}
 
@@ -147,7 +147,7 @@ func (c *AppController) startAIContinue() {
 		if utf8.RuneCountInString(preview) > 80 {
 			preview = string([]rune(preview)[:80]) + "…"
 		}
-		c.ShowToastOrHUD("将把光标前的文本发给 AI：" + preview)
+		c.ShowToastOrHUD(i18n.Tf("ai.continue.disclosure", preview))
 		_ = c.UpdateMainConfig(func(m *config.MainConfig) { m.AI.ContinueDisclosed = true })
 	}
 
@@ -177,7 +177,7 @@ func (c *AppController) startAIContinue() {
 			if errors.Is(err, context.Canceled) || ctx.Err() == context.Canceled {
 				return
 			}
-			c.ShowToastOrHUD("续写请求失败：" + err.Error())
+			c.ShowToastOrHUD(i18n.Tf("ai.continue.request_failed", err))
 			return
 		}
 		if ctx.Err() != nil {
@@ -185,7 +185,7 @@ func (c *AppController) startAIContinue() {
 		}
 		options := ParseAIContinuation(reply.String())
 		if len(options) == 0 {
-			c.ShowToastOrHUD("没有得到续写建议")
+			c.ShowToastOrHUD(i18n.T("ai.continue.no_suggestion"))
 			return
 		}
 		c.insertContinuation(options)
@@ -235,16 +235,16 @@ func (c *AppController) armContinuationUndo(inserted string) bool {
 func (c *AppController) insertContinuation(options []string) {
 	best := options[0]
 	if err := c.insertAtCaret(best); err != nil {
-		c.ShowToastOrHUD("插入失败：" + err.Error())
+		c.ShowToastOrHUD(i18n.Tf("ai.continue.insert_failed", err))
 		return
 	}
 	armed := c.armContinuationUndo(best)
-	note := "已插入续写"
+	note := i18n.T("ai.continue.inserted")
 	if len(options) > 1 {
-		note = fmt.Sprintf("已插入续写（另有 %d 条备选未显示）", len(options)-1)
+		note = i18n.Tf("ai.continue.inserted_more", len(options)-1)
 	}
 	if armed {
-		note += " · 5 秒内按退格撤销"
+		note += " · " + i18n.T("ai.continue.undo_hint")
 	}
 	c.ShowToastOrHUD(note)
 }
