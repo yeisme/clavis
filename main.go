@@ -173,6 +173,7 @@ type desktopApp struct {
 	imePillPanel         *mygo.Window
 	inputUI              *inputEngineUI
 	settingsWin          *mygo.Window
+	annotateWin          *mygo.Window
 	selectionBar         *mygo.Window
 	selectionBarPayload  uiapp.SelectionBarPayload
 	tray                 *mygo.Tray
@@ -394,6 +395,8 @@ func (a *desktopApp) start() {
 		OnOpenSettings:        a.handleOpenSettings,
 		OnOpenPromptComposer:  a.handleOpenPromptComposer,
 		OnClosePromptComposer: a.handleClosePromptComposer,
+		OnShowAnnotateWindow:  a.handleShowAnnotateWindow,
+		OnCloseAnnotateWindow: a.handleCloseAnnotateWindow,
 		OnShowIMEPill:         a.handleShowIMEPill,
 		OnLanguageChange:      a.handleLanguageChange,
 		OnRecordItemUse:       a.handleRecordItemUse,
@@ -905,6 +908,9 @@ func planFallbackShortcuts(trigger config.TriggerConfig) []fallbackShortcut {
 	candidates := []fallbackShortcut{
 		{Accelerator: toMyGoAccelerator(trigger.CapsuleShortcut), Kind: host.TriggerCapsuleToggle},
 		{Accelerator: toMyGoAccelerator(trigger.ClipboardShortcut), Kind: host.TriggerClipboardToggle},
+	}
+	if acc := toMyGoAccelerator(trigger.ScreenshotShortcut); acc != "" {
+		candidates = append(candidates, fallbackShortcut{Accelerator: acc, Kind: host.TriggerScreenshotAnnotate})
 	}
 	seen := make(map[string]struct{}, len(candidates))
 	out := make([]fallbackShortcut, 0, len(candidates))
@@ -1954,6 +1960,52 @@ func (a *desktopApp) handleClosePromptComposer() {
 		if win.IsVisible() {
 			win.Hide()
 			a.lastPanelHideNano.Store(time.Now().UnixNano())
+		}
+	})
+}
+
+func (a *desktopApp) handleShowAnnotateWindow() {
+	go mygo.RunOnMain(func() {
+		a.mu.Lock()
+		win := a.annotateWin
+		ctrl := a.controller
+		a.mu.Unlock()
+		if ctrl == nil {
+			return
+		}
+		if win == nil {
+			spec := uiapp.FloatingSurfaceSpecWithElevation(ctrl.Config().Main.Appearance, 660, uiapp.SurfaceElevationFlat, mygo.VibrancyNone, uiapp.DismissExplicit, uiapp.FocusPreviousApp)
+			spec.Radius = uiapp.SurfaceRadius{Kind: uiapp.SurfaceRadiusSystem}
+			win = mygo.NewWindow(uiapp.FloatingSurface(mygo.WindowOptions{
+				Title:     "Clavis Annotate",
+				Width:     920,
+				Height:    660,
+				MinWidth:  640,
+				MinHeight: 460,
+				Hidden:    true,
+				StateKey:  "annotate",
+				Content:   ui.View(ctrl.AnnotateView),
+			}, spec))
+			uiapp.BindFloatingSurface(win, spec, uiapp.SurfaceHooks{
+				Dismiss: ctrl.CloseAnnotateWindow, RestoreFocus: a.restorePreviousAppFocus, Quitting: a.quitting.Load,
+			})
+			a.mu.Lock()
+			a.annotateWin = win
+			a.mu.Unlock()
+		}
+		win.Show()
+		win.Focus()
+		win.Invalidate()
+	})
+}
+
+func (a *desktopApp) handleCloseAnnotateWindow() {
+	go mygo.RunOnMain(func() {
+		a.mu.Lock()
+		win := a.annotateWin
+		a.mu.Unlock()
+		if win != nil && win.IsVisible() {
+			win.Hide()
 		}
 	})
 }
