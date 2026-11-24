@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo/plugins/sqlite"
 	coresync "github.com/yeisme/clavis/pkg/core/sync"
@@ -769,5 +772,193 @@ func TestSQLiteStoreConcurrentAccess(t *testing.T) {
 }
 
 func testClientEnvelope(priv ed25519.PrivateKey, account, device, object string, version uint64, class coresync.DataClass, payload []byte) (coresync.EncryptedEnvelope, error) {
-	return coresync.NewEncryptedEnvelope(priv, account, device, object, version, class, payload)
+	adk := make([]byte, 32)
+	if _, err := rand.Read(adk); err != nil {
+		return coresync.EncryptedEnvelope{}, err
+	}
+	return coresync.NewEncryptedEnvelope(priv, adk, account, device, object, version, class, payload)
+}
+
+func newTestDeviceIdentity(t *testing.T) coresync.DeviceIdentity {
+	t.Helper()
+	_, edPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	xPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred := make([]byte, 32)
+	adk := make([]byte, 32)
+	_, _ = rand.Read(cred)
+	_, _ = rand.Read(adk)
+	return coresync.DeviceIdentity{
+		Ed25519Private: edPriv,
+		X25519Private:  xPriv,
+		Credential:     cred,
+		ADK:            adk,
+	}
+}
+
+func TestSQLiteSyncStoreClientFullParityWithoutPanics(t *testing.T) {
+	path := provisionSQLiteTestPath(t)
+	store, err := NewSQLiteSyncStore(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	idA := newTestDeviceIdentity(t)
+	idB := newTestDeviceIdentity(t)
+	idC := newTestDeviceIdentity(t)
+
+	a, err := coresync.NewClientWithStore(store, "dev-a", idA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := coresync.NewClientWithStore(store, "dev-b", idB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := coresync.NewClientWithStore(store, "dev-c", idC)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cred, err := store.RegisterAccount("acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.LoginWithCredential("acct", cred); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.PairDeviceWithCredential(); err != nil {
+		t.Fatalf("PairDeviceWithCredential on SQLiteSyncStore: %v", err)
+	}
+
+	// Prepare and confirm recovery code on SQLiteSyncStore (zero panics!).
+	code, err := a.PrepareRecoveryCode()
+	if err != nil {
+		t.Fatalf("PrepareRecoveryCode: %v", err)
+	}
+	if err := a.ConfirmRecoveryCode(code); err != nil {
+		t.Fatalf("ConfirmRecoveryCode: %v", err)
+	}
+
+	// Pair B and C via signed tickets with X25519 + wrapped ADK; verify one-shot nonce replay protection.
+	now := time.Now().UTC()
+	for _, peer := range []*coresync.Client{b, c} {
+		if err := peer.LoginWithCredential("acct", cred); err != nil {
+			t.Fatal(err)
+		}
+		bundle, err := a.CreatePairingBundleWithX25519(peer.DeviceID(), peer.DevicePublicKey(), peer.X25519PublicKey(), now)
+		if err != nil {
+			t.Fatalf("CreatePairingBundleWithX25519(%s): %v", peer.DeviceID(), err)
+		}
+		if err := peer.PairDeviceWithTicket(bundle.Ticket, bundle.ShortCode, coresync.PairingFingerprint(a.DevicePublicKey()), now.Add(time.Second)); err != nil {
+			t.Fatalf("PairDeviceWithTicket(%s): %v", peer.DeviceID(), err)
+		}
+		if err := peer.PairDeviceWithTicket(bundle.Ticket, bundle.ShortCode, coresync.PairingFingerprint(a.DevicePublicKey()), now.Add(2*time.Second)); !errors.Is(err, coresync.ErrPairingCodeUsed) {
+			t.Fatalf("replayed ticket(%s) err = %v, want %v", peer.DeviceID(), err, coresync.ErrPairingCodeUsed)
+		}
+		if !bytes.Equal(a.ADK(), peer.ADK()) {
+			t.Fatalf("device %s did not receive shared ADK", peer.DeviceID())
+		}
+		if err := peer.ConfirmRecoveryCode(code); err != nil {
+			t.Fatalf("ConfirmRecoveryCode(%s): %v", peer.DeviceID(), err)
+		}
+	}
+
+	// Upload -> ListObjects -> Pull -> Update -> Fast-forward cleanly (no false conflict!).
+	if err := a.UploadClass(coresync.LearningData, "learning-1", 1, []byte("v1-a")); err != nil {
+		t.Fatal(err)
+	}
+	objs, err := b.ListObjects()
+	if err != nil || len(objs) != 1 || objs[0].ObjectID != "learning-1" || objs[0].Class != coresync.LearningData {
+		t.Fatalf("ListObjects = %+v, %v", objs, err)
+	}
+	resB, err := b.PullAll()
+	if err != nil || len(resB.Objects) != 1 || len(resB.Conflicts) != 0 || string(resB.Objects[0].Payload) != "v1-a" {
+		t.Fatalf("B PullAll = %+v, %v", resB, err)
+	}
+	if err := b.UploadClass(coresync.LearningData, "learning-1", 2, []byte("v2-b")); err != nil {
+		t.Fatal(err)
+	}
+	resA, err := a.PullObjects("learning-1")
+	if err != nil || len(resA.Conflicts) != 0 || len(resA.Objects) != 1 || string(resA.Objects[0].Payload) != "v2-b" {
+		t.Fatalf("A fast-forward pull = %+v, %v", resA, err)
+	}
+
+	// True concurrent conflict + ResolveConflict.
+	if err := a.StageLocalEdit(coresync.LearningData, "learning-1", []byte("v3-a-local")); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.UploadClass(coresync.LearningData, "learning-1", 3, []byte("v3-b-remote")); err != nil {
+		t.Fatal(err)
+	}
+	conflictRes, err := a.PullObjects("learning-1")
+	if err != nil || len(conflictRes.Conflicts) != 1 {
+		t.Fatalf("expected conflict on A, got %+v, %v", conflictRes, err)
+	}
+	if err := a.ResolveConflict("learning-1", true); err != nil {
+		t.Fatalf("ResolveConflict: %v", err)
+	}
+	if len(a.Conflicts()) != 0 {
+		t.Fatalf("conflicts left unresolved: %+v", a.Conflicts())
+	}
+
+	// Restart SQLite store and verify keys, recovery wrap, and ADK rotation on RemoveDevice persist!
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewSQLiteSyncStore(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+
+	a2, _ := coresync.NewClientWithStore(reopened, "dev-a", idA)
+	b2, _ := coresync.NewClientWithStore(reopened, "dev-b", idB)
+	c2, _ := coresync.NewClientWithStore(reopened, "dev-c", idC)
+	for _, cl := range []*coresync.Client{a2, b2, c2} {
+		if err := cl.LoginWithCredential("acct", cred); err != nil {
+			t.Fatal(err)
+		}
+		if err := cl.RefreshADK(); err != nil {
+			t.Fatalf("RefreshADK after restart (%s): %v", cl.DeviceID(), err)
+		}
+		if err := cl.ConfirmRecoveryCode(code); err != nil {
+			t.Fatalf("ConfirmRecoveryCode after restart (%s): %v", cl.DeviceID(), err)
+		}
+	}
+
+	// RemoveDevice revokes dev-a, deletes its wrapped ADK, and rotates ADK to adk-v2!
+	if err := b2.RemoveDevice("dev-a"); err != nil {
+		t.Fatalf("RemoveDevice(dev-a): %v", err)
+	}
+	if b2.ADKKeyID() != "adk-v2" {
+		t.Fatalf("rotated ADKKeyID = %q, want adk-v2", b2.ADKKeyID())
+	}
+	if err := b2.UploadClass(coresync.LearningData, "after-revoke", 1, []byte("top-secret-v2")); err != nil {
+		t.Fatalf("upload after rotation: %v", err)
+	}
+	// Remaining active device C pulls & decrypts with rotated adk-v2!
+	pulledC, err := c2.Pull("after-revoke")
+	if err != nil || string(pulledC.Payload) != "top-secret-v2" {
+		t.Fatalf("C pull after rotation = %+v, %v", pulledC, err)
+	}
+	// Revoked device A cannot upload, cannot refresh ADK, cannot re-pair, and cannot decrypt!
+	if err := a2.UploadClass(coresync.LearningData, "blocked", 1, []byte("no")); err == nil {
+		t.Fatal("revoked device upload succeeded")
+	}
+	if err := a2.RefreshADK(); !errors.Is(err, coresync.ErrStoreDeviceRevoked) {
+		t.Fatalf("revoked device RefreshADK err = %v, want %v", err, coresync.ErrStoreDeviceRevoked)
+	}
+	envV2, err := reopened.GetEnvelope("acct", "after-revoke")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coresync.DecryptEnvelope(a2.ADK(), envV2, b2.DevicePublicKey()); err == nil {
+		t.Fatal("revoked device decrypted adk-v2 envelope")
+	}
 }

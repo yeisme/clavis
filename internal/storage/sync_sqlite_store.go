@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
@@ -285,7 +286,12 @@ func releaseDatabasePathLock(lock *databasePathLock) error {
 // which used the initial storage implementation.
 type SQLiteStore = SQLiteSyncStore
 
-var _ coresync.SyncStore = (*SQLiteSyncStore)(nil)
+var (
+	_ coresync.SyncStore     = (*SQLiteSyncStore)(nil)
+	_ coresync.ADKStore      = (*SQLiteSyncStore)(nil)
+	_ coresync.RecoveryStore = (*SQLiteSyncStore)(nil)
+	_ coresync.PairingStore  = (*SQLiteSyncStore)(nil)
+)
 
 // NewSQLiteSyncStore opens dbPath (or :memory:) and initializes the sync schema.
 // File-backed stores require an already-provisioned regular database in a
@@ -429,7 +435,12 @@ func (s *SQLiteSyncStore) initSchema(ctx context.Context, wal bool) error {
 		`CREATE INDEX IF NOT EXISTS idx_sync_tombstones_object ON sync_tombstones(account_id, object_id, sequence)`,
 		`CREATE TABLE IF NOT EXISTS sync_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL, object_digest TEXT NOT NULL, device_id TEXT NOT NULL, at_ns INTEGER NOT NULL, action TEXT NOT NULL, FOREIGN KEY(account_id) REFERENCES sync_accounts(account_id))`,
 		`CREATE INDEX IF NOT EXISTS idx_sync_audit_account ON sync_audit(account_id, at_ns, id)`,
-		`PRAGMA user_version = 1`,
+		`CREATE TABLE IF NOT EXISTS sync_device_keys (account_id TEXT NOT NULL, device_id TEXT NOT NULL, x25519_public_key BLOB NOT NULL, PRIMARY KEY(account_id, device_id), FOREIGN KEY(account_id) REFERENCES sync_accounts(account_id))`,
+		`CREATE TABLE IF NOT EXISTS sync_wrapped_adk (account_id TEXT NOT NULL, device_id TEXT NOT NULL, key_id TEXT NOT NULL DEFAULT 'adk-v1', wrapped BLOB NOT NULL, PRIMARY KEY(account_id, device_id), FOREIGN KEY(account_id) REFERENCES sync_accounts(account_id))`,
+		`CREATE TABLE IF NOT EXISTS sync_account_recovery (account_id TEXT PRIMARY KEY, recovery_salt BLOB NOT NULL, recovery_wrap BLOB, adk_version INTEGER NOT NULL DEFAULT 1, FOREIGN KEY(account_id) REFERENCES sync_accounts(account_id))`,
+		`CREATE TABLE IF NOT EXISTS sync_pairing_nonces (account_id TEXT NOT NULL, nonce TEXT NOT NULL, used_at_ns INTEGER NOT NULL, PRIMARY KEY(account_id, nonce), FOREIGN KEY(account_id) REFERENCES sync_accounts(account_id))`,
+		`CREATE TABLE IF NOT EXISTS sync_revoked_devices (account_id TEXT NOT NULL, device_id TEXT NOT NULL, revoked_at_ns INTEGER NOT NULL, PRIMARY KEY(account_id, device_id), FOREIGN KEY(account_id) REFERENCES sync_accounts(account_id))`,
+		`PRAGMA user_version = 2`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Execute(ctx, stmt); err != nil {
@@ -814,9 +825,16 @@ func (s *SQLiteSyncStore) RegisterAccount(account string) (credentialOut []byte,
 	if _, err := rand.Read(credential); err != nil {
 		return nil, err
 	}
+	recoverySalt := make([]byte, 32)
+	if _, err := rand.Read(recoverySalt); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err = s.db.Execute(context.Background(), `INSERT INTO sync_accounts(account_id,credential) VALUES(?,?)`, account, credential)
+	_, err = s.db.Transaction(context.Background(), []sqlite.Statement{
+		{SQL: `INSERT INTO sync_accounts(account_id,credential) VALUES(?,?)`, Args: []any{account, credential}},
+		{SQL: `INSERT INTO sync_account_recovery(account_id,recovery_salt,adk_version) VALUES(?,?,1)`, Args: []any{account, recoverySalt}},
+	})
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return nil, coresync.ErrStoreAccountExists
@@ -857,6 +875,9 @@ func (s *SQLiteSyncStore) PairDeviceWithCredential(account, device string, pub e
 	if err := s.checkCredentialLocked(account, credential); err != nil {
 		return err
 	}
+	if s.isDeviceRevokedLocked(account, device) {
+		return coresync.ErrStoreDeviceRevoked
+	}
 	rows, err := s.db.Query(context.Background(), `SELECT public_key FROM sync_devices WHERE account_id=? AND device_id=?`, account, device)
 	if err != nil {
 		return err
@@ -870,6 +891,347 @@ func (s *SQLiteSyncStore) PairDeviceWithCredential(account, device string, pub e
 	}
 	_, err = s.db.Execute(context.Background(), `INSERT INTO sync_devices(account_id,device_id,public_key) VALUES(?,?,?)`, account, device, append([]byte(nil), pub...))
 	return err
+}
+
+func (s *SQLiteSyncStore) PairDeviceWithTicket(ticket coresync.PairingTicket) (err error) {
+	defer func() {
+		if protectErr := s.secureOwnedFiles(); protectErr != nil {
+			err = errors.Join(err, fmt.Errorf("sync: protect database files: %w", protectErr))
+		}
+	}()
+	if err := ticket.Verify(time.Now().UTC()); err != nil {
+		return err
+	}
+	if len(ticket.X25519PublicKey) != 0 && len(ticket.X25519PublicKey) != 32 {
+		return coresync.ErrPairingTicket
+	}
+	if len(ticket.WrappedADK) != 0 && len(ticket.WrappedADK) < 60 {
+		return coresync.ErrPairingTicket
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	authPub, err := s.deviceKeyLocked(ticket.Account, ticket.Authorizer)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(authPub, ticket.AuthorizerPubKey) {
+		return coresync.ErrPairingTicket
+	}
+	nonceRows, err := s.db.Query(context.Background(), `SELECT 1 FROM sync_pairing_nonces WHERE account_id=? AND nonce=?`, ticket.Account, ticket.Nonce)
+	if err != nil {
+		return err
+	}
+	if len(nonceRows.Values) > 0 {
+		return coresync.ErrPairingCodeUsed
+	}
+	if s.isDeviceRevokedLocked(ticket.Account, ticket.Device) {
+		return coresync.ErrStoreDeviceRevoked
+	}
+	devRows, err := s.db.Query(context.Background(), `SELECT public_key FROM sync_devices WHERE account_id=? AND device_id=?`, ticket.Account, ticket.Device)
+	if err != nil {
+		return err
+	}
+	if len(devRows.Values) > 0 {
+		old, _ := blob(devRows.Values[0], 0)
+		if !bytes.Equal(old, ticket.PublicKey) {
+			return coresync.ErrStoreDeviceKey
+		}
+	}
+	stmts := []sqlite.Statement{
+		{SQL: `INSERT INTO sync_pairing_nonces(account_id,nonce,used_at_ns) VALUES(?,?,?)`, Args: []any{ticket.Account, ticket.Nonce, time.Now().UTC().UnixNano()}},
+		{SQL: `INSERT INTO sync_devices(account_id,device_id,public_key) VALUES(?,?,?) ON CONFLICT(account_id,device_id) DO NOTHING`, Args: []any{ticket.Account, ticket.Device, append([]byte(nil), ticket.PublicKey...)}},
+	}
+	if len(ticket.X25519PublicKey) == 32 {
+		stmts = append(stmts, sqlite.Statement{
+			SQL:  `INSERT INTO sync_device_keys(account_id,device_id,x25519_public_key) VALUES(?,?,?) ON CONFLICT(account_id,device_id) DO UPDATE SET x25519_public_key=excluded.x25519_public_key`,
+			Args: []any{ticket.Account, ticket.Device, append([]byte(nil), ticket.X25519PublicKey...)},
+		})
+	}
+	if len(ticket.WrappedADK) >= 60 {
+		keyID := ticket.ADKKeyID
+		if !coresync.IsValidADKKeyID(keyID) {
+			keyID = coresync.DefaultADKKeyID
+		}
+		stmts = append(stmts, sqlite.Statement{
+			SQL:  `INSERT INTO sync_wrapped_adk(account_id,device_id,key_id,wrapped) VALUES(?,?,?,?) ON CONFLICT(account_id,device_id) DO UPDATE SET key_id=excluded.key_id,wrapped=excluded.wrapped`,
+			Args: []any{ticket.Account, ticket.Device, keyID, append([]byte(nil), ticket.WrappedADK...)},
+		})
+		if ver, ok := coresync.ADKVersion(keyID); ok {
+			stmts = append(stmts, sqlite.Statement{
+				SQL:  `UPDATE sync_account_recovery SET adk_version=MAX(adk_version,?) WHERE account_id=?`,
+				Args: []any{int64(ver), ticket.Account},
+			})
+		}
+	}
+	if _, err := s.db.Transaction(context.Background(), stmts); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			return coresync.ErrPairingCodeUsed
+		}
+		return fmt.Errorf("sync: pair device with ticket: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteSyncStore) RemoveDevice(account, device string, credential []byte) (err error) {
+	defer func() {
+		if protectErr := s.secureOwnedFiles(); protectErr != nil {
+			err = errors.Join(err, fmt.Errorf("sync: protect database files: %w", protectErr))
+		}
+	}()
+	if !validID(account) || !validID(device) {
+		return fmt.Errorf("%w: remove device", coresync.ErrStoreInvalidArgument)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkCredentialLocked(account, credential); err != nil {
+		return err
+	}
+	rows, err := s.db.Query(context.Background(), `SELECT 1 FROM sync_devices WHERE account_id=? AND device_id=?`, account, device)
+	if err != nil {
+		return err
+	}
+	if len(rows.Values) == 0 {
+		return coresync.ErrStoreDeviceMissing
+	}
+	_, err = s.db.Transaction(context.Background(), []sqlite.Statement{
+		{SQL: `INSERT OR REPLACE INTO sync_revoked_devices(account_id,device_id,revoked_at_ns) VALUES(?,?,?)`, Args: []any{account, device, time.Now().UTC().UnixNano()}},
+		{SQL: `DELETE FROM sync_wrapped_adk WHERE account_id=? AND device_id=?`, Args: []any{account, device}},
+		{SQL: `DELETE FROM sync_device_keys WHERE account_id=? AND device_id=?`, Args: []any{account, device}},
+		{SQL: `DELETE FROM sync_devices WHERE account_id=? AND device_id=?`, Args: []any{account, device}},
+	})
+	if err != nil {
+		return fmt.Errorf("sync: remove device: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteSyncStore) SetX25519PublicKey(account, device string, pub, credential []byte) (err error) {
+	defer func() {
+		if protectErr := s.secureOwnedFiles(); protectErr != nil {
+			err = errors.Join(err, fmt.Errorf("sync: protect database files: %w", protectErr))
+		}
+	}()
+	if !validID(account) || !validID(device) || len(pub) != 32 {
+		return fmt.Errorf("%w: x25519 public key", coresync.ErrStoreInvalidArgument)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkCredentialLocked(account, credential); err != nil {
+		return err
+	}
+	if _, err := s.deviceKeyLocked(account, device); err != nil {
+		return err
+	}
+	_, err = s.db.Execute(context.Background(), `INSERT INTO sync_device_keys(account_id,device_id,x25519_public_key) VALUES(?,?,?) ON CONFLICT(account_id,device_id) DO UPDATE SET x25519_public_key=excluded.x25519_public_key`, account, device, append([]byte(nil), pub...))
+	return err
+}
+
+func (s *SQLiteSyncStore) X25519PublicKey(account, device string) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.isDeviceRevokedLocked(account, device) {
+		return nil, coresync.ErrStoreDeviceRevoked
+	}
+	rows, err := s.db.Query(context.Background(), `SELECT x25519_public_key FROM sync_device_keys WHERE account_id=? AND device_id=?`, account, device)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows.Values) == 0 {
+		return nil, errors.New("sync: x25519 key is not registered")
+	}
+	pub, ok := blob(rows.Values[0], 0)
+	if !ok || len(pub) != 32 {
+		return nil, errors.New("sync: x25519 key is not registered")
+	}
+	return pub, nil
+}
+
+func (s *SQLiteSyncStore) SetWrappedADKForDevice(account, sender, target string, wrapped, signature []byte) (err error) {
+	defer func() {
+		if protectErr := s.secureOwnedFiles(); protectErr != nil {
+			err = errors.Join(err, fmt.Errorf("sync: protect database files: %w", protectErr))
+		}
+	}()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pub, err := s.deviceKeyLocked(account, sender)
+	if err != nil || !ed25519.Verify(pub, coresync.WrappedADKCanonical(account, sender, target, wrapped), signature) {
+		return errors.New("sync: invalid wrapped ADK signature")
+	}
+	if len(wrapped) < 32 {
+		return errors.New("sync: wrapped ADK target is not paired")
+	}
+	if _, err := s.deviceKeyLocked(account, target); err != nil {
+		return errors.New("sync: wrapped ADK target is not paired")
+	}
+	_, err = s.db.Execute(context.Background(), `INSERT INTO sync_wrapped_adk(account_id,device_id,key_id,wrapped) VALUES(?,?,?,?) ON CONFLICT(account_id,device_id) DO UPDATE SET wrapped=excluded.wrapped`, account, target, coresync.DefaultADKKeyID, append([]byte(nil), wrapped...))
+	return err
+}
+
+func (s *SQLiteSyncStore) SetWrappedADKEntryForDevice(account, sender, target, keyID string, wrapped, signature []byte) (err error) {
+	defer func() {
+		if protectErr := s.secureOwnedFiles(); protectErr != nil {
+			err = errors.Join(err, fmt.Errorf("sync: protect database files: %w", protectErr))
+		}
+	}()
+	if !coresync.IsValidADKKeyID(keyID) {
+		return errors.New("sync: invalid ADK key id")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pub, err := s.deviceKeyLocked(account, sender)
+	if err != nil || !ed25519.Verify(pub, coresync.WrappedADKEntryCanonical(account, sender, target, keyID, wrapped), signature) {
+		return errors.New("sync: invalid wrapped ADK signature")
+	}
+	if len(wrapped) < 32 {
+		return errors.New("sync: wrapped ADK target is not paired")
+	}
+	if _, err := s.deviceKeyLocked(account, target); err != nil {
+		return errors.New("sync: wrapped ADK target is not paired")
+	}
+	stmts := []sqlite.Statement{
+		{SQL: `INSERT INTO sync_wrapped_adk(account_id,device_id,key_id,wrapped) VALUES(?,?,?,?) ON CONFLICT(account_id,device_id) DO UPDATE SET key_id=excluded.key_id,wrapped=excluded.wrapped`, Args: []any{account, target, keyID, append([]byte(nil), wrapped...)}},
+	}
+	if ver, ok := coresync.ADKVersion(keyID); ok {
+		stmts = append(stmts, sqlite.Statement{
+			SQL:  `UPDATE sync_account_recovery SET adk_version=MAX(adk_version,?) WHERE account_id=?`,
+			Args: []any{int64(ver), account},
+		})
+	}
+	_, err = s.db.Transaction(context.Background(), stmts)
+	return err
+}
+
+func (s *SQLiteSyncStore) GetWrappedADK(account, device string, signature []byte) ([]byte, error) {
+	entry, err := s.GetWrappedADKEntry(account, device, signature)
+	if err != nil {
+		return nil, err
+	}
+	return entry.Wrapped, nil
+}
+
+func (s *SQLiteSyncStore) GetWrappedADKEntry(account, device string, signature []byte) (coresync.WrappedADKEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.isDeviceRevokedLocked(account, device) {
+		return coresync.WrappedADKEntry{}, coresync.ErrStoreDeviceRevoked
+	}
+	pub, err := s.deviceKeyLocked(account, device)
+	if err != nil || !ed25519.Verify(pub, coresync.WrappedADKRequestCanonical(account, device), signature) {
+		return coresync.WrappedADKEntry{}, errors.New("sync: invalid wrapped ADK request")
+	}
+	rows, err := s.db.Query(context.Background(), `SELECT key_id, wrapped FROM sync_wrapped_adk WHERE account_id=? AND device_id=?`, account, device)
+	if err != nil {
+		return coresync.WrappedADKEntry{}, err
+	}
+	if len(rows.Values) == 0 {
+		return coresync.WrappedADKEntry{}, errors.New("sync: wrapped ADK is not available")
+	}
+	keyID := syncStr(rows.Values[0], 0)
+	if !coresync.IsValidADKKeyID(keyID) {
+		keyID = coresync.DefaultADKKeyID
+	}
+	wrapped, ok := blob(rows.Values[0], 1)
+	if !ok || len(wrapped) == 0 {
+		return coresync.WrappedADKEntry{}, errors.New("sync: wrapped ADK is not available")
+	}
+	return coresync.WrappedADKEntry{KeyID: keyID, Wrapped: wrapped}, nil
+}
+
+func (s *SQLiteSyncStore) ListActiveDevices(account string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	acctRows, err := s.db.Query(context.Background(), `SELECT 1 FROM sync_accounts WHERE account_id=?`, account)
+	if err != nil || len(acctRows.Values) == 0 {
+		return nil, coresync.ErrStoreAccountMissing
+	}
+	rows, err := s.db.Query(context.Background(), `SELECT device_id FROM sync_devices WHERE account_id=? ORDER BY device_id`, account)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows.Values))
+	for _, r := range rows.Values {
+		if id := syncStr(r, 0); id != "" {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+func (s *SQLiteSyncStore) ensureRecoveryRowLocked(account string) ([]byte, error) {
+	rows, err := s.db.Query(context.Background(), `SELECT recovery_salt FROM sync_account_recovery WHERE account_id=?`, account)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows.Values) > 0 {
+		salt, ok := blob(rows.Values[0], 0)
+		if ok && len(salt) == 32 {
+			return salt, nil
+		}
+	}
+	salt := make([]byte, 32)
+	if _, err := rand.Read(salt); err != nil {
+		return nil, err
+	}
+	if _, err := s.db.Execute(context.Background(), `INSERT INTO sync_account_recovery(account_id,recovery_salt,adk_version) VALUES(?,?,1) ON CONFLICT(account_id) DO UPDATE SET recovery_salt=excluded.recovery_salt`, account, salt); err != nil {
+		return nil, err
+	}
+	return salt, nil
+}
+
+func (s *SQLiteSyncStore) GetRecoverySalt(account, device string, signature []byte) (saltOut []byte, err error) {
+	defer func() {
+		if protectErr := s.secureOwnedFiles(); protectErr != nil {
+			err = errors.Join(err, fmt.Errorf("sync: protect database files: %w", protectErr))
+		}
+	}()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pub, err := s.deviceKeyLocked(account, device)
+	if err != nil || !ed25519.Verify(pub, coresync.WrappedADKRequestCanonical(account, device), signature) {
+		return nil, errors.New("sync: invalid recovery salt request")
+	}
+	return s.ensureRecoveryRowLocked(account)
+}
+
+func (s *SQLiteSyncStore) SetRecoveryWrap(account, device string, wrapped, signature []byte) (err error) {
+	defer func() {
+		if protectErr := s.secureOwnedFiles(); protectErr != nil {
+			err = errors.Join(err, fmt.Errorf("sync: protect database files: %w", protectErr))
+		}
+	}()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pub, err := s.deviceKeyLocked(account, device)
+	if err != nil || !ed25519.Verify(pub, coresync.RecoveryWrapCanonical(account, device, wrapped), signature) {
+		return errors.New("sync: invalid recovery wrap signature")
+	}
+	if _, err := s.ensureRecoveryRowLocked(account); err != nil {
+		return err
+	}
+	_, err = s.db.Execute(context.Background(), `UPDATE sync_account_recovery SET recovery_wrap=? WHERE account_id=?`, append([]byte(nil), wrapped...), account)
+	return err
+}
+
+func (s *SQLiteSyncStore) GetRecoveryWrap(account, device string, signature []byte) ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	pub, err := s.deviceKeyLocked(account, device)
+	if err != nil || !ed25519.Verify(pub, coresync.WrappedADKRequestCanonical(account, device), signature) {
+		return nil, errors.New("sync: invalid recovery wrap request")
+	}
+	rows, err := s.db.Query(context.Background(), `SELECT recovery_wrap FROM sync_account_recovery WHERE account_id=?`, account)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows.Values) == 0 {
+		return nil, errors.New("sync: recovery wrap is not available")
+	}
+	wrapped, ok := blob(rows.Values[0], 0)
+	if !ok || len(wrapped) == 0 {
+		return nil, errors.New("sync: recovery wrap is not available")
+	}
+	return wrapped, nil
 }
 
 func (s *SQLiteSyncStore) checkCredentialLocked(account string, credential []byte) error {
@@ -890,18 +1252,7 @@ func (s *SQLiteSyncStore) checkCredentialLocked(account string, credential []byt
 func (s *SQLiteSyncStore) DevicePublicKey(account, device string) (ed25519.PublicKey, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.Query(context.Background(), `SELECT public_key FROM sync_devices WHERE account_id=? AND device_id=?`, account, device)
-	if err != nil {
-		return nil, err
-	}
-	if len(rows.Values) == 0 {
-		return nil, coresync.ErrStoreDeviceMissing
-	}
-	key, ok := blob(rows.Values[0], 0)
-	if !ok || len(key) != ed25519.PublicKeySize {
-		return nil, fmt.Errorf("sync: invalid stored device key")
-	}
-	return ed25519.PublicKey(key), nil
+	return s.deviceKeyLocked(account, device)
 }
 
 func (s *SQLiteSyncStore) UploadEnvelope(account, device, object string, version uint64, e coresync.EncryptedEnvelope) (err error) {
@@ -983,6 +1334,38 @@ func (s *SQLiteSyncStore) GetEnvelope(account, object string) (coresync.Encrypte
 	return coresync.ParseEncryptedEnvelope(raw)
 }
 
+func (s *SQLiteSyncStore) ListObjects(account string) ([]coresync.ObjectSummary, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	acctRows, err := s.db.Query(context.Background(), `SELECT 1 FROM sync_accounts WHERE account_id=?`, account)
+	if err != nil || len(acctRows.Values) == 0 {
+		return nil, coresync.ErrStoreAccountMissing
+	}
+	rows, err := s.db.Query(context.Background(), `SELECT object_id, version, envelope FROM sync_objects WHERE account_id=? ORDER BY object_id`, account)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]coresync.ObjectSummary, 0, len(rows.Values))
+	for _, r := range rows.Values {
+		raw, ok := blob(r, 2)
+		if !ok {
+			continue
+		}
+		env, parseErr := coresync.ParseEncryptedEnvelope(raw)
+		if parseErr != nil {
+			continue
+		}
+		out = append(out, coresync.ObjectSummary{
+			ObjectID: syncStr(r, 0),
+			Version:  uint64(syncInt64val(r, 1)),
+			Class:    env.Class,
+			DeviceID: env.DeviceID,
+			KeyID:    env.KeyID,
+		})
+	}
+	return out, nil
+}
+
 func (s *SQLiteSyncStore) ObjectVersion(account, object string) (uint64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1058,6 +1441,9 @@ func (s *SQLiteSyncStore) SyncTombstones(account, device string, _ uint64) (out 
 	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.isDeviceRevokedLocked(account, device) {
+		return nil, coresync.ErrStoreDeviceRevoked
+	}
 	// Read the candidate batch first, then publish exactly that range in a
 	// transaction whose predicates re-check both cursors. A concurrent SQLite
 	// connection therefore cannot publish a range for a stale watermark.
@@ -1138,6 +1524,9 @@ func (s *SQLiteSyncStore) ConfirmTombstones(account, device string, sequence uin
 	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.isDeviceRevokedLocked(account, device) {
+		return coresync.ErrStoreDeviceRevoked
+	}
 	rows, err := s.db.Query(context.Background(), `SELECT watermark,issued,issued_from,issued_to FROM sync_devices WHERE account_id=? AND device_id=?`, account, device)
 	if err != nil || len(rows.Values) == 0 {
 		return coresync.ErrStoreDeviceMissing
@@ -1240,7 +1629,15 @@ func (s *SQLiteSyncStore) LatestSequence(account string) (uint64, error) {
 	return uint64(syncInt64val(rows.Values[0], 0)), nil
 }
 
+func (s *SQLiteSyncStore) isDeviceRevokedLocked(account, device string) bool {
+	rows, err := s.db.Query(context.Background(), `SELECT 1 FROM sync_revoked_devices WHERE account_id=? AND device_id=?`, account, device)
+	return err == nil && len(rows.Values) > 0
+}
+
 func (s *SQLiteSyncStore) deviceKeyLocked(account, device string) (ed25519.PublicKey, error) {
+	if s.isDeviceRevokedLocked(account, device) {
+		return nil, coresync.ErrStoreDeviceRevoked
+	}
 	rows, err := s.db.Query(context.Background(), `SELECT public_key FROM sync_devices WHERE account_id=? AND device_id=?`, account, device)
 	if err != nil || len(rows.Values) == 0 {
 		return nil, coresync.ErrStoreDeviceMissing

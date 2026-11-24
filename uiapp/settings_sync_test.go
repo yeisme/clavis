@@ -212,3 +212,38 @@ func TestSyncStatusCardCachesAcrossFramesAndNeverBlocksOnSlowReader(t *testing.T
 		t.Fatalf("async sync result not rendered after completion: %v", ttSlow.Texts())
 	}
 }
+
+func TestSettingsSyncCardShowsAllowlistAndConflictCount(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
+	defer SetSyncStatusReader(nil)
+
+	ctrl := &AppController{}
+	defer ctrl.Close()
+
+	ctrl.SetSyncStatusReader(func(context.Context) (coresync.StatusSnapshot, host.OperationResult, error) {
+		return coresync.StatusSnapshot{
+			LoggedIn:       true,
+			Account:        "alice…",
+			DeviceID:       "mac-1…",
+			LocalVersion:   9,
+			Conflicts:      2,
+			Devices:        3,
+			AllowedClasses: coresync.Phase1SyncPlan().AllowedClasses(),
+		}, host.OperationResult{State: host.StateReady}, nil
+	})
+
+	i18n.SetLanguage(i18n.Chinese)
+	ttZH := ui.NewTester(func(c *ui.Context) { ctrl.renderSyncStatusCard(c, ui.LightTheme()) }, 420, 420)
+	ttZH.Frame()
+	if !ttZH.HasText("同步范围") || !ttZH.HasText("input_method, learning_data") || !ttZH.HasText("冲突") || !ttZH.HasText("2") {
+		t.Fatalf("zh sync card missing allowlist or conflict count: %v", ttZH.Texts())
+	}
+
+	i18n.SetLanguage(i18n.English)
+	ttEN := ui.NewTester(func(c *ui.Context) { ctrl.renderSyncStatusCard(c, ui.LightTheme()) }, 420, 420)
+	ttEN.Frame()
+	if !ttEN.HasText("Allowlist") || !ttEN.HasText("input_method, learning_data") || !ttEN.HasText("Conflicts") || !ttEN.HasText("2") {
+		t.Fatalf("en sync card missing allowlist or conflict count: %v", ttEN.Texts())
+	}
+}

@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,10 +33,49 @@ const (
 	ProtocolVersion uint16 = 2
 	deleteDomain           = "clavis.sync.delete.v2"
 	envelopeDomain         = "clavis.sync.envelope.v2"
-	adkKeyID               = "adk-v1"
+	DefaultADKKeyID        = "adk-v1"
+	adkKeyID               = DefaultADKKeyID
 	wrapInfo               = "clavis.sync.wrap.v2"
 	recoveryInfo           = "clavis.sync.recovery.v2"
 )
+
+// ADKVersion parses a versioned ADK key identifier such as "adk-v1" or "adk-v2".
+func ADKVersion(keyID string) (uint64, bool) {
+	if !strings.HasPrefix(keyID, "adk-v") {
+		return 0, false
+	}
+	suffix := strings.TrimPrefix(keyID, "adk-v")
+	if suffix == "" || strings.HasPrefix(suffix, "0") {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(suffix, 10, 64)
+	if err != nil || v == 0 {
+		return 0, false
+	}
+	return v, true
+}
+
+// IsValidADKKeyID reports whether keyID is a valid versioned ADK identifier.
+func IsValidADKKeyID(keyID string) bool {
+	_, ok := ADKVersion(keyID)
+	return ok
+}
+
+// FormatADKKeyID formats a positive ADK version as "adk-v<version>".
+func FormatADKKeyID(version uint64) string {
+	if version == 0 {
+		version = 1
+	}
+	return fmt.Sprintf("adk-v%d", version)
+}
+
+func nextADKKeyID(current string) string {
+	v, ok := ADKVersion(current)
+	if !ok {
+		v = 1
+	}
+	return FormatADKKeyID(v + 1)
+}
 
 type DataClass string
 
@@ -77,11 +118,35 @@ type SyncPlan struct {
 func DefaultSyncPlan() SyncPlan {
 	return SyncPlan{InputMethod: true, LearningData: true, ClipboardText: true, Media: true, ApplicationCtx: true, Templates: true, Snippets: true, Glossary: true, ConfigBaseline: true}
 }
+
+// Phase1SyncPlan returns the strict Phase 1 allowlist: only input_method and
+// learning_data are permitted; passwords and key_manager are always forbidden.
+func Phase1SyncPlan() SyncPlan {
+	return SyncPlan{InputMethod: true, LearningData: true}
+}
+
 func (p SyncPlan) Validate() error {
 	if p.Passwords || p.KeyManager {
-		return errors.New("sync: passwords and key-manager data can never be synchronized")
+		return ErrClassForbidden
 	}
 	return nil
+}
+
+// Allows reports whether class c is permitted by this sync plan.
+func (p SyncPlan) Allows(c DataClass) bool {
+	return p.allows(c)
+}
+
+// AllowedClasses returns the deterministic list of data classes enabled in p.
+func (p SyncPlan) AllowedClasses() []DataClass {
+	items := p.Items()
+	out := make([]DataClass, 0, len(items))
+	for _, item := range items {
+		if item.Allowed {
+			out = append(out, item.Class)
+		}
+	}
+	return out
 }
 func (p SyncPlan) allows(c DataClass) bool {
 	switch c {
@@ -326,7 +391,7 @@ func validClass(c DataClass) bool {
 	return strings.TrimSpace(string(c)) != "" && c != Passwords && c != KeyManager
 }
 func marshalEnvelope(e EncryptedEnvelope) ([]byte, error) {
-	if e.ProtocolVersion != ProtocolVersion || e.KeyID != adkKeyID || e.AccountID == "" || e.DeviceID == "" || e.ObjectID == "" || e.Version == 0 || !validClass(e.Class) || len(e.Nonce) != 12 || len(e.Ciphertext) < 16 || len(e.Signature) != ed25519.SignatureSize {
+	if e.ProtocolVersion != ProtocolVersion || !IsValidADKKeyID(e.KeyID) || e.AccountID == "" || e.DeviceID == "" || e.ObjectID == "" || e.Version == 0 || !validClass(e.Class) || len(e.Nonce) != 12 || len(e.Ciphertext) < 16 || len(e.Signature) != ed25519.SignatureSize {
 		return nil, errors.New("sync: invalid encrypted envelope")
 	}
 	return json.Marshal(e)
@@ -437,27 +502,48 @@ type tombstoneBatch struct {
 }
 
 type Server struct {
-	mu               sync.Mutex
-	accounts         map[string]map[string]ed25519.PublicKey
-	x25519Accounts   map[string]map[string][]byte
-	wrappedADK       map[string]map[string][]byte
-	recoverySalt     map[string][]byte
-	recoveryWrap     map[string][]byte
-	credentials      map[string][32]byte
-	accountSequences map[string]uint64
-	tombstones       map[string]map[string]Tombstone
-	objects          map[string]map[string][]byte
-	versions         map[string]map[string]uint64
-	watermarks       map[string]map[string]uint64
-	issued           map[string]map[string]tombstoneBatch
-	pairingNonces    map[string]map[string]struct{}
-	tombstoneLog     map[string]map[uint64]Tombstone
-	sequence         uint64
-	audit            []AuditEvent
+	mu                sync.Mutex
+	accounts          map[string]map[string]ed25519.PublicKey
+	x25519Accounts    map[string]map[string][]byte
+	wrappedADK        map[string]map[string][]byte
+	wrappedADKKeyID   map[string]map[string]string
+	accountADKVersion map[string]uint64
+	revokedDevices    map[string]map[string]struct{}
+	recoverySalt      map[string][]byte
+	recoveryWrap      map[string][]byte
+	credentials       map[string][32]byte
+	accountSequences  map[string]uint64
+	tombstones        map[string]map[string]Tombstone
+	objects           map[string]map[string][]byte
+	versions          map[string]map[string]uint64
+	watermarks        map[string]map[string]uint64
+	issued            map[string]map[string]tombstoneBatch
+	pairingNonces     map[string]map[string]struct{}
+	tombstoneLog      map[string]map[uint64]Tombstone
+	sequence          uint64
+	audit             []AuditEvent
 }
 
 func NewServer() *Server {
-	return &Server{accounts: map[string]map[string]ed25519.PublicKey{}, x25519Accounts: map[string]map[string][]byte{}, wrappedADK: map[string]map[string][]byte{}, recoverySalt: map[string][]byte{}, recoveryWrap: map[string][]byte{}, credentials: map[string][32]byte{}, accountSequences: map[string]uint64{}, tombstones: map[string]map[string]Tombstone{}, tombstoneLog: map[string]map[uint64]Tombstone{}, objects: map[string]map[string][]byte{}, versions: map[string]map[string]uint64{}, watermarks: map[string]map[string]uint64{}, issued: map[string]map[string]tombstoneBatch{}, pairingNonces: map[string]map[string]struct{}{}}
+	return &Server{
+		accounts:          map[string]map[string]ed25519.PublicKey{},
+		x25519Accounts:    map[string]map[string][]byte{},
+		wrappedADK:        map[string]map[string][]byte{},
+		wrappedADKKeyID:   map[string]map[string]string{},
+		accountADKVersion: map[string]uint64{},
+		revokedDevices:    map[string]map[string]struct{}{},
+		recoverySalt:      map[string][]byte{},
+		recoveryWrap:      map[string][]byte{},
+		credentials:       map[string][32]byte{},
+		accountSequences:  map[string]uint64{},
+		tombstones:        map[string]map[string]Tombstone{},
+		tombstoneLog:      map[string]map[uint64]Tombstone{},
+		objects:           map[string]map[string][]byte{},
+		versions:          map[string]map[string]uint64{},
+		watermarks:        map[string]map[string]uint64{},
+		issued:            map[string]map[string]tombstoneBatch{},
+		pairingNonces:     map[string]map[string]struct{}{},
+	}
 }
 func (s *Server) initAccountLocked(a string) {
 	if s.recoverySalt[a] == nil {
@@ -472,6 +558,15 @@ func (s *Server) initAccountLocked(a string) {
 	}
 	if s.wrappedADK[a] == nil {
 		s.wrappedADK[a] = map[string][]byte{}
+	}
+	if s.wrappedADKKeyID[a] == nil {
+		s.wrappedADKKeyID[a] = map[string]string{}
+	}
+	if s.accountADKVersion[a] == 0 {
+		s.accountADKVersion[a] = 1
+	}
+	if s.revokedDevices[a] == nil {
+		s.revokedDevices[a] = map[string]struct{}{}
 	}
 	if s.tombstones[a] == nil {
 		s.tombstones[a] = map[string]Tombstone{}
@@ -558,6 +653,9 @@ func (s *Server) pairDevice(account, device string, pub ed25519.PublicKey, crede
 		return errors.New("sync: invalid device pairing")
 	}
 	s.initAccountLocked(account)
+	if _, revoked := s.revokedDevices[account][device]; revoked {
+		return ErrStoreDeviceRevoked
+	}
 	if old, exists := s.accounts[account][device]; exists && !hmac.Equal(old, pub) {
 		return errors.New("sync: device key cannot be overwritten")
 	}
@@ -585,6 +683,9 @@ func (s *Server) PairDeviceWithTicket(ticket PairingTicket) error {
 	if s.accounts[ticket.Account][ticket.Authorizer] == nil {
 		return ErrStoreDeviceMissing
 	}
+	if _, revoked := s.revokedDevices[ticket.Account][ticket.Device]; revoked {
+		return ErrStoreDeviceRevoked
+	}
 	if old, exists := s.accounts[ticket.Account][ticket.Device]; exists && !bytes.Equal(old, ticket.PublicKey) {
 		return ErrStoreDeviceKey
 	}
@@ -600,7 +701,15 @@ func (s *Server) PairDeviceWithTicket(ticket PairingTicket) error {
 		s.x25519Accounts[ticket.Account][ticket.Device] = append([]byte(nil), ticket.X25519PublicKey...)
 	}
 	if len(ticket.WrappedADK) >= 60 {
+		keyID := ticket.ADKKeyID
+		if !IsValidADKKeyID(keyID) {
+			keyID = DefaultADKKeyID
+		}
 		s.wrappedADK[ticket.Account][ticket.Device] = append([]byte(nil), ticket.WrappedADK...)
+		s.wrappedADKKeyID[ticket.Account][ticket.Device] = keyID
+		if ver, ok := ADKVersion(keyID); ok && ver > s.accountADKVersion[ticket.Account] {
+			s.accountADKVersion[ticket.Account] = ver
+		}
 	}
 	s.pairingNonces[ticket.Account][ticket.Nonce] = struct{}{}
 	return nil
@@ -619,9 +728,12 @@ func (s *Server) RemoveDevice(account, device string, credential []byte) error {
 	if s.accounts[account][device] == nil {
 		return errors.New("sync: device is not paired")
 	}
+	s.initAccountLocked(account)
+	s.revokedDevices[account][device] = struct{}{}
 	delete(s.accounts[account], device)
 	delete(s.x25519Accounts[account], device)
 	delete(s.wrappedADK[account], device)
+	delete(s.wrappedADKKeyID[account], device)
 	delete(s.watermarks[account], device)
 	delete(s.issued[account], device)
 	return nil
@@ -645,6 +757,9 @@ func (s *Server) SetX25519PublicKey(account, device string, pub, credential []by
 func (s *Server) X25519PublicKey(account, device string) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, revoked := s.revokedDevices[account][device]; revoked {
+		return nil, ErrStoreDeviceRevoked
+	}
 	pub := s.x25519Accounts[account][device]
 	if len(pub) != 32 {
 		return nil, errors.New("sync: x25519 key is not registered")
@@ -652,12 +767,22 @@ func (s *Server) X25519PublicKey(account, device string) ([]byte, error) {
 	return append([]byte(nil), pub...), nil
 }
 
-func wrappedADKCanonical(account, sender, target string, wrapped []byte) []byte {
+func WrappedADKCanonical(account, sender, target string, wrapped []byte) []byte {
 	h := sha256.Sum256(wrapped)
 	return append([]byte("clavis.sync.wrapped-adk.v2\x00"+account+"\x00"+sender+"\x00"+target+"\x00"), h[:]...)
 }
-func wrappedADKRequestCanonical(account, device string) []byte {
+func WrappedADKEntryCanonical(account, sender, target, keyID string, wrapped []byte) []byte {
+	h := sha256.Sum256(wrapped)
+	return append([]byte("clavis.sync.wrapped-adk-entry.v2\x00"+account+"\x00"+sender+"\x00"+target+"\x00"+keyID+"\x00"), h[:]...)
+}
+func WrappedADKRequestCanonical(account, device string) []byte {
 	return []byte("clavis.sync.get-wrapped-adk.v2\x00" + account + "\x00" + device)
+}
+func wrappedADKCanonical(account, sender, target string, wrapped []byte) []byte {
+	return WrappedADKCanonical(account, sender, target, wrapped)
+}
+func wrappedADKRequestCanonical(account, device string) []byte {
+	return WrappedADKRequestCanonical(account, device)
 }
 func (s *Server) SetWrappedADK(account, device string, wrapped, signature []byte) error {
 	return s.SetWrappedADKForDevice(account, device, device, wrapped, signature)
@@ -666,7 +791,7 @@ func (s *Server) SetWrappedADKForDevice(account, sender, target string, wrapped,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	pub := s.accounts[account][sender]
-	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, wrappedADKCanonical(account, sender, target, wrapped), signature) {
+	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, WrappedADKCanonical(account, sender, target, wrapped), signature) {
 		return errors.New("sync: invalid wrapped ADK signature")
 	}
 	if len(wrapped) < 32 || s.accounts[account][target] == nil {
@@ -674,39 +799,93 @@ func (s *Server) SetWrappedADKForDevice(account, sender, target string, wrapped,
 	}
 	s.initAccountLocked(account)
 	s.wrappedADK[account][target] = append([]byte(nil), wrapped...)
+	if s.wrappedADKKeyID[account][target] == "" {
+		s.wrappedADKKeyID[account][target] = DefaultADKKeyID
+	}
+	return nil
+}
+func (s *Server) SetWrappedADKEntryForDevice(account, sender, target, keyID string, wrapped, signature []byte) error {
+	if !IsValidADKKeyID(keyID) {
+		return errors.New("sync: invalid ADK key id")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pub := s.accounts[account][sender]
+	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, WrappedADKEntryCanonical(account, sender, target, keyID, wrapped), signature) {
+		return errors.New("sync: invalid wrapped ADK signature")
+	}
+	if len(wrapped) < 32 || s.accounts[account][target] == nil {
+		return errors.New("sync: wrapped ADK target is not paired")
+	}
+	s.initAccountLocked(account)
+	s.wrappedADK[account][target] = append([]byte(nil), wrapped...)
+	s.wrappedADKKeyID[account][target] = keyID
+	if ver, ok := ADKVersion(keyID); ok && ver > s.accountADKVersion[account] {
+		s.accountADKVersion[account] = ver
+	}
 	return nil
 }
 func (s *Server) GetWrappedADK(account, device string, signature []byte) ([]byte, error) {
+	entry, err := s.GetWrappedADKEntry(account, device, signature)
+	if err != nil {
+		return nil, err
+	}
+	return entry.Wrapped, nil
+}
+func (s *Server) GetWrappedADKEntry(account, device string, signature []byte) (WrappedADKEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, revoked := s.revokedDevices[account][device]; revoked {
+		return WrappedADKEntry{}, ErrStoreDeviceRevoked
+	}
 	pub := s.accounts[account][device]
-	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, wrappedADKRequestCanonical(account, device), signature) {
-		return nil, errors.New("sync: invalid wrapped ADK request")
+	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, WrappedADKRequestCanonical(account, device), signature) {
+		return WrappedADKEntry{}, errors.New("sync: invalid wrapped ADK request")
 	}
 	wrapped := s.wrappedADK[account][device]
 	if len(wrapped) == 0 {
-		return nil, errors.New("sync: wrapped ADK is not available")
+		return WrappedADKEntry{}, errors.New("sync: wrapped ADK is not available")
 	}
-	return append([]byte(nil), wrapped...), nil
+	keyID := s.wrappedADKKeyID[account][device]
+	if !IsValidADKKeyID(keyID) {
+		keyID = DefaultADKKeyID
+	}
+	return WrappedADKEntry{KeyID: keyID, Wrapped: append([]byte(nil), wrapped...)}, nil
+}
+func (s *Server) ListActiveDevices(account string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.credentials[account]; !ok {
+		return nil, ErrStoreAccountMissing
+	}
+	out := make([]string, 0, len(s.accounts[account]))
+	for device := range s.accounts[account] {
+		out = append(out, device)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 func (s *Server) GetRecoverySalt(account, device string, signature []byte) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	pub := s.accounts[account][device]
-	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, wrappedADKRequestCanonical(account, device), signature) {
+	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, WrappedADKRequestCanonical(account, device), signature) {
 		return nil, errors.New("sync: invalid recovery salt request")
 	}
 	return append([]byte(nil), s.recoverySalt[account]...), nil
 }
-func recoveryWrapCanonical(account, device string, wrapped []byte) []byte {
+func RecoveryWrapCanonical(account, device string, wrapped []byte) []byte {
 	h := sha256.Sum256(wrapped)
 	return append([]byte("clavis.sync.recovery-wrap.v2\x00"+account+"\x00"+device+"\x00"), h[:]...)
+}
+func recoveryWrapCanonical(account, device string, wrapped []byte) []byte {
+	return RecoveryWrapCanonical(account, device, wrapped)
 }
 func (s *Server) SetRecoveryWrap(account, device string, wrapped, signature []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	pub := s.accounts[account][device]
-	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, recoveryWrapCanonical(account, device, wrapped), signature) {
+	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, RecoveryWrapCanonical(account, device, wrapped), signature) {
 		return errors.New("sync: invalid recovery wrap signature")
 	}
 	s.recoveryWrap[account] = append([]byte(nil), wrapped...)
@@ -716,7 +895,7 @@ func (s *Server) GetRecoveryWrap(account, device string, signature []byte) ([]by
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	pub := s.accounts[account][device]
-	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, wrappedADKRequestCanonical(account, device), signature) {
+	if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, WrappedADKRequestCanonical(account, device), signature) {
 		return nil, errors.New("sync: invalid recovery wrap request")
 	}
 	if len(s.recoveryWrap[account]) == 0 {
@@ -763,6 +942,9 @@ func (s *Server) SubmitDelete(d DeleteInstruction) (Tombstone, error) {
 func (s *Server) SyncTombstones(account, device string, after uint64) ([]Tombstone, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, revoked := s.revokedDevices[account][device]; revoked {
+		return nil, ErrStoreDeviceRevoked
+	}
 	if s.accounts[account][device] == nil {
 		return nil, errors.New("sync: device is not paired")
 	}
@@ -803,6 +985,9 @@ func (s *Server) tombstoneBatchLocked(account string, batch tombstoneBatch) ([]T
 func (s *Server) ConfirmTombstones(account, device string, sequence uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, revoked := s.revokedDevices[account][device]; revoked {
+		return ErrStoreDeviceRevoked
+	}
 	if s.accounts[account][device] == nil {
 		return errors.New("sync: device is not paired")
 	}
@@ -868,6 +1053,9 @@ func (s *Server) UploadEnvelope(account, device, object string, version uint64, 
 	if e.AccountID != account || e.DeviceID != device || e.ObjectID != object || e.Version != version || e.ProtocolVersion != ProtocolVersion || !validClass(e.Class) || len(e.Nonce) != 12 || len(e.Ciphertext) < 16 {
 		return errors.New("sync: envelope does not match upload")
 	}
+	if _, revoked := s.revokedDevices[account][device]; revoked {
+		return ErrStoreDeviceRevoked
+	}
 	pub := s.accounts[account][device]
 	if len(pub) != ed25519.PublicKeySize || !e.Verify(pub) {
 		return errors.New("sync: invalid envelope signature")
@@ -891,6 +1079,29 @@ func (s *Server) UploadEnvelope(account, device, object string, version uint64, 
 	s.objects[account][object] = encoded
 	s.versions[account][object] = version
 	return nil
+}
+func (s *Server) ListObjects(account string) ([]ObjectSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.credentials[account]; !ok {
+		return nil, ErrStoreAccountMissing
+	}
+	out := make([]ObjectSummary, 0, len(s.objects[account]))
+	for id, raw := range s.objects[account] {
+		env, err := parseEnvelope(raw)
+		if err != nil {
+			continue
+		}
+		out = append(out, ObjectSummary{
+			ObjectID: id,
+			Version:  env.Version,
+			Class:    env.Class,
+			DeviceID: env.DeviceID,
+			KeyID:    env.KeyID,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ObjectID < out[j].ObjectID })
+	return out, nil
 }
 func (s *Server) Audit(accounts ...string) []AuditEvent {
 	s.mu.Lock()
@@ -950,8 +1161,22 @@ type SyncDiagnostic struct {
 }
 
 type localObject struct {
-	version uint64
-	payload []byte
+	version     uint64
+	baseVersion uint64
+	basePayload []byte
+	payload     []byte
+	dirty       bool
+	class       DataClass
+}
+
+// LocalObjectState exposes a read-only copy of a tracked local object.
+type LocalObjectState struct {
+	ObjectID    string
+	Version     uint64
+	BaseVersion uint64
+	Class       DataClass
+	Payload     []byte
+	Dirty       bool
 }
 
 type Client struct {
@@ -964,6 +1189,8 @@ type Client struct {
 	privateKey          ed25519.PrivateKey
 	xPrivateKey         *ecdh.PrivateKey
 	adk                 []byte
+	adkKeyID            string
+	adkHistory          map[string][]byte
 	deviceSalt          []byte
 	recoveryWrap        []byte
 	stateStore          StateStore
@@ -994,7 +1221,22 @@ func newClient(s *Server, device string, identity DeviceIdentity) (*Client, erro
 	if err != nil {
 		return nil, err
 	}
-	return &Client{server: s, store: store, deviceID: device, privateKey: append(ed25519.PrivateKey(nil), identity.Ed25519Private...), xPrivateKey: identity.X25519Private, adk: append([]byte(nil), identity.ADK...), credential: append([]byte(nil), identity.Credential...), cache: NewLocalCache(), plan: DefaultSyncPlan(), vault: v, localObjects: make(map[string]localObject)}, nil
+	adkCopy := append([]byte(nil), identity.ADK...)
+	return &Client{
+		server:       s,
+		store:        store,
+		deviceID:     device,
+		privateKey:   append(ed25519.PrivateKey(nil), identity.Ed25519Private...),
+		xPrivateKey:  identity.X25519Private,
+		adk:          adkCopy,
+		adkKeyID:     DefaultADKKeyID,
+		adkHistory:   map[string][]byte{DefaultADKKeyID: append([]byte(nil), adkCopy...)},
+		credential:   append([]byte(nil), identity.Credential...),
+		cache:        NewLocalCache(),
+		plan:         DefaultSyncPlan(),
+		vault:        v,
+		localObjects: make(map[string]localObject),
+	}, nil
 }
 
 // NewClient retains the in-memory constructor for callers that do not yet have
@@ -1026,7 +1268,180 @@ func NewClientWithStore(store SyncStore, device string, identity DeviceIdentity)
 	if err != nil {
 		return nil, err
 	}
-	return &Client{store: store, deviceID: device, privateKey: append(ed25519.PrivateKey(nil), identity.Ed25519Private...), xPrivateKey: identity.X25519Private, adk: append([]byte(nil), identity.ADK...), cache: NewLocalCache(), plan: DefaultSyncPlan(), vault: v, localObjects: make(map[string]localObject)}, nil
+	adkCopy := append([]byte(nil), identity.ADK...)
+	var credCopy []byte
+	if len(identity.Credential) == 32 {
+		credCopy = append([]byte(nil), identity.Credential...)
+	}
+	return &Client{
+		store:        store,
+		deviceID:     device,
+		privateKey:   append(ed25519.PrivateKey(nil), identity.Ed25519Private...),
+		xPrivateKey:  identity.X25519Private,
+		adk:          adkCopy,
+		adkKeyID:     DefaultADKKeyID,
+		adkHistory:   map[string][]byte{DefaultADKKeyID: append([]byte(nil), adkCopy...)},
+		credential:   credCopy,
+		cache:        NewLocalCache(),
+		plan:         DefaultSyncPlan(),
+		vault:        v,
+		localObjects: make(map[string]localObject),
+	}, nil
+}
+
+// NewPersistentClientWithStore loads device identity from keyStore and
+// non-secret state from state, backed by any durable SyncStore.
+func NewPersistentClientWithStore(ctx context.Context, store SyncStore, device string, keyStore SecretStore, state StateStore) (*Client, error) {
+	identity, err := LoadOrCreateDeviceIdentity(keyStore)
+	if err != nil {
+		return nil, err
+	}
+	c, err := NewClientWithStore(store, device, identity)
+	if err != nil {
+		return nil, err
+	}
+	c.keyStore = keyStore
+	if state != nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		w, ready, err := state.Load(ctx)
+		if err != nil {
+			return nil, err
+		}
+		c.watermark, c.recoveryReady, c.syncEnabled, c.stateStore = w, ready, ready, state
+	}
+	return c, nil
+}
+
+func (c *Client) SetStateStore(ctx context.Context, state StateStore) error {
+	if state == nil {
+		c.mu.Lock()
+		c.stateStore = nil
+		c.mu.Unlock()
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	w, ready, err := state.Load(ctx)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.stateStore = state
+	if w > c.watermark {
+		c.watermark = w
+	}
+	if ready {
+		c.recoveryReady = true
+		c.syncEnabled = true
+	}
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Client) AccountID() string { c.mu.Lock(); defer c.mu.Unlock(); return c.accountID }
+func (c *Client) DeviceID() string  { c.mu.Lock(); defer c.mu.Unlock(); return c.deviceID }
+func (c *Client) DevicePublicKey() ed25519.PublicKey {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.privateKey) != ed25519.PrivateKeySize {
+		return nil
+	}
+	return append(ed25519.PublicKey(nil), c.privateKey.Public().(ed25519.PublicKey)...)
+}
+func (c *Client) X25519PublicKey() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.xPrivateKey == nil {
+		return nil
+	}
+	return append([]byte(nil), c.xPrivateKey.PublicKey().Bytes()...)
+}
+func (c *Client) ADKKeyID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.currentADKKeyIDLocked()
+}
+
+// SignControlPayload signs a transport control record using the device's
+// Ed25519 private key without exposing key material to callers.
+func (c *Client) SignControlPayload(canonical []byte) ([]byte, error) {
+	c.mu.Lock()
+	priv := append(ed25519.PrivateKey(nil), c.privateKey...)
+	c.mu.Unlock()
+	if len(priv) != ed25519.PrivateKeySize {
+		return nil, errors.New("sync: signing key is not initialized")
+	}
+	return ed25519.Sign(priv, canonical), nil
+}
+
+// BuildSignedWrappedADKEntry wraps the client's current ADK for targetDevice
+// using ECDH with targetX25519Pub and signs the entry with the sender's Ed25519 key.
+func (c *Client) BuildSignedWrappedADKEntry(targetDevice string, targetX25519Pub []byte) (keyID string, wrapped, signature []byte, err error) {
+	c.mu.Lock()
+	account := c.accountID
+	sender := c.deviceID
+	adk := append([]byte(nil), c.adk...)
+	keyID = c.currentADKKeyIDLocked()
+	xpriv := c.xPrivateKey
+	priv := append(ed25519.PrivateKey(nil), c.privateKey...)
+	c.mu.Unlock()
+	if account == "" || sender == "" || targetDevice == "" {
+		return "", nil, nil, errors.New("sync: account, sender, and target device are required")
+	}
+	if len(adk) != 32 || xpriv == nil || len(priv) != ed25519.PrivateKeySize {
+		return "", nil, nil, errors.New("sync: client keys are not initialized")
+	}
+	pub, err := ecdh.X25519().NewPublicKey(targetX25519Pub)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	shared, err := xpriv.ECDH(pub)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	sealed, err := wrapWithSharedKey(shared, adk)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	wrapped = append(append([]byte(nil), xpriv.PublicKey().Bytes()...), sealed...)
+	signature = ed25519.Sign(priv, WrappedADKEntryCanonical(account, sender, targetDevice, keyID, wrapped))
+	return keyID, wrapped, signature, nil
+}
+
+// SetRecoveryMaterial caches verified recovery salt and recovery-wrapped ADK
+// ciphertext fetched from a transport before ConfirmRecoveryCode is invoked.
+func (c *Client) SetRecoveryMaterial(salt, wrapped []byte) {
+	if len(salt) != 32 || len(wrapped) == 0 {
+		return
+	}
+	c.mu.Lock()
+	c.deviceSalt = append([]byte(nil), salt...)
+	c.recoveryWrap = append([]byte(nil), wrapped...)
+	c.mu.Unlock()
+}
+
+// DecryptVerifiedEnvelope decrypts an envelope whose Ed25519 signature has
+// already been verified using the client's ADK keyring.
+func (c *Client) DecryptVerifiedEnvelope(envelope EncryptedEnvelope, pub ed25519.PublicKey) ([]byte, error) {
+	return c.decryptEnvelopeWithKeyring(envelope, pub)
+}
+func (c *Client) currentADKKeyIDLocked() string {
+	if !IsValidADKKeyID(c.adkKeyID) {
+		return DefaultADKKeyID
+	}
+	return c.adkKeyID
+}
+func (c *Client) adkForKeyIDLocked(keyID string) ([]byte, bool) {
+	if keyID == c.currentADKKeyIDLocked() && len(c.adk) == 32 {
+		return append([]byte(nil), c.adk...), true
+	}
+	if key, ok := c.adkHistory[keyID]; ok && len(key) == 32 {
+		return append([]byte(nil), key...), true
+	}
+	return nil, false
 }
 
 func (c *Client) syncStore() (SyncStore, error) {
@@ -1173,9 +1588,21 @@ func (c *Client) publishWrappedADK() error {
 	c.mu.Lock()
 	a, d := c.accountID, c.deviceID
 	adk := append([]byte(nil), c.adk...)
+	keyID := c.currentADKKeyIDLocked()
 	xpriv := c.xPrivateKey
 	priv := append(ed25519.PrivateKey(nil), c.privateKey...)
+	store := c.store
 	c.mu.Unlock()
+	if store == nil {
+		return errors.New("sync: store is not configured")
+	}
+	adkStore, ok := store.(ADKStore)
+	if !ok {
+		return errors.New("sync: wrapped ADK is unsupported by this store")
+	}
+	if a == "" || d == "" || xpriv == nil || len(priv) != ed25519.PrivateKeySize || len(adk) != 32 {
+		return errors.New("sync: paired device and ADK are required to publish wrapped ADK")
+	}
 	shared, err := xpriv.ECDH(xpriv.PublicKey())
 	if err != nil {
 		return err
@@ -1185,7 +1612,7 @@ func (c *Client) publishWrappedADK() error {
 		return err
 	}
 	wrapped = append(append([]byte(nil), xpriv.PublicKey().Bytes()...), wrapped...)
-	return c.server.SetWrappedADKForDevice(a, d, d, wrapped, ed25519.Sign(priv, wrappedADKCanonical(a, d, d, wrapped)))
+	return adkStore.SetWrappedADKEntryForDevice(a, d, d, keyID, wrapped, ed25519.Sign(priv, WrappedADKEntryCanonical(a, d, d, keyID, wrapped)))
 }
 
 // RefreshADK fetches the device-specific wrapped account key and replaces the
@@ -1194,18 +1621,32 @@ func (c *Client) RefreshADK() error {
 	c.mu.Lock()
 	account, device, store := c.accountID, c.deviceID, c.store
 	xpriv, priv := c.xPrivateKey, c.privateKey
+	keyStore := c.keyStore
 	c.mu.Unlock()
-	reader, ok := store.(wrappedADKReader)
-	if !ok {
-		return errors.New("sync: wrapped ADK is unsupported by this store")
-	}
 	if account == "" || device == "" || xpriv == nil || len(priv) != ed25519.PrivateKeySize {
 		return errors.New("sync: a paired device is required to refresh the ADK")
 	}
-	wrapped, err := reader.GetWrappedADK(account, device, ed25519.Sign(priv, wrappedADKRequestCanonical(account, device)))
-	if err != nil {
-		return err
+	sig := ed25519.Sign(priv, WrappedADKRequestCanonical(account, device))
+	var entry WrappedADKEntry
+	if adkStore, ok := store.(ADKStore); ok {
+		var err error
+		entry, err = adkStore.GetWrappedADKEntry(account, device, sig)
+		if err != nil {
+			return err
+		}
+	} else if reader, ok := store.(wrappedADKReader); ok {
+		wrapped, err := reader.GetWrappedADK(account, device, sig)
+		if err != nil {
+			return err
+		}
+		entry = WrappedADKEntry{KeyID: DefaultADKKeyID, Wrapped: wrapped}
+	} else {
+		return errors.New("sync: wrapped ADK is unsupported by this store")
 	}
+	if !IsValidADKKeyID(entry.KeyID) {
+		entry.KeyID = DefaultADKKeyID
+	}
+	wrapped := entry.Wrapped
 	if len(wrapped) < 32 {
 		return errors.New("sync: wrapped ADK is incomplete")
 	}
@@ -1225,11 +1666,25 @@ func (c *Client) RefreshADK() error {
 		return errors.New("sync: wrapped ADK has invalid key length")
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.accountID != account {
+		c.mu.Unlock()
 		return errors.New("sync: account changed during ADK refresh")
 	}
-	c.adk = adk
+	if c.adkHistory == nil {
+		c.adkHistory = make(map[string][]byte)
+	}
+	if len(c.adk) == 32 {
+		c.adkHistory[c.currentADKKeyIDLocked()] = append([]byte(nil), c.adk...)
+	}
+	c.adk = append([]byte(nil), adk...)
+	c.adkKeyID = entry.KeyID
+	c.adkHistory[entry.KeyID] = append([]byte(nil), adk...)
+	c.mu.Unlock()
+	if keyStore != nil {
+		if err := keyStore.SaveKey(deviceADKKey, encodeSecret(adk)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 func (c *Client) ADK() []byte {
@@ -1245,14 +1700,22 @@ func (c *Client) WrapADKForDevice(device string) error {
 	c.mu.Lock()
 	a, d := c.accountID, c.deviceID
 	adk := append([]byte(nil), c.adk...)
+	keyID := c.currentADKKeyIDLocked()
 	xpriv := c.xPrivateKey
 	priv := append(ed25519.PrivateKey(nil), c.privateKey...)
-	cred := append([]byte(nil), c.credential...)
+	store := c.store
 	c.mu.Unlock()
 	if len(adk) != 32 {
 		return errors.New("sync: ADK is not initialized")
 	}
-	pubBytes, err := c.server.X25519PublicKey(a, device)
+	if store == nil {
+		return errors.New("sync: store is not configured")
+	}
+	adkStore, ok := store.(ADKStore)
+	if !ok {
+		return errors.New("sync: wrapped ADK is unsupported by this store")
+	}
+	pubBytes, err := adkStore.X25519PublicKey(a, device)
 	if err != nil {
 		return err
 	}
@@ -1269,12 +1732,7 @@ func (c *Client) WrapADKForDevice(device string) error {
 		return err
 	}
 	wrapped = append(append([]byte(nil), xpriv.PublicKey().Bytes()...), wrapped...)
-	if err := c.server.SetWrappedADKForDevice(a, d, device, wrapped, ed25519.Sign(priv, wrappedADKCanonical(a, d, device, wrapped))); err != nil {
-		return err
-	}
-	_ = cred
-	_ = d
-	return nil
+	return adkStore.SetWrappedADKEntryForDevice(a, d, device, keyID, wrapped, ed25519.Sign(priv, WrappedADKEntryCanonical(a, d, device, keyID, wrapped)))
 }
 
 func (c *Client) PairDevice(tickets ...PairingTicket) error {
@@ -1296,7 +1754,6 @@ func (c *Client) PairDeviceWithCredential() error {
 	xpub := append([]byte(nil), c.xPrivateKey.PublicKey().Bytes()...)
 	cred := append([]byte(nil), c.credential...)
 	store := c.store
-	server := c.server
 	c.mu.Unlock()
 	if a == "" {
 		return errors.New("sync: login is required")
@@ -1307,16 +1764,14 @@ func (c *Client) PairDeviceWithCredential() error {
 	if err := store.PairDeviceWithCredential(a, d, pub, cred); err != nil {
 		return err
 	}
-	if server == nil {
-		// A durable SyncStore currently owns encrypted objects and device
-		// signatures. The ADK is supplied by the persisted identity; no server
-		// private-key or plaintext key exchange is required for this client path.
+	adkStore, ok := store.(ADKStore)
+	if !ok {
 		if len(c.ADK()) != 32 {
 			return errors.New("sync: ADK is not initialized")
 		}
 		return nil
 	}
-	if err := server.SetX25519PublicKey(a, d, xpub, cred); err != nil {
+	if err := adkStore.SetX25519PublicKey(a, d, xpub, cred); err != nil {
 		return err
 	}
 	if err := c.ensureADK(); err != nil {
@@ -1361,6 +1816,283 @@ func (c *Client) Conflicts() []ConflictEntry {
 	return out
 }
 
+// StageLocalEdit records an uncommitted local change on object so a subsequent
+// PullObjects detects true concurrent divergence instead of overwriting it.
+func (c *Client) StageLocalEdit(class DataClass, object string, payload []byte) error {
+	if strings.TrimSpace(object) == "" {
+		return errors.New("sync: object id cannot be empty")
+	}
+	if class == Passwords || class == KeyManager {
+		return ErrClassForbidden
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.localObjects == nil {
+		c.localObjects = make(map[string]localObject)
+	}
+	existing, hasExisting := c.localObjects[object]
+	if hasExisting {
+		nextVer := existing.version
+		if existing.baseVersion >= nextVer {
+			nextVer = existing.baseVersion + 1
+		}
+		c.localObjects[object] = localObject{
+			version:     nextVer,
+			baseVersion: existing.baseVersion,
+			basePayload: bytes.Clone(existing.basePayload),
+			payload:     bytes.Clone(payload),
+			dirty:       !bytes.Equal(payload, existing.basePayload),
+			class:       class,
+		}
+		return nil
+	}
+	c.localObjects[object] = localObject{
+		version:     1,
+		baseVersion: 0,
+		payload:     bytes.Clone(payload),
+		dirty:       true,
+		class:       class,
+	}
+	return nil
+}
+
+// LocalObject returns a snapshot of the client's tracked local object state.
+func (c *Client) LocalObject(object string) (LocalObjectState, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	lo, ok := c.localObjects[object]
+	if !ok {
+		return LocalObjectState{}, false
+	}
+	return LocalObjectState{
+		ObjectID:    object,
+		Version:     lo.version,
+		BaseVersion: lo.baseVersion,
+		Class:       lo.class,
+		Payload:     bytes.Clone(lo.payload),
+		Dirty:       lo.dirty,
+	}, true
+}
+
+// RecordRemoteConflict records an explicit conflict observed by an external
+// transport (for example two devices writing the same object version into a
+// shared sync directory) without losing local payload state.
+func (c *Client) RecordRemoteConflict(remote EncryptedEnvelope, remotePayload []byte) ConflictEntry {
+	c.mu.Lock()
+	local := c.localObjects[remote.ObjectID]
+	localVer := local.version
+	localPayload := bytes.Clone(local.payload)
+	if c.localObjects == nil {
+		c.localObjects = make(map[string]localObject)
+	}
+	c.localObjects[remote.ObjectID] = localObject{
+		version:     localVer,
+		baseVersion: remote.Version,
+		basePayload: bytes.Clone(remotePayload),
+		payload:     bytes.Clone(localPayload),
+		dirty:       true,
+		class:       remote.Class,
+	}
+	conflictID := conflictObjectID(remote.ObjectID, remote.DeviceID, remote.Version)
+	conflict := ConflictEntry{
+		ObjectID:      remote.ObjectID,
+		ConflictID:    conflictID,
+		LocalVersion:  localVer,
+		RemoteVersion: remote.Version,
+		LocalPayload:  localPayload,
+		RemotePayload: bytes.Clone(remotePayload),
+	}
+	for _, existing := range c.conflicts {
+		if existing.ObjectID == conflict.ObjectID && existing.ConflictID == conflict.ConflictID {
+			c.mu.Unlock()
+			return existing
+		}
+	}
+	c.conflicts = append(c.conflicts, ConflictEntry{
+		ObjectID:      conflict.ObjectID,
+		ConflictID:    conflict.ConflictID,
+		LocalVersion:  conflict.LocalVersion,
+		RemoteVersion: conflict.RemoteVersion,
+		LocalPayload:  bytes.Clone(conflict.LocalPayload),
+		RemotePayload: bytes.Clone(conflict.RemotePayload),
+	})
+	c.mu.Unlock()
+	return conflict
+}
+
+// ListObjects returns metadata summaries for all live encrypted objects stored
+// for the logged-in account.
+func (c *Client) ListObjects() ([]ObjectSummary, error) {
+	store, err := c.syncStore()
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	account := c.accountID
+	c.mu.Unlock()
+	if account == "" {
+		return nil, errors.New("sync: login is required")
+	}
+	return store.ListObjects(account)
+}
+
+// PullAll enumerates all live objects in the store and pulls each one.
+func (c *Client) PullAll() (PullResult, error) {
+	summaries, err := c.ListObjects()
+	if err != nil {
+		return PullResult{}, err
+	}
+	if len(summaries) == 0 {
+		return PullResult{}, nil
+	}
+	ids := make([]string, 0, len(summaries))
+	for _, s := range summaries {
+		ids = append(ids, s.ObjectID)
+	}
+	return c.PullObjects(ids...)
+}
+
+// ResolveConflict resolves a recorded conflict for objectID by either
+// uploading the local payload as a new winning version (keepLocal=true) or
+// adopting the remote payload (keepLocal=false).
+func (c *Client) ResolveConflict(objectID string, keepLocal bool) error {
+	c.syncMu.Lock()
+	defer c.syncMu.Unlock()
+	store, err := c.syncStore()
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	account := c.accountID
+	device := c.deviceID
+	enabled := c.syncEnabled
+	plan := c.plan
+	priv := append(ed25519.PrivateKey(nil), c.privateKey...)
+	conflictIdx := -1
+	var entry ConflictEntry
+	for i, candidate := range c.conflicts {
+		if candidate.ObjectID == objectID || candidate.ConflictID == objectID {
+			conflictIdx = i
+			entry = candidate
+			break
+		}
+	}
+	var class DataClass
+	if conflictIdx >= 0 {
+		class = c.localObjects[entry.ObjectID].class
+	}
+	c.mu.Unlock()
+	if conflictIdx < 0 {
+		return ErrConflictNotFound
+	}
+	if account == "" {
+		return errors.New("sync: login is required")
+	}
+	if class == "" {
+		if remoteEnv, getErr := store.GetEnvelope(account, entry.ObjectID); getErr == nil {
+			class = remoteEnv.Class
+		} else {
+			class = InputMethod
+		}
+	}
+
+	if keepLocal {
+		if !enabled {
+			return errors.New("sync: recovery code must be saved and confirmed before sync is enabled")
+		}
+		if class == Passwords || class == KeyManager {
+			return ErrClassForbidden
+		}
+		if !plan.allows(class) {
+			return fmt.Errorf("%w: %s", ErrClassNotAllowed, class)
+		}
+		if class == SensitiveVault && !c.vault.Authorized() {
+			return errors.New("sync: vault authorization required")
+		}
+		remoteVer := entry.RemoteVersion
+		if v, vErr := store.ObjectVersion(account, entry.ObjectID); vErr == nil && v > remoteVer {
+			remoteVer = v
+		}
+		nextVer := remoteVer
+		if entry.LocalVersion > nextVer {
+			nextVer = entry.LocalVersion
+		}
+		nextVer++
+		if err := c.ensureADK(); err != nil {
+			return err
+		}
+		c.mu.Lock()
+		adk := append([]byte(nil), c.adk...)
+		keyID := c.currentADKKeyIDLocked()
+		c.mu.Unlock()
+		env, err := NewEncryptedEnvelopeWithKeyID(priv, adk, keyID, account, device, entry.ObjectID, nextVer, class, entry.LocalPayload)
+		if err != nil {
+			return err
+		}
+		if err := store.UploadEnvelope(account, device, entry.ObjectID, nextVer, env); err != nil {
+			return err
+		}
+		c.mu.Lock()
+		if c.localObjects == nil {
+			c.localObjects = make(map[string]localObject)
+		}
+		c.localObjects[entry.ObjectID] = localObject{
+			version:     nextVer,
+			baseVersion: nextVer,
+			basePayload: bytes.Clone(entry.LocalPayload),
+			payload:     bytes.Clone(entry.LocalPayload),
+			dirty:       false,
+			class:       class,
+		}
+		c.conflicts = slices.Delete(c.conflicts, conflictIdx, conflictIdx+1)
+		c.mu.Unlock()
+		return nil
+	}
+
+	c.mu.Lock()
+	if c.localObjects == nil {
+		c.localObjects = make(map[string]localObject)
+	}
+	c.localObjects[entry.ObjectID] = localObject{
+		version:     entry.RemoteVersion,
+		baseVersion: entry.RemoteVersion,
+		basePayload: bytes.Clone(entry.RemotePayload),
+		payload:     bytes.Clone(entry.RemotePayload),
+		dirty:       false,
+		class:       class,
+	}
+	c.conflicts = slices.Delete(c.conflicts, conflictIdx, conflictIdx+1)
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Client) decryptEnvelopeWithKeyring(envelope EncryptedEnvelope, pub ed25519.PublicKey) ([]byte, error) {
+	c.mu.Lock()
+	key, ok := c.adkForKeyIDLocked(envelope.KeyID)
+	fallback := append([]byte(nil), c.adk...)
+	c.mu.Unlock()
+	if ok {
+		if payload, err := DecryptEnvelope(key, envelope, pub); err == nil {
+			return payload, nil
+		}
+	}
+	if err := c.RefreshADK(); err == nil {
+		c.mu.Lock()
+		refreshed, found := c.adkForKeyIDLocked(envelope.KeyID)
+		if !found {
+			refreshed = append([]byte(nil), c.adk...)
+		}
+		c.mu.Unlock()
+		if len(refreshed) == 32 {
+			return DecryptEnvelope(refreshed, envelope, pub)
+		}
+	}
+	if len(fallback) == 32 {
+		return DecryptEnvelope(fallback, envelope, pub)
+	}
+	return nil, errors.New("sync: no matching ADK available for envelope")
+}
+
 // Pull fetches one encrypted object, verifies its sender signature, and only
 // then decrypts it. A verification failure never reaches the AEAD operation.
 func (c *Client) Pull(object string) (PulledObject, error) {
@@ -1383,18 +2115,15 @@ func (c *Client) PullObjects(objects ...string) (PullResult, error) {
 	}
 	c.mu.Lock()
 	account := c.accountID
-	adk := append([]byte(nil), c.adk...)
+	hasADK := len(c.adk) == 32
 	c.mu.Unlock()
 	if account == "" {
 		return PullResult{}, errors.New("sync: login is required")
 	}
-	if len(adk) != 32 {
+	if !hasADK {
 		if err := c.ensureADK(); err != nil {
 			return PullResult{}, err
 		}
-		c.mu.Lock()
-		adk = append([]byte(nil), c.adk...)
-		c.mu.Unlock()
 	}
 	out := PullResult{}
 	for _, object := range objects {
@@ -1413,7 +2142,7 @@ func (c *Client) PullObjects(objects ...string) (PullResult, error) {
 			c.recordDiagnostic(SyncDiagnostic{Kind: "unsupported_class", Class: envelope.Class, ObjectID: envelope.ObjectID, Message: "unknown data class skipped without local persistence"})
 			continue
 		}
-		payload, err := DecryptEnvelope(adk, envelope, pub)
+		payload, err := c.decryptEnvelopeWithKeyring(envelope, pub)
 		if err != nil {
 			return out, err
 		}
@@ -1421,18 +2150,39 @@ func (c *Client) PullObjects(objects ...string) (PullResult, error) {
 		c.mu.Lock()
 		local, hasLocal := c.localObjects[object]
 		c.mu.Unlock()
-		if hasLocal && local.version != envelope.Version && !bytes.Equal(local.payload, payload) {
-			conflictID := conflictObjectID(object, envelope.DeviceID, envelope.Version)
-			conflict := ConflictEntry{ObjectID: object, ConflictID: conflictID, LocalVersion: local.version, RemoteVersion: envelope.Version, LocalPayload: bytes.Clone(local.payload), RemotePayload: payload}
-			c.recordConflict(conflict)
-			out.Conflicts = append(out.Conflicts, conflict)
-			continue
+		if hasLocal {
+			localModified := local.dirty && !bytes.Equal(local.payload, local.basePayload)
+			if bytes.Equal(local.payload, payload) {
+				// Payloads already match: converge metadata cleanly.
+			} else if !localModified {
+				// Clean local copy (not dirty, or matches base): fast-forward without conflict.
+				if envelope.Version < local.baseVersion {
+					continue
+				}
+			} else if envelope.Version != local.baseVersion {
+				// Local was modified concurrently while remote diverged from base.
+				conflictID := conflictObjectID(object, envelope.DeviceID, envelope.Version)
+				conflict := ConflictEntry{ObjectID: object, ConflictID: conflictID, LocalVersion: local.version, RemoteVersion: envelope.Version, LocalPayload: bytes.Clone(local.payload), RemotePayload: bytes.Clone(payload)}
+				c.recordConflict(conflict)
+				out.Conflicts = append(out.Conflicts, conflict)
+				continue
+			} else {
+				// Remote is still at our baseVersion; preserve our uncommitted local edit.
+				continue
+			}
 		}
 		c.mu.Lock()
 		if c.localObjects == nil {
 			c.localObjects = make(map[string]localObject)
 		}
-		c.localObjects[object] = localObject{version: envelope.Version, payload: append([]byte(nil), payload...)}
+		c.localObjects[object] = localObject{
+			version:     envelope.Version,
+			baseVersion: envelope.Version,
+			basePayload: append([]byte(nil), payload...),
+			payload:     append([]byte(nil), payload...),
+			dirty:       false,
+			class:       envelope.Class,
+		}
 		c.mu.Unlock()
 		out.Objects = append(out.Objects, pulled)
 	}
@@ -1590,10 +2340,10 @@ func (c *Client) UploadClass(class DataClass, object string, version uint64, pay
 		return errors.New("sync: login is required")
 	}
 	if class == Passwords || class == KeyManager {
-		return errors.New("sync: passwords and key-manager data can never be synchronized")
+		return ErrClassForbidden
 	}
 	if !p.allows(class) {
-		return fmt.Errorf("sync: %s is not enabled in the sync plan", class)
+		return fmt.Errorf("%w: %s", ErrClassNotAllowed, class)
 	}
 	if class == SensitiveVault && !c.vault.Authorized() {
 		return errors.New("sync: vault authorization required")
@@ -1603,6 +2353,7 @@ func (c *Client) UploadClass(class DataClass, object string, version uint64, pay
 	}
 	c.mu.Lock()
 	adk := append([]byte(nil), c.adk...)
+	keyID := c.currentADKKeyIDLocked()
 	c.mu.Unlock()
 	if len(adk) != 32 {
 		if err := c.ensureADK(); err != nil {
@@ -1610,9 +2361,10 @@ func (c *Client) UploadClass(class DataClass, object string, version uint64, pay
 		}
 		c.mu.Lock()
 		adk = append([]byte(nil), c.adk...)
+		keyID = c.currentADKKeyIDLocked()
 		c.mu.Unlock()
 	}
-	e, err := clientEnvelopeWithADK(priv, adk, a, d, object, version, class, payload)
+	e, err := NewEncryptedEnvelopeWithKeyID(priv, adk, keyID, a, d, object, version, class, payload)
 	if err != nil {
 		return err
 	}
@@ -1634,18 +2386,31 @@ func (c *Client) UploadClass(class DataClass, object string, version uint64, pay
 		if keyErr != nil {
 			return err
 		}
-		remotePayload, decErr := DecryptEnvelope(adk, remote, pub)
+		remotePayload, decErr := c.decryptEnvelopeWithKeyring(remote, pub)
 		if decErr != nil {
 			return decErr
 		}
 		conflictID := conflictObjectID(object, d, version)
-		conflictEnvelope, envErr := clientEnvelopeWithADK(priv, adk, a, d, conflictID, version, class, payload)
+		conflictEnvelope, envErr := NewEncryptedEnvelopeWithKeyID(priv, adk, keyID, a, d, conflictID, version, class, payload)
 		if envErr != nil {
 			return envErr
 		}
 		if uploadErr := store.UploadEnvelope(a, d, conflictID, version, conflictEnvelope); uploadErr != nil {
 			return uploadErr
 		}
+		c.mu.Lock()
+		if c.localObjects == nil {
+			c.localObjects = make(map[string]localObject)
+		}
+		c.localObjects[object] = localObject{
+			version:     version,
+			baseVersion: remote.Version,
+			basePayload: bytes.Clone(remotePayload),
+			payload:     bytes.Clone(payload),
+			dirty:       true,
+			class:       class,
+		}
+		c.mu.Unlock()
 		c.recordConflict(ConflictEntry{ObjectID: object, ConflictID: conflictID, LocalVersion: version, RemoteVersion: remote.Version, LocalPayload: append([]byte(nil), payload...), RemotePayload: remotePayload})
 		return ErrStoreConflict
 	}
@@ -1653,44 +2418,31 @@ func (c *Client) UploadClass(class DataClass, object string, version uint64, pay
 	if c.localObjects == nil {
 		c.localObjects = make(map[string]localObject)
 	}
-	c.localObjects[object] = localObject{version: version, payload: append([]byte(nil), payload...)}
+	c.localObjects[object] = localObject{
+		version:     version,
+		baseVersion: version,
+		basePayload: append([]byte(nil), payload...),
+		payload:     append([]byte(nil), payload...),
+		dirty:       false,
+		class:       class,
+	}
 	c.mu.Unlock()
 	return nil
 }
 
-// NewEncryptedEnvelope seals an opaque payload for an authenticated sync upload.
-// The payload is encrypted before it enters any SyncStore implementation.
-func NewEncryptedEnvelope(priv ed25519.PrivateKey, args ...any) (EncryptedEnvelope, error) {
-	var adk []byte
-	var a, d, o string
-	var v uint64
-	var class DataClass
-	var payload []byte
-	if len(args) == 7 {
-		adk, _ = args[0].([]byte)
-		a, _ = args[1].(string)
-		d, _ = args[2].(string)
-		o, _ = args[3].(string)
-		v = envelopeVersion(args[4])
-		class, _ = args[5].(DataClass)
-		payload, _ = args[6].([]byte)
-	} else if len(args) == 6 {
-		a, _ = args[0].(string)
-		d, _ = args[1].(string)
-		o, _ = args[2].(string)
-		v = envelopeVersion(args[3])
-		class, _ = args[4].(DataClass)
-		payload, _ = args[5].([]byte)
-		// Compatibility callers must migrate to the explicit ADK form. This
-		// branch deliberately does not derive a key from the signing private key.
-		adk = compatibilityADK()
-	} else {
-		return EncryptedEnvelope{}, errors.New("sync: invalid envelope arguments")
+// NewEncryptedEnvelopeWithKeyID seals an opaque payload for an authenticated
+// sync upload using an explicit 32-byte ADK and versioned ADK key ID.
+func NewEncryptedEnvelopeWithKeyID(priv ed25519.PrivateKey, adk []byte, keyID, account, device, object string, version uint64, class DataClass, payload []byte) (EncryptedEnvelope, error) {
+	if len(priv) != ed25519.PrivateKeySize {
+		return EncryptedEnvelope{}, errors.New("sync: invalid signing key")
 	}
 	if len(adk) != 32 {
-		return EncryptedEnvelope{}, errors.New("sync: ADK must be 32 bytes")
+		return EncryptedEnvelope{}, ErrMissingADK
 	}
-	e := EncryptedEnvelope{ProtocolVersion: ProtocolVersion, KeyID: adkKeyID, AccountID: a, DeviceID: d, ObjectID: o, Version: v, Class: class, Nonce: make([]byte, 12)}
+	if !IsValidADKKeyID(keyID) {
+		return EncryptedEnvelope{}, errors.New("sync: invalid ADK key id")
+	}
+	e := EncryptedEnvelope{ProtocolVersion: ProtocolVersion, KeyID: keyID, AccountID: account, DeviceID: device, ObjectID: object, Version: version, Class: class, Nonce: make([]byte, 12)}
 	if _, err := io.ReadFull(rand.Reader, e.Nonce); err != nil {
 		return e, err
 	}
@@ -1707,9 +2459,42 @@ func NewEncryptedEnvelope(priv ed25519.PrivateKey, args ...any) (EncryptedEnvelo
 	return e, nil
 }
 
-func compatibilityADK() []byte {
-	sum := sha256.Sum256([]byte("clavis.sync.compatibility-adk.v2"))
-	return sum[:]
+// NewEncryptedEnvelope seals an opaque payload for an authenticated sync upload.
+// Callers MUST provide a real 32-byte ADK:
+//   - 7 args: (adk, account, device, object, version, class, payload) -> uses DefaultADKKeyID
+//   - 8 args: (adk, keyID, account, device, object, version, class, payload)
+func NewEncryptedEnvelope(priv ed25519.PrivateKey, args ...any) (EncryptedEnvelope, error) {
+	var adk []byte
+	var keyID string
+	var a, d, o string
+	var v uint64
+	var class DataClass
+	var payload []byte
+	switch len(args) {
+	case 8:
+		adk, _ = args[0].([]byte)
+		keyID, _ = args[1].(string)
+		a, _ = args[2].(string)
+		d, _ = args[3].(string)
+		o, _ = args[4].(string)
+		v = envelopeVersion(args[5])
+		class, _ = args[6].(DataClass)
+		payload, _ = args[7].([]byte)
+	case 7:
+		adk, _ = args[0].([]byte)
+		keyID = DefaultADKKeyID
+		a, _ = args[1].(string)
+		d, _ = args[2].(string)
+		o, _ = args[3].(string)
+		v = envelopeVersion(args[4])
+		class, _ = args[5].(DataClass)
+		payload, _ = args[6].([]byte)
+	case 6:
+		return EncryptedEnvelope{}, ErrMissingADK
+	default:
+		return EncryptedEnvelope{}, errors.New("sync: invalid envelope arguments")
+	}
+	return NewEncryptedEnvelopeWithKeyID(priv, adk, keyID, a, d, o, v, class, payload)
 }
 
 func envelopeVersion(value any) uint64 {
@@ -1730,14 +2515,11 @@ func envelopeVersion(value any) uint64 {
 	return 0
 }
 
-func clientEnvelope(priv ed25519.PrivateKey, a, d, o string, v uint64, class DataClass, payload []byte) (EncryptedEnvelope, error) {
-	return NewEncryptedEnvelope(priv, a, d, o, v, class, payload)
-}
 func clientEnvelopeWithADK(priv ed25519.PrivateKey, adk []byte, a, d, o string, v uint64, class DataClass, payload []byte) (EncryptedEnvelope, error) {
-	return NewEncryptedEnvelope(priv, adk, a, d, o, v, class, payload)
+	return NewEncryptedEnvelopeWithKeyID(priv, adk, DefaultADKKeyID, a, d, o, v, class, payload)
 }
 func DecryptEnvelope(adk []byte, e EncryptedEnvelope, pub ed25519.PublicKey) ([]byte, error) {
-	if len(adk) != 32 || e.KeyID != adkKeyID || !e.Verify(pub) {
+	if len(adk) != 32 || !IsValidADKKeyID(e.KeyID) || !e.Verify(pub) {
 		return nil, errors.New("sync: invalid envelope authentication")
 	}
 	block, err := aes.NewCipher(adk)
@@ -1800,7 +2582,18 @@ func (c *Client) PrepareRecoveryCode() (string, error) {
 	a, d := c.accountID, c.deviceID
 	priv := append(ed25519.PrivateKey(nil), c.privateKey...)
 	adk := append([]byte(nil), c.adk...)
+	store := c.store
 	c.mu.Unlock()
+	if a == "" || d == "" {
+		return "", errors.New("sync: login is required")
+	}
+	if store == nil {
+		return "", errors.New("sync: store is not configured")
+	}
+	recoveryStore, ok := store.(RecoveryStore)
+	if !ok {
+		return "", errors.New("sync: recovery storage is unsupported by this store")
+	}
 	if len(adk) != 32 {
 		if err := c.ensureADK(); err != nil {
 			return "", err
@@ -1809,7 +2602,7 @@ func (c *Client) PrepareRecoveryCode() (string, error) {
 		adk = append([]byte(nil), c.adk...)
 		c.mu.Unlock()
 	}
-	salt, err := c.server.GetRecoverySalt(a, d, ed25519.Sign(priv, wrappedADKRequestCanonical(a, d)))
+	salt, err := recoveryStore.GetRecoverySalt(a, d, ed25519.Sign(priv, WrappedADKRequestCanonical(a, d)))
 	if err != nil {
 		return "", err
 	}
@@ -1817,7 +2610,7 @@ func (c *Client) PrepareRecoveryCode() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := c.server.SetRecoveryWrap(a, d, wrapped, ed25519.Sign(priv, recoveryWrapCanonical(a, d, wrapped))); err != nil {
+	if err := recoveryStore.SetRecoveryWrap(a, d, wrapped, ed25519.Sign(priv, RecoveryWrapCanonical(a, d, wrapped))); err != nil {
 		return "", err
 	}
 	c.mu.Lock()
@@ -1826,6 +2619,9 @@ func (c *Client) PrepareRecoveryCode() (string, error) {
 	c.recoveryReady = false
 	c.syncEnabled = false
 	c.mu.Unlock()
+	if err := c.saveState(); err != nil {
+		return "", err
+	}
 	return code, nil
 }
 func (c *Client) ConfirmRecoveryCode(code string) error {
@@ -1834,19 +2630,30 @@ func (c *Client) ConfirmRecoveryCode(code string) error {
 	priv := append(ed25519.PrivateKey(nil), c.privateKey...)
 	salt := append([]byte(nil), c.deviceSalt...)
 	wrapped := append([]byte(nil), c.recoveryWrap...)
+	store := c.store
+	keyStore := c.keyStore
 	c.mu.Unlock()
-	if len(salt) != 32 {
-		var err error
-		salt, err = c.server.GetRecoverySalt(a, d, ed25519.Sign(priv, wrappedADKRequestCanonical(a, d)))
-		if err != nil {
-			return err
+	if len(salt) != 32 || len(wrapped) == 0 {
+		if store == nil {
+			return errors.New("sync: store is not configured")
 		}
-	}
-	if len(wrapped) == 0 {
-		var err error
-		wrapped, err = c.server.GetRecoveryWrap(a, d, ed25519.Sign(priv, wrappedADKRequestCanonical(a, d)))
-		if err != nil {
-			return err
+		recoveryStore, ok := store.(RecoveryStore)
+		if !ok {
+			return errors.New("sync: recovery storage is unsupported by this store")
+		}
+		if len(salt) != 32 {
+			var err error
+			salt, err = recoveryStore.GetRecoverySalt(a, d, ed25519.Sign(priv, WrappedADKRequestCanonical(a, d)))
+			if err != nil {
+				return err
+			}
+		}
+		if len(wrapped) == 0 {
+			var err error
+			wrapped, err = recoveryStore.GetRecoveryWrap(a, d, ed25519.Sign(priv, WrappedADKRequestCanonical(a, d)))
+			if err != nil {
+				return err
+			}
 		}
 	}
 	adk, err := openRecovery(code, salt, wrapped)
@@ -1855,10 +2662,19 @@ func (c *Client) ConfirmRecoveryCode(code string) error {
 	}
 	c.mu.Lock()
 	c.adk = append([]byte(nil), adk...)
+	if c.adkHistory == nil {
+		c.adkHistory = make(map[string][]byte)
+	}
+	c.adkHistory[c.currentADKKeyIDLocked()] = append([]byte(nil), adk...)
 	c.recoveryReady = true
 	c.syncEnabled = true
 	c.mu.Unlock()
-	return nil
+	if keyStore != nil {
+		if err := keyStore.SaveKey(deviceADKKey, encodeSecret(adk)); err != nil {
+			return err
+		}
+	}
+	return c.saveState()
 }
 func equalHash(exp [32]byte, b []byte) bool {
 	got := sha256.Sum256(b)

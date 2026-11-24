@@ -104,7 +104,11 @@ func runStoreContract(t *testing.T, store SyncStore) {
 	if err := store.PairDeviceWithCredential("acct", "device", other.Public().(ed25519.PublicKey), credential); err == nil {
 		t.Fatalf("device overwrite error = %v", err)
 	}
-	e, err := clientEnvelope(priv, "acct", "device", "object", 1, InputMethod, []byte("secret"))
+	adk := make([]byte, 32)
+	if _, err := rand.Read(adk); err != nil {
+		t.Fatal(err)
+	}
+	e, err := clientEnvelopeWithADK(priv, adk, "acct", "device", "object", 1, InputMethod, []byte("secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,6 +118,10 @@ func runStoreContract(t *testing.T, store SyncStore) {
 	got, err := store.GetEnvelope("acct", "object")
 	if err != nil || string(got.Ciphertext) != string(e.Ciphertext) {
 		t.Fatalf("envelope = %v, %v", got, err)
+	}
+	objs, err := store.ListObjects("acct")
+	if err != nil || len(objs) != 1 || objs[0].ObjectID != "object" || objs[0].Version != 1 {
+		t.Fatalf("ListObjects = %+v, %v", objs, err)
 	}
 	if err := store.UploadEnvelope("acct", "device", "object", 1, e); err == nil {
 		t.Fatal("stale upload accepted")
@@ -128,7 +136,7 @@ func runStoreContract(t *testing.T, store SyncStore) {
 	if !store.VerifyTombstone(tombstone) {
 		t.Fatal("stored tombstone did not verify")
 	}
-	e3, err := clientEnvelope(priv, "acct", "device", "object", 3, InputMethod, []byte("resurrection"))
+	e3, err := clientEnvelopeWithADK(priv, adk, "acct", "device", "object", 3, InputMethod, []byte("resurrection"))
 	if err != nil {
 		t.Fatal(err)
 	}

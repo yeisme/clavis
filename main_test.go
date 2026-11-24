@@ -22,6 +22,7 @@ import (
 	"github.com/yeisme/clavis/internal/daemon"
 	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/internal/storage"
+	internalsync "github.com/yeisme/clavis/internal/sync"
 	"github.com/yeisme/clavis/pkg/core/ai"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/config"
@@ -29,6 +30,7 @@ import (
 	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/pkg/core/i18n"
 	"github.com/yeisme/clavis/pkg/core/inputengine"
+	coresync "github.com/yeisme/clavis/pkg/core/sync"
 	"github.com/yeisme/clavis/uiapp"
 )
 
@@ -1307,5 +1309,52 @@ func TestDaemonTelemetrySummaryAndBridgeSelfHeal(t *testing.T) {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("daemonTelemetrySummary() = %q, missing %q", summary, want)
 		}
+	}
+}
+
+func TestInitDesktopSyncStatusWiresLiveStateAndAllowlist(t *testing.T) {
+	ctx := context.Background()
+	userDataDir := t.TempDir()
+	syncDir := filepath.Join(userDataDir, "sync-dir")
+	if err := os.MkdirAll(syncDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAVIS_SYNC_DIR", "")
+
+	stateStore, reader := initDesktopSyncStatus(ctx, userDataDir)
+	if stateStore == nil || reader == nil {
+		t.Fatalf("initDesktopSyncStatus returned nil store=%v reader=%v", stateStore, reader)
+	}
+	defer stateStore.Close()
+	defer uiapp.SetSyncStatusReader(nil)
+
+	if err := stateStore.Save(ctx, 12, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.SaveStatusMeta(ctx, internalsync.DeviceStatusMetadata{
+		AccountID:      "desktop-user@example.com",
+		DeviceID:       "macbook-m4",
+		SyncDir:        syncDir,
+		Conflicts:      1,
+		Devices:        2,
+		LastSyncAt:     time.Now().UTC(),
+		AllowedClasses: coresync.Phase1SyncPlan().AllowedClasses(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctrl := uiapp.NewAppController(uiapp.Options{})
+	defer ctrl.Close()
+	ctrl.SetSyncStatusReader(reader)
+
+	snap, res, err := reader(ctx)
+	if err != nil || res.State != host.StateReady {
+		t.Fatalf("reader = %+v, %+v, %v", snap, res, err)
+	}
+	if !snap.LoggedIn || snap.LocalVersion != 12 || snap.Conflicts != 1 || snap.Devices != 2 {
+		t.Fatalf("unexpected desktop sync snapshot: %+v", snap)
+	}
+	if len(snap.AllowedClasses) != 2 || snap.AllowedClasses[0] != coresync.InputMethod || snap.AllowedClasses[1] != coresync.LearningData {
+		t.Fatalf("unexpected desktop sync allowlist: %+v", snap.AllowedClasses)
 	}
 }

@@ -3,6 +3,7 @@ package uiapp
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +42,12 @@ type syncStatusCacheEntry struct {
 
 func (a *AppController) syncStatusCache() *syncStatusCacheEntry {
 	return a.syncStatusCacheStateFor()
+}
+
+// SetSyncStatusReader installs the local-only reader used by Settings and
+// Management Hub. Passing nil restores the normal unconfigured display.
+func (a *AppController) SetSyncStatusReader(reader SyncStatusReader) {
+	SetSyncStatusReader(reader)
 }
 
 // SetSyncStatusReader installs the local-only reader used by the settings
@@ -184,11 +191,32 @@ func (a *AppController) forceRefreshSyncStatus(svc ui.Services) {
 	entry.mu.Unlock()
 }
 
+func formatSyncAllowlist(classes []coresync.DataClass) string {
+	if len(classes) == 0 {
+		classes = coresync.Phase1SyncPlan().AllowedClasses()
+	}
+	parts := make([]string, 0, len(classes))
+	for _, c := range classes {
+		if c == coresync.Passwords || c == coresync.KeyManager {
+			continue
+		}
+		if s := strings.TrimSpace(string(c)); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	if len(parts) == 0 {
+		return "input_method, learning_data"
+	}
+	return strings.Join(parts, ", ")
+}
+
 func (a *AppController) renderSyncStatusCard(c *ui.Context, theme *ui.Theme) {
 	zh := i18n.IsChinese()
 	svc := c.Services()
 	snapshot, result, err, loading := a.cachedSyncStatus(svc)
 	reader, _ := currentSyncStatusReader()
+	allowlistLabel := pickLang(zh, "同步范围", "Allowlist")
+	allowlistSummary := formatSyncAllowlist(snapshot.AllowedClasses)
 	settingsSourceCard(c, theme, pickLang(zh, "同步", "Sync"), pickLang(zh, "只读", "Read-only"), func() {
 		switch {
 		case result.State == host.StateRefreshing && !snapshot.LoggedIn:
@@ -210,6 +238,7 @@ func (a *AppController) renderSyncStatusCard(c *ui.Context, theme *ui.Theme) {
 				"当前未登录同步账号，配置与数据仅保存在本地。",
 				"Not signed in to a sync account. Settings and data stay local.",
 			))
+			settingsKeyValueRow(c, theme, allowlistLabel, allowlistSummary)
 		default:
 			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, pickLang(zh, "登录状态", "Sign-in Status")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
@@ -221,6 +250,8 @@ func (a *AppController) renderSyncStatusCard(c *ui.Context, theme *ui.Theme) {
 			settingsKeyValueRow(c, theme, pickLang(zh, "本地版本", "Local Version"), fmt.Sprintf("%d", snapshot.LocalVersion))
 			settingsKeyValueRow(c, theme, pickLang(zh, "待上传", "Pending Uploads"), fmt.Sprintf("%d", snapshot.PendingUploads))
 			settingsKeyValueRow(c, theme, pickLang(zh, "待处理删除", "Pending Tombstones"), fmt.Sprintf("%d", snapshot.PendingTombstones))
+			settingsKeyValueRow(c, theme, pickLang(zh, "冲突", "Conflicts"), fmt.Sprintf("%d", snapshot.Conflicts))
+			settingsKeyValueRow(c, theme, allowlistLabel, allowlistSummary)
 			settingsKeyValueRow(c, theme, pickLang(zh, "上次同步", "Last Sync"), formatSyncRelativeTime(snapshot.LastSyncAt, time.Now()))
 			settingsKeyValueRow(c, theme, pickLang(zh, "已知设备", "Known Devices"), fmt.Sprintf("%d", snapshot.Devices))
 		}
@@ -231,9 +262,9 @@ func (a *AppController) renderSyncStatusCard(c *ui.Context, theme *ui.Theme) {
 		if reader != nil {
 			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 				ui.Spacer(c)
-				label := pickLang(zh, "刷新", "Refresh")
+				label := i18n.T("settings.diag.refresh")
 				if loading {
-					label = pickLang(zh, "刷新中…", "Refreshing…")
+					label = i18n.T("stats.status.refreshing")
 				}
 				if ui.Button(c, label).Key("sync-status-refresh").Disabled(loading).Padding(space2, space8).Shrink(0).Clicked() {
 					a.forceRefreshSyncStatus(svc)
@@ -248,13 +279,11 @@ func formatSyncRelativeTime(at, now time.Time) string {
 	if at.IsZero() {
 		return pickLang(zh, "从未同步", "Never synced")
 	}
-	if now.Before(at) {
+	if now.Before(at) || now.Sub(at) < time.Minute {
 		return pickLang(zh, "刚刚", "Just now")
 	}
 	d := now.Sub(at)
 	switch {
-	case d < time.Minute:
-		return pickLang(zh, "刚刚", "Just now")
 	case d < time.Hour:
 		mins := int(d / time.Minute)
 		return pickLang(zh, fmt.Sprintf("%d 分钟前", mins), fmt.Sprintf("%dm ago", mins))
