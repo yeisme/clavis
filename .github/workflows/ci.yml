@@ -1,0 +1,149 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vet-and-cross-compile:
+    name: Vet, Scripts & Cross-Compile
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Go vet (host, Windows, Linux, macOS)
+        run: |
+          go vet ./...
+          GOOS=windows GOARCH=amd64 go vet ./...
+          GOOS=linux GOARCH=amd64 go vet ./...
+          GOOS=darwin GOARCH=arm64 go vet ./...
+
+      - name: Cross-compile Windows bridge & capture test binaries
+        run: |
+          GOOS=windows GOARCH=amd64 go test -c -o /dev/null ./internal/bridge
+          GOOS=windows GOARCH=amd64 go test -c -o /dev/null ./internal/capture
+
+      - name: Check whitespace and conflict markers
+        run: git diff --check
+
+      - name: Validate shell script syntax
+        run: bash -n scripts/*.sh
+
+      - name: Validate mygo.json manifest
+        run: |
+          python3 -m json.tool mygo.json > /dev/null
+          python3 - <<'PY'
+          import json
+          data = json.load(open("mygo.json", encoding="utf-8"))
+          for key in ("name", "slug", "identifier", "version"):
+              assert isinstance(data.get(key), str) and data[key].strip(), f"missing or invalid mygo.json key: {key}"
+          PY
+
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Validate mygo.json with plutil
+        run: plutil -lint mygo.json
+
+      - name: Run full test suite
+        run: go test -count=1 ./...
+
+      - name: Run race detector on core & daemon packages
+        run: >-
+          go test -count=1 -race
+          ./internal/secrets/...
+          ./internal/storage/...
+          ./internal/sync/...
+          ./internal/daemon/...
+          ./pkg/core/...
+          ./cmd/clavis/...
+          .
+
+      - name: Smoke-check, self-check & sync plan
+        run: |
+          go run . --smoke-check
+          go run . --self-check
+          go run ./cmd/clavis sync plan
+
+      - name: Verify -ldflags -X version injection
+        run: |
+          go build -ldflags "-X main.clavisBuildVersion=0.2.0-ci" -o /tmp/clavis-ci-ver .
+          ver_out="$(/tmp/clavis-ci-ver --version)"
+          echo "$ver_out"
+          [[ "$ver_out" == *"0.2.0-ci"* ]]
+          rm -f /tmp/clavis-ci-ver
+
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Run Windows package tests
+        run: >-
+          go test -count=1
+          ./pkg/...
+          ./internal/bridge/...
+          ./internal/capture/...
+          ./internal/secrets/...
+          ./internal/sync/...
+          ./cmd/clavis/...
+
+  test-linux:
+    name: Test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Run Linux package tests with race detector
+        run: >-
+          go test -count=1 -race
+          ./pkg/...
+          ./internal/secrets/...
+          ./internal/storage/...
+          ./internal/sync/...
+          ./internal/daemon/...
+          ./cmd/clavis/...
