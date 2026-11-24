@@ -1,8 +1,6 @@
 package uiapp
 
 import (
-	"sync"
-
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
@@ -106,30 +104,23 @@ var capsuleHubEntries = []capsuleHubEntry{
 	},
 }
 
-var hubSurfaceStore = struct {
-	mu     sync.Mutex
-	active map[*AppController]CapsuleHubSurface
-}{
-	active: make(map[*AppController]CapsuleHubSurface),
-}
-
 // ActiveHubSurface reports which operational hub (Stats / Management) is
 // currently shown in the Capsule Omnibox, or HubSurfaceNone for the normal list.
 func (a *AppController) ActiveHubSurface() CapsuleHubSurface {
-	hubSurfaceStore.mu.Lock()
-	defer hubSurfaceStore.mu.Unlock()
-	return hubSurfaceStore.active[a]
+	return a.hubSurfaceState()
+}
+
+// resetHubSurfaceSilent clears the active hub surface without invoking OnRepaint.
+func (a *AppController) resetHubSurfaceSilent() {
+	a.setHubSurfaceState(HubSurfaceNone)
 }
 
 // SetHubSurface activates or clears an operational hub inside the Capsule.
 func (a *AppController) SetHubSurface(surface CapsuleHubSurface) {
-	hubSurfaceStore.mu.Lock()
-	if surface == HubSurfaceNone {
-		delete(hubSurfaceStore.active, a)
-	} else {
-		hubSurfaceStore.active[a] = surface
+	a.setHubSurfaceState(surface)
+	if a == nil {
+		return
 	}
-	hubSurfaceStore.mu.Unlock()
 	a.mu.Lock()
 	repaint := a.OnRepaint
 	a.mu.Unlock()
@@ -140,15 +131,10 @@ func (a *AppController) SetHubSurface(surface CapsuleHubSurface) {
 
 // ToggleHubSurface toggles the specified operational hub on or off.
 func (a *AppController) ToggleHubSurface(surface CapsuleHubSurface) CapsuleHubSurface {
-	hubSurfaceStore.mu.Lock()
-	next := surface
-	if hubSurfaceStore.active[a] == surface {
-		next = HubSurfaceNone
-		delete(hubSurfaceStore.active, a)
-	} else {
-		hubSurfaceStore.active[a] = surface
+	next := a.toggleHubSurfaceState(surface)
+	if a == nil {
+		return next
 	}
-	hubSurfaceStore.mu.Unlock()
 	a.mu.Lock()
 	repaint := a.OnRepaint
 	a.mu.Unlock()

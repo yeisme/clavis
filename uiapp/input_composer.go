@@ -45,6 +45,7 @@ type composerCompletionItem struct {
 }
 
 type composerState struct {
+	mu               sync.Mutex
 	chips            []composerChip
 	history          []string
 	historyIdx       int // -1 when not browsing history
@@ -54,57 +55,41 @@ type composerState struct {
 	pendingSelection bool
 }
 
-var composerStore = struct {
-	mu    sync.Mutex
-	byCtl map[*AppController]*composerState
-}{
-	byCtl: make(map[*AppController]*composerState),
-}
-
 func composerFor(a *AppController) *composerState {
-	composerStore.mu.Lock()
-	defer composerStore.mu.Unlock()
-	st, ok := composerStore.byCtl[a]
-	if !ok {
-		st = &composerState{historyIdx: -1}
-		composerStore.byCtl[a] = st
-	}
-	return st
+	return a.composerStateFor()
 }
 
 func resetComposerState(a *AppController) {
-	composerStore.mu.Lock()
-	defer composerStore.mu.Unlock()
-	if st, ok := composerStore.byCtl[a]; ok {
-		// Preserve sent input history across turns in the same session,
-		// while clearing ephemeral menu/selection/chips on Capsule close.
-		st.chips = nil
-		st.historyIdx = -1
-		st.historyDraft = ""
-		st.menuSelected = 0
-		st.dismissedToken = ""
-		st.pendingSelection = false
+	if a == nil {
+		return
 	}
+	st := a.composerStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	// Preserve sent input history across turns in the same session,
+	// while clearing ephemeral menu/selection/chips on Capsule close.
+	st.chips = nil
+	st.historyIdx = -1
+	st.historyDraft = ""
+	st.menuSelected = 0
+	st.dismissedToken = ""
+	st.pendingSelection = false
 }
 
 func (a *AppController) composerChips() []composerChip {
-	composerStore.mu.Lock()
-	defer composerStore.mu.Unlock()
-	st := composerStore.byCtl[a]
-	if st == nil || len(st.chips) == 0 {
+	st := a.composerStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.chips) == 0 {
 		return nil
 	}
 	return append([]composerChip(nil), st.chips...)
 }
 
 func (a *AppController) addComposerChip(chip composerChip) {
-	composerStore.mu.Lock()
-	defer composerStore.mu.Unlock()
-	st, ok := composerStore.byCtl[a]
-	if !ok {
-		st = &composerState{historyIdx: -1}
-		composerStore.byCtl[a] = st
-	}
+	st := a.composerStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	for _, existing := range st.chips {
 		if existing.ID == chip.ID {
 			return
@@ -114,10 +99,10 @@ func (a *AppController) addComposerChip(chip composerChip) {
 }
 
 func (a *AppController) removeComposerChip(id string) {
-	composerStore.mu.Lock()
-	defer composerStore.mu.Unlock()
-	st := composerStore.byCtl[a]
-	if st == nil || len(st.chips) == 0 {
+	st := a.composerStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.chips) == 0 {
 		return
 	}
 	kept := st.chips[:0]
@@ -130,10 +115,10 @@ func (a *AppController) removeComposerChip(id string) {
 }
 
 func (a *AppController) popLastComposerChip() bool {
-	composerStore.mu.Lock()
-	defer composerStore.mu.Unlock()
-	st := composerStore.byCtl[a]
-	if st == nil || len(st.chips) == 0 {
+	st := a.composerStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.chips) == 0 {
 		return false
 	}
 	st.chips = st.chips[:len(st.chips)-1]
@@ -145,13 +130,9 @@ func (a *AppController) recordComposerHistory(prompt string) {
 	if trimmed == "" {
 		return
 	}
-	composerStore.mu.Lock()
-	defer composerStore.mu.Unlock()
-	st, ok := composerStore.byCtl[a]
-	if !ok {
-		st = &composerState{historyIdx: -1}
-		composerStore.byCtl[a] = st
-	}
+	st := a.composerStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	if len(st.history) == 0 || st.history[len(st.history)-1] != trimmed {
 		st.history = append(st.history, trimmed)
 		if len(st.history) > composerHistoryLimit {
@@ -163,10 +144,10 @@ func (a *AppController) recordComposerHistory(prompt string) {
 }
 
 func (a *AppController) stepComposerHistory(delta int, currentText string) (string, bool) {
-	composerStore.mu.Lock()
-	defer composerStore.mu.Unlock()
-	st := composerStore.byCtl[a]
-	if st == nil || len(st.history) == 0 {
+	st := a.composerStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.history) == 0 {
 		return currentText, false
 	}
 	if delta < 0 {
@@ -196,10 +177,10 @@ func (a *AppController) stepComposerHistory(delta int, currentText string) (stri
 }
 
 func (a *AppController) composerHistoryPosition() (idx, total int) {
-	composerStore.mu.Lock()
-	defer composerStore.mu.Unlock()
-	st := composerStore.byCtl[a]
-	if st == nil || st.historyIdx < 0 || len(st.history) == 0 {
+	st := a.composerStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.historyIdx < 0 || len(st.history) == 0 {
 		return -1, 0
 	}
 	return st.historyIdx + 1, len(st.history)

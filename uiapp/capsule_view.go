@@ -277,9 +277,7 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 // clearHubSurfaceSilently clears any active hub surface without invoking
 // OnRepaint, avoiding re-entrant repaint loops during PhaseHidden renders.
 func (a *AppController) clearHubSurfaceSilently() {
-	hubSurfaceStore.mu.Lock()
-	delete(hubSurfaceStore.active, a)
-	hubSurfaceStore.mu.Unlock()
+	a.resetHubSurfaceSilent()
 }
 
 type visibleOmniboxList struct {

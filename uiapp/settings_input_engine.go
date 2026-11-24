@@ -44,15 +44,8 @@ type inputEngineUIState struct {
 	blocklistErr           string
 }
 
-var inputEngineUIStates sync.Map // map[*AppController]*inputEngineUIState
-
 func (a *AppController) inputEngineUI() *inputEngineUIState {
-	if v, ok := inputEngineUIStates.Load(a); ok {
-		return v.(*inputEngineUIState)
-	}
-	fresh := &inputEngineUIState{}
-	actual, _ := inputEngineUIStates.LoadOrStore(a, fresh)
-	return actual.(*inputEngineUIState)
+	return a.inputEngineUIStateFor()
 }
 
 func (a *AppController) setInputEngineDictLoaderForTest(loader inputEngineDictLoader) {
@@ -94,6 +87,9 @@ func defaultInputEngineDictLoader(customPaths []string) (inputengine.DictionaryS
 }
 
 func (a *AppController) triggerInputEngineDictRefresh(svc ui.Services, customPaths []string, force bool) {
+	if a.isClosed() {
+		return
+	}
 	pathsCopy := append([]string(nil), customPaths...)
 	pathsKey := strings.Join(pathsCopy, "\x00")
 	st := a.inputEngineUI()
@@ -109,8 +105,15 @@ func (a *AppController) triggerInputEngineDictRefresh(svc ui.Services, customPat
 	if loader == nil {
 		loader = defaultInputEngineDictLoader
 	}
+	lifeCtx := a.lifeCtx()
 	go func() {
 		status, diags, err := loader(pathsCopy)
+		if lifeCtx.Err() != nil {
+			st.mu.Lock()
+			st.dictLoading = false
+			st.mu.Unlock()
+			return
+		}
 		st.mu.Lock()
 		st.dictStatus = status
 		st.dictDiags = append([]inputengine.DictionaryDiagnostic(nil), diags...)
@@ -122,6 +125,9 @@ func (a *AppController) triggerInputEngineDictRefresh(svc ui.Services, customPat
 			st.dictErr = ""
 		}
 		st.mu.Unlock()
+		if a.isClosed() {
+			return
+		}
 		svc.Invalidate()
 		if a != nil {
 			a.mu.Lock()
@@ -135,6 +141,9 @@ func (a *AppController) triggerInputEngineDictRefresh(svc ui.Services, customPat
 }
 
 func (a *AppController) ensureUserBlocklistStoreAsync(svc ui.Services) {
+	if a.isClosed() {
+		return
+	}
 	st := a.inputEngineUI()
 	st.mu.Lock()
 	if st.blocklistStore != nil || st.blocklistInitAttempted || st.blocklistInitLoading {
@@ -155,8 +164,15 @@ func (a *AppController) ensureUserBlocklistStoreAsync(svc ui.Services) {
 	db := sqlStore.DB()
 	st.mu.Unlock()
 
+	lifeCtx := a.lifeCtx()
 	go func() {
 		store, err := internalstorage.NewUserBlocklistStore(db)
+		if lifeCtx.Err() != nil {
+			st.mu.Lock()
+			st.blocklistInitLoading = false
+			st.mu.Unlock()
+			return
+		}
 		st.mu.Lock()
 		st.blocklistInitAttempted = true
 		st.blocklistInitLoading = false
@@ -171,6 +187,9 @@ func (a *AppController) ensureUserBlocklistStoreAsync(svc ui.Services) {
 			st.blocklistWords = append([]string(nil), store.Words()...)
 		}
 		st.mu.Unlock()
+		if a.isClosed() {
+			return
+		}
 		svc.Invalidate()
 		if a != nil {
 			a.mu.Lock()
@@ -193,7 +212,7 @@ func (a *AppController) blockCandidateWordDraft() {
 	if word == "" || store == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(a.lifeCtx(), time.Second)
 	defer cancel()
 	if err := store.Block(ctx, word); err != nil {
 		st.mu.Lock()
@@ -217,7 +236,7 @@ func (a *AppController) unblockCandidateWord(word string) {
 	if store == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(a.lifeCtx(), time.Second)
 	defer cancel()
 	if err := store.Unblock(ctx, word); err != nil {
 		st.mu.Lock()

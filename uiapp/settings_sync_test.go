@@ -5,29 +5,42 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/host"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 	coresync "github.com/yeisme/clavis/pkg/core/sync"
 )
 
 func TestFormatSyncRelativeTime(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
+
 	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
 	cases := []struct {
-		name string
-		at   time.Time
-		want string
+		name   string
+		at     time.Time
+		wantZH string
+		wantEN string
 	}{
-		{name: "never", want: "从未同步"},
-		{name: "recent", at: now.Add(-20 * time.Second), want: "刚刚"},
-		{name: "minutes", at: now.Add(-5 * time.Minute), want: "5 分钟前"},
-		{name: "hours", at: now.Add(-2 * time.Hour), want: "2 小时前"},
-		{name: "days", at: now.Add(-3 * 24 * time.Hour), want: "3 天前"},
+		{name: "never", wantZH: "从未同步", wantEN: "Never synced"},
+		{name: "recent", at: now.Add(-20 * time.Second), wantZH: "刚刚", wantEN: "Just now"},
+		{name: "minutes", at: now.Add(-5 * time.Minute), wantZH: "5 分钟前", wantEN: "5m ago"},
+		{name: "hours", at: now.Add(-2 * time.Hour), wantZH: "2 小时前", wantEN: "2h ago"},
+		{name: "days", at: now.Add(-3 * 24 * time.Hour), wantZH: "3 天前", wantEN: "3d ago"},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := formatSyncRelativeTime(tc.at, now); got != tc.want {
-				t.Fatalf("formatSyncRelativeTime(%v) = %q, want %q", tc.at, got, tc.want)
+		t.Run(tc.name+"/zh", func(t *testing.T) {
+			i18n.SetLanguage(i18n.Chinese)
+			if got := formatSyncRelativeTime(tc.at, now); got != tc.wantZH {
+				t.Fatalf("formatSyncRelativeTime(%v) = %q, want %q", tc.at, got, tc.wantZH)
+			}
+		})
+		t.Run(tc.name+"/en", func(t *testing.T) {
+			i18n.SetLanguage(i18n.English)
+			if got := formatSyncRelativeTime(tc.at, now); got != tc.wantEN {
+				t.Fatalf("formatSyncRelativeTime(%v) = %q, want %q", tc.at, got, tc.wantEN)
 			}
 		})
 	}
@@ -57,38 +70,95 @@ func TestSettingsAISectionWiresContinueEnabledSwitch(t *testing.T) {
 }
 
 func TestSyncStatusCardRendersThreeSemanticStates(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
 	defer SetSyncStatusReader(nil)
-	ctrl := &AppController{}
 
-	SetSyncStatusReader(nil)
-	tt := ui.NewTester(func(c *ui.Context) { ctrl.renderSyncStatusCard(c, ui.LightTheme()) }, 420, 220)
-	tt.Frame()
-	if !tt.HasText("未配置同步") {
-		t.Fatalf("unconfigured sync state missing: %v", tt.Texts())
-	}
+	t.Run("zh", func(t *testing.T) {
+		i18n.SetLanguage(i18n.Chinese)
+		ctrl := &AppController{}
+		defer ctrl.Close()
 
-	SetSyncStatusReader(func(context.Context) (coresync.StatusSnapshot, host.OperationResult, error) {
-		return coresync.StatusSnapshot{}, host.OperationResult{State: host.StateUnknown}, nil
+		SetSyncStatusReader(nil)
+		tt := ui.NewTester(func(c *ui.Context) { ctrl.renderSyncStatusCard(c, ui.LightTheme()) }, 420, 220)
+		tt.Frame()
+		if !tt.HasText("未配置同步") {
+			t.Fatalf("unconfigured sync state missing: %v", tt.Texts())
+		}
+
+		SetSyncStatusReader(func(context.Context) (coresync.StatusSnapshot, host.OperationResult, error) {
+			return coresync.StatusSnapshot{}, host.OperationResult{State: host.StateUnknown}, nil
+		})
+		tt = ui.NewTester(func(c *ui.Context) { ctrl.renderSyncStatusCard(c, ui.LightTheme()) }, 420, 220)
+		tt.Frame()
+		if !tt.HasText("同步本地状态暂不可用，当前未执行任何同步操作。") {
+			t.Fatalf("unknown sync state missing: %v", tt.Texts())
+		}
+
+		SetSyncStatusReader(func(context.Context) (coresync.StatusSnapshot, host.OperationResult, error) {
+			return coresync.StatusSnapshot{LoggedIn: true, Account: "alice@example.com", DeviceID: "mac-1", LocalVersion: 3, Devices: 2}, host.OperationResult{State: host.StateReady}, nil
+		})
+		tt = ui.NewTester(func(c *ui.Context) { ctrl.renderSyncStatusCard(c, ui.LightTheme()) }, 420, 320)
+		tt.Frame()
+		if !tt.HasText("已登录") || !tt.HasText("alice@example.com") {
+			t.Fatalf("logged-in sync state missing: %v", tt.Texts())
+		}
 	})
-	tt = ui.NewTester(func(c *ui.Context) { ctrl.renderSyncStatusCard(c, ui.LightTheme()) }, 420, 220)
-	tt.Frame()
-	if !tt.HasText("同步本地状态暂不可用，当前未执行任何同步操作。") {
-		t.Fatalf("unknown sync state missing: %v", tt.Texts())
-	}
 
-	SetSyncStatusReader(func(context.Context) (coresync.StatusSnapshot, host.OperationResult, error) {
-		return coresync.StatusSnapshot{LoggedIn: true, Account: "alice@example.com", DeviceID: "mac-1", LocalVersion: 3, Devices: 2}, host.OperationResult{State: host.StateReady}, nil
+	t.Run("en", func(t *testing.T) {
+		i18n.SetLanguage(i18n.English)
+		ctrl := &AppController{}
+		defer ctrl.Close()
+
+		assertNoHan := func(texts []string) {
+			t.Helper()
+			for _, s := range texts {
+				for _, r := range s {
+					if unicode.Is(unicode.Han, r) {
+						t.Fatalf("English sync status card leaked Chinese text: %q (all=%v)", s, texts)
+					}
+				}
+			}
+		}
+
+		SetSyncStatusReader(nil)
+		tt := ui.NewTester(func(c *ui.Context) { ctrl.renderSyncStatusCard(c, ui.LightTheme()) }, 420, 220)
+		tt.Frame()
+		if !tt.HasText("Sync not configured") || !tt.HasText("Sync") {
+			t.Fatalf("unconfigured English sync state missing: %v", tt.Texts())
+		}
+		assertNoHan(tt.Texts())
+
+		SetSyncStatusReader(func(context.Context) (coresync.StatusSnapshot, host.OperationResult, error) {
+			return coresync.StatusSnapshot{}, host.OperationResult{State: host.StateUnknown}, nil
+		})
+		tt = ui.NewTester(func(c *ui.Context) { ctrl.renderSyncStatusCard(c, ui.LightTheme()) }, 420, 220)
+		tt.Frame()
+		if !tt.HasText("Local sync status is temporarily unavailable; no sync actions were performed.") {
+			t.Fatalf("unknown English sync state missing: %v", tt.Texts())
+		}
+		assertNoHan(tt.Texts())
+
+		SetSyncStatusReader(func(context.Context) (coresync.StatusSnapshot, host.OperationResult, error) {
+			return coresync.StatusSnapshot{LoggedIn: true, Account: "alice@example.com", DeviceID: "mac-1", LocalVersion: 3, Devices: 2}, host.OperationResult{State: host.StateReady}, nil
+		})
+		tt = ui.NewTester(func(c *ui.Context) { ctrl.renderSyncStatusCard(c, ui.LightTheme()) }, 420, 320)
+		tt.Frame()
+		if !tt.HasText("Signed in") || !tt.HasText("alice@example.com") || !tt.HasText("Refresh") {
+			t.Fatalf("logged-in English sync state missing: %v", tt.Texts())
+		}
+		assertNoHan(tt.Texts())
 	})
-	tt = ui.NewTester(func(c *ui.Context) { ctrl.renderSyncStatusCard(c, ui.LightTheme()) }, 420, 320)
-	tt.Frame()
-	if !tt.HasText("已登录") || !tt.HasText("alice@example.com") {
-		t.Fatalf("logged-in sync state missing: %v", tt.Texts())
-	}
 }
 
 func TestSyncStatusCardCachesAcrossFramesAndNeverBlocksOnSlowReader(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
+	i18n.SetLanguage(i18n.Chinese)
+
 	defer SetSyncStatusReader(nil)
 	ctrl := &AppController{}
+	defer ctrl.Close()
 
 	// 1. Counting fast reader: repeated renders within TTL call reader only once.
 	var fastCalls atomic.Int32

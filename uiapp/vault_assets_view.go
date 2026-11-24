@@ -421,22 +421,8 @@ func (s *vaultViewState) clearStatusLocked() {
 	s.statusMsg = ""
 }
 
-var vaultViewStateStore = struct {
-	mu    sync.Mutex
-	byCtl map[*AppController]*vaultViewState
-}{
-	byCtl: make(map[*AppController]*vaultViewState),
-}
-
 func vaultUIState(c *AppController) *vaultViewState {
-	vaultViewStateStore.mu.Lock()
-	defer vaultViewStateStore.mu.Unlock()
-	st := vaultViewStateStore.byCtl[c]
-	if st == nil {
-		st = &vaultViewState{}
-		vaultViewStateStore.byCtl[c] = st
-	}
-	return st
+	return c.vaultUIStateFor()
 }
 
 func (a *AppController) renderVaultAssetsView(c *ui.Context, theme *ui.Theme) {

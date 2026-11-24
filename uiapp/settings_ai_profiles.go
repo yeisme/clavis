@@ -15,47 +15,34 @@ import (
 // aiProfilePanelState stores transient UI state for the AI Profile & cc-switch
 // management view (never raw secrets).
 type aiProfilePanelState struct {
+	mu              sync.Mutex
 	previewTargetID string
 	presetNote      string
 }
 
-var aiProfilePanelStore = struct {
-	mu    sync.Mutex
-	byCtl map[*AppController]*aiProfilePanelState
-}{
-	byCtl: make(map[*AppController]*aiProfilePanelState),
-}
-
 func (a *AppController) aiProfilePanel() *aiProfilePanelState {
-	aiProfilePanelStore.mu.Lock()
-	defer aiProfilePanelStore.mu.Unlock()
-	st, ok := aiProfilePanelStore.byCtl[a]
-	if !ok {
-		st = &aiProfilePanelState{}
-		aiProfilePanelStore.byCtl[a] = st
-	}
-	return st
+	return a.aiProfilePanelStateFor()
 }
 
 func (a *AppController) aiProfilePreviewTarget() (string, string) {
 	st := a.aiProfilePanel()
-	aiProfilePanelStore.mu.Lock()
-	defer aiProfilePanelStore.mu.Unlock()
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	return st.previewTargetID, st.presetNote
 }
 
 func (a *AppController) setAIProfilePreviewTarget(id string) {
 	st := a.aiProfilePanel()
-	aiProfilePanelStore.mu.Lock()
+	st.mu.Lock()
 	st.previewTargetID = strings.TrimSpace(id)
-	aiProfilePanelStore.mu.Unlock()
+	st.mu.Unlock()
 }
 
 func (a *AppController) setAIProfilePresetNote(note string) {
 	st := a.aiProfilePanel()
-	aiProfilePanelStore.mu.Lock()
+	st.mu.Lock()
 	st.presetNote = note
-	aiProfilePanelStore.mu.Unlock()
+	st.mu.Unlock()
 }
 
 // aiProfileSecretRef returns the non-secret reference locator for a profile.
