@@ -162,6 +162,7 @@ type desktopApp struct {
 	// learningWriter is the only path hook, commit and UI callers use to
 	// learn: RAM mirror at once, SQLite in coalesced background batches.
 	learningWriter       *storage.LearningWriter
+	blocklistStore       *storage.UserBlocklistStore
 	clipStore            clipboard.Store
 	mediaStore           *clipboard.MediaStore
 	auditLog             *automation.AuditLog
@@ -367,6 +368,7 @@ func (a *desktopApp) start() {
 	var sqliteStore *storage.SQLiteClipboardStore
 	var learningStore *storage.LearningStore
 	var learningWriter *storage.LearningWriter
+	var blocklistStore *storage.UserBlocklistStore
 	var clipStore clipboard.Store
 	var mediaStore *clipboard.MediaStore
 	var dataDir string
@@ -386,6 +388,9 @@ func (a *desktopApp) start() {
 			if ls, lsErr := storage.NewLearningStore(s.DB()); lsErr == nil {
 				learningStore = ls
 				learningWriter = storage.NewLearningWriter(ls, storage.LearningWriterOptions{})
+			}
+			if bs, bsErr := storage.NewUserBlocklistStore(s.DB()); bsErr == nil {
+				blocklistStore = bs
 			}
 		}
 	}
@@ -677,6 +682,7 @@ func (a *desktopApp) start() {
 	a.sqliteStore = sqliteStore
 	a.learningStore = learningStore
 	a.learningWriter = learningWriter
+	a.blocklistStore = blocklistStore
 	a.clipStore = clipStore
 	a.mediaStore = mediaStore
 	a.auditLog = auditLog
@@ -700,11 +706,8 @@ func (a *desktopApp) start() {
 	}
 	sup.Start(ctx)
 	a.wireInputEngineLearning(hostBridge, learningStore)
-	if ui := a.setupInputEngine(ctx, hostBridge, cfg.Main.InputEngine, controller.SuggestInputCandidates); ui != nil {
-		a.mu.Lock()
-		a.inputUI = ui
-		a.mu.Unlock()
-	}
+	a.syncInputEngineBlocklist(hostBridge, blocklistStore)
+	_ = a.setupInputEngine(ctx, hostBridge, cfg.Main.InputEngine, controller.SuggestInputCandidates)
 
 	cw := watcher.NewConfigWatcher(cfgStore, watcher.WithOnReload(func(watcher.ReloadResult) {
 		a.applyConfigReload()
@@ -1208,20 +1211,34 @@ func (a *desktopApp) applyConfigReload() {
 // in-place optimize shortcut, the clipboard privacy filter and the daemon.
 func (a *desktopApp) applyRuntimeConfig(cfg config.ClavisConfig) {
 	a.mu.Lock()
+	ctx := a.ctx
 	br := a.hostBridge
+	ctrl := a.controller
 	sqliteStore := a.sqliteStore
-	learningStore := a.learningStore
+	blocklistStore := a.blocklistStore
 	sup := a.supervisor
 	a.mu.Unlock()
-	if learningStore != nil {
-		storage.InjectUserWords(context.Background(), learningStore, cfg.Main.InputEngine.UserWords)
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	a.resyncUserWords(cfg)
 	if updater, ok := br.(dynamicBridgeUpdater); ok {
 		updater.UpdateTriggerConfig(cfg.Main.Trigger)
 		updater.UpdateKeymapConfig(cfg.Main.Keymap)
 		updater.UpdateIMEConfig(cfg.Main.IME, cfg.IMERules)
 	}
+	a.syncInputEngineBlocklist(br, blocklistStore)
 	if h, ok := br.(bridge.InputEngineHost); ok {
+		if cfg.Main.InputEngine.Enabled {
+			var suggest suggestFunc
+			if ctrl != nil {
+				suggest = ctrl.SuggestInputCandidates
+			}
+			a.ensureInputEngineUI(ctx, br, cfg.Main.InputEngine, suggest)
+			if f, ok := br.(bridge.InlineIMEForcer); ok && f != nil {
+				f.SetInlineIMEForced(cfg.Main.InputEngine.ForceTakeover)
+			}
+		}
 		h.ConfigureInputEngine(cfg.Main.InputEngine)
 	}
 	if ext, ok := br.(bridge.ExtendedHostService); ok {
@@ -1249,10 +1266,6 @@ func (a *desktopApp) applySavedConfig() {
 	cfg := ctrl.Config()
 	a.applyRuntimeConfig(cfg)
 	a.syncFallbackShortcuts(cfg.Main.Trigger)
-	// Re-apply "my words" after any config save: the settings page edits the config, and this is
-	// the one place that owns the learning store, so additions get pinned and removals get
-	// unpinned here rather than in the UI layer.
-	a.resyncUserWords(cfg)
 }
 
 // resyncUserWords pins every configured word and unpins words that were removed, so editing the
@@ -1268,11 +1281,17 @@ func (a *desktopApp) resyncUserWords(cfg config.ClavisConfig) {
 	defer cancel()
 	keep := make(map[string]bool, len(cfg.Main.InputEngine.UserWords))
 	for _, w := range cfg.Main.InputEngine.UserWords {
-		keep[w] = true
+		if trimmed := strings.TrimSpace(w); trimmed != "" {
+			keep[trimmed] = true
+		}
 	}
+	unpinned := make(map[string]struct{})
 	for _, pinned := range store.PinnedIMEWords(ctx) {
 		if !keep[pinned] {
-			_ = store.UnpinIMEWord(ctx, pinned)
+			if _, done := unpinned[pinned]; !done {
+				_ = store.UnpinIMEWord(ctx, pinned)
+				unpinned[pinned] = struct{}{}
+			}
 		}
 	}
 	storage.InjectUserWords(ctx, store, cfg.Main.InputEngine.UserWords)
@@ -1513,7 +1532,11 @@ func (a *desktopApp) handleRecordItemUse(itemID string) {
 	if lw := a.learningWriterForUse(); lw != nil {
 		// RAM mirror now (the frecency sync below sees this use), SQLite later
 		// in a coalesced batch: ~12.6ms per native write on Windows.
-		lw.QueueItemUse(itemID, time.Now())
+		now := time.Now()
+		lw.QueueItemUse(itemID, now)
+		if strings.HasPrefix(itemID, "glossary:") {
+			lw.QueueLexiconHit(now, true)
+		}
 	}
 	a.goBG(func(ctx context.Context) {
 		a.syncFrecency(ctx)
@@ -1548,6 +1571,17 @@ func (a *desktopApp) learningWriterForUse() *storage.LearningWriter {
 	return a.learningWriter
 }
 
+func (a *desktopApp) syncInputEngineBlocklist(br bridge.HostService, bs *storage.UserBlocklistStore) {
+	if br == nil || bs == nil {
+		return
+	}
+	bh, ok := br.(bridge.InputEngineBlocklistHost)
+	if !ok {
+		return
+	}
+	bh.UpdateInputEngineBlockedWords(bs.Words())
+}
+
 func (a *desktopApp) wireInputEngineLearning(br bridge.HostService, ls *storage.LearningStore) {
 	lh, ok := br.(bridge.InputEngineLearningHost)
 	if !ok || ls == nil {
@@ -1572,6 +1606,7 @@ func (a *desktopApp) wireInputEngineLearning(br bridge.HostService, ls *storage.
 		// native round trips, >=12.6ms each on Windows): queue it.
 		if writer != nil {
 			writer.QueueIMECommit(c.PinyinKey, c.Word, c.PrevWord, c.Pinned)
+			writer.QueueLexiconHit(time.Now(), c.FirstChoice)
 		}
 	})
 }
@@ -2226,6 +2261,8 @@ func (a *desktopApp) shutdown() {
 		dw := a.dictionaryWatcher
 		sup := a.supervisor
 		ctrl := a.controller
+		inputUI := a.inputUI
+		a.inputUI = nil
 		sqliteStore := a.sqliteStore
 		learningWriter := a.learningWriter
 		tray := a.tray
@@ -2234,6 +2271,9 @@ func (a *desktopApp) shutdown() {
 
 		if cancel != nil {
 			cancel()
+		}
+		if inputUI != nil {
+			inputUI.Stop()
 		}
 		if cw != nil {
 			cw.Stop()

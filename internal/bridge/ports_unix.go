@@ -4,11 +4,13 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/ebitengine/purego"
 	"github.com/yeisme/clavis/pkg/core/config"
@@ -162,14 +164,64 @@ func (b *darwinBridge) CaptureEditableField(ctx context.Context) (host.EditableF
 	defer cfRelease(focused)
 	return host.EditableFieldSnapshot{Value: copyAXStringAttr(focused, "AXValue", 0), SelectedText: copyAXStringAttr(focused, "AXSelectedText", 0)}, nil
 }
-func (b *darwinBridge) ReplaceEditableField(ctx context.Context, replacement string, onlySelection bool) error {
+type replaceFieldOps struct {
+	setSelectedText func(string) bool
+	setValue        func(string) bool
+	selectAll       func(context.Context) error
+	inject          func(ctx context.Context, text string, deleteCount, cursorBack int) error
+}
+
+func replaceEditableFieldWithOps(ctx context.Context, replacement string, onlySelection bool, ops replaceFieldOps) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if onlySelection && trySetAXSelectedText(replacement) {
+	if onlySelection {
+		if ops.setSelectedText != nil && ops.setSelectedText(replacement) {
+			return nil
+		}
+		return ops.inject(ctx, replacement, 0, 0)
+	}
+	if ops.setValue != nil && ops.setValue(replacement) {
 		return nil
 	}
-	return b.InjectText(ctx, replacement, 0, 0)
+	if ops.selectAll != nil {
+		if err := ops.selectAll(ctx); err != nil {
+			return err
+		}
+	}
+	deleteCount := 0
+	if replacement == "" {
+		deleteCount = 1
+	}
+	return ops.inject(ctx, replacement, deleteCount, 0)
+}
+
+func (b *darwinBridge) selectAllFocusedField(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := initDarwin(); err != nil {
+		return err
+	}
+	if !axIsProcessTrusted() {
+		return errors.New("darwin: Accessibility permission required for field replacement")
+	}
+	postTaggedKey(kVK_ANSI_A, kCGEventFlagMaskCommand)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(20 * time.Millisecond):
+		return nil
+	}
+}
+
+func (b *darwinBridge) ReplaceEditableField(ctx context.Context, replacement string, onlySelection bool) error {
+	return replaceEditableFieldWithOps(ctx, replacement, onlySelection, replaceFieldOps{
+		setSelectedText: trySetAXSelectedText,
+		setValue:        trySetAXValue,
+		selectAll:       b.selectAllFocusedField,
+		inject:          b.InjectText,
+	})
 }
 func (b *darwinBridge) UpdateDaemonShortcut(accel string) {
 	if b.triggers != nil {

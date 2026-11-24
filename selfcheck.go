@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
 	"github.com/yeisme/clavis/internal/bridge"
 	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/ime"
 	"github.com/yeisme/clavis/pkg/core/inputengine"
 )
 
@@ -47,23 +49,19 @@ func runSelfCheck(w io.Writer) error {
 	fmt.Fprintf(w, "config dir: %s\n", cfgDir)
 
 	// --- configuration -------------------------------------------------------
-	cfg := config.DefaultConfig()
-	store := config.NewConfigStore(cfgDir)
-	usingDefaults := true
-	if _, err := os.Stat(cfgDir); err == nil {
-		if loaded, loadErr := store.LoadOrInitialize(); loadErr == nil {
-			cfg, usingDefaults = loaded, false
-		}
-	}
-	if usingDefaults {
-		fmt.Fprintln(w, "config: defaults (no config dir on disk)")
-	} else {
+	cfg, loadedConfig, cfgErrors, cfgWarnings := loadConfigReadOnly(cfgDir)
+	switch {
+	case loadedConfig:
 		fmt.Fprintln(w, "config: loaded")
+	case len(cfgErrors) > 0:
+		fmt.Fprintln(w, "config: defaults (failed to load existing config; see errors below)")
+	default:
+		fmt.Fprintln(w, "config: defaults (no config files on disk)")
 	}
-	for _, e := range store.LastErrors() {
+	for _, e := range cfgErrors {
 		fmt.Fprintf(w, "config error: %v\n", e)
 	}
-	for _, warn := range store.LastWarnings() {
+	for _, warn := range cfgWarnings {
 		fmt.Fprintf(w, "config warning: %s: %s\n", warn.KeyPath, warn.Message)
 	}
 
@@ -77,11 +75,19 @@ func runSelfCheck(w io.Writer) error {
 	if !ie.Enabled {
 		fmt.Fprintln(w, "input engine: OFF (set [input_engine] enabled = true to take over typing)")
 	}
-	_, dictStatus := inputengine.LoadUserDictionary()
+	userDict, dictStatus := inputengine.LoadUserDictionary()
+	activeDict := userDict
 	var dictionaryDiagnostics []inputengine.DictionaryDiagnostic
-	_, dictErr := inputengine.LoadDictionaryWithDiagnostics(ie.CustomDictPaths, "", func(d inputengine.DictionaryDiagnostic) {
-		dictionaryDiagnostics = append(dictionaryDiagnostics, d)
-	})
+	var dictErr error
+	if hasCustomDictPaths(ie.CustomDictPaths) {
+		var customDict inputengine.Dictionary
+		customDict, dictErr = inputengine.LoadDictionaryWithDiagnostics(ie.CustomDictPaths, "", func(d inputengine.DictionaryDiagnostic) {
+			dictionaryDiagnostics = append(dictionaryDiagnostics, d)
+		})
+		if customDict != nil {
+			activeDict = customDict
+		}
+	}
 	fmt.Fprintf(w, "dictionary: %s (%s) · %d\n", dictStatus.Source, dictStatus.Path, dictStatus.Count)
 	for _, diagnostic := range dictStatus.Diagnostics {
 		fmt.Fprintf(w, "dictionary diagnostic: %s\n", diagnostic)
@@ -92,7 +98,7 @@ func runSelfCheck(w io.Writer) error {
 	if dictErr != nil {
 		fmt.Fprintf(w, "dictionary error: %v\n", dictErr)
 	}
-	probeInputEngine(w, ie)
+	probeInputEngine(w, ie, activeDict)
 
 	// --- permissions ---------------------------------------------------------
 	ctx := context.Background()
@@ -159,22 +165,181 @@ func runSelfCheck(w io.Writer) error {
 	return nil
 }
 
-// probeInputEngine composes a known pinyin string and reports the candidates,
-// which proves the dictionary layers actually resolved and the engine runs.
-func probeInputEngine(w io.Writer, ie config.InputEngineConfig) {
+// loadConfigReadOnly reads existing config files from cfgDir without ever creating or
+// mutating files on disk. Missing config dirs or empty dirs fall back to in-memory defaults.
+func loadConfigReadOnly(cfgDir string) (config.ClavisConfig, bool, []config.LoadError, []config.ValidationIssue) {
+	cfg := config.DefaultConfig()
+	if _, err := os.Stat(cfgDir); err != nil {
+		return cfg, false, nil, nil
+	}
+
+	anyPresent := false
+	for _, kind := range config.AllConfigFileKinds() {
+		if _, err := os.Stat(filepath.Join(cfgDir, string(kind))); err == nil {
+			anyPresent = true
+			break
+		}
+	}
+	if !anyPresent {
+		return cfg, false, nil, nil
+	}
+
+	required := []config.ConfigFileKind{
+		config.FileMain,
+		config.FileLeader,
+		config.FileSnippets,
+		config.FileGlossary,
+		config.FileIMERules,
+		config.FilePrompts,
+		config.FileComponents,
+	}
+	allRequiredPresent := true
+	for _, kind := range required {
+		if _, err := os.Stat(filepath.Join(cfgDir, string(kind))); err != nil {
+			allRequiredPresent = false
+			break
+		}
+	}
+	if allRequiredPresent {
+		store := config.NewConfigStore(cfgDir)
+		if store.Reload() {
+			return store.Current(), true, nil, store.LastWarnings()
+		}
+		return cfg, false, store.LastErrors(), store.LastWarnings()
+	}
+
+	// Partial config directory: decode whichever TOML files exist on disk, keeping
+	// in-memory defaults for absent files without writing anything to disk.
+	var errs []config.LoadError
+	readOptional := func(kind config.ConfigFileKind, apply func(string) error) {
+		path := filepath.Join(cfgDir, string(kind))
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return
+			}
+			errs = append(errs, config.LoadError{File: string(kind), Message: err.Error()})
+			return
+		}
+		if err := apply(string(data)); err != nil {
+			errs = append(errs, config.LoadError{File: string(kind), Message: err.Error()})
+		}
+	}
+	readOptional(config.FileMain, func(s string) error {
+		v, err := config.DecodeMainConfig(s)
+		if err == nil {
+			cfg.Main = v
+		}
+		return err
+	})
+	readOptional(config.FileLeader, func(s string) error {
+		v, err := config.DecodeLeaderConfig(s)
+		if err == nil {
+			cfg.Leader = v
+		}
+		return err
+	})
+	readOptional(config.FileSnippets, func(s string) error {
+		v, err := config.DecodeSnippetsConfig(s)
+		if err == nil {
+			cfg.Snippets = v
+		}
+		return err
+	})
+	readOptional(config.FileGlossary, func(s string) error {
+		v, err := config.DecodeGlossaryConfig(s)
+		if err == nil {
+			cfg.Glossary = v
+		}
+		return err
+	})
+	readOptional(config.FileIMERules, func(s string) error {
+		v, err := config.DecodeIMERulesConfig(s)
+		if err == nil {
+			cfg.IMERules = v
+		}
+		return err
+	})
+	readOptional(config.FilePrompts, func(s string) error {
+		v, err := config.DecodePromptsConfig(s)
+		if err == nil {
+			cfg.Prompts = v
+		}
+		return err
+	})
+	readOptional(config.FileComponents, func(s string) error {
+		v, err := config.DecodeComponentsConfig(s)
+		if err == nil {
+			cfg.Components = v
+		}
+		return err
+	})
+	readOptional(config.FileWorkflows, func(s string) error {
+		v, err := config.DecodeWorkflowsConfig(s)
+		if err == nil {
+			cfg.Workflows = v
+		}
+		return err
+	})
+	readOptional(config.FileQuickJump, func(s string) error {
+		v, err := config.DecodeQuickJumpConfig(s)
+		if err == nil {
+			cfg.QuickJump = v
+		}
+		return err
+	})
+
+	var warnings []config.ValidationIssue
+	for _, issue := range config.Validate(cfg) {
+		if issue.Severity == config.SeverityError {
+			errs = append(errs, config.LoadError{
+				File:    issue.File,
+				KeyPath: issue.KeyPath,
+				Message: issue.Message,
+			})
+		} else {
+			warnings = append(warnings, issue)
+		}
+	}
+	if len(errs) > 0 {
+		return config.DefaultConfig(), false, errs, warnings
+	}
+	return cfg, true, nil, warnings
+}
+
+func hasCustomDictPaths(paths []string) bool {
+	for _, p := range paths {
+		if strings.TrimSpace(p) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// probeInputSequence returns the key sequence that encodes "ni" + "hao" under scheme
+// (e.g. "nihao" for quanpin, "nihc" for xiaohe/ziranma, "nihk" for microsoft/sogou/pinyin_plus).
+func probeInputSequence(scheme string) string {
+	norm := strings.ToLower(strings.TrimSpace(scheme))
+	return ime.ShuangpinCode(norm, "ni") + ime.ShuangpinCode(norm, "hao")
+}
+
+// probeInputEngine composes a scheme-appropriate pinyin string using the already-loaded
+// dictionary and reports the candidates, proving the dictionary layers resolved and the engine runs.
+func probeInputEngine(w io.Writer, ie config.InputEngineConfig, dict inputengine.Dictionary) {
 	eng := inputengine.New(inputengine.Options{
 		Scheme:           ie.Scheme,
 		CandidateCount:   ie.CandidateCount,
 		ShiftToggleASCII: ie.ShiftToggleASCII,
 		FuzzyPinyin:      ie.FuzzyPinyin,
-		CustomDictPaths:  ie.CustomDictPaths,
+		Dictionary:       dict,
 	})
-	for _, r := range "nihao" {
+	seq := probeInputSequence(ie.Scheme)
+	for _, r := range seq {
 		eng.HandleKey(inputengine.Key{Kind: inputengine.KeyLetter, Rune: r})
 	}
 	view := eng.View()
 	if len(view.Candidates) == 0 {
-		fmt.Fprintf(w, "input engine probe: typing \"nihao\" produced NO candidates (dictionary failed to load)\n")
+		fmt.Fprintf(w, "input engine probe: typing %q produced NO candidates (dictionary failed to load)\n", seq)
 		return
 	}
 	names := make([]string, 0, 3)
@@ -184,5 +349,5 @@ func probeInputEngine(w io.Writer, ie config.InputEngineConfig) {
 		}
 		names = append(names, c.Text)
 	}
-	fmt.Fprintf(w, "input engine probe: typing \"nihao\" -> %s\n", strings.Join(names, " / "))
+	fmt.Fprintf(w, "input engine probe: typing %q -> %s\n", seq, strings.Join(names, " / "))
 }

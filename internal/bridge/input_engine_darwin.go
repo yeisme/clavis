@@ -79,6 +79,10 @@ func (b *darwinBridge) inputEngineHandleInline(ev host.InlineKeyEvent) (consume 
 	if eng == nil || !ev.IsDown {
 		return false
 	}
+	if b.isSelfFrontmost() {
+		b.resetInputEngine()
+		return false
+	}
 	defer func() {
 		if recover() != nil {
 			b.ime.commits.resetPrev()
