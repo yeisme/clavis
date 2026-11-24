@@ -168,10 +168,16 @@ func (a *AppController) renderPinnedAndTemplatesView(c *ui.Context, theme *ui.Th
 			kitDivider(c, theme)
 
 			// Section 2: Snippets & Prompt Templates.
-			ui.Text(c, pickLang(zh,
-				fmt.Sprintf("片段与提示词模板 (%d + %d)", len(snippets), len(prompts)),
-				fmt.Sprintf("Snippets & Templates (%d + %d)", len(snippets), len(prompts)),
-			)).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, pickLang(zh,
+					fmt.Sprintf("片段与提示词模板 (%d + %d)", len(snippets), len(prompts)),
+					fmt.Sprintf("Snippets & Templates (%d + %d)", len(snippets), len(prompts)),
+				)).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine().Grow(1)
+				if ui.Button(c, i18n.T("assets.templates.manage")).Key("assets-open-templates-settings").Padding(space2, space8).Clicked() {
+					a.CloseHubSurface()
+					a.OpenSettingsSection(settingsSectionTemplates)
+				}
+			})
 
 			for _, snip := range snippets {
 				s := snip
@@ -199,6 +205,10 @@ func (a *AppController) renderPinnedAndTemplatesView(c *ui.Context, theme *ui.Th
 							ui.Text(c, nonEmptyOr(pt.Title, pt.ID)).FontSize(typeMeta).FontWeight(600).TextColor(theme.Text).SingleLine()
 							ui.Text(c, previewSingleLine(pt.Description, 72)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 						})
+						if ui.Button(c, i18n.T("assets.templates.compose")).Key("assets-tpl-compose-" + pt.ID).Padding(space2, space8).Clicked() {
+							a.CloseHubSurface()
+							a.OpenPromptComposer(pt, state.Context)
+						}
 						if ui.Button(c, pickLang(zh, "复制模板", "Copy")).Key("assets-tpl-copy-" + pt.ID).Padding(space2, space8).Clicked() {
 							_ = a.writeClipboardText(pt.Template)
 							a.ShowToastOrHUD(i18n.T("hud.copied"))

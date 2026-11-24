@@ -150,6 +150,12 @@ func TestSettingsSidebarSearchPerSectionAccuracy(t *testing.T) {
 	if got := matchingKeys("同步"); len(got) != 1 || got[0] != "about" {
 		t.Fatalf("query '同步' matched %v, want only [about]", got)
 	}
+	if got := matchingKeys("promptrepo"); len(got) != 1 || got[0] != "templates" {
+		t.Fatalf("query 'promptrepo' matched %v, want only [templates]", got)
+	}
+	if got := matchingKeys("模板库"); len(got) != 1 || got[0] != "templates" {
+		t.Fatalf("query '模板库' matched %v, want only [templates]", got)
+	}
 }
 
 func TestSettingsScreenshotShortcutQuickJumpAndAllSectionsRender(t *testing.T) {

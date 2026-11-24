@@ -127,3 +127,51 @@ func TestExecuteRenderedAIInvokesOnceAfterFreshConfirmation(t *testing.T) {
 		t.Fatalf("fake provider calls = %d, want 1", fake.calls)
 	}
 }
+
+func TestRenderMultiLocaleChineseAndUnsupportedLocales(t *testing.T) {
+	zhContract := Contract{
+		SchemaVersion: ContractSchema,
+		Locale:        "zh-CN",
+		Permissions:   []string{"preview", ExecuteRequiresReview},
+		Inputs: []InputDefinition{
+			{Name: "topic", Type: "string", Required: true, Labels: map[string]string{"zh-CN": "主题"}},
+			{Name: "style", Type: "enum", Enum: []string{"简洁", "详细"}, Default: "简洁"},
+		},
+	}
+
+	got := RenderContract(zhContract, "请用{{style}}风格介绍{{topic}}", map[string]string{"topic": "模板平台"}, nil)
+	if len(got.Diagnostics) != 0 || got.RenderedText != "请用简洁风格介绍模板平台" {
+		t.Fatalf("zh-CN render failed: %+v", got)
+	}
+
+	// Case-insensitive locale matching via RenderContractForLocale.
+	ciGot := RenderContractForLocale(zhContract, "主题：{{topic}}", map[string]string{"topic": "多语言"}, nil, "zh-cn")
+	if len(ciGot.Diagnostics) != 0 || ciGot.RenderedText != "主题：多语言" {
+		t.Fatalf("case-insensitive zh-cn render failed: %+v", ciGot)
+	}
+	mismatch := RenderContractForLocale(zhContract, "主题：{{topic}}", map[string]string{"topic": "多语言"}, nil, "ja")
+	if mismatch.RenderedText != "" || len(mismatch.Diagnostics) == 0 || mismatch.Diagnostics[0].Code != LocaleUnsupported {
+		t.Fatalf("mismatched requested locale must fail closed: %+v", mismatch)
+	}
+
+	// ExecuteRenderedAI works for zh-CN contracts once review is explicitly confirmed.
+	fake := &fakeAIExecutor{}
+	if err := zhContract.ExecuteRenderedAI(context.Background(), got, false, fake); err == nil || fake.calls != 0 {
+		t.Fatalf("unconfirmed zh-CN AI execution must be denied, err=%v calls=%d", err, fake.calls)
+	}
+	if err := zhContract.ExecuteRenderedAI(context.Background(), got, true, fake); err != nil || fake.calls != 1 {
+		t.Fatalf("confirmed zh-CN AI execution failed: err=%v calls=%d", err, fake.calls)
+	}
+
+	// Empty, invalid, or explicitly disallowed locales fail closed.
+	for _, bad := range []Contract{
+		{SchemaVersion: ContractSchema, Locale: "", Inputs: zhContract.Inputs},
+		{SchemaVersion: ContractSchema, Locale: "invalid_locale", Inputs: zhContract.Inputs},
+		{SchemaVersion: ContractSchema, Locale: "ja", SupportedLocales: []string{"en", "zh-CN"}, Inputs: zhContract.Inputs},
+	} {
+		res := RenderContract(bad, "{{topic}}", map[string]string{"topic": "测试"}, nil)
+		if res.RenderedText != "" || len(res.Diagnostics) == 0 || res.Diagnostics[0].Code != LocaleUnsupported {
+			t.Fatalf("expected locale_unsupported for %+v, got %+v", bad, res)
+		}
+	}
+}

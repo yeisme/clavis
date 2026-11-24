@@ -657,6 +657,8 @@ func (c *AppController) handleInternalSettingCommand(args []string) {
 		c.OpenSettings(SettingsTabConfigs)
 	case "security", "vault":
 		c.OpenSettingsSection(settingsSectionSecurity)
+	case "templates", "prompts":
+		c.OpenSettingsSection(settingsSectionTemplates)
 	default:
 		c.OpenSettings(SettingsTabGeneral)
 	}
@@ -924,6 +926,24 @@ func (c *AppController) SaveGlossaryConfig(glossaryCfg config.GlossaryConfig) er
 		c.AIClient.GlossaryEngine = c.Glossary
 	}
 	c.settingsStatus = i18n.Tf("settings.status.glossary_saved", len(updated.Glossary.Terms))
+	onRepaint := c.OnRepaint
+	c.mu.Unlock()
+	if onRepaint != nil {
+		onRepaint()
+	}
+	return nil
+}
+
+// SavePromptsConfig persists prompts.toml, refreshes the state machine, and repaints.
+func (c *AppController) SavePromptsConfig(promptsCfg config.PromptsConfig) error {
+	if err := c.ConfigStore.SavePrompts(promptsCfg); err != nil {
+		c.setSettingsStatus(i18n.Tf("settings.status.save_prompts_failed", err))
+		return err
+	}
+	updated := c.ConfigStore.Current()
+	c.mu.Lock()
+	c.StateMachine.SetConfig(updated)
+	c.settingsStatus = i18n.Tf("settings.status.prompts_saved", len(updated.Prompts.Items))
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
 	if onRepaint != nil {

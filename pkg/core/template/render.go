@@ -26,10 +26,21 @@ type renderToken struct {
 
 var renderPlaceholderRE = regexp.MustCompile(`\{\{\s*([^{}]+?)\s*\}\}`)
 
-// Render renders a validated English contract without ambient built-ins.
+// Render renders a validated contract without ambient built-ins.
 // Contract inputs are the only values that can be supplied to the body.
 func Render(c Contract, body string, values map[string]string) RenderResult {
 	return RenderContract(c, body, values, nil)
+}
+
+// RenderContractForLocale renders a contract body for requestedLocale,
+// failing closed with LocaleUnsupported if the contract does not support it.
+func RenderContractForLocale(c Contract, body any, values, builtins map[string]string, requestedLocale string) RenderResult {
+	if strings.TrimSpace(requestedLocale) != "" && !c.SupportsLocale(requestedLocale) {
+		return RenderResult{
+			Diagnostics: []Diagnostic{diagnostic(LocaleUnsupported, "locale", "contract locale is not renderable")},
+		}
+	}
+	return RenderContract(c, body, values, builtins)
 }
 
 // RenderContract renders a contract body with explicit values and optional
@@ -43,7 +54,7 @@ func RenderContract(c Contract, body any, values, builtins map[string]string) Re
 		result.Diagnostics = append(result.Diagnostics, diagnostic(InvalidBody, "body", "template body must be text"))
 		return result
 	}
-	if c.Locale != "en" {
+	if !c.LocaleRenderable() {
 		result.Diagnostics = append(result.Diagnostics, diagnostic(LocaleUnsupported, "locale", "contract locale is not renderable"))
 		return result
 	}

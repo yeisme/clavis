@@ -111,10 +111,48 @@ func TestContractFailClosedSevenRules(t *testing.T) {
 			t.Fatalf("result = %+v", got)
 		}
 	})
-	t.Run("7 only en locale renders", func(t *testing.T) {
-		got := RenderContractPrompt(testContract("zh-CN", template.InputDefinition{Name: "x", Type: "string"}), "{{x}}", map[string]string{"x": "值"}, RenderContext{})
-		if !hasContractCode(got.Diagnostics, "locale_unsupported", "") {
-			t.Fatalf("diagnostics = %+v", got.Diagnostics)
+	t.Run("7 multi-locale zh-CN renders and invalid or disallowed locales fail closed", func(t *testing.T) {
+		zh := template.Contract{
+			SchemaVersion: template.ContractSchema,
+			Locale:        "zh-CN",
+			Inputs: []template.InputDefinition{
+				{Name: "topic", Type: "string", Required: true, Labels: map[string]string{"zh-CN": "主题", "en": "Topic"}},
+				{Name: "tone", Type: "enum", Enum: []string{"正式", "口语"}, Default: "正式"},
+			},
+		}
+		slots := PromptSlotsFromContract(zh)
+		if len(slots) != 2 || slots[0].Label != "主题" || slots[1].Kind != "select" {
+			t.Fatalf("zh-CN slots = %+v", slots)
+		}
+		got := RenderContractPrompt(zh, "请以{{tone}}语气撰写关于{{topic}}的摘要。", map[string]string{"topic": "Clavis 模板"}, RenderContext{})
+		if len(got.Diagnostics) != 0 || got.RenderedText != "请以正式语气撰写关于Clavis 模板的摘要。" {
+			t.Fatalf("zh-CN render result = %+v", got)
+		}
+
+		// Case-insensitive and other valid BCP-47 locales render cleanly.
+		ja := testContract("ja-jp", template.InputDefinition{Name: "x", Type: "string"})
+		if jaRes := RenderContractPrompt(ja, "入力:{{x}}", map[string]string{"x": "テスト"}, RenderContext{}); len(jaRes.Diagnostics) != 0 || jaRes.RenderedText != "入力:テスト" {
+			t.Fatalf("ja-jp render result = %+v", jaRes)
+		}
+
+		// Empty, malformed, or explicitly disallowed locales fail closed with locale_unsupported.
+		for _, bad := range []template.Contract{
+			testContract("", template.InputDefinition{Name: "x", Type: "string"}),
+			testContract("zh_CN", template.InputDefinition{Name: "x", Type: "string"}),
+			{SchemaVersion: template.ContractSchema, Locale: "fr", SupportedLocales: []string{"en", "zh-CN"}, Inputs: []template.InputDefinition{{Name: "x", Type: "string"}}},
+		} {
+			badRes := RenderContractPrompt(bad, "{{x}}", map[string]string{"x": "值"}, RenderContext{})
+			if !hasContractCode(badRes.Diagnostics, "locale_unsupported", "") || badRes.RenderedText != "" {
+				t.Fatalf("expected locale_unsupported for %q, got %+v", bad.Locale, badRes)
+			}
+		}
+
+		// RenderContractPromptForLocale matches case-insensitively and rejects mismatched locale.
+		if okRes := RenderContractPromptForLocale(zh, "{{topic}}", map[string]string{"topic": "值"}, RenderContext{}, "zh-cn"); len(okRes.Diagnostics) != 0 || okRes.RenderedText != "值" {
+			t.Fatalf("RenderContractPromptForLocale(zh-cn) = %+v", okRes)
+		}
+		if badReq := RenderContractPromptForLocale(zh, "{{topic}}", map[string]string{"topic": "值"}, RenderContext{}, "fr"); !hasContractCode(badReq.Diagnostics, "locale_unsupported", "") || badReq.RenderedText != "" {
+			t.Fatalf("RenderContractPromptForLocale(fr) = %+v", badReq)
 		}
 	})
 }

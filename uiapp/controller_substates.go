@@ -32,6 +32,8 @@ type controllerSubStates struct {
 	syncStatus       *syncStatusCacheEntry
 	inputEngineUI    *inputEngineUIState
 	clipboardTTLSync *clipboardTTLSyncState
+	promptContract   *promptContractState
+	templatesUI      *templatesUIState
 }
 
 // lifeCtx returns a context bound to the controller's lifetime. It is canceled
@@ -333,6 +335,30 @@ func (c *AppController) inputEngineUIStateFor() *inputEngineUIState {
 	return c.subStates.inputEngineUI
 }
 
+func (c *AppController) promptContractStateFor() *promptContractState {
+	if c == nil {
+		return &promptContractState{}
+	}
+	c.subStateMu.Lock()
+	defer c.subStateMu.Unlock()
+	if c.subStates.promptContract == nil {
+		c.subStates.promptContract = &promptContractState{}
+	}
+	return c.subStates.promptContract
+}
+
+func (c *AppController) templatesUIStateFor() *templatesUIState {
+	if c == nil {
+		return &templatesUIState{}
+	}
+	c.subStateMu.Lock()
+	defer c.subStateMu.Unlock()
+	if c.subStates.templatesUI == nil {
+		c.subStates.templatesUI = &templatesUIState{}
+	}
+	return c.subStates.templatesUI
+}
+
 // withClipboardTTLSync provides synchronized lazy access to the per-controller
 // clipboardTTLSyncState (staged for settings_clipboard.go migration).
 func (c *AppController) withClipboardTTLSync(fn func(*clipboardTTLSyncState)) {
@@ -441,6 +467,26 @@ func (c *AppController) closeSubStates() {
 		st.valueDraft = ""
 		st.recordDraft = ""
 		st.labelDraft = ""
+		st.mu.Unlock()
+	}
+
+	if st := subs.promptContract; st != nil {
+		st.mu.Lock()
+		st.active = false
+		st.reviewPending = false
+		st.reviewPromptHash = ""
+		st.diagnostics = nil
+		st.aiRunStatus = ""
+		st.aiRunError = ""
+		st.mu.Unlock()
+	}
+
+	if st := subs.templatesUI; st != nil {
+		st.mu.Lock()
+		st.catalogSnap = nil
+		st.importedItems = nil
+		st.diagnostics = nil
+		st.overlayDraft = ""
 		st.mu.Unlock()
 	}
 }

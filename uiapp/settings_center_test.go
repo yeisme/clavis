@@ -35,8 +35,8 @@ func openSettingsSection(t *testing.T, tt *ui.Tester, label string) {
 
 func TestSettingsNavigationHasFiveGroupsAndSecondaryPages(t *testing.T) {
 	sections := settingsNavigationSections()
-	if len(sections) != 13 {
-		t.Fatalf("settings navigation exposes %d pages, want 13", len(sections))
+	if len(sections) != 14 {
+		t.Fatalf("settings navigation exposes %d pages, want 14", len(sections))
 	}
 	seenKeys := map[string]bool{}
 	seenGroups := map[string]bool{}
@@ -50,7 +50,7 @@ func TestSettingsNavigationHasFiveGroupsAndSecondaryPages(t *testing.T) {
 	if len(seenGroups) != 5 {
 		t.Fatalf("settings navigation exposes %d groups, want 5", len(seenGroups))
 	}
-	for _, key := range []string{"leader", "snippets", "glossary", "clipboard", "workflows", "appearance", "security", "about"} {
+	for _, key := range []string{"leader", "snippets", "glossary", "templates", "clipboard", "workflows", "appearance", "security", "about"} {
 		if _, ok := settingsSectionFromKey(key); !ok {
 			t.Fatalf("secondary settings page %q is not addressable", key)
 		}

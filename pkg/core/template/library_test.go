@@ -15,14 +15,44 @@ func libraryFixture(t *testing.T) string {
 	c := fixture(t)
 	for _, s := range c.Solutions {
 		for _, v := range s.Templates {
-			name, _ := ContractPath(v)
-			b, _ := json.Marshal(map[string]string{"schema_version": ContractSchema, "template_digest": v.Digest, "solution_id": s.ID, "digest": Digest([]byte("declared canonical, not raw bytes"))})
-			if err := os.WriteFile(filepath.Join(dir, name), b, 0600); err != nil {
-				t.Fatal(err)
-			}
+			writeValidContractSidecar(t, dir, s, v, []string{"preview", ExecuteRequiresReview}, nil)
 		}
 	}
 	return dir
+}
+
+func writeValidContractSidecar(t *testing.T, dir string, s Solution, v Template, perms []string, inputs []InputDefinition) Contract {
+	t.Helper()
+	contract := Contract{
+		SchemaVersion:  ContractSchema,
+		PackageID:      s.PackageID,
+		SolutionID:     s.ID,
+		Version:        s.Version,
+		Role:           v.Role,
+		Locale:         v.Locale,
+		TemplatePath:   v.Path,
+		TemplateDigest: v.Digest,
+		License:        s.Rights,
+		Permissions:    perms,
+		Inputs:         inputs,
+	}
+	var err error
+	contract.Digest, err = CanonicalContractDigest(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := ContractPath(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return contract
 }
 func newLibrary(t *testing.T) (*Library, string) {
 	t.Helper()
@@ -68,6 +98,9 @@ func TestLibraryImportOverlayAndFork(t *testing.T) {
 	item := onlyItem(t, l)
 	if item.Source != Imported || item.SourceKind != SourcePromptrepo || item.Provenance == nil || item.ID != "demo-summary.main.en" || item.Body == "" || item.Maturity == "" {
 		t.Fatal("missing imported view")
+	}
+	if item.ContractStatus != "validated" || item.Contract == nil {
+		t.Fatalf("expected validated contract in library view, got status=%q contract=%v diags=%+v", item.ContractStatus, item.Contract, item.ContractDiagnostics)
 	}
 	rec := item.Provenance
 	if rec.ContractDigest == rec.DeclaredContractDigest || rec.ContractDigest == "" {
@@ -523,11 +556,7 @@ func TestDefaultSelectionAndIndependentVariantPins(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, v.Path), body, 0600); err != nil {
 			t.Fatal(err)
 		}
-		name, _ := ContractPath(*v)
-		b, _ := json.Marshal(map[string]string{"schema_version": ContractSchema, "template_digest": v.Digest})
-		if err := os.WriteFile(filepath.Join(dir, name), b, 0600); err != nil {
-			t.Fatal(err)
-		}
+		writeValidContractSidecar(t, dir, *s, *v, []string{"preview"}, nil)
 		c.Discovery = append(c.Discovery, Discovery{PackageID: s.PackageID, SolutionID: s.ID, Role: v.Role, Locale: v.Locale, Media: []string{"text", "text"}})
 	}
 	s.Templates = variants
@@ -614,4 +643,129 @@ func TestCorruptOverlayDoesNotReenableImport(t *testing.T) {
 	if len(rows) != 0 {
 		t.Fatal("corrupt overlay silently exposed enabled import")
 	}
+}
+
+func TestLibraryViewFullContractValidationAndDiagnostics(t *testing.T) {
+	t.Run("validated zh-CN contract and overlay/remove lifecycle", func(t *testing.T) {
+		dir := libraryFixture(t)
+		c := fixture(t)
+		s := &c.Solutions[0]
+		zhBody := []byte("请用{{tone}}语气总结：{{topic}}")
+		zhTmpl := Template{
+			Role:   "main",
+			Locale: "zh-CN",
+			Path:   "solutions/writing/demo-summary/prompts/main.zh-CN.md",
+			Digest: Digest(zhBody),
+		}
+		if err := os.WriteFile(filepath.Join(dir, zhTmpl.Path), zhBody, 0600); err != nil {
+			t.Fatal(err)
+		}
+		writeValidContractSidecar(t, dir, *s, zhTmpl, []string{"preview", ExecuteRequiresReview}, []InputDefinition{
+			{Name: "topic", Type: "string", Required: true, Labels: map[string]string{"zh-CN": "主题"}},
+			{Name: "tone", Type: "enum", Enum: []string{"正式", "简洁"}, Default: "简洁"},
+		})
+		s.Templates = append(s.Templates, zhTmpl)
+		c.Discovery = append(c.Discovery, Discovery{PackageID: s.PackageID, SolutionID: s.ID, Role: "main", Locale: "zh-CN", Title: "演示", Summary: "测试", Media: []string{"text"}})
+		writeCatalog(t, dir, c)
+
+		l, _ := newLibrary(t)
+		noDiagnostics(t, l.Refresh(dir))
+		noDiagnostics(t, l.Import(dir, s.PackageID, s.ID, "main", "zh-CN", SourceFile))
+
+		rows, ds := l.View(nil)
+		noDiagnostics(t, ds)
+		if len(rows) != 1 || rows[0].ContractStatus != "validated" || rows[0].Contract == nil || rows[0].Contract.Locale != "zh-CN" {
+			t.Fatalf("expected validated zh-CN item, got rows=%+v ds=%+v", rows, ds)
+		}
+		if len(rows[0].Contract.Inputs) != 2 {
+			t.Fatalf("expected 2 contract inputs, got %+v", rows[0].Contract.Inputs)
+		}
+		if rawObj, err := l.ReadCASObject(rows[0].Provenance.Digest); err != nil || string(rawObj) != string(zhBody) {
+			t.Fatalf("ReadCASObject mismatch: err=%v body=%q", err, string(rawObj))
+		}
+
+		noDiagnostics(t, l.SaveOverlay(s.ID, "main", "zh-CN", []byte("title = \"自定义中文标题\"\n")))
+		rawOv, exists, ods := l.ReadOverlay(s.ID, "main", "zh-CN")
+		noDiagnostics(t, ods)
+		if !exists || !strings.Contains(string(rawOv), "自定义中文标题") {
+			t.Fatalf("ReadOverlay = (%q, %v)", string(rawOv), exists)
+		}
+		noDiagnostics(t, l.DeleteOverlay(s.ID, "main", "zh-CN"))
+		if _, exists, _ := l.ReadOverlay(s.ID, "main", "zh-CN"); exists {
+			t.Fatal("overlay still exists after DeleteOverlay")
+		}
+		noDiagnostics(t, l.RemoveImport(s.ID, "main", "zh-CN"))
+		rows, ds = l.View(nil)
+		noDiagnostics(t, ds)
+		if len(rows) != 0 {
+			t.Fatalf("expected 0 rows after RemoveImport, got %d", len(rows))
+		}
+	})
+
+	t.Run("header-only sidecar surfaces concrete diagnostic", func(t *testing.T) {
+		dir := libraryFixture(t)
+		c := fixture(t)
+		tmpl := c.Solutions[0].Templates[0]
+		name, _ := ContractPath(tmpl)
+		b, _ := json.Marshal(map[string]string{"schema_version": ContractSchema, "template_digest": tmpl.Digest})
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0600); err != nil {
+			t.Fatal(err)
+		}
+		l, _ := newLibrary(t)
+		noDiagnostics(t, l.Refresh(dir))
+		noDiagnostics(t, l.Import(dir, "demo/writing", "demo-summary", "main", "en", SourceFile))
+		rows, ds := l.View(nil)
+		if len(rows) != 1 || rows[0].ContractStatus != "header_only_unvalidated" {
+			t.Fatalf("expected header_only_unvalidated, got rows=%+v", rows)
+		}
+		assertCode(t, ds, InvalidDigest)
+	})
+
+	t.Run("contract with bad canonical digest or undeclared placeholder marks contract_invalid", func(t *testing.T) {
+		dir := libraryFixture(t)
+		c := fixture(t)
+		s := &c.Solutions[0]
+		tmpl := &s.Templates[0]
+		body := []byte("Summarize {{undeclared_slot}}")
+		tmpl.Digest = Digest(body)
+		if err := os.WriteFile(filepath.Join(dir, tmpl.Path), body, 0600); err != nil {
+			t.Fatal(err)
+		}
+		writeValidContractSidecar(t, dir, *s, *tmpl, []string{"preview"}, nil)
+		writeCatalog(t, dir, c)
+
+		l, _ := newLibrary(t)
+		noDiagnostics(t, l.Refresh(dir))
+		noDiagnostics(t, l.Import(dir, s.PackageID, s.ID, tmpl.Role, tmpl.Locale, SourceFile))
+		rows, ds := l.View(nil)
+		if len(rows) != 1 || rows[0].ContractStatus != "contract_invalid" || rows[0].Contract != nil {
+			t.Fatalf("expected contract_invalid for undeclared placeholder, got rows=%+v", rows)
+		}
+		assertCode(t, ds, UndeclaredPlaceholder)
+
+		// Also test tampered canonical digest inside sidecar.
+		name, _ := ContractPath(*tmpl)
+		badContract := Contract{
+			SchemaVersion:  ContractSchema,
+			PackageID:      s.PackageID,
+			SolutionID:     s.ID,
+			Version:        s.Version,
+			Role:           tmpl.Role,
+			Locale:         tmpl.Locale,
+			TemplatePath:   tmpl.Path,
+			TemplateDigest: tmpl.Digest,
+			Digest:         Digest([]byte("tampered canonical digest")),
+		}
+		rawBad, _ := json.Marshal(badContract)
+		if err := os.WriteFile(filepath.Join(dir, name), rawBad, 0600); err != nil {
+			t.Fatal(err)
+		}
+		noDiagnostics(t, l.Refresh(dir))
+		noDiagnostics(t, l.Import(dir, s.PackageID, s.ID, tmpl.Role, tmpl.Locale, SourceFile))
+		rows, ds = l.View(nil)
+		if len(rows) != 1 || rows[0].ContractStatus != "contract_invalid" || rows[0].Contract != nil {
+			t.Fatalf("expected contract_invalid for tampered canonical digest, got rows=%+v", rows)
+		}
+		assertCode(t, ds, DigestMismatch)
+	})
 }
