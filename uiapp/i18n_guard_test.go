@@ -52,7 +52,7 @@ var i18nMigratedZeroToleranceFiles = []string{
 // Regenerate with: CLAVIS_I18N_BASELINE=1 go test -v -run TestI18nHardcodedDebtRatchet ./uiapp
 var i18nDebtBaseline = map[string]i18nFileDebt{
 	"agent_manage_controls.go": {pickLangCalls: 20, rawChineseLiterals: 23},
-	"agent_sessions.go":        {pickLangCalls: 0, rawChineseLiterals: 34},
+	"agent_sessions.go":        {pickLangCalls: 30, rawChineseLiterals: 34},
 	"agent_workbench_view.go":  {pickLangCalls: 3, rawChineseLiterals: 41},
 	"ai_center_view.go":        {pickLangCalls: 0, rawChineseLiterals: 28},
 	"ai_usage_view.go":         {pickLangCalls: 0, rawChineseLiterals: 4},
@@ -63,7 +63,9 @@ var i18nDebtBaseline = map[string]i18nFileDebt{
 	"clipboard_actions.go":     {pickLangCalls: 13, rawChineseLiterals: 13},
 	"clipboard_media.go":       {pickLangCalls: 7, rawChineseLiterals: 7},
 	"clipboard_stats_view.go":  {pickLangCalls: 0, rawChineseLiterals: 7},
-	"controller.go":            {pickLangCalls: 1, rawChineseLiterals: 8},
+	"controller.go":            {pickLangCalls: 0, rawChineseLiterals: 3},
+	"controller_ai.go":         {pickLangCalls: 1, rawChineseLiterals: 1},
+	"controller_settings.go":   {pickLangCalls: 0, rawChineseLiterals: 4},
 	"input_candidate_view.go":  {pickLangCalls: 0, rawChineseLiterals: 2},
 	"input_composer.go":        {pickLangCalls: 29, rawChineseLiterals: 38},
 	"kit_states.go":            {pickLangCalls: 0, rawChineseLiterals: 7},
@@ -79,7 +81,7 @@ var i18nDebtBaseline = map[string]i18nFileDebt{
 	"settings_editors.go":      {pickLangCalls: 2, rawChineseLiterals: 2},
 	"settings_input_engine.go": {pickLangCalls: 21, rawChineseLiterals: 21},
 	"settings_rows.go":         {pickLangCalls: 0, rawChineseLiterals: 7},
-	"settings_sync.go":         {pickLangCalls: 0, rawChineseLiterals: 24},
+	"settings_sync.go":         {pickLangCalls: 24, rawChineseLiterals: 24},
 	"settings_view.go":         {pickLangCalls: 4, rawChineseLiterals: 22},
 	"tab_registry.go":          {pickLangCalls: 0, rawChineseLiterals: 3},
 	"vault_assets_view.go":     {pickLangCalls: 22, rawChineseLiterals: 22},

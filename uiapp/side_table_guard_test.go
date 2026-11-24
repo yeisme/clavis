@@ -24,24 +24,12 @@ func TestSideTableGuardNoGlobalControllerMaps(t *testing.T) {
 		t.Fatal("expected non-empty uiapp/*.go file set")
 	}
 
-	// Temporary single-file allowlist for settings_clipboard.go, which is owned
-	// by the parallel Wave 2 i18n worktree during CLV-P2-1. Its replacement field
-	// (controllerSubStates.clipboardTTLSync + withClipboardTTLSync) is already
-	// staged in controller_substates.go; remove this allowlist entry immediately
-	// after migrating settings_clipboard.go post-merge.
-	temporaryAllowlist := map[string]bool{
-		"settings_clipboard.go": true,
-	}
-
 	fset := token.NewFileSet()
 	var violations []string
 
 	for _, path := range files {
 		base := filepath.Base(path)
 		if strings.HasSuffix(base, "_test.go") {
-			continue
-		}
-		if temporaryAllowlist[base] {
 			continue
 		}
 

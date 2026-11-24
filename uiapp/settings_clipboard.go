@@ -3,7 +3,6 @@ package uiapp
 import (
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/egoist/mygo/ui"
@@ -17,13 +16,6 @@ type clipboardTTLSyncState struct {
 	lastConfigTTL int
 }
 
-var clipboardTTLSyncStore = struct {
-	mu    sync.Mutex
-	byCtl map[*AppController]*clipboardTTLSyncState
-}{
-	byCtl: make(map[*AppController]*clipboardTTLSyncState),
-}
-
 // syncClipboardSensitiveTTLFromConfig reconciles the runtime sensitive copy TTL
 // with the persisted config.ClipboardConfig value (e.g. after restart or config
 // reload) without clobbering direct runtime overrides when config stays default.
@@ -32,24 +24,19 @@ func (a *AppController) syncClipboardSensitiveTTLFromConfig(clipCfg config.Clipb
 		return
 	}
 	cfgTTL := config.NormalizeSensitiveTTLSeconds(clipCfg.SensitiveTTLSeconds)
-	clipboardTTLSyncStore.mu.Lock()
-	st, ok := clipboardTTLSyncStore.byCtl[a]
-	if !ok {
-		st = &clipboardTTLSyncState{}
-		clipboardTTLSyncStore.byCtl[a] = st
-	}
 	shouldApply := false
-	if !st.initialized {
-		st.initialized = true
-		st.lastConfigTTL = cfgTTL
-		if cfgTTL != config.DefaultSensitiveCopyTTLSeconds {
+	a.withClipboardTTLSync(func(st *clipboardTTLSyncState) {
+		if !st.initialized {
+			st.initialized = true
+			st.lastConfigTTL = cfgTTL
+			if cfgTTL != config.DefaultSensitiveCopyTTLSeconds {
+				shouldApply = true
+			}
+		} else if st.lastConfigTTL != cfgTTL {
+			st.lastConfigTTL = cfgTTL
 			shouldApply = true
 		}
-	} else if st.lastConfigTTL != cfgTTL {
-		st.lastConfigTTL = cfgTTL
-		shouldApply = true
-	}
-	clipboardTTLSyncStore.mu.Unlock()
+	})
 	if shouldApply {
 		a.SetClipboardSensitiveTTLSeconds(cfgTTL)
 	}
@@ -59,15 +46,10 @@ func (a *AppController) syncClipboardSensitiveTTLFromConfig(clipCfg config.Clipb
 // persists the clamped value into config.toml so it survives restarts.
 func (a *AppController) updateClipboardSensitiveTTL(sec int) int {
 	norm := a.SetClipboardSensitiveTTLSeconds(sec)
-	clipboardTTLSyncStore.mu.Lock()
-	st, ok := clipboardTTLSyncStore.byCtl[a]
-	if !ok {
-		st = &clipboardTTLSyncState{}
-		clipboardTTLSyncStore.byCtl[a] = st
-	}
-	st.initialized = true
-	st.lastConfigTTL = norm
-	clipboardTTLSyncStore.mu.Unlock()
+	a.withClipboardTTLSync(func(st *clipboardTTLSyncState) {
+		st.initialized = true
+		st.lastConfigTTL = norm
+	})
 	if a != nil && a.ConfigStore != nil {
 		_ = a.UpdateMainConfig(func(m *config.MainConfig) {
 			m.Clipboard.SensitiveTTLSeconds = norm
