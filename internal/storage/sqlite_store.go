@@ -232,7 +232,8 @@ const clipboardFTSUpdateTrigger = `CREATE TRIGGER IF NOT EXISTS clipboard_items_
 // during the update can fail. Rebuild from the contents after filling metadata.
 func (s *SQLiteClipboardStore) backfillClipboardMetadata(ctx context.Context) error {
 	rows, err := s.db.Query(ctx, `SELECT 1 FROM sqlite_schema WHERE name='clipboard_items_au' AND instr(sql, 'AFTER UPDATE OF content, source_app_name')=0
-		UNION ALL SELECT 1 FROM clipboard_items WHERE kind='' LIMIT 1`)
+		UNION ALL SELECT 1 FROM clipboard_items
+		 WHERE kind='' OR (kind='text' AND byte_size=0 AND content<>'') LIMIT 1`)
 	if err != nil {
 		return fmt.Errorf("inspect clipboard metadata backfill: %w", err)
 	}
@@ -242,7 +243,8 @@ func (s *SQLiteClipboardStore) backfillClipboardMetadata(ctx context.Context) er
 	if _, err := s.db.Transaction(ctx, []sqlite.Statement{
 		{SQL: `DROP TRIGGER IF EXISTS clipboard_items_au`},
 		{SQL: clipboardFTSUpdateTrigger},
-		{SQL: `UPDATE clipboard_items SET kind='text', byte_size=length(CAST(content AS BLOB)) WHERE kind=''`},
+		{SQL: `UPDATE clipboard_items SET kind='text', byte_size=length(CAST(content AS BLOB))
+			WHERE kind='' OR (kind='text' AND byte_size=0 AND content<>'')`},
 		{SQL: `INSERT INTO clipboard_fts(clipboard_fts) VALUES ('rebuild')`},
 	}); err != nil {
 		return fmt.Errorf("backfill clipboard metadata and FTS index: %w", err)
@@ -306,7 +308,8 @@ func (s *SQLiteClipboardStore) Record(ctx context.Context, candidate clipboard.C
 	if candidate.Kind == "" {
 		candidate.Kind = clipboard.KindText
 	}
-	if candidate.Kind == clipboard.KindText && candidate.ByteSize == 0 {
+	if candidate.Kind == clipboard.KindText {
+		candidate.Media = clipboard.Media{}
 		candidate.ByteSize = int64(len([]byte(candidate.Content)))
 	}
 	hash := candidate.DedupeHash()

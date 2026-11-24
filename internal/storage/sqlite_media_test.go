@@ -84,6 +84,35 @@ func TestSQLiteClipboardStore_BackfillsKindAndByteSizeIdempotently(t *testing.T)
 	}
 }
 
+func TestSQLiteClipboardStore_BackfillsTextKindWithZeroByteSize(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "kind-text.db")
+	db, err := sqlite.Open(ctx, dbPath, sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Execute(ctx, `CREATE TABLE clipboard_items (id TEXT PRIMARY KEY, content TEXT NOT NULL, content_hash TEXT NOT NULL UNIQUE, source_bundle_id TEXT NOT NULL DEFAULT '', source_app_name TEXT NOT NULL DEFAULT '', created_at_ns INTEGER NOT NULL, updated_at_ns INTEGER NOT NULL, is_pinned INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL DEFAULT 'text')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Execute(ctx, `INSERT INTO clipboard_items VALUES ('old-kind','中文','h-kind','','Notes',1,1,0,'text')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewSQLiteClipboardStore(ctx, dbPath, clipboard.NewPrivacyFilter())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	items, err := store.Recent(ctx, 10)
+	if err != nil || len(items) != 1 || items[0].ByteSize != int64(len([]byte("中文"))) || items[0].Media.Kind != "" {
+		t.Fatalf("migrated item=%+v err=%v", items, err)
+	}
+}
+
 func TestSQLiteClipboardStore_BackfillsAndIndexesAllLegacyRows(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "legacy.db")
@@ -188,6 +217,21 @@ func TestSQLiteClipboardStore_RejectsMediaWithoutBlobSHA(t *testing.T) {
 	})
 	if err == nil || ok || item != nil {
 		t.Fatalf("expected malformed media rejection, item=%+v ok=%v err=%v", item, ok, err)
+	}
+}
+
+func TestSQLiteClipboardStoreTextCandidateCannotCarryMediaMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t, ":memory:", clipboard.NewPrivacyFilter())
+	item, ok, err := store.Record(ctx, clipboard.CaptureCandidate{
+		Content: "plain",
+		Media:   clipboard.Media{Kind: clipboard.KindText, MediaPath: "/stale/blob", BlobSHA: "stale", ByteSize: 999},
+	})
+	if err != nil || !ok {
+		t.Fatalf("record text: item=%+v ok=%v err=%v", item, ok, err)
+	}
+	if item.IsMedia() || item.MediaPath != "" || item.BlobSHA != "" || item.ByteSize != int64(len([]byte("plain"))) {
+		t.Fatalf("text row retained media metadata: %+v", item.Media)
 	}
 }
 
