@@ -297,7 +297,7 @@ func (a *AppController) renderSettingsAIProfilesSection(
 		protoStr := aiProtocolShortLabel(activeProfile.Protocol)
 		cycleSummary := pickLang(zh, "仅当前", "single")
 		if nextCycleID != "" && !strings.EqualFold(nextCycleID, activeProfile.ID) {
-			cycleSummary = fmt.Sprintf("%s (%s⇧P)", nextCycleID, modPrefix())
+			cycleSummary = fmt.Sprintf("%s (%s⇧M)", nextCycleID, modPrefix())
 		}
 
 		ui.Grid(c).Columns(2).GapX(space10).GapY(space2).FillWidth().Children(func() {
@@ -370,7 +370,10 @@ func (a *AppController) renderAIProfileMatrixCard(
 			})
 
 			if hasPreview {
-				a.renderAISwitchImpactCard(c, theme, cfg, activeProfile, previewTarget, keySource)
+				previewNotice := pickLang(zh,
+					fmt.Sprintf("已展开切换影响预览：%s → %s（见上方配置切换栏）。", activeProfile.ID, previewTarget.ID),
+					fmt.Sprintf("Switch impact preview open above: %s → %s.", activeProfile.ID, previewTarget.ID))
+				ui.Text(c, previewNotice).FontSize(typeMicro).TextColor(theme.TextMuted).Wrap()
 			} else {
 				mirrorMsg := pickLang(zh,
 					"点击任意候选卡片的「影响」可对比协议、模型、推理强度、SecretRef 与生效面；密钥按 Keychain → 环境变量 → 本地免密钥解析，永不写入 TOML。",

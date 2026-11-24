@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/config"
@@ -81,6 +82,13 @@ type settingsEditorState struct {
 
 	// clipboard exclusions form.
 	clipExcludeDraft string
+
+	// async-cached OS input sources for renderIMEConfig (avoids blocking TIS IPC on every frame).
+	imeHasCurrent bool
+	imeCurrent    host.InputSourceInfo
+	imeSources    []host.InputSourceInfo
+	imeFetchedAt  time.Time
+	imeInFlight   bool
 }
 
 var settingsEditorStates sync.Map // map[*AppController]*settingsEditorState
@@ -455,10 +463,68 @@ func splitTokens(raw string) []string {
 // IME configuration
 // ---------------------------------------------------------------------------
 
+const imeSettingsCacheTTL = 2 * time.Second
+
+func (a *AppController) refreshIMEConfigSourcesAsync(svc ui.Services, force bool) {
+	se := a.settingsEditor()
+	se.mu.Lock()
+	if se.imeInFlight || (!force && !se.imeFetchedAt.IsZero() && time.Since(se.imeFetchedAt) < imeSettingsCacheTTL) {
+		se.mu.Unlock()
+		return
+	}
+	se.imeInFlight = true
+	se.mu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), imeSwitchTimeout)
+		defer cancel()
+		cur, curErr := a.CurrentInputSource(ctx)
+		sources := a.AvailableInputSources(ctx)
+
+		se.mu.Lock()
+		if curErr == nil {
+			se.imeHasCurrent = true
+			se.imeCurrent = cur
+		}
+		if sources != nil {
+			se.imeSources = append([]host.InputSourceInfo(nil), sources...)
+		}
+		se.imeFetchedAt = time.Now()
+		se.imeInFlight = false
+		se.mu.Unlock()
+
+		svc.Invalidate()
+		if a != nil {
+			a.mu.Lock()
+			repaint := a.OnRepaint
+			a.mu.Unlock()
+			if repaint != nil {
+				repaint()
+			}
+		}
+	}()
+}
+
 // renderIMEConfig draws the global IME settings: switches, the switch
 // delay, the current and the default input source.
 func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
 	imeCfg := cfg.Main.IME
+	a.refreshIMEConfigSourcesAsync(c.Services(), false)
+
+	se := a.settingsEditor()
+	se.mu.Lock()
+	hasCurrent := se.imeHasCurrent
+	curSource := se.imeCurrent
+	cachedSources := append([]host.InputSourceInfo(nil), se.imeSources...)
+	inFlight := se.imeInFlight
+	se.mu.Unlock()
+
+	if !hasCurrent {
+		if fallback := a.Diagnostics().ActiveInputSource; fallback.ID != "" || fallback.Name != "" {
+			hasCurrent = true
+			curSource = fallback
+		}
+	}
 
 	settingsSourceCard(c, theme, i18n.T("settings.card.ime"), "[ime]", func() {
 		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.ime.enabled"), "enabled", "", imeCfg.Enabled); changed {
@@ -482,16 +548,15 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 		}
 
 		settingsCardDivider(c, theme)
-		ctx := context.Background()
-		if cur, err := a.CurrentInputSource(ctx); err == nil {
-			settingsKeyValueRow(c, theme, i18n.T("settings.ime.current_source"), FormatInputSourceStatus(cur))
+		if hasCurrent {
+			settingsKeyValueRow(c, theme, i18n.T("settings.ime.current_source"), FormatInputSourceStatus(curSource))
 		}
 		if st, ok := a.ForegroundIMEStatus(); ok {
 			for _, row := range foregroundIMERows(st) {
 				settingsKeyValueRow(c, theme, row[0], row[1])
 			}
 		}
-		labels, ids := inputSourceOptions(a.AvailableInputSources(ctx), imeCfg.DefaultInputSourceID)
+		labels, ids := inputSourceOptions(cachedSources, imeCfg.DefaultInputSourceID)
 		options := make([]settingOption, len(ids))
 		for i := range ids {
 			options[i] = settingOption{ids[i], labels[i]}
@@ -503,6 +568,16 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 			options, imeCfg.DefaultInputSourceID, 0); changed {
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.DefaultInputSourceID = v })
 		}
+		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+			ui.Spacer(c)
+			refreshLabel := pickLang(i18n.IsChinese(), "刷新输入源", "Refresh Input Sources")
+			if inFlight {
+				refreshLabel = pickLang(i18n.IsChinese(), "刷新中…", "Refreshing…")
+			}
+			if ui.Button(c, refreshLabel).Key("ime-sources-refresh").Disabled(inFlight).Padding(space2, space8).Shrink(0).Clicked() {
+				a.refreshIMEConfigSourcesAsync(c.Services(), true)
+			}
+		})
 	})
 }
 
@@ -762,109 +837,8 @@ func (a *AppController) renderIMERulesCard(c *ui.Context, theme *ui.Theme, cfg c
 }
 
 // ---------------------------------------------------------------------------
-// AI profile editor
+// AI profile mutations
 // ---------------------------------------------------------------------------
-
-// renderAIProfileEditor draws the editor of the active AI profile.
-func (a *AppController) renderAIProfileEditor(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
-	active := a.ActiveAIProfile()
-
-	settingsEditorCard(c, theme, i18n.T("settings.card.profile_config"), func() {
-		settingsHint(c, theme, i18n.Tf("settings.ai.editing_profile", active.ID))
-		ui.Column(c).FillWidth().Gap(space4).Children(func() {
-			settingsInlineRow(c, theme, i18n.T("settings.field.name"), settingsFieldLabelWidth, func() {
-				if v, changed := settingsTextInput(c, i18n.T("settings.ai.profile_name"), active.Name, active.Name); changed {
-					a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.Name = v })
-				}
-			})
-			settingsInlineRow(c, theme, i18n.T("settings.field.provider"), settingsFieldLabelWidth, func() {
-				if v, changed := settingsTextInput(c, i18n.T("settings.ai.profile_provider"), "deepseek", active.Provider); changed {
-					a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.Provider = strings.TrimSpace(v) })
-				}
-			})
-			settingsInlineRow(c, theme, i18n.T("settings.field.protocol"), settingsFieldLabelWidth, func() {
-				opts := make([]string, 0, 3)
-				for _, p := range config.AllAIProtocols() {
-					opts = append(opts, string(p))
-				}
-				current := string(active.Protocol)
-				if current == "" {
-					current = string(config.ProtocolOpenAICompatible)
-				}
-				if v, changed := settingsSelect(c, opts, current); changed {
-					a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.Protocol = config.AIProtocol(v) })
-				}
-			})
-			settingsInlineRow(c, theme, i18n.T("settings.field.model"), settingsFieldLabelWidth, func() {
-				if v, changed := settingsTextInput(c, i18n.T("settings.ai.profile_model"), "model-name", active.Model); changed {
-					a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.Model = strings.TrimSpace(v) })
-				}
-			})
-			settingsInlineRow(c, theme, i18n.T("settings.field.temperature"), settingsFieldLabelWidth, func() {
-				if v, changed := settingsInlineNumber(c, theme, i18n.T("settings.field.temperature"), active.Temperature, 0, 2, 0.1, ""); changed {
-					a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.Temperature = v })
-				}
-			})
-			settingsInlineRow(c, theme, i18n.T("settings.field.timeout_s"), settingsFieldLabelWidth, func() {
-				if v, changed := settingsInlineNumber(c, theme, i18n.T("settings.field.timeout_s"), active.TimeoutSeconds, 5, 300, 5, "s"); changed {
-					a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.TimeoutSeconds = v })
-				}
-			})
-		})
-		settingsInlineRow(c, theme, i18n.T("settings.field.base_url"), settingsFieldLabelWidth, func() {
-			if v, changed := settingsTextInput(c, i18n.T("settings.ai.profile_base_url"), "https://api.example.com/v1", active.BaseURL); changed {
-				a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.BaseURL = strings.TrimSpace(v) })
-			}
-		})
-		settingsInlineRow(c, theme, i18n.T("settings.field.keychain"), settingsFieldLabelWidth, func() {
-			if v, changed := settingsTextInput(c, i18n.T("settings.ai.profile_keychain"), "clavis.ai.profile", active.KeychainAccount); changed {
-				a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.KeychainAccount = strings.TrimSpace(v) })
-			}
-		})
-		settingsLabelled(c, theme, i18n.T("settings.field.system_prompt"), func() {
-			if v, changed := settingsTextArea(c, i18n.T("settings.ai.system_prompt"), i18n.T("settings.ai.system_prompt_ph"), active.SystemPrompt, 2); changed {
-				a.updateAIProfile(active.ID, func(p *config.AIProfile) { p.SystemPrompt = v })
-			}
-		})
-		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-			if ui.Button(c, i18n.T("settings.ai.delete_profile")).Disabled(len(cfg.Main.AI.Profiles) <= 1).Clicked() {
-				a.deleteAIProfile(active.ID)
-			}
-			settingsHint(c, theme, i18n.Tf("settings.ai.profile_count", len(cfg.Main.AI.Profiles)))
-		})
-	})
-}
-
-// renderAIAddProfileCard draws the form that appends a custom AI profile.
-func (a *AppController) renderAIAddProfileCard(c *ui.Context, theme *ui.Theme) {
-	se := a.settingsEditor()
-	settingsEditorCard(c, theme, i18n.T("settings.card.add_profile"), func() {
-		draft := seGet(se, func(s *settingsEditorState) config.AIProfile { return s.aiDraftProfile })
-		if draft.ID == "" && draft.Provider == "" && draft.BaseURL == "" && draft.Model == "" {
-			draft = config.AIProfile{Protocol: config.ProtocolOpenAICompatible, Temperature: 0.2, TimeoutSeconds: 30}
-		}
-		ui.Grid(c).Columns(2).GapX(8).GapY(2).FillWidth().Children(func() {
-			if v, changed := settingsTextInput(c, i18n.T("settings.ai.new_profile_id"), "my-profile", draft.ID); changed {
-				seSet(se, func(s *settingsEditorState) { s.aiDraftProfile.ID = v })
-			}
-			if v, changed := settingsTextInput(c, i18n.T("settings.ai.new_profile_provider"), "openai", draft.Provider); changed {
-				seSet(se, func(s *settingsEditorState) { s.aiDraftProfile.Provider = v })
-			}
-			if v, changed := settingsTextInput(c, i18n.T("settings.ai.new_profile_base_url"), "https://api.example.com/v1", draft.BaseURL); changed {
-				seSet(se, func(s *settingsEditorState) { s.aiDraftProfile.BaseURL = v })
-			}
-			if v, changed := settingsTextInput(c, i18n.T("settings.ai.new_profile_model"), "model-name", draft.Model); changed {
-				seSet(se, func(s *settingsEditorState) { s.aiDraftProfile.Model = v })
-			}
-		})
-		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-			if ui.PrimaryButton(c, i18n.T("settings.ai.add_profile")).Clicked() {
-				a.addAIProfileDraft()
-			}
-			settingsHint(c, theme, i18n.T("settings.ai.new_profile_hint"))
-		})
-	})
-}
 
 // updateAIProfile applies mutate to the profile with id and persists it,
 // keeping the flat [ai] fields of the active profile in sync.
@@ -1800,7 +1774,8 @@ func (a *AppController) deleteSnippetDraft() {
 // Glossary & Clipboard
 // ---------------------------------------------------------------------------
 
-// renderGlossarySection draws glossary CRUD beside the clipboard controls.
+// renderGlossarySection draws glossary CRUD without duplicating clipboard settings
+// (which live in the dedicated Clipboard section).
 func (a *AppController) renderGlossarySection(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
 	se := a.settingsEditor()
 	terms := cfg.Glossary.Terms
@@ -1814,74 +1789,70 @@ func (a *AppController) renderGlossarySection(c *ui.Context, theme *ui.Theme, cf
 		})
 	}
 
-	ui.Grid(c).Columns(settingsTwoColumns(c)).Gap(10).FillWidth().Children(func() {
-		settingsEditorCard(c, theme, i18n.Tf("settings.glossary.card_title", len(terms)), func() {
-			ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-				if ui.PrimaryButton(c, i18n.T("settings.glossary.new_term")).Clicked() {
-					seSet(se, func(s *settingsEditorState) {
-						s.glossaryIsNew = true
-						s.glossarySelected = ""
-						s.glossaryDraft = config.GlossaryTerm{Aliases: []string{}}
-					})
-				}
-				settingsHint(c, theme, i18n.T("settings.glossary.select_term"))
-			})
-			settingsDivider(c)
-			if len(terms) == 0 {
-				kitEmptyState(c, theme, "character.book.closed", i18n.T("omnibox.empty.glossary"), "")
-			}
-			for _, term := range terms {
-				t := term
-				row := settingsListRow(c, theme, "glossary:"+t.Term, t.Term == selected)
-				row.Children(func() {
-					ui.Text(c, t.Term).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Shrink(0)
-					ui.Text(c, strings.Join(t.Aliases, ", ")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().Grow(1).MinWidth(0)
-					if t.Category != "" {
-						chip(c, theme, "", t.Category, chipNeutral).Shrink(0)
-					}
+	settingsEditorCard(c, theme, i18n.Tf("settings.glossary.card_title", len(terms)), func() {
+		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
+			if ui.PrimaryButton(c, i18n.T("settings.glossary.new_term")).Clicked() {
+				seSet(se, func(s *settingsEditorState) {
+					s.glossaryIsNew = true
+					s.glossarySelected = ""
+					s.glossaryDraft = config.GlossaryTerm{Aliases: []string{}}
 				})
-				if row.Clicked() {
-					seSet(se, func(s *settingsEditorState) {
-						s.glossaryIsNew = false
-						s.glossarySelected = t.Term
-						s.glossaryDraft = t
-					})
-				}
 			}
-
-			settingsDivider(c)
-			draft := seGet(se, func(s *settingsEditorState) config.GlossaryTerm { return s.glossaryDraft })
-			settingsInlineRow(c, theme, i18n.T("settings.field.term"), settingsFieldLabelWidth, func() {
-				if v, changed := settingsTextInput(c, i18n.T("settings.glossary.term"), "Kubernetes", draft.Term); changed {
-					seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Term = v })
-				}
-			})
-			settingsInlineRow(c, theme, i18n.T("settings.field.aliases"), settingsFieldLabelWidth, func() {
-				if v, changed := settingsTextInput(c, i18n.T("settings.glossary.aliases"), "k8s, kube", strings.Join(draft.Aliases, ", ")); changed {
-					seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Aliases = splitTokens(v) })
-				}
-			})
-			settingsInlineRow(c, theme, i18n.T("settings.field.category"), settingsFieldLabelWidth, func() {
-				if v, changed := settingsTextInput(c, i18n.T("settings.glossary.category"), "product", draft.Category); changed {
-					seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Category = v })
-				}
-			})
-			settingsInlineRow(c, theme, i18n.T("settings.field.hint"), settingsFieldLabelWidth, func() {
-				if v, changed := settingsTextInput(c, i18n.T("settings.glossary.hint"), i18n.T("settings.glossary.hint_ph"), draft.Hint); changed {
-					seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Hint = v })
-				}
-			})
-			ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-				if ui.PrimaryButton(c, i18n.T("settings.glossary.save")).Clicked() {
-					a.saveGlossaryDraft()
-				}
-				if ui.Button(c, i18n.T("settings.glossary.delete")).Disabled(seGet(se, func(s *settingsEditorState) bool { return s.glossaryIsNew })).Clicked() {
-					a.deleteGlossaryDraft()
-				}
-			})
+			settingsHint(c, theme, i18n.T("settings.glossary.select_term"))
 		})
+		settingsDivider(c)
+		if len(terms) == 0 {
+			kitEmptyState(c, theme, "character.book.closed", i18n.T("omnibox.empty.glossary"), "")
+		}
+		for _, term := range terms {
+			t := term
+			row := settingsListRow(c, theme, "glossary:"+t.Term, t.Term == selected)
+			row.Children(func() {
+				ui.Text(c, t.Term).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Shrink(0)
+				ui.Text(c, strings.Join(t.Aliases, ", ")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().Grow(1).MinWidth(0)
+				if t.Category != "" {
+					chip(c, theme, "", t.Category, chipNeutral).Shrink(0)
+				}
+			})
+			if row.Clicked() {
+				seSet(se, func(s *settingsEditorState) {
+					s.glossaryIsNew = false
+					s.glossarySelected = t.Term
+					s.glossaryDraft = t
+				})
+			}
+		}
 
-		a.renderClipboardCard(c, theme, cfg)
+		settingsDivider(c)
+		draft := seGet(se, func(s *settingsEditorState) config.GlossaryTerm { return s.glossaryDraft })
+		settingsInlineRow(c, theme, i18n.T("settings.field.term"), settingsFieldLabelWidth, func() {
+			if v, changed := settingsTextInput(c, i18n.T("settings.glossary.term"), "Kubernetes", draft.Term); changed {
+				seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Term = v })
+			}
+		})
+		settingsInlineRow(c, theme, i18n.T("settings.field.aliases"), settingsFieldLabelWidth, func() {
+			if v, changed := settingsTextInput(c, i18n.T("settings.glossary.aliases"), "k8s, kube", strings.Join(draft.Aliases, ", ")); changed {
+				seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Aliases = splitTokens(v) })
+			}
+		})
+		settingsInlineRow(c, theme, i18n.T("settings.field.category"), settingsFieldLabelWidth, func() {
+			if v, changed := settingsTextInput(c, i18n.T("settings.glossary.category"), "product", draft.Category); changed {
+				seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Category = v })
+			}
+		})
+		settingsInlineRow(c, theme, i18n.T("settings.field.hint"), settingsFieldLabelWidth, func() {
+			if v, changed := settingsTextInput(c, i18n.T("settings.glossary.hint"), i18n.T("settings.glossary.hint_ph"), draft.Hint); changed {
+				seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Hint = v })
+			}
+		})
+		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
+			if ui.PrimaryButton(c, i18n.T("settings.glossary.save")).Clicked() {
+				a.saveGlossaryDraft()
+			}
+			if ui.Button(c, i18n.T("settings.glossary.delete")).Disabled(seGet(se, func(s *settingsEditorState) bool { return s.glossaryIsNew })).Clicked() {
+				a.deleteGlossaryDraft()
+			}
+		})
 	})
 }
 

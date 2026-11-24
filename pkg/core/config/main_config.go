@@ -1166,6 +1166,9 @@ type ClipboardConfig struct {
 	MediaCapture bool `json:"mediaCapture"`
 	// MediaQuotaMB caps on-disk image blobs; oldest unpinned media rows are evicted first.
 	MediaQuotaMB int `json:"mediaQuotaMb"`
+	// SensitiveTTLSeconds is the auto-clear countdown (5..300s, default 30s) for
+	// user-only sensitive clipboard copies.
+	SensitiveTTLSeconds int `json:"sensitiveTtlSeconds"`
 }
 
 func DefaultClipboardConfig() ClipboardConfig {
@@ -1178,8 +1181,9 @@ func DefaultClipboardConfig() ClipboardConfig {
 			"com.1password.1password",
 			"com.apple.keychainaccess",
 		},
-		MediaCapture: true,
-		MediaQuotaMB: 512,
+		MediaCapture:        true,
+		MediaQuotaMB:        512,
+		SensitiveTTLSeconds: DefaultSensitiveCopyTTLSeconds,
 	}
 }
 
@@ -1223,6 +1227,11 @@ func decodeClipboardConfig(tbl *toml.Table, path string) (ClipboardConfig, error
 	} else if ok {
 		cfg.MediaQuotaMB = n
 	}
+	if n, ok, err := optionalInt(tbl, "sensitive_ttl_seconds", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.SensitiveTTLSeconds = NormalizeSensitiveTTLSeconds(n)
+	}
 	return cfg, nil
 }
 
@@ -1235,6 +1244,7 @@ func (c ClipboardConfig) toTOML() *toml.Table {
 	t.Set("excluded_bundle_ids", stringsToTOMLArray(c.ExcludedBundleIDs))
 	t.Set("media_capture", toml.BoolVal(c.MediaCapture))
 	t.Set("media_quota_mb", toml.IntVal(int64(c.MediaQuotaMB)))
+	t.Set("sensitive_ttl_seconds", toml.IntVal(int64(NormalizeSensitiveTTLSeconds(c.SensitiveTTLSeconds))))
 	return t
 }
 

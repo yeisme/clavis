@@ -1,13 +1,17 @@
 package uiapp
 
 import (
+	"context"
 	"image"
 	"image/color"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
@@ -196,4 +200,113 @@ func TestSettingsScreenshotShortcutQuickJumpAndAllSectionsRender(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestSettingsAIProfilesShortcutHintAndSingleImpactCard(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
+	i18n.SetLanguage(i18n.English)
+
+	ctrl, _, _, _ := newTestController(t, nil)
+	ctrl.setSettingsSection(settingsSectionAI)
+	tt := ui.NewTester(ctrl.SettingsView, 980, 1400)
+	tt.Frame()
+
+	// Shortcut hint must match ai_center_view.go (⌘⇧M / Ctrl+⇧M), never ⇧P.
+	joined := strings.Join(tt.Texts(), "\n")
+	if !strings.Contains(joined, "⇧M") {
+		t.Fatalf("AI profile switcher missing ⇧M cycle hint: %v", tt.Texts())
+	}
+	if strings.Contains(joined, "⇧P") {
+		t.Fatalf("AI profile switcher still contains stale ⇧P hint: %v", tt.Texts())
+	}
+
+	// Opening switch impact preview must render Confirm Switch ONCE (no duplicate card/key).
+	ctrl.setAIProfilePreviewTarget("ollama")
+	tt.Frame()
+	confirmCount := 0
+	for _, txt := range tt.Texts() {
+		if txt == "Confirm Switch" {
+			confirmCount++
+		}
+	}
+	if confirmCount != 1 {
+		t.Fatalf("Confirm Switch rendered %d times, want 1; texts=%v", confirmCount, tt.Texts())
+	}
+}
+
+type countingSlowIMEBridge struct {
+	*mockBridge
+	gate        chan struct{}
+	curCalls    atomic.Int32
+	sourceCalls atomic.Int32
+}
+
+func (b *countingSlowIMEBridge) CurrentInputSource(ctx context.Context) (host.InputSourceInfo, error) {
+	if b.curCalls.Add(1) == 1 && b.gate != nil {
+		select {
+		case <-b.gate:
+		case <-ctx.Done():
+			return host.InputSourceInfo{}, ctx.Err()
+		}
+	}
+	return b.mockBridge.CurrentInputSource(ctx)
+}
+
+func (b *countingSlowIMEBridge) InputSources(ctx context.Context) ([]host.InputSourceInfo, error) {
+	b.sourceCalls.Add(1)
+	return b.mockBridge.InputSources(ctx)
+}
+
+func TestSettingsIMEConfigCachesSourcesAsyncAndRefreshes(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
+	i18n.SetLanguage(i18n.English)
+
+	gate := make(chan struct{})
+	br := &countingSlowIMEBridge{mockBridge: newMockBridge(), gate: gate}
+	ctrl := NewAppController(Options{
+		ConfigStore: config.NewConfigStore(t.TempDir()),
+		Bridge:      br,
+	})
+	tt := ui.NewTester(func(c *ui.Context) {
+		ctrl.renderIMEConfig(c, ui.LightTheme(), ctrl.Config())
+	}, 520, 480)
+
+	// Frame 1 must not block even while OS TIS IPC is blocked on gate.
+	start := time.Now()
+	tt.Frame()
+	if elapsed := time.Since(start); elapsed > 80*time.Millisecond {
+		t.Fatalf("renderIMEConfig blocked render frame for %v", elapsed)
+	}
+	close(gate)
+
+	waitUntil(t, time.Second, func() bool {
+		se := ctrl.settingsEditor()
+		se.mu.Lock()
+		defer se.mu.Unlock()
+		return !se.imeInFlight && !se.imeFetchedAt.IsZero()
+	}, "IME config async refresh completed")
+
+	// Rapid subsequent frames hit the 2s cache without calling OS IPC again.
+	for range 6 {
+		tt.Frame()
+	}
+	if got := br.curCalls.Load(); got != 1 {
+		t.Fatalf("CurrentInputSource called %d times within TTL, want 1", got)
+	}
+	if got := br.sourceCalls.Load(); got != 1 {
+		t.Fatalf("InputSources called %d times within TTL, want 1", got)
+	}
+	if !tt.HasText("ABC · EN") {
+		t.Fatalf("cached current input source not rendered: %v", tt.Texts())
+	}
+
+	// Clicking Refresh Input Sources explicitly forces an async refresh.
+	if err := tt.Click("Refresh Input Sources"); err != nil {
+		t.Fatalf("click Refresh Input Sources: %v", err)
+	}
+	waitUntil(t, time.Second, func() bool {
+		return br.curCalls.Load() >= 2 && br.sourceCalls.Load() >= 2
+	}, "explicit Refresh Input Sources triggered async fetch")
 }

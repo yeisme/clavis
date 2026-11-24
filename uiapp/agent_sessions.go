@@ -2,18 +2,19 @@ package uiapp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	internalagentsession "github.com/yeisme/clavis/internal/agentsession"
 	"github.com/yeisme/clavis/pkg/core/agentsession"
+	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/host"
+	"github.com/yeisme/clavis/pkg/core/terminal"
 )
 
 type agentCommand struct{ ID, Label, Detail string }
@@ -157,30 +158,49 @@ func (c *AppController) fetchAgentOutput(target string, force bool) {
 	}()
 }
 
-type codexSQLiteReader struct{ path string }
+var (
+	agentCodexDBPathMu sync.RWMutex
+	agentCodexDBPath   string
 
-func (r codexSQLiteReader) Threads(ctx context.Context, limit int) ([]agentsession.CodexThread, error) {
-	query := fmt.Sprintf("SELECT id,title,cwd,updated_at,preview,source FROM threads WHERE archived=0 ORDER BY updated_at DESC LIMIT %d", limit)
-	out, err := exec.CommandContext(ctx, "sqlite3", "-readonly", "-json", r.path, query).Output()
-	if err != nil {
-		return nil, err
+	agentTerminalResolverMu      sync.RWMutex
+	agentTerminalResolverFactory = func(cfg config.TerminalConfig) *terminal.Resolver {
+		return terminal.NewResolver(cfg)
 	}
-	var rows []struct {
-		ID      string `json:"id"`
-		Title   string `json:"title"`
-		CWD     string `json:"cwd"`
-		Updated int64  `json:"updated_at"`
-		Preview string `json:"preview"`
-		Source  string `json:"source"`
+)
+
+func currentCodexDBPath() string {
+	agentCodexDBPathMu.RLock()
+	override := strings.TrimSpace(agentCodexDBPath)
+	agentCodexDBPathMu.RUnlock()
+	if override != "" {
+		return override
 	}
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return nil, err
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".codex", "state_5.sqlite")
+}
+
+func setAgentCodexDBPathForTest(path string) func() {
+	agentCodexDBPathMu.Lock()
+	previous := agentCodexDBPath
+	agentCodexDBPath = path
+	agentCodexDBPathMu.Unlock()
+	return func() {
+		agentCodexDBPathMu.Lock()
+		agentCodexDBPath = previous
+		agentCodexDBPathMu.Unlock()
 	}
-	threads := make([]agentsession.CodexThread, 0, len(rows))
-	for _, row := range rows {
-		threads = append(threads, agentsession.CodexThread{ID: row.ID, Title: row.Title, Workspace: row.CWD, LastActivityAt: time.Unix(row.Updated, 0), LastMessage: row.Preview, Status: row.Source})
+}
+
+func setAgentTerminalResolverForTest(factory func(config.TerminalConfig) *terminal.Resolver) func() {
+	agentTerminalResolverMu.Lock()
+	previous := agentTerminalResolverFactory
+	agentTerminalResolverFactory = factory
+	agentTerminalResolverMu.Unlock()
+	return func() {
+		agentTerminalResolverMu.Lock()
+		agentTerminalResolverFactory = previous
+		agentTerminalResolverMu.Unlock()
 	}
-	return threads, nil
 }
 
 func (c *AppController) refreshAgentSessions() {
@@ -192,13 +212,16 @@ func (c *AppController) refreshAgentSessions() {
 	c.agentRefreshStarted = true
 	setAgentOperationResult(c, host.OperationResult{State: host.StateRefreshing, ObservedAt: time.Now()})
 	c.agentMu.Unlock()
-	home, _ := os.UserHomeDir()
-	db := filepath.Join(home, ".codex", "state_5.sqlite")
+	db := currentCodexDBPath()
+	var codexReader agentsession.CodexThreadsReader
+	if reader, err := internalagentsession.NewCodexSQLiteReader(db); err == nil {
+		codexReader = reader
+	}
 	previousSessions, _ := c.cachedAgentData()
 	herdrExec := c.currentHerdrExecutor()
 	sessions, diagnostics := agentsession.Discover(context.Background(), agentsession.Options{
 		CodexDB:       db,
-		CodexReader:   codexSQLiteReader{path: db},
+		CodexReader:   codexReader,
 		HerdrExecutor: herdrExec,
 	})
 	var workspaces []agentsession.HerdrWorkspace
@@ -508,7 +531,7 @@ func (c *AppController) focusAgentSession(session agentsession.Session) {
 		available, err := focuser.Available(ctx)
 		if err != nil || !available {
 			c.ShowToastOrHUD("已复制会话 ID（未检测到 herdr，无法直接跳转）")
-			c.openGhosttyForAgentFallback()
+			c.openTerminalForAgentFallback(session)
 			return
 		}
 		var (
@@ -540,12 +563,33 @@ func (c *AppController) focusAgentSession(session agentsession.Session) {
 	}()
 }
 
-func (c *AppController) openGhosttyForAgentFallback() {
-	c.mu.Lock()
-	bridge := c.Bridge
-	c.mu.Unlock()
-	if bridge != nil {
-		_ = bridge.OpenApp(context.Background(), "com.mitchellh.ghostty")
+func (c *AppController) openTerminalForAgentFallback(session agentsession.Session) {
+	termCfg := config.DefaultTerminalConfig()
+	if c != nil && c.ConfigStore != nil {
+		termCfg = c.Config().Main.Terminal
+	}
+	dir := strings.TrimSpace(session.Workspace)
+	if dir != "" && !filepath.IsAbs(dir) {
+		dir = ""
+	}
+	agentTerminalResolverMu.RLock()
+	factory := agentTerminalResolverFactory
+	agentTerminalResolverMu.RUnlock()
+	if factory == nil {
+		factory = terminal.NewResolver
+	}
+	resolver := factory(termCfg)
+	if resolver == nil {
+		return
+	}
+	plan, _, err := resolver.Open(dir)
+	if err != nil && plan.Profile.BundleID != "" && c != nil {
+		c.mu.Lock()
+		bridge := c.Bridge
+		c.mu.Unlock()
+		if bridge != nil {
+			_ = bridge.OpenApp(context.Background(), plan.Profile.BundleID)
+		}
 	}
 }
 
