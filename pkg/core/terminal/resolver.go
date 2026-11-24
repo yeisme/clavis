@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -27,11 +28,81 @@ type Detector interface {
 	Exists(profile config.TerminalProfile) bool
 }
 
+// ExecRunner executes a resolved TerminalPlan via os/exec.
+type ExecRunner struct{}
+
+func (ExecRunner) Run(program string, args ...string) error {
+	cmd := exec.Command(program, args...)
+	if program == "open" {
+		return cmd.Run()
+	}
+	return cmd.Start()
+}
+
+// Resolver resolves and executes configured terminal profiles.
+type Resolver struct {
+	cfg      config.TerminalConfig
+	detector Detector
+	runner   Runner
+}
+
+// NewResolver constructs a Resolver backed by the system detector and ExecRunner.
+func NewResolver(cfg config.TerminalConfig) *Resolver {
+	return NewResolverWith(cfg, systemDetector{}, ExecRunner{})
+}
+
+// NewResolverWith constructs a Resolver with custom detector/runner seams for tests.
+func NewResolverWith(cfg config.TerminalConfig, detector Detector, runner Runner) *Resolver {
+	if detector == nil {
+		detector = systemDetector{}
+	}
+	if runner == nil {
+		runner = ExecRunner{}
+	}
+	return &Resolver{
+		cfg:      cfg,
+		detector: detector,
+		runner:   runner,
+	}
+}
+
+// Resolve selects a terminal profile and constructs its open plan without launching.
+func (r *Resolver) Resolve(dir string) (TerminalPlan, host.OperationResult, error) {
+	if r == nil {
+		return ResolveTerminal(config.DefaultTerminalConfig(), dir)
+	}
+	return ResolveTerminalWithDetector(r.cfg, dir, r.detector)
+}
+
+// Open resolves the terminal profile and executes the plan via the configured Runner.
+func (r *Resolver) Open(dir string) (TerminalPlan, host.OperationResult, error) {
+	plan, res, err := r.Resolve(dir)
+	if err != nil {
+		return plan, res, err
+	}
+	runner := Runner(ExecRunner{})
+	if r != nil && r.runner != nil {
+		runner = r.runner
+	}
+	if err := Execute(plan, runner); err != nil {
+		res.State = host.StateFailed
+		res.Code = "terminal_open_failed"
+		res.Message = err.Error()
+		res.Retryable = true
+		return plan, res, err
+	}
+	return plan, res, nil
+}
+
 type systemDetector struct{}
 
 func (systemDetector) Exists(p config.TerminalProfile) bool {
-	if p.BundleID != "" {
-		for _, root := range []string{"/Applications", "/System/Applications", "/System/Library/CoreServices"} {
+	if p.BundleID != "" && p.Command != "" {
+		roots := []string{"/Applications", "/System/Applications", "/System/Applications/Utilities", "/System/Library/CoreServices"}
+		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+			roots = append(roots, filepath.Join(home, "Applications"))
+		}
+		for _, root := range roots {
 			if _, err := os.Stat(filepath.Join(root, p.Command+".app")); err == nil {
 				return true
 			}
@@ -99,22 +170,46 @@ func resolveTerminal(cfg config.TerminalConfig, dir string, detector Detector) (
 	return makePlan(p, dir), host.OperationResult{State: host.StateReady, Code: "terminal_ready", Message: fmt.Sprintf("using %s", p.Name), ObservedAt: time.Now()}, nil
 }
 
+func isAppleTerminal(p config.TerminalProfile) bool {
+	return strings.EqualFold(strings.TrimSpace(p.BundleID), "com.apple.Terminal") ||
+		strings.EqualFold(strings.TrimSpace(p.Command), "Terminal")
+}
+
 func makePlan(p config.TerminalProfile, dir string) TerminalPlan {
+	return makePlanForOS(p, dir, runtime.GOOS)
+}
+
+func makePlanForOS(p config.TerminalProfile, dir, goos string) TerminalPlan {
 	template := strings.TrimSpace(p.ArgTemplate)
+	if isAppleTerminal(p) {
+		// Apple Terminal.app does not accept --working-directory={dir}; opening the
+		// directory path via `open -a Terminal <dir>` opens a window at that path.
+		if template == "" || template == "--working-directory={dir}" {
+			template = "{dir}"
+		}
+		args := templateArgs(template, dir)
+		app := strings.TrimSpace(p.Command)
+		var openArgs []string
+		if app != "" {
+			openArgs = append([]string{"-a", app}, args...)
+		} else {
+			openArgs = append([]string{"-b", p.BundleID}, args...)
+		}
+		return TerminalPlan{Profile: p, Program: "open", Args: openArgs, Dir: dir}
+	}
 	if template == "" {
 		template = "--working-directory={dir}"
 	}
 	args := templateArgs(template, dir)
-	if filepath.IsAbs(p.Command) && p.BundleID == "" {
+	if (filepath.IsAbs(p.Command) && p.BundleID == "") || (goos != "darwin" && p.BundleID == "" && strings.TrimSpace(p.Command) != "") {
 		return TerminalPlan{Profile: p, Program: p.Command, Args: args, Dir: dir}
 	}
-	openArgs := []string{"-na"}
+	var openArgs []string
 	if p.BundleID != "" {
-		openArgs = append(openArgs, "-b", p.BundleID)
+		openArgs = []string{"-n", "-b", p.BundleID, "--args"}
 	} else {
-		openArgs = append(openArgs, p.Command)
+		openArgs = []string{"-na", p.Command, "--args"}
 	}
-	openArgs = append(openArgs, "--args")
 	openArgs = append(openArgs, args...)
 	return TerminalPlan{Profile: p, Program: "open", Args: openArgs, Dir: dir}
 }

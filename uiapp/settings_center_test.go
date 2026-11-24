@@ -90,42 +90,18 @@ func TestSettingsDraftDirtyDetectsChangedSnippet(t *testing.T) {
 }
 
 // TestSettingsCenter_TriggersAndAppearancePersist drives the interactive
-// trigger and appearance editors and checks config.toml follows.
+// trigger and appearance editors on their dedicated sections and checks config.toml follows.
 func TestSettingsCenter_TriggersAndAppearancePersist(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
 	tt := ui.NewTester(ctrl.SettingsView, 960, 640)
 	tt.Frame()
 
-	// The trigger controls show the live values from config.toml.
+	// The trigger controls show the live values from config.toml and do not duplicate Appearance.
 	if !tt.HasText("right_option") || !tt.HasText("capsule_shortcut: option+space") {
 		t.Fatalf("expected trigger values on General & Triggers, got %v", tt.Texts())
 	}
-
-	// Toggle show_preview_pane and check it reaches config.toml.
-	if !ctrl.Config().Main.Appearance.ShowPreviewPane {
-		t.Fatal("expected show_preview_pane to default to true")
-	}
-	if err := tt.Click("Show Preview Pane"); err != nil {
-		t.Fatalf("click Show Preview Pane: %v", err)
-	}
-	tt.Frame()
-	if ctrl.Config().Main.Appearance.ShowPreviewPane {
-		t.Fatal("expected show_preview_pane=false after toggling the switch")
-	}
-	if body := readConfigFile(t, ctrl, config.FileMain); strings.Contains(body, "show_preview_pane = true") {
-		t.Fatalf("config.toml still shows show_preview_pane = true:\n%s", body)
-	}
-
-	// Pick the dark theme segment: humanized "Dark", stored as "dark".
-	if err := tt.Click("Dark"); err != nil {
-		t.Fatalf("click Dark theme segment: %v", err)
-	}
-	tt.Frame()
-	if got := ctrl.Config().Main.Appearance.Theme; got != "dark" {
-		t.Fatalf("appearance.theme = %q, want dark", got)
-	}
-	if body := readConfigFile(t, ctrl, config.FileMain); !strings.Contains(body, `theme = "dark"`) {
-		t.Fatalf("config.toml does not persist theme = dark:\n%s", body)
+	if tt.HasText("[appearance]") {
+		t.Fatalf("General & Triggers must not duplicate [appearance] card: %v", tt.Texts())
 	}
 
 	// Record a new capsule shortcut chord: option+shift+k.
@@ -157,6 +133,38 @@ func TestSettingsCenter_TriggersAndAppearancePersist(t *testing.T) {
 	tt.Frame()
 	if got := ctrl.Config().Main.Trigger.CapsuleShortcut; got != "option+shift+k" {
 		t.Fatalf("capsule_shortcut = %q after cancelling, want option+shift+k", got)
+	}
+
+	// Appearance lives in its dedicated section.
+	ctrl.setSettingsSection(settingsSectionAppearance)
+	tt.Frame()
+	tt.Frame()
+
+	// Toggle show_preview_pane and check it reaches config.toml.
+	if !ctrl.Config().Main.Appearance.ShowPreviewPane {
+		t.Fatal("expected show_preview_pane to default to true")
+	}
+	if err := tt.Click("Show Preview Pane"); err != nil {
+		t.Fatalf("click Show Preview Pane: %v", err)
+	}
+	tt.Frame()
+	if ctrl.Config().Main.Appearance.ShowPreviewPane {
+		t.Fatal("expected show_preview_pane=false after toggling the switch")
+	}
+	if body := readConfigFile(t, ctrl, config.FileMain); strings.Contains(body, "show_preview_pane = true") {
+		t.Fatalf("config.toml still shows show_preview_pane = true:\n%s", body)
+	}
+
+	// Pick the dark theme segment: humanized "Dark", stored as "dark".
+	if err := tt.Click("Dark"); err != nil {
+		t.Fatalf("click Dark theme segment: %v", err)
+	}
+	tt.Frame()
+	if got := ctrl.Config().Main.Appearance.Theme; got != "dark" {
+		t.Fatalf("appearance.theme = %q, want dark", got)
+	}
+	if body := readConfigFile(t, ctrl, config.FileMain); !strings.Contains(body, `theme = "dark"`) {
+		t.Fatalf("config.toml does not persist theme = dark:\n%s", body)
 	}
 }
 
@@ -544,12 +552,26 @@ func TestSettingsCenter_AIProfileEditAndAdd(t *testing.T) {
 
 func TestSettingsCenter_ClipboardMediaControlsPersist(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
-	tt := ui.NewTester(ctrl.SettingsView, 960, 640)
+	tt := ui.NewTester(ctrl.SettingsView, 960, 1200)
 	tt.Frame()
-	openSettingsSection(t, tt, "Glossary & Clipboard")
+
+	// Glossary section must not duplicate Clipboard settings.
+	ctrl.setSettingsSection(settingsSectionGlossary)
+	tt.Frame()
+	if tt.HasText("[clipboard]") {
+		t.Fatalf("Glossary section must not duplicate [clipboard] card: %v", tt.Texts())
+	}
+
+	// Clipboard settings and ClipboardKeyManager live in the dedicated Clipboard section.
+	ctrl.setSettingsSection(settingsSectionClipboard)
+	tt.Frame()
+	tt.Frame()
 
 	if !tt.HasText("Capture Images & Files") {
 		t.Fatalf("expected media capture setting, got %v", tt.Texts())
+	}
+	if !tt.HasText("Clipboard Shortcuts & Copy Capabilities") {
+		t.Fatalf("expected mounted ClipboardKeyManager card in Settings -> Clipboard, got %v", tt.Texts())
 	}
 	if err := tt.Click("Capture Images & Files"); err != nil {
 		t.Fatalf("click media capture: %v", err)
@@ -569,6 +591,35 @@ func TestSettingsCenter_ClipboardMediaControlsPersist(t *testing.T) {
 	tt.Frame()
 	if got := ctrl.Config().Main.Clipboard.MediaQuotaMB; got < 0 {
 		t.Fatalf("media quota = %d, want non-negative", got)
+	}
+
+	// Changing sensitive copy TTL preset persists to config.toml and survives restart.
+	if err := tt.Click("60s"); err != nil {
+		t.Fatalf("click 60s TTL preset: %v", err)
+	}
+	tt.Frame()
+	if got := ctrl.Config().Main.Clipboard.SensitiveTTLSeconds; got != 60 {
+		t.Fatalf("SensitiveTTLSeconds = %d, want 60", got)
+	}
+	if got := ctrl.ClipboardKeyManagerPolicy().SensitiveTTLSeconds; got != 60 {
+		t.Fatalf("runtime policy SensitiveTTLSeconds = %d, want 60", got)
+	}
+	body = readConfigFile(t, ctrl, config.FileMain)
+	if !strings.Contains(body, "sensitive_ttl_seconds = 60") {
+		t.Fatalf("config.toml does not persist sensitive_ttl_seconds = 60:\n%s", body)
+	}
+
+	// Simulated restart: fresh ConfigStore + AppController on the same directory loads TTL=60.
+	restartedStore := config.NewConfigStore(ctrl.ConfigStore.Directory())
+	if _, err := restartedStore.LoadOrInitialize(); err != nil {
+		t.Fatalf("restarted LoadOrInitialize: %v", err)
+	}
+	restartedCtrl := NewAppController(Options{ConfigStore: restartedStore})
+	restartedCtrl.setSettingsSection(settingsSectionClipboard)
+	tt2 := ui.NewTester(restartedCtrl.SettingsView, 960, 1200)
+	tt2.Frame()
+	if got := restartedCtrl.ClipboardKeyManagerPolicy().SensitiveTTLSeconds; got != 60 {
+		t.Fatalf("restarted runtime policy SensitiveTTLSeconds = %d, want 60", got)
 	}
 }
 

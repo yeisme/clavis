@@ -476,6 +476,7 @@ func (a *AppController) renderSettingsSection(
 // These wrappers expose the grouped navigation's dedicated secondary pages.
 func (a *AppController) renderSettingsClipboardSection(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
 	a.renderClipboardCard(c, theme, cfg)
+	a.renderClipboardKeyManagerCard(c, theme, cfg)
 }
 
 func (a *AppController) renderSettingsAppearanceSection(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
@@ -489,7 +490,7 @@ func (a *AppController) renderSettingsAboutSection(c *ui.Context, theme *ui.Them
 	a.renderSyncStatusCard(c, theme)
 }
 
-// renderSettingsGeneralSection draws the interactive trigger and appearance editors.
+// renderSettingsGeneralSection draws the interactive trigger editors.
 func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
 	se := a.settingsEditor()
 	trigger := cfg.Main.Trigger
@@ -539,8 +540,6 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.SnippetBackspaceUndo = v })
 		}
 	})
-
-	a.renderSettingsAppearanceCard(c, theme, cfg)
 
 	a.mu.Lock()
 	statusMsg := a.settingsStatus

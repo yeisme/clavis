@@ -23,8 +23,13 @@ type TerminalConfig struct {
 func DefaultTerminalConfig() TerminalConfig {
 	return TerminalConfig{Default: "ghostty", Profiles: []TerminalProfile{
 		{Name: "ghostty", BundleID: "com.mitchellh.ghostty", Command: "Ghostty", ArgTemplate: "--working-directory={dir}"},
-		{Name: "terminal", BundleID: "com.apple.Terminal", Command: "Terminal", ArgTemplate: "--working-directory={dir}"},
+		{Name: "terminal", BundleID: "com.apple.Terminal", Command: "Terminal", ArgTemplate: "{dir}"},
 	}}
+}
+
+func isAppleTerminalProfile(p TerminalProfile) bool {
+	return strings.EqualFold(strings.TrimSpace(p.BundleID), "com.apple.Terminal") ||
+		(strings.TrimSpace(p.BundleID) == "" && strings.EqualFold(strings.TrimSpace(p.Command), "Terminal"))
 }
 
 func decodeTerminalConfig(tbl *toml.Table, path string) (TerminalConfig, error) {
@@ -59,6 +64,9 @@ func decodeTerminalConfig(tbl *toml.Table, path string) (TerminalConfig, error) 
 		}
 		if profile.ArgTemplate, _, err = optionalString(p, "arg_template", pp); err != nil {
 			return cfg, err
+		}
+		if isAppleTerminalProfile(profile) && strings.TrimSpace(profile.ArgTemplate) == "--working-directory={dir}" {
+			profile.ArgTemplate = "{dir}"
 		}
 		cfg.Profiles = append(cfg.Profiles, profile)
 	}

@@ -3,6 +3,7 @@ package uiapp
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/egoist/mygo/ui"
@@ -10,6 +11,70 @@ import (
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/i18n"
 )
+
+type clipboardTTLSyncState struct {
+	initialized   bool
+	lastConfigTTL int
+}
+
+var clipboardTTLSyncStore = struct {
+	mu    sync.Mutex
+	byCtl map[*AppController]*clipboardTTLSyncState
+}{
+	byCtl: make(map[*AppController]*clipboardTTLSyncState),
+}
+
+// syncClipboardSensitiveTTLFromConfig reconciles the runtime sensitive copy TTL
+// with the persisted config.ClipboardConfig value (e.g. after restart or config
+// reload) without clobbering direct runtime overrides when config stays default.
+func (a *AppController) syncClipboardSensitiveTTLFromConfig(clipCfg config.ClipboardConfig) {
+	if a == nil {
+		return
+	}
+	cfgTTL := config.NormalizeSensitiveTTLSeconds(clipCfg.SensitiveTTLSeconds)
+	clipboardTTLSyncStore.mu.Lock()
+	st, ok := clipboardTTLSyncStore.byCtl[a]
+	if !ok {
+		st = &clipboardTTLSyncState{}
+		clipboardTTLSyncStore.byCtl[a] = st
+	}
+	shouldApply := false
+	if !st.initialized {
+		st.initialized = true
+		st.lastConfigTTL = cfgTTL
+		if cfgTTL != config.DefaultSensitiveCopyTTLSeconds {
+			shouldApply = true
+		}
+	} else if st.lastConfigTTL != cfgTTL {
+		st.lastConfigTTL = cfgTTL
+		shouldApply = true
+	}
+	clipboardTTLSyncStore.mu.Unlock()
+	if shouldApply {
+		a.SetClipboardSensitiveTTLSeconds(cfgTTL)
+	}
+}
+
+// updateClipboardSensitiveTTL updates the runtime sensitive copy TTL and
+// persists the clamped value into config.toml so it survives restarts.
+func (a *AppController) updateClipboardSensitiveTTL(sec int) int {
+	norm := a.SetClipboardSensitiveTTLSeconds(sec)
+	clipboardTTLSyncStore.mu.Lock()
+	st, ok := clipboardTTLSyncStore.byCtl[a]
+	if !ok {
+		st = &clipboardTTLSyncState{}
+		clipboardTTLSyncStore.byCtl[a] = st
+	}
+	st.initialized = true
+	st.lastConfigTTL = norm
+	clipboardTTLSyncStore.mu.Unlock()
+	if a != nil && a.ConfigStore != nil {
+		_ = a.UpdateMainConfig(func(m *config.MainConfig) {
+			m.Clipboard.SensitiveTTLSeconds = norm
+		})
+	}
+	return norm
+}
 
 // ClipboardKeyManagerView renders a standalone, ui.NewTester-ready view of
 // Clipboard Shortcut, Conflict Detection, Copy Capabilities, Sensitive TTL,
@@ -34,6 +99,7 @@ func (a *AppController) ClipboardKeyManagerView(c *ui.Context) {
 // sensitive copy), password history isolation, and sensitive TTL auto-clear.
 func (a *AppController) renderClipboardKeyManagerCard(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
 	zh := i18n.IsChinese()
+	a.syncClipboardSensitiveTTLFromConfig(cfg.Main.Clipboard)
 	policy := a.ClipboardKeyManagerPolicy()
 	conflicts := config.DetectClipboardShortcutConflicts(cfg.Main, policy.Bindings)
 	sensitiveState := a.SensitiveClipboardState()
@@ -114,7 +180,7 @@ func (a *AppController) renderClipboardKeyManagerCard(c *ui.Context, theme *ui.T
 			5,
 			"s",
 		); changed {
-			a.SetClipboardSensitiveTTLSeconds(int(v))
+			a.updateClipboardSensitiveTTL(int(v))
 		}
 
 		ui.Row(c).FillWidth().Wrap().Gap(space4).AlignItems(ui.Center).Children(func() {
@@ -127,7 +193,7 @@ func (a *AppController) renderClipboardKeyManagerCard(c *ui.Context, theme *ui.T
 					btn.Border(space1, selectionEdge(theme))
 				}
 				if btn.Clicked() {
-					a.SetClipboardSensitiveTTLSeconds(s)
+					a.updateClipboardSensitiveTTL(s)
 				}
 			}
 			ui.Spacer(c)

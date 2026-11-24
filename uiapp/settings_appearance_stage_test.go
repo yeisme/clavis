@@ -11,6 +11,7 @@ import (
 
 func TestSettingsAppearanceStageControlsPersist(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
+	ctrl.setSettingsSection(settingsSectionAppearance)
 	tt := ui.NewTester(ctrl.SettingsView, 960, 900)
 	tt.Frame()
 	scrollSettingsTo(t, tt, "Visual Preset")
@@ -65,6 +66,7 @@ func TestSettingsAppearanceStageControlsPersist(t *testing.T) {
 
 func TestSettingsAppearanceStageClampsPastRange(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
+	ctrl.setSettingsSection(settingsSectionAppearance)
 	tt := ui.NewTester(ctrl.SettingsView, 960, 900)
 	tt.Frame()
 	setNamedSlider(t, tt, "Stage Intensity", 2)
@@ -85,6 +87,7 @@ func TestSettingsAppearanceStageClampsPastRange(t *testing.T) {
 func TestSettingsAppearanceStageRendersMinimumWindow(t *testing.T) {
 	for _, dark := range []bool{false, true} {
 		ctrl, _, _, _ := newTestController(t, nil)
+		ctrl.setSettingsSection(settingsSectionAppearance)
 		tt := ui.NewTesterWith(ctrl.SettingsView, 760, 500, ui.TesterOptions{Dark: dark})
 		tt.Frame()
 		img := tt.Image()

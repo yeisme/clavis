@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -46,6 +47,14 @@ func TestResolveTerminalMissingGhosttyFallsBackToTerminal(t *testing.T) {
 	if err != nil || res.State != host.StateDegraded || plan.Profile.Name != "terminal" || !strings.Contains(res.Message, "Terminal") {
 		t.Fatalf("plan=%+v result=%+v err=%v", plan, res, err)
 	}
+	if plan.Program != "open" || !slices.Equal(plan.Args, []string{"-a", "Terminal", "/tmp/project"}) {
+		t.Fatalf("Apple Terminal plan should use open -a Terminal <dir>, got program=%q args=%v", plan.Program, plan.Args)
+	}
+	for _, arg := range plan.Args {
+		if strings.Contains(arg, "--working-directory") || arg == "--args" {
+			t.Fatalf("Apple Terminal plan must not pass --working-directory or --args: %v", plan.Args)
+		}
+	}
 }
 func TestResolveTerminalBothMissingFailsWithoutPanic(t *testing.T) {
 	cfg := config.DefaultTerminalConfig()
@@ -67,6 +76,50 @@ func TestResolveTerminalReplacesDirWithSpaces(t *testing.T) {
 	joined := strings.Join(r.args, " ")
 	if !strings.Contains(joined, "/tmp/My Project") || strings.Contains(joined, "{dir}") {
 		t.Fatalf("args=%v", r.args)
+	}
+	if !slices.Equal(r.args, []string{"-n", "-b", "com.mitchellh.ghostty", "--args", "--working-directory=/tmp/My Project"}) {
+		t.Fatalf("ghostty args=%v", r.args)
+	}
+}
+
+func TestResolveTerminalAppleTerminalLegacyTemplateAndSpaces(t *testing.T) {
+	cfg := config.TerminalConfig{
+		Default: "terminal",
+		Profiles: []config.TerminalProfile{{
+			Name:        "terminal",
+			BundleID:    "com.apple.Terminal",
+			Command:     "Terminal",
+			ArgTemplate: "--working-directory={dir}",
+		}},
+	}
+	plan, res, err := ResolveTerminalWithDetector(cfg, "/tmp/My Project", fakeDetector{"terminal": true})
+	if err != nil || res.State != host.StateReady {
+		t.Fatalf("plan=%+v res=%+v err=%v", plan, res, err)
+	}
+	if plan.Program != "open" || !slices.Equal(plan.Args, []string{"-a", "Terminal", "/tmp/My Project"}) {
+		t.Fatalf("legacy Apple Terminal template was not normalized: program=%q args=%v", plan.Program, plan.Args)
+	}
+}
+
+func TestResolverOpenAndNonDarwinPlan(t *testing.T) {
+	cfg := config.DefaultTerminalConfig()
+	r := &fakeRunner{}
+	resolver := NewResolverWith(cfg, fakeDetector{"ghostty": false, "terminal": true}, r)
+	plan, res, err := resolver.Open("/tmp/work")
+	if err != nil || res.State != host.StateDegraded || plan.Profile.Name != "terminal" {
+		t.Fatalf("plan=%+v res=%+v err=%v", plan, res, err)
+	}
+	if r.calls != 1 || r.program != "open" || !slices.Equal(r.args, []string{"-a", "Terminal", "/tmp/work"}) {
+		t.Fatalf("runner=%+v", r)
+	}
+
+	linuxPlan := makePlanForOS(config.TerminalProfile{
+		Name:        "alacritty",
+		Command:     "alacritty",
+		ArgTemplate: "--working-directory {dir}",
+	}, "/home/dev/repo", "linux")
+	if linuxPlan.Program != "alacritty" || !slices.Equal(linuxPlan.Args, []string{"--working-directory", "/home/dev/repo"}) {
+		t.Fatalf("linuxPlan=%+v", linuxPlan)
 	}
 }
 func TestResolveTerminalUnknownDefaultIsReadableError(t *testing.T) {

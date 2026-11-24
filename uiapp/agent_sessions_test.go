@@ -2,16 +2,20 @@ package uiapp
 
 import (
 	"context"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/egoist/mygo/plugins/sqlite"
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/agentsession"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/host"
+	"github.com/yeisme/clavis/pkg/core/terminal"
 )
 
 func TestAgentItemsConversationAndCommandCompletion(t *testing.T) {
@@ -133,6 +137,26 @@ func renderAgentToast(t *testing.T, message string) *ui.Tester {
 	return tester
 }
 
+type fakeTerminalDetector map[string]bool
+
+func (d fakeTerminalDetector) Exists(p config.TerminalProfile) bool { return d[p.Name] }
+
+type fakeTerminalRunner struct {
+	mu      sync.Mutex
+	calls   int
+	program string
+	args    []string
+}
+
+func (r *fakeTerminalRunner) Run(program string, args ...string) error {
+	r.mu.Lock()
+	r.calls++
+	r.program = program
+	r.args = append([]string(nil), args...)
+	r.mu.Unlock()
+	return nil
+}
+
 func TestAgentFocusUnavailableCopiesWithHonestToast(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
 	var mu sync.Mutex
@@ -151,6 +175,11 @@ func TestAgentFocusUnavailableCopiesWithHonestToast(t *testing.T) {
 	ctrl.mu.Unlock()
 	restore := setAgentFocuserForTest(&fakeAgentFocuser{available: false})
 	defer restore()
+	termRunner := &fakeTerminalRunner{}
+	restoreTerm := setAgentTerminalResolverForTest(func(cfg config.TerminalConfig) *terminal.Resolver {
+		return terminal.NewResolverWith(cfg, fakeTerminalDetector{"ghostty": false, "terminal": true}, termRunner)
+	})
+	defer restoreTerm()
 	if !ctrl.agentItemAction(engine.OmniboxItem{UtilityValue: "agent-session:codex:sess-1"}) {
 		t.Fatal("session item was not handled")
 	}
@@ -161,9 +190,13 @@ func TestAgentFocusUnavailableCopiesWithHonestToast(t *testing.T) {
 	ctrl.agentItemAction(engine.OmniboxItem{UtilityValue: "agent-session:codex:sess-1"})
 	waitUntil(t, time.Second, func() bool {
 		mu.Lock()
-		defer mu.Unlock()
-		return strings.Contains(toast, "无法直接跳转")
-	}, "honest unavailable focus toast")
+		gotToast := strings.Contains(toast, "无法直接跳转")
+		mu.Unlock()
+		termRunner.mu.Lock()
+		called := termRunner.calls > 0
+		termRunner.mu.Unlock()
+		return gotToast && called
+	}, "honest unavailable focus toast and terminal resolver fallback")
 	mu.Lock()
 	gotCopied, gotToast := copied, toast
 	mu.Unlock()
@@ -172,6 +205,12 @@ func TestAgentFocusUnavailableCopiesWithHonestToast(t *testing.T) {
 	}
 	if !renderAgentToast(t, gotToast).HasText("无法直接跳转") {
 		t.Fatalf("toast=%q", gotToast)
+	}
+	termRunner.mu.Lock()
+	gotProg, gotArgs := termRunner.program, append([]string(nil), termRunner.args...)
+	termRunner.mu.Unlock()
+	if gotProg != "open" || len(gotArgs) < 2 || gotArgs[0] != "-a" || gotArgs[1] != "Terminal" {
+		t.Fatalf("fallback did not use resolved Apple Terminal: program=%q args=%v", gotProg, gotArgs)
 	}
 }
 
@@ -288,5 +327,96 @@ func TestAgentVisibleItemsIsolatesControllerResults(t *testing.T) {
 	itemsB := ctrlB.agentVisibleItems("")
 	if len(itemsB) != 1 || itemsB[0].UtilityValue != "agent-refresh-status" {
 		t.Fatalf("ctrlB missing its own failure status row: %+v", itemsB)
+	}
+}
+
+func TestRefreshAgentSessionsUsesCodexSQLiteReader(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state_5.sqlite")
+	db, err := sqlite.Open(context.Background(), path, sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatalf("open temp codex db: %v", err)
+	}
+	_, err = db.Execute(context.Background(), `CREATE TABLE threads (
+		id TEXT PRIMARY KEY,
+		title TEXT,
+		cwd TEXT,
+		updated_at TEXT,
+		status TEXT,
+		source TEXT,
+		last_message TEXT
+	)`)
+	if err != nil {
+		t.Fatalf("create threads: %v", err)
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+	_, err = db.Execute(context.Background(),
+		`INSERT INTO threads VALUES (?,?,?,?,?,?,?)`,
+		"cx-sql-1", "SQLite Wired", "/tmp/clavis-repo", nowStr, "completed", "cli-wrong-source", "all green",
+	)
+	if err != nil {
+		t.Fatalf("insert thread: %v", err)
+	}
+	_ = db.Close()
+
+	restoreDB := setAgentCodexDBPathForTest(path)
+	defer restoreDB()
+
+	ctrl, _, _, _ := newTestController(t, nil)
+	waitUntil(t, 3*time.Second, func() bool { return !ctrl.agentRefreshing() }, "initial agent refresh settled")
+
+	ctrl.refreshAgentSessions()
+	sessions, _ := ctrl.cachedAgentData()
+	var found *agentsession.Session
+	for i := range sessions {
+		if sessions[i].Provider == "codex" && sessions[i].ID == "cx-sql-1" {
+			found = &sessions[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("codex session cx-sql-1 not loaded via CodexSQLiteReader: %+v", sessions)
+	}
+	if found.Title != "SQLite Wired" || found.LastMessage != "all green" {
+		t.Fatalf("unexpected codex session fields: %+v", *found)
+	}
+	// Completed status must map to StatusStopped (not mis-read from source column).
+	if found.Status != agentsession.StatusStopped {
+		t.Fatalf("codex status = %q, want %q", found.Status, agentsession.StatusStopped)
+	}
+}
+
+func TestAgentFallbackUsesConfiguredTerminalProfileAndWorkspace(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	if err := ctrl.UpdateMainConfig(func(m *config.MainConfig) {
+		m.Terminal = config.TerminalConfig{
+			Default: "wezterm",
+			Profiles: []config.TerminalProfile{{
+				Name:        "wezterm",
+				Command:     "/usr/local/bin/wezterm",
+				ArgTemplate: "start --cwd {dir}",
+			}},
+		}
+	}); err != nil {
+		t.Fatalf("update terminal config: %v", err)
+	}
+
+	runner := &fakeTerminalRunner{}
+	var capturedCfg config.TerminalConfig
+	restoreTerm := setAgentTerminalResolverForTest(func(cfg config.TerminalConfig) *terminal.Resolver {
+		capturedCfg = cfg
+		return terminal.NewResolverWith(cfg, fakeTerminalDetector{"wezterm": true}, runner)
+	})
+	defer restoreTerm()
+
+	ctrl.openTerminalForAgentFallback(agentsession.Session{
+		ID:        "sess-term",
+		Provider:  "codex",
+		Workspace: "/tmp/my-workspace",
+	})
+	if capturedCfg.Default != "wezterm" {
+		t.Fatalf("resolver did not receive configured Main.Terminal: %+v", capturedCfg)
+	}
+	if runner.calls != 1 || runner.program != "/usr/local/bin/wezterm" || !slices.Equal(runner.args, []string{"start", "--cwd", "/tmp/my-workspace"}) {
+		t.Fatalf("unexpected resolved command: program=%q args=%v calls=%d", runner.program, runner.args, runner.calls)
 	}
 }
