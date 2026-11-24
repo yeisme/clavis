@@ -348,9 +348,9 @@ func (a *AppController) renderManageVaultQuickJumpCard(c *ui.Context, theme *ui.
 				a.CloseHubSurface()
 				a.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Query: "#"})
 			}
-			if ui.Button(c, pickLang(zh, "密钥库", "Vault")).Key("manage-open-vault").Clicked() {
-				a.setAssetsSubTab(assetsSubVault)
-				a.SetHubSurface(HubSurfaceAssets)
+			if ui.Button(c, pickLang(zh, "安全", "Security")).Key("manage-open-security").Clicked() {
+				a.CloseHubSurface()
+				a.OpenSettingsSection(settingsSectionSecurity)
 			}
 		})
 	})

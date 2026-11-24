@@ -203,6 +203,18 @@ func (c *AppController) VaultPutSecret(id, recordKey, label, kind, value string)
 
 // VaultUserCopy executes a User-Only TTL-protected copy from Vault and syncs Header TTL pill.
 func (c *AppController) VaultUserCopy(secretRefID string) (secrets.CopyReceipt, error) {
+	return c.VaultCopyAs(secrets.ActorUserSession, "clavis-ui-user", secretRefID)
+}
+
+// VaultAgentCopyAttempt simulates/executes an Agent copy request so all agent paths
+// go through Vault.Copy and deterministically receive ErrAgentForbidden without copy.
+func (c *AppController) VaultAgentCopyAttempt(secretRefID string) (secrets.CopyReceipt, error) {
+	return c.VaultCopyAs(secrets.ActorAgent, "clavis-agent-session", secretRefID)
+}
+
+// VaultCopyAs executes a Vault.Copy request under the supplied actor identity and
+// updates Vault UI status classification (copied, locked, missing, or denied).
+func (c *AppController) VaultCopyAs(actor, sessionID, secretRefID string) (secrets.CopyReceipt, error) {
 	v := c.SecretVault()
 	st := c.clipboardKeyManager()
 	st.mu.Lock()
@@ -220,14 +232,23 @@ func (c *AppController) VaultUserCopy(secretRefID string) (secrets.CopyReceipt, 
 	receipt, err := v.Copy(secrets.UserCopyRequest{
 		RequestID:   reqID,
 		SecretRefID: strings.TrimSpace(secretRefID),
-		Actor:       secrets.ActorUserSession,
-		SessionID:   "clavis-ui-user",
+		Actor:       actor,
+		SessionID:   strings.TrimSpace(sessionID),
 		TTL:         ttl,
 		Destination: secrets.CopyDestinationClipboard,
-		Reason:      "user_assets_hub_copy",
+		Reason:      "user_vault_copy",
 	})
+	zh := i18n.IsChinese()
+	uiSt := vaultUIState(c)
 	if err != nil {
-		c.ShowToastOrHUD(err.Error())
+		kind, code, detail := classifyVaultFailure(receipt, err, zh)
+		uiSt.mu.Lock()
+		uiSt.setStatusLocked(kind, code, detail)
+		uiSt.mu.Unlock()
+		c.notifyClipboardKeyManagerRepaint()
+		if actor == secrets.ActorUserSession {
+			c.ShowToastOrHUD(detail)
+		}
 		return receipt, err
 	}
 
@@ -251,19 +272,29 @@ func (c *AppController) VaultUserCopy(secretRefID string) (secrets.CopyReceipt, 
 	st.sensitiveTTL = ttl
 	st.sensitiveExpiresAt = receipt.ExpiresAt
 	st.sensitiveTimer = time.AfterFunc(ttl, func() {
-		_ = v.Cleanup(reqID, secretRefID, "clavis-ui-user")
+		_ = v.Cleanup(reqID, secretRefID, strings.TrimSpace(sessionID))
 		c.clearSensitiveClipboardForGen(gen)
 	})
 	st.mu.Unlock()
 
+	okMsg := fmt.Sprintf("%s (%ds TTL)", i18n.T("hud.copied"), int(ttl.Seconds()))
+	uiSt.mu.Lock()
+	uiSt.setStatusLocked(vaultStatusCopied, string(receipt.State), okMsg)
+	uiSt.mu.Unlock()
+
 	c.notifyClipboardKeyManagerRepaint()
-	c.ShowToastOrHUD(fmt.Sprintf("%s (%ds TTL)", i18n.T("hud.copied"), int(ttl.Seconds())))
+	c.ShowToastOrHUD(okMsg)
 	return receipt, nil
 }
 
 // VaultRevoke revokes a SecretRef so future copies fail safely and persists metadata.
 func (c *AppController) VaultRevoke(secretRefID string) error {
 	if err := c.SecretVault().Revoke(secretRefID); err != nil {
+		uiSt := vaultUIState(c)
+		kind, code, detail := classifyVaultFailure(secrets.CopyReceipt{ErrorCode: secrets.CopyErrorRefNotFound}, err, i18n.IsChinese())
+		uiSt.mu.Lock()
+		uiSt.setStatusLocked(kind, code, detail)
+		uiSt.mu.Unlock()
 		return err
 	}
 	c.persistVaultMetadata()
@@ -271,14 +302,27 @@ func (c *AppController) VaultRevoke(secretRefID string) error {
 }
 
 type vaultViewState struct {
-	mu           sync.Mutex
-	addOpen      bool
-	auditOpen    bool
-	recordDraft  string
-	labelDraft   string
-	valueDraft   string
-	statusMsg    string
-	isError      bool
+	mu          sync.Mutex
+	addOpen     bool
+	auditOpen   bool
+	recordDraft string
+	labelDraft  string
+	valueDraft  string
+	statusKind  vaultStatusKind
+	statusCode  string
+	statusMsg   string
+}
+
+func (s *vaultViewState) setStatusLocked(kind vaultStatusKind, code, msg string) {
+	s.statusKind = kind
+	s.statusCode = code
+	s.statusMsg = msg
+}
+
+func (s *vaultViewState) clearStatusLocked() {
+	s.statusKind = vaultStatusNone
+	s.statusCode = ""
+	s.statusMsg = ""
 }
 
 var vaultViewStateStore = struct {
@@ -300,6 +344,10 @@ func vaultUIState(c *AppController) *vaultViewState {
 }
 
 func (a *AppController) renderVaultAssetsView(c *ui.Context, theme *ui.Theme) {
+	a.renderVaultBody(c, theme, false)
+}
+
+func (a *AppController) renderVaultBody(c *ui.Context, theme *ui.Theme, inlineInScroll bool) {
 	zh := i18n.IsChinese()
 	st := vaultUIState(a)
 	snap := a.VaultSnapshot()
@@ -312,11 +360,91 @@ func (a *AppController) renderVaultAssetsView(c *ui.Context, theme *ui.Theme) {
 	recDraft := st.recordDraft
 	lblDraft := st.labelDraft
 	valDraft := st.valueDraft
+	statusKind := st.statusKind
+	statusCode := st.statusCode
 	statusMsg := st.statusMsg
-	isErr := st.isError
 	st.mu.Unlock()
 
-	ui.Column(c).Key("vault-assets-view").FillWidth().Grow(1).MinHeight(0).Gap(space8).Children(func() {
+	renderListAndAudit := func() {
+		ui.Column(c).FillWidth().Gap(space4).Children(func() {
+			if len(snap.SecretRefs) == 0 {
+				kitStateView(c, theme, kitStateEmpty, "lock.rotation",
+					pickLang(zh, "暂无 SecretRef 记录", "No SecretRef entries yet"),
+					pickLang(zh, "点击「+ 新增引用」安全托管凭据，仅显示元数据与审计状态。", "Click '+ New Ref' to store credentials safely; only metadata is shown here."),
+					nil)
+			}
+			for _, ref := range snap.SecretRefs {
+				r := ref
+				title := strings.TrimSpace(r.Label)
+				if title == "" {
+					title = r.RecordKey
+				}
+				kitCard(c, theme, cardFlat, func() {
+					ui.Row(c).FillWidth().Padding(space8, space10).Gap(space8).AlignItems(ui.Center).Children(func() {
+						renderSemanticIcon(c, "lock.rotation", typeBody, secondaryInk(theme))
+						ui.Column(c).Grow(1).MinWidth(0).Gap(space2).Children(func() {
+							ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
+								ui.Text(c, title).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine()
+								tone := chipNeutral
+								if r.State == secrets.SecretStateRevoked {
+									tone = chipDanger
+								}
+								kitStatusPill(c, theme, r.State, tone)
+							})
+							metaLine := fmt.Sprintf("%s · v%d · %s", r.RecordKey, r.Version, r.Kind)
+							if r.Backend != "" {
+								metaLine += " · " + r.Backend
+							}
+							ui.Text(c, metaLine).
+								FontSize(typeMicro).FontFeatures("tnum").TextColor(theme.TextMuted).SingleLine()
+						})
+
+						if r.State != secrets.SecretStateRevoked {
+							copyLbl := pickLang(zh, "TTL 复制", "Copy")
+							if ui.Button(c, copyLbl).Key("vault-copy-" + r.ID).Label(copyLbl).Padding(space2, space8).Clicked() {
+								_, _ = a.VaultUserCopy(r.ID)
+							}
+							revLbl := pickLang(zh, "吊销", "Revoke")
+							if ui.Button(c, revLbl).Key("vault-revoke-" + r.ID).Label(revLbl).Padding(space2, space8).Clicked() {
+								_ = a.VaultRevoke(r.ID)
+							}
+						}
+					})
+				})
+			}
+
+			if auditOpen {
+				kitDivider(c, theme)
+				kitCard(c, theme, cardInset, func() {
+					ui.Column(c).FillWidth().Padding(space8, space10).Gap(space4).Children(func() {
+						ui.Text(c, pickLang(zh, "Vault 审计记录（零敏感数据）", "Vault Audit Log (Metadata Only)")).
+							FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+						if len(events) == 0 {
+							ui.Text(c, pickLang(zh, "暂无审计事件", "No audit events")).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+						}
+						start := max(0, len(events)-10)
+						for i := len(events) - 1; i >= start; i-- {
+							ev := events[i]
+							line := fmt.Sprintf("%s · %s · %s", ev.At.Format("15:04:05"), ev.Action, ev.State)
+							if ev.Actor != "" {
+								line += " · " + ev.Actor
+							}
+							if ev.ErrorCode != "" {
+								line += " (" + ev.ErrorCode + ")"
+							}
+							ui.Text(c, line).FontSize(typeMicro).FontFeatures("tnum").TextColor(theme.TextMuted).SingleLine()
+						}
+					})
+				})
+			}
+		})
+	}
+
+	root := ui.Column(c).Key("vault-assets-view").FillWidth().Gap(space8)
+	if !inlineInScroll {
+		root = root.Grow(1).MinHeight(0)
+	}
+	root.Children(func() {
 		// Top bar: status summary + Add Reference toggle + Audit drawer toggle.
 		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 			renderSemanticIcon(c, "lock.rotation", typeMeta, secondaryInk(theme))
@@ -351,13 +479,7 @@ func (a *AppController) renderVaultAssetsView(c *ui.Context, theme *ui.Theme) {
 			}
 		})
 
-		if statusMsg != "" {
-			if isErr {
-				kitWarningBanner(c, theme, statusMsg)
-			} else {
-				ui.Text(c, statusMsg).FontSize(typeMicro).TextColor(theme.TextMuted).Wrap()
-			}
-		}
+		renderVaultStatusCard(c, theme, st, statusKind, statusCode, statusMsg, zh)
 
 		if addOpen {
 			kitCard(c, theme, cardInset, func() {
@@ -367,42 +489,44 @@ func (a *AppController) renderVaultAssetsView(c *ui.Context, theme *ui.Theme) {
 
 					ui.Row(c).FillWidth().Gap(space6).Children(func() {
 						rkIn := ui.TextInput(c.Key("vault-in-record"), &recDraft).
-							Placeholder(pickLang(zh, "Record Key (例: clavis.prod.db)", "Record Key (e.g. clavis.prod.db)")).Grow(1)
+							Label(pickLang(zh, "记录标识", "Record Key")).
+							Placeholder(pickLang(zh, "例: clavis.prod.db", "e.g. clavis.prod.db")).Grow(1)
 						if rkIn.Changed() {
 							st.mu.Lock()
 							st.recordDraft = recDraft
 							st.mu.Unlock()
 						}
 						lbIn := ui.TextInput(c.Key("vault-in-label"), &lblDraft).
-							Placeholder(pickLang(zh, "Alias 标签 (例: Production DB)", "Alias Label (e.g. Production DB)")).Grow(1)
+							Label(pickLang(zh, "业务别名", "Alias Label")).
+							Placeholder(pickLang(zh, "例: Production DB", "e.g. Production DB")).Grow(1)
 						if lbIn.Changed() {
 							st.mu.Lock()
 							st.labelDraft = lblDraft
 							st.mu.Unlock()
 						}
 					})
-					ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
-						vlIn := ui.TextInput(c.Key("vault-in-value"), &valDraft).
-							Placeholder(pickLang(zh, "凭据明文（提交后立即清空草稿）", "Credential value (draft cleared on save)")).Grow(1)
+					ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.End).Children(func() {
+						vlIn := ui.TextInput(c.Key("vault-in-value"), &valDraft).Password().
+							Label(pickLang(zh, "凭据正文", "Credential")).
+							Placeholder(pickLang(zh, "提交后立即清空草稿", "Draft cleared on save")).Grow(1)
 						if vlIn.Changed() {
 							st.mu.Lock()
 							st.valueDraft = valDraft
 							st.mu.Unlock()
 						}
 						saveLbl := pickLang(zh, "保存", "Save")
-						if ui.Button(c, saveLbl).Key("vault-save-btn").Label(saveLbl).Padding(space2, space10).Clicked() {
+						if ui.Button(c, saveLbl).Key("vault-save-btn").Padding(space2, space10).Clicked() {
 							_, err := a.VaultPutSecret("", recDraft, lblDraft, secrets.SecretKindPassword, valDraft)
 							st.mu.Lock()
 							st.valueDraft = "" // wipe plaintext draft immediately
 							if err != nil {
-								st.statusMsg = err.Error()
-								st.isError = true
+								kind, code, detail := classifyVaultFailure(secrets.CopyReceipt{}, err, zh)
+								st.setStatusLocked(kind, code, detail)
 							} else {
 								st.recordDraft = ""
 								st.labelDraft = ""
 								st.addOpen = false
-								st.statusMsg = pickLang(zh, "已安全存入分层密钥库", "Stored in layered SecretStore")
-								st.isError = false
+								st.setStatusLocked(vaultStatusStored, secrets.SecretStateStored, pickLang(zh, "已安全存入分层密钥库", "Stored in layered SecretStore"))
 							}
 							st.mu.Unlock()
 						}
@@ -411,83 +535,11 @@ func (a *AppController) renderVaultAssetsView(c *ui.Context, theme *ui.Theme) {
 			})
 		}
 
-		// Metadata-only SecretRef list.
-		ui.Scroll(c).FillWidth().Grow(1).MinHeight(0).Children(func() {
-			ui.Column(c).FillWidth().Gap(space4).Children(func() {
-				if len(snap.SecretRefs) == 0 {
-					kitStateView(c, theme, kitStateEmpty, "lock.rotation",
-						pickLang(zh, "暂无 SecretRef 记录", "No SecretRef entries yet"),
-						pickLang(zh, "点击「+ 新增引用」安全托管凭据，仅显示元数据与审计状态。", "Click '+ New Ref' to store credentials safely; only metadata is shown here."),
-						nil)
-				}
-				for _, ref := range snap.SecretRefs {
-					r := ref
-					title := strings.TrimSpace(r.Label)
-					if title == "" {
-						title = r.RecordKey
-					}
-					kitCard(c, theme, cardFlat, func() {
-						ui.Row(c).FillWidth().Padding(space8, space10).Gap(space8).AlignItems(ui.Center).Children(func() {
-							renderSemanticIcon(c, "lock.rotation", typeBody, secondaryInk(theme))
-							ui.Column(c).Grow(1).MinWidth(0).Gap(space2).Children(func() {
-								ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
-									ui.Text(c, title).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine()
-									tone := chipNeutral
-									if r.State == secrets.SecretStateRevoked {
-										tone = chipDanger
-									}
-									kitStatusPill(c, theme, r.State, tone)
-								})
-								ui.Text(c, fmt.Sprintf("%s · v%d · %s", r.RecordKey, r.Version, r.Kind)).
-									FontSize(typeMicro).FontFeatures("tnum").TextColor(theme.TextMuted).SingleLine()
-							})
-
-							if r.State != secrets.SecretStateRevoked {
-								copyLbl := pickLang(zh, "TTL 复制", "Copy")
-								if ui.Button(c, copyLbl).Key("vault-copy-" + r.ID).Label(copyLbl).Padding(space2, space8).Clicked() {
-									if _, err := a.VaultUserCopy(r.ID); err != nil {
-										st.mu.Lock()
-										st.statusMsg = err.Error()
-										st.isError = true
-										st.mu.Unlock()
-									}
-								}
-								revLbl := pickLang(zh, "吊销", "Revoke")
-								if ui.Button(c, revLbl).Key("vault-revoke-" + r.ID).Label(revLbl).Padding(space2, space8).Clicked() {
-									if err := a.VaultRevoke(r.ID); err != nil {
-										st.mu.Lock()
-										st.statusMsg = err.Error()
-										st.isError = true
-										st.mu.Unlock()
-									}
-								}
-							}
-						})
-					})
-				}
-
-				if auditOpen {
-					kitDivider(c, theme)
-					kitCard(c, theme, cardInset, func() {
-						ui.Column(c).FillWidth().Padding(space8, space10).Gap(space4).Children(func() {
-							ui.Text(c, pickLang(zh, "Vault 审计记录（零敏感数据）", "Vault Audit Log (Metadata Only)")).
-								FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
-							if len(events) == 0 {
-								ui.Text(c, pickLang(zh, "暂无审计事件", "No audit events")).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
-							}
-							start := max(0, len(events)-10)
-							for i := len(events) - 1; i >= start; i-- {
-								ev := events[i]
-								line := fmt.Sprintf("%s · %s · %s", ev.At.Format("15:04:05"), ev.Action, ev.State)
-								if ev.ErrorCode != "" {
-									line += " (" + ev.ErrorCode + ")"
-								}
-								ui.Text(c, line).FontSize(typeMicro).FontFeatures("tnum").TextColor(theme.TextMuted).SingleLine()
-							}
-						})
-					})
-				}
-			})
-		})
+		// Metadata-only SecretRef list & optional Audit drawer.
+		if inlineInScroll {
+			renderListAndAudit()
+		} else {
+			ui.Scroll(c).FillWidth().Grow(1).MinHeight(0).Children(renderListAndAudit)
+		}
 	})
 }

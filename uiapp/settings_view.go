@@ -30,6 +30,7 @@ const (
 	settingsSectionAppearance  = 9
 	settingsSectionClipboard   = 10
 	settingsSectionAbout       = 11
+	settingsSectionSecurity    = 12
 )
 
 // settingsSectionMeta describes one navigation rail entry.
@@ -80,6 +81,7 @@ func settingsNavigationSections() []settingsSectionMeta {
 	}, sections[6:]...)...)
 	sections = append(sections,
 		settingsSectionMeta{settingsSectionAppearance, "appearance", i18n.T("settings.section.appearance"), "paintbrush", i18n.T("settings.section.appearance.hint"), SettingsTabGeneral, "system"},
+		settingsSectionMeta{settingsSectionSecurity, "security", pickLang(i18n.IsChinese(), "安全", "Security"), "lock.rotation", pickLang(i18n.IsChinese(), "密码与密钥引用、只读元数据与 User-Only TTL 复制", "SecretRefs, metadata-only index & User-Only TTL copy"), SettingsTabGeneral, "system"},
 		settingsSectionMeta{settingsSectionAbout, "about", i18n.T("settings.section.about"), "info.circle", i18n.T("settings.section.about.hint"), SettingsTabGeneral, "about"},
 	)
 	for i := range sections {
@@ -90,7 +92,7 @@ func settingsNavigationSections() []settingsSectionMeta {
 			sections[i].Group = "productivity"
 		case "ai":
 			sections[i].Group = "intelligence"
-		case "appearance", "permissions", "configs":
+		case "appearance", "permissions", "configs", "security":
 			sections[i].Group = "system"
 		case "about":
 			sections[i].Group = "about"
@@ -330,7 +332,11 @@ func settingsSectionMatches(meta settingsSectionMeta, query string, cfg config.C
 		value = strings.ToLower(value)
 		return strings.NewReplacer("_", "", "-", "", " ", "").Replace(value)
 	}
-	haystack := compact(strings.Join([]string{meta.Key, meta.Label, meta.Hint, fmt.Sprintf("%+v", cfg)}, " "))
+	extra := ""
+	if meta.Key == "security" {
+		extra = "security vault password secret keychain ttl 安全 密码 密钥"
+	}
+	haystack := compact(strings.Join([]string{meta.Key, meta.Label, meta.Hint, extra, fmt.Sprintf("%+v", cfg)}, " "))
 	return strings.Contains(haystack, compact(query))
 }
 
@@ -419,6 +425,8 @@ func (a *AppController) renderSettingsSection(
 		a.renderSettingsClipboardSection(c, theme, cfg)
 	case settingsSectionAppearance:
 		a.renderSettingsAppearanceSection(c, theme, cfg)
+	case settingsSectionSecurity:
+		a.renderSettingsSecuritySection(c, theme)
 	case settingsSectionAbout:
 		a.renderSettingsAboutSection(c, theme)
 	case settingsSectionAI:

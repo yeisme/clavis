@@ -3761,6 +3761,8 @@ func (c *AppController) handleInternalSettingCommand(args []string) {
 		c.OpenSettings(SettingsTabPermissions)
 	case "configs":
 		c.OpenSettings(SettingsTabConfigs)
+	case "security", "vault":
+		c.OpenSettingsSection(settingsSectionSecurity)
 	default:
 		c.OpenSettings(SettingsTabGeneral)
 	}
@@ -3768,13 +3770,20 @@ func (c *AppController) handleInternalSettingCommand(args []string) {
 
 // OpenSettings selects the requested settings tab and invokes OnOpenSettings.
 func (c *AppController) OpenSettings(tab SettingsTab) {
+	c.OpenSettingsSection(int(tab))
+}
+
+// OpenSettingsSection opens the settings center directly on a specific navigation rail section.
+func (c *AppController) OpenSettingsSection(section int) {
+	target := normalizeSettingsSection(section)
+	meta := settingsSectionMetaFor(target)
 	c.mu.Lock()
-	c.uiState.settingsTabIdx = int(tab)
+	c.uiState.settingsTabIdx = target
 	fn := c.OnOpenSettings
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
 	if fn != nil {
-		fn(tab)
+		fn(meta.Settings)
 	}
 	if onRepaint != nil {
 		onRepaint()
