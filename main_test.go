@@ -19,10 +19,12 @@ import (
 	"github.com/yeisme/clavis/internal/daemon"
 	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/internal/storage"
+	"github.com/yeisme/clavis/pkg/core/ai"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/host"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 	"github.com/yeisme/clavis/uiapp"
 )
 
@@ -644,5 +646,204 @@ func TestCloseHidesLetsQuitThrough(t *testing.T) {
 	onClose(e)
 	if !e.DefaultPrevented() || hidden != 2 {
 		t.Fatalf("close after a canceled quit: prevented=%v hidden=%d", e.DefaultPrevented(), hidden)
+	}
+}
+
+func TestRecordPolledClipboardCandidateSkipsVaultAndPasswordCopies(t *testing.T) {
+	ctx := context.Background()
+	cfgStore := config.NewConfigStore(t.TempDir())
+	cfg, err := cfgStore.LoadOrInitialize()
+	if err != nil {
+		t.Fatalf("LoadOrInitialize: %v", err)
+	}
+	clipStore := clipboard.NewMemoryStore(clipboard.NewPrivacyFilterFromConfig(cfg.Main.Clipboard))
+	ctrl := uiapp.NewAppController(uiapp.Options{
+		ConfigStore:     cfgStore,
+		ClipboardStore:  clipStore,
+		SecretStore:     secrets.NewMemoryAPIKeyStore(),
+		ClipboardWriter: func(string) {},
+	})
+	defer ctrl.Close()
+
+	app := newDesktopApp()
+
+	// 1. Copy a password via the sensitive TTL path (same path used by Vault copies and `pw`).
+	const generatedPW = "Tr0ub4dor&3-vault-copy!"
+	if _, err := ctrl.ExecuteClipboardAction(uiapp.ClipboardCopyRequest{
+		Action:      config.ClipboardActionCopySensitive,
+		Origin:      uiapp.ClipboardCopyOriginUser,
+		Item:        clipboard.ClipboardItem{Content: generatedPW},
+		Sensitive:   true,
+		SecretLabel: "Generated Password",
+		TTL:         30 * time.Second,
+	}); err != nil {
+		t.Fatalf("ExecuteClipboardAction: %v", err)
+	}
+	if app.recordPolledClipboardCandidate(ctx, ctrl, nil, clipStore, nil, cfg, &clipboard.CaptureCandidate{
+		Content:   generatedPW,
+		Timestamp: time.Now().UTC(),
+	}, 1) {
+		t.Fatal("sensitive Vault/pw clipboard copy must NOT be recorded in clipboard history")
+	}
+
+	// 2. Secret-shaped content (e.g. sk- API key) must also be skipped.
+	if app.recordPolledClipboardCandidate(ctx, ctrl, nil, clipStore, nil, cfg, &clipboard.CaptureCandidate{
+		Content:   "sk-proj-supersecretkey123456",
+		Timestamp: time.Now().UTC(),
+	}, 2) {
+		t.Fatal("secret-shaped candidate must NOT be recorded in clipboard history")
+	}
+
+	// 3. Normal text must still be recorded.
+	if !app.recordPolledClipboardCandidate(ctx, ctrl, nil, clipStore, nil, cfg, &clipboard.CaptureCandidate{
+		Content:   "regular clipboard text",
+		Timestamp: time.Now().UTC(),
+	}, 3) {
+		t.Fatal("expected normal clipboard text to be recorded")
+	}
+
+	items, err := clipStore.Recent(ctx, 10)
+	if err != nil {
+		t.Fatalf("Recent: %v", err)
+	}
+	if len(items) != 1 || items[0].Content != "regular clipboard text" {
+		t.Fatalf("clipboard history = %+v, want only regular clipboard text", items)
+	}
+}
+
+func TestSharedLearningStoreCallbacksAndUsageRecorder(t *testing.T) {
+	ctx := context.Background()
+	cfgStore := config.NewConfigStore(t.TempDir())
+	cfg, err := cfgStore.LoadOrInitialize()
+	if err != nil {
+		t.Fatalf("LoadOrInitialize: %v", err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "shared_learning.db")
+	sqliteStore, err := storage.NewSQLiteClipboardStoreFromConfig(ctx, dbPath, cfg.Main.Clipboard)
+	if err != nil {
+		t.Fatalf("NewSQLiteClipboardStoreFromConfig: %v", err)
+	}
+	defer sqliteStore.Close()
+	learningStore, err := storage.NewLearningStore(sqliteStore.DB())
+	if err != nil {
+		t.Fatalf("NewLearningStore: %v", err)
+	}
+	learningWriter := storage.NewLearningWriter(learningStore, storage.LearningWriterOptions{FlushInterval: 20 * time.Millisecond})
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = learningWriter.Close(flushCtx)
+		cancel()
+	}()
+
+	learningWriter.RecordAIUsage(ai.UsageRecord{
+		At:       time.Now().UTC(),
+		Profile:  "deepseek",
+		Provider: "deepseek",
+		Model:    "deepseek-chat",
+		Action:   "ask",
+		Usage:    ai.ProviderUsage{InputTokens: 30, OutputTokens: 15, Reported: true},
+		Latency:  120 * time.Millisecond,
+	})
+	learningWriter.QueueLexiconHit(time.Now(), true)
+	learningWriter.QueueItemUse("glossary:term:Kubernetes", time.Now())
+	if err := learningWriter.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	usageDays, err := sharedAIUsageDailyReader(learningStore)(ctx, 7)
+	if err != nil || len(usageDays) != 7 {
+		t.Fatalf("sharedAIUsageDailyReader = (%v, %v)", usageDays, err)
+	}
+	if last := usageDays[len(usageDays)-1]; last.Requests != 1 || last.InputTokens != 30 || last.OutputTokens != 15 {
+		t.Fatalf("unexpected today usage: %+v", last)
+	}
+
+	hitDays, err := sharedLexiconHitsDailyReader(learningStore)(ctx, 7)
+	if err != nil || len(hitDays) != 7 || hitDays[len(hitDays)-1].Hits != 1 {
+		t.Fatalf("sharedLexiconHitsDailyReader = (%+v, %v)", hitDays, err)
+	}
+
+	topWords, err := sharedLexiconTopWordsReader(learningStore)(ctx, 5)
+	if err != nil || len(topWords) != 1 || topWords[0].Word != "Kubernetes" {
+		t.Fatalf("sharedLexiconTopWordsReader = (%+v, %v)", topWords, err)
+	}
+}
+
+func TestSyncLanguageFromConfigCallsSetLocaleForEnglish(t *testing.T) {
+	origLang := i18n.Current()
+	origSetLocale := setAppLocale
+	defer func() {
+		i18n.SetLanguage(origLang)
+		setAppLocale = origSetLocale
+	}()
+
+	var locales []string
+	setAppLocale = func(tag string) {
+		locales = append(locales, tag)
+	}
+
+	app := newDesktopApp()
+	i18n.SetLanguage(i18n.English)
+
+	zhCfg := config.DefaultConfig()
+	zhCfg.Main.Appearance.Language = "zh-CN"
+	app.syncLanguageFromConfig(zhCfg)
+
+	enCfg := config.DefaultConfig()
+	enCfg.Main.Appearance.Language = "en"
+	app.syncLanguageFromConfig(enCfg)
+
+	want := []string{"zh-Hans", "en"}
+	if !slices.Equal(locales, want) {
+		t.Fatalf("setAppLocale calls = %v, want %v", locales, want)
+	}
+}
+
+func TestRefreshTrayLabelsPreservesPermissionStatus(t *testing.T) {
+	origLang := i18n.Current()
+	defer i18n.SetLanguage(origLang)
+
+	app := newDesktopApp()
+	i18n.SetLanguage(i18n.English)
+	if got := app.currentPermissionsMenuLabel(); got != i18n.T("tray.permissions_checking") {
+		t.Fatalf("initial label = %q, want %q", got, i18n.T("tray.permissions_checking"))
+	}
+
+	app.mu.Lock()
+	app.permKnown = true
+	app.permStatus = host.PermissionStatus{Accessibility: true, InputMonitoring: true, Granted: true}
+	app.permCaps = host.Capabilities{Accessibility: true, InputMonitoring: true}
+	app.mu.Unlock()
+
+	if got := app.currentPermissionsMenuLabel(); got != i18n.T("tray.permissions_all") {
+		t.Fatalf("en observed label = %q, want %q", got, i18n.T("tray.permissions_all"))
+	}
+
+	i18n.SetLanguage(i18n.Chinese)
+	if got := app.currentPermissionsMenuLabel(); got != i18n.T("tray.permissions_all") {
+		t.Fatalf("zh relocalized label = %q, want %q (must not reset to checking)", got, i18n.T("tray.permissions_all"))
+	}
+}
+
+func TestHasVisibleSurfaceIncludesAnnotateAndInputUI(t *testing.T) {
+	app := newDesktopApp()
+	annotate := new(mygo.Window)
+	inputPanel := new(mygo.Window)
+	settings := new(mygo.Window)
+
+	app.mu.Lock()
+	app.settingsWin = settings
+	app.annotateWin = annotate
+	app.inputUI = &inputEngineUI{panel: inputPanel}
+	app.mu.Unlock()
+
+	if app.hasVisibleSurface(func(*mygo.Window) bool { return false }) {
+		t.Fatal("expected false when no surfaces are visible")
+	}
+	if !app.hasVisibleSurface(func(w *mygo.Window) bool { return w == annotate }) {
+		t.Fatal("annotateWin visibility must keep Clavis from calling App.Hide()")
+	}
+	if !app.hasVisibleSurface(func(w *mygo.Window) bool { return w == inputPanel }) {
+		t.Fatal("inputUI.panel visibility must keep Clavis from calling App.Hide()")
 	}
 }
