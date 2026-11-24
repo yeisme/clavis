@@ -1,6 +1,6 @@
 # Clavis 推进路线（Single Source of Truth）
 
-> **权威基线**：HEAD `79d325b`（2026-11-25）
+> **权威基线**：`main` `3166819` + Wave 4 收口（2026-11-25）
 >
 > **状态口径**：本文件是 Clavis 全仓唯一的推进路线与阶段状态真源。历史规划与专项设计见 §5 文档索引；任何旧文档与本文件冲突时，以本文件与当前代码为准。
 
@@ -8,13 +8,13 @@
 
 ## 0. 一句话结论与 1.x 完成口径
 
-Clavis 的核心功能面（Launcher / 第二输入法 / 媒体剪贴板 / Security Vault / 区域截图标注 / 多协议 AI & Vision OCR / Herdr Agent 控制面）已全部合入 `main`，且 **P0（安全与正确性止血）** 与 **P1（核心引擎、接线与 120Hz 性能收口）** 已全量落地验收。当前处于 **P2（架构减债与可维护性收口）**，随后推进 **P3（统一 Schema、模板平台与多设备同步）** 与 **P4（Windows 实测、CI 打包与可选扩展）**。
+Clavis 的核心功能面（Launcher / 第二输入法 / 媒体剪贴板 / Security Vault / 区域截图标注 / 多协议 AI & Vision OCR / Herdr Agent 控制面 / 多语言模板库 / 多设备密文同步）已全部合入 `main`。**P0（安全与正确性止血）**、**P1（核心引擎、接线与 120Hz 性能收口）**、**P2（架构减债、i18n 守卫、守护生命周期与文档真源）** 与 **P3（统一 SQLite Schema 迁移、Bigram/学习合并、T5 模板平台与多设备密文同步）** 均已完成验收合入；当前处于 **P4（Windows Parity 收口、GitHub Actions CI/可复现打包与可选扩展）**，其中代码与自动化门禁逐步合入，**Windows 真机硬件签收**与 **macOS 交互式 A1–A16 GUI 手测矩阵**待机主在本地桌面会话中完成最终签收。
 
-| 里程碑 | 目标定义 | 验收门槛 |
-| --- | --- | --- |
-| **1.0 自用稳定版** | macOS 日常主力启动器 + 第二输入法 + 截图/OCR/AI/Vault/Herdr 全链路可用，无已知安全/竞态/掉帧缺陷 | `CLV-P0` + `CLV-P1` + `CLV-P2` 全绿，单测与 `-race` 零回归 |
-| **1.1 跨设备与模板完善** | 统一 SQLite 迁移框架、`MergeLearning` 合并、多语言模板库 UI、共享目录密文同步可用 | `CLV-P3` 全绿 + 双目录/双设备密文同步端到端验证 |
-| **1.2 工程与双平台收口** | Windows 桥接测试与真机校验闭环、GitHub Actions CI 与可复现 `ldflags` 打包落地 | `CLV-P4` 核心批次绿 + 三平台 `go vet` & 打包产物校验 |
+| 里程碑 | 状态 | 目标定义 | 验收门槛 |
+| --- | --- | --- | --- |
+| **1.0 自用稳定版** | ✅ 代码达成（⏳ 待 macOS A1–A16 交互签收） | macOS 日常主力启动器 + 第二输入法 + 截图/OCR/AI/Vault/Herdr 全链路可用，无已知安全/竞态/掉帧缺陷 | `CLV-P0` + `CLV-P1` + `CLV-P2` 全绿，单测与 `-race` 零回归，机主完成 A1–A16 GUI 实测 |
+| **1.1 跨设备与模板完善** | ✅ 已合入 `main` | 统一 SQLite 迁移框架、`MergeLearning` 合并、多语言模板库 UI、共享目录密文同步可用 | `CLV-P3` 全绿 + 双目录/双设备密文同步端到端验证 |
+| **1.2 工程与双平台收口** | 🔄 进行中（⏳ 待 Windows 真机签收） | Windows 桥接测试与真机校验闭环、GitHub Actions CI 与可复现 `ldflags` 打包落地 | `CLV-P4` 核心批次绿 + 三平台 `go vet`/CI & 打包产物校验 + Windows 实机手测签收 |
 
 ---
 
@@ -55,35 +55,42 @@ Clavis 的核心功能面（Launcher / 第二输入法 / 媒体剪贴板 / Secur
 
 ---
 
-### Phase 2（`CLV-P2`）：架构减债、守护生命周期与文档真源 — **In Progress**
+### Phase 2（`CLV-P2`）：架构减债、守护生命周期与文档真源 — **Completed**
 
-| 批次 | 状态 | 范围与目标 |
-| --- | --- | --- |
-| `CLV-P2-1` | 🔄 In Progress | `uiapp` 架构重构：拆分超大视图与控制器职责，收敛状态同步与事件分发边界 |
-| `CLV-P2-2` | 🔄 In Progress | i18n 守卫与 UX 抛光：消除残留硬编码文案，补齐中英双语测试守卫与交互细节 |
-| `CLV-P2-3` | 🔄 In Progress | 守护进程生命周期收口：`internal/daemon` 启动/优雅退出/信号/Watcher 生命周期与幂等恢复 |
-| `CLV-P2-4` | 🔄 In Progress | IMK 死残留清理（删除 `cmd/clavis-imk/` 与 `internal/bridge/imk_ipc.go`）、确立 `docs/ROADMAP.md` 唯一真源、刷新 `README.md`、补齐 11-23~24 新特性三篇事实规格 |
-
----
-
-### Phase 3（`CLV-P3`）：数据一致性、模板平台与多设备密文同步 — **Planned**
-
-| 批次 | 状态 | 范围与目标 |
-| --- | --- | --- |
-| `CLV-P3-1` | ⏳ Planned | 统一 SQLite Schema 迁移框架：按库独立版本号、迁移前自动备份、单库事务与未知版本 fail-closed（参见 `docs/backend/schema-migration.md`） |
-| `CLV-P3-2` | ⏳ Planned | Bigram 与学习数据快照：`MergeLearning` 可交换合并、`log1p` 频次压缩与 pinned 永久保护（参见 `docs/design/ime-dictionary-architecture.md`） |
-| `CLV-P3-3` | ⏳ Planned | Template Platform T5：多语言模板目录激活、`promptrepo` 目录集成与设置页模板库管理 UI（参见 `docs/design/template-platform.md`） |
-| `CLV-P3-4` | ⏳ Planned | 多设备同步加固与目录传输（D1）：密码学 v2 双向可解信封（ADK/ECDH）、共享目录密文传输后端、冲突可见性与同步审计 |
+| 批次 | 状态 | 合并提交（实现提交） | 核心交付 |
+| --- | --- | --- | --- |
+| `CLV-P2-1` | ✅ Completed | `76bdbe0` (`e859e49`) | `uiapp` 架构重构：消除全局侧表、按领域拆分控制器（`controller_ai/clipboard/settings/workflow/substates`）、绑定生命周期上下文与侧表测试守卫 |
+| `CLV-P2-2` | ✅ Completed | `efc4b08` (`2f1b408`) | i18n 守卫与 UX 抛光：迁移 8 个 `uiapp` 视图至中英双语表，新增 AST i18n 守卫单测 |
+| `CLV-P2-3` | ✅ Completed | `f7efe8e` (`452163f`) | 守护进程生命周期收口：追踪主进程 goroutine/timer、启用主动 Watchdog 自愈与遥测上报、移除死代码 `lru` |
+| `CLV-P2-4` | ✅ Completed | `32108e5` (`0404df8`) | IMK 死残留清理（删除 `cmd/clavis-imk/` 与 `internal/bridge/imk_ipc.go`）、确立 `docs/ROADMAP.md` 唯一真源、刷新 `README.md`、补齐 11-23~24 新特性三篇事实规格 |
+| `CLV-P2-5` | ✅ Completed | `fa500e5` | 收口清理最后一张全局侧表 `clipboardTTLSync` 并对齐拆文件后的 i18n AST 守卫基线 |
 
 ---
 
-### Phase 4（`CLV-P4`）：跨平台校验、CI/打包与可选扩展 — **Planned**
+### Phase 3（`CLV-P3`）：数据一致性、模板平台与多设备密文同步 — **Completed**
 
-| 批次 | 状态 | 范围与目标 |
+| 批次 | 状态 | 合并提交（实现提交） | 核心交付 |
+| --- | --- | --- | --- |
+| `CLV-P3-1` | ✅ Completed | `84ea939` (`bcf8c6e`) | 统一 SQLite Schema 迁移框架（单库独立版本号、迁移前自动备份、单库事务与未知版本 fail-closed）、Bigram 冷启动快照与可交换 `MergeLearning` 合并（原计划 P3-1 + P3-2 合并落地，参见 `docs/backend/schema-migration.md` 与 `docs/design/ime-dictionary-architecture.md`） |
+| `CLV-P3-2` | ✅ Completed | `f3d1bc3` (`a1c7291`) | Template Platform T5：解锁多语言模板契约、激活设置页模板库管理 UI（`uiapp/settings_templates.go`）与 Prompt Composer 完整接线（参见 `docs/design/template-platform.md`） |
+| `CLV-P3-3` | ✅ Completed | `3166819` (`027d280`) | 多设备密文同步（D1）：密码学 v2 双向可解信封与 ADK 轮换加固、共享目录密文传输后端 `DirTransport`、`clavis sync` CLI 子命令与桌面端同步状态接线（参见 `docs/design/multi-device.md`） |
+
+---
+
+### Phase 4（`CLV-P4`）：跨平台校验、CI/打包与可选扩展 — **In Progress**
+
+| 批次 | 状态 | 范围与交付进展 |
 | --- | --- | --- |
-| `CLV-P4-1` | ⏳ Planned | Windows Parity 收口与桥接测试：补齐 `internal/bridge/*_windows_test.go`、`internal/capture` 区域框选、真机手测回归记录（参见 `docs/windows-parity-audit.md`） |
-| `CLV-P4-2` | ⏳ Planned | GitHub Actions CI 与可复现打包：三平台 `go vet`、`go test -race`、构建期 `ldflags` 版本/commit 注入与打包体积检查（D3） |
-| `CLV-P4-3` | ⏳ Planned | 可选扩展（按需排期）：`NotificationStore`（只读 DSH/飞书游标通知，参见 `docs/backend/notification-store.md`）、本地模型 C1 路由（参见 `docs/design/local-model-architecture.md`）、MCP stdio 集成（D2） |
+| `CLV-P4-1` | 🔄 In Progress（代码推进中；⏳ 待 Windows 真机签收） | Windows Parity 收口与桥接测试：补齐 `internal/bridge/*_windows_test.go`、`internal/capture` 区域框选、交叉编译门禁与诊断能力对账（参见 `docs/windows-parity-audit.md`）；**真实 Windows 硬件手测签收待机主完成** |
+| `CLV-P4-2` | ✅ Completed（Wave 4 `clv/p4-ci-packaging`） | GitHub Actions 跨平台 CI（`.github/workflows/ci.yml`：三平台 `go vet`、`go test -race`、Windows 测试交叉编译、`--smoke-check` / `--self-check` / `clavis sync plan`）、`version.go` `-ldflags -X` 注入与单测、`scripts/package.sh` / `package-all.sh` / `version.sh` / `device-beat.sh` / `device-beat.ps1` 加固（含多平台 `clavis-cli` 打包、Linux `.tar.gz` 与 `.sha256` 清单）（D3） |
+| `CLV-P4-3` | 🔄 In Progress（Wave 4 并行交付中） | 可选扩展：`NotificationStore`（只读 DSH/飞书游标通知，参见 `docs/backend/notification-store.md`）、本地模型 C1 路由（参见 `docs/design/local-model-architecture.md`）、MCP stdio 集成（D2） |
+
+#### 硬件与人工签收待办（Pending Owner Hardware Verification）
+
+以下两项无法由无头 CI 或纯单测替代，须由机主在真实桌面环境完成最终签收后方可关闭对应里程碑：
+
+- [ ] **Windows 真机硬件签收**：在真实 Windows 设备拉取 `main` 构建运行，执行 `scripts/device-beat.ps1` 记录心跳，手测验证低级键钩子/热键恢复、IMM32/TSF 输入法切换、`ProbeSelection` 划词与区域截图标注流程。
+- [ ] **macOS 交互式 A1–A16 GUI 手测矩阵**：在已授予 Accessibility / Input Monitoring / Screen Recording 权限的 macOS 桌面会话中，逐项回归验证 Capsule、第二输入法候选窗、划词悬浮条、区域截图标注、Security Vault 安全剪贴板与 Herdr 控制面交互。
 
 ---
 
@@ -100,7 +107,7 @@ Clavis 的核心功能面（Launcher / 第二输入法 / 媒体剪贴板 / Secur
 
 1. **禁止未关账的旧文档继续误导**：每个阶段合入后须同步更新本文件状态与基线 SHA，避免重复盘点已落地项。
 2. **并行 worktree 文件归属隔离**：同一目录不同职责必须按文件显式划分（尤其是 `uiapp/` 与 `internal/bridge/`），严禁使用 `git add -A`。
-3. **跨平台编译门禁常绿**：任何合入前必须通过 `go vet ./...`、`GOOS=windows GOARCH=amd64 go vet ./...`、`GOOS=linux GOARCH=amd64 go vet ./...` 与相关包 `-count=1` 单测。
+3. **跨平台编译门禁常绿**：任何合入前必须通过 `go vet ./...`、`GOOS=windows GOARCH=amd64 go vet ./...`、`GOOS=linux GOARCH=amd64 go vet ./...` 与相关包 `-count=1` 单测，并确保 `.github/workflows/ci.yml` 全绿。
 
 ---
 
@@ -111,9 +118,9 @@ Clavis 的核心功能面（Launcher / 第二输入法 / 媒体剪贴板 / Secur
 - **Herdr 控制面与 Agent 会话**：[`docs/design/herdr-control-plane-spec.md`](design/herdr-control-plane-spec.md)
 - **AI 工作台、OCR/翻译与续写**：[`docs/design/ai-workbench-spec.md`](design/ai-workbench-spec.md)
 - **视觉语言与空间 3D 规范**：[`docs/design/visual-language.md`](design/visual-language.md)
-- **模板平台（Phase 3 实施依据）**：[`docs/design/template-platform.md`](design/template-platform.md)
-- **多设备同步（Phase 3 结合 D1）**：[`docs/design/multi-device.md`](design/multi-device.md)
-- **SQLite 迁移契约（Phase 3）**：[`docs/backend/schema-migration.md`](backend/schema-migration.md)
+- **模板平台（Phase 3 已落地）**：[`docs/design/template-platform.md`](design/template-platform.md)
+- **多设备同步（Phase 3 结合 D1 已落地）**：[`docs/design/multi-device.md`](design/multi-device.md)
+- **SQLite 迁移契约（Phase 3 已落地）**：[`docs/backend/schema-migration.md`](backend/schema-migration.md)
 - **Windows 能力对账（Phase 4）**：[`docs/windows-parity-audit.md`](windows-parity-audit.md)
 
 ### 已取代 / 历史归档文档（顶部已标注状态横幅）
