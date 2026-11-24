@@ -651,7 +651,7 @@ func evaluateAdvancedUtility(q string, now time.Time) []OmniboxItem {
 	if out := evaluateDateMath(q, now); len(out) > 0 {
 		return out
 	}
-	return nil
+	return evaluateDevUtility(q, now)
 }
 func parseFloat(s string) float64 { v, _ := strconv.ParseFloat(s, 64); return v }
 func convertUnit(v float64, from, to string) (float64, bool) {

@@ -112,6 +112,7 @@ const (
 	ItemScriptCommand  OmniboxItemKind = "script_command"
 	ItemWorkflow       OmniboxItemKind = "workflow"
 	ItemPortProcess    OmniboxItemKind = "port_process"
+	ItemQuickJump      OmniboxItemKind = "quick_jump"
 )
 
 type PortEntry struct {
@@ -152,8 +153,10 @@ type OmniboxItem struct {
 	GlossaryTerm     *config.GlossaryTerm   `json:"glossaryTerm,omitempty"`
 	AIMode           string                 `json:"aiMode,omitempty"`
 	AIPrompt         string                 `json:"aiPrompt,omitempty"`
+	AISourceText     string                 `json:"aiSourceText,omitempty"`
 	SettingID        string                 `json:"settingId,omitempty"`
 	UtilityValue     string                 `json:"utilityValue,omitempty"`
+	UtilitySensitive bool                   `json:"utilitySensitive,omitempty"`
 	AppBundleID      string                 `json:"appBundleId,omitempty"`
 	AppPath          string                 `json:"appPath,omitempty"`
 	IMEMode          config.IMEMode         `json:"imeMode,omitempty"`
@@ -164,6 +167,7 @@ type OmniboxItem struct {
 	Port             int                    `json:"port,omitempty"`
 	PortPID          int                    `json:"portPid,omitempty"`
 	PortProcess      string                 `json:"portProcess,omitempty"`
+	QuickJump        *QuickJumpTarget       `json:"quickJump,omitempty"`
 	// ClipboardSourceApp and ClipboardCopiedAt feed the clipboard row's
 	// "source · time" line; Subtitle keeps its "Clipboard" fallback for
 	// screen readers and other consumers.
@@ -210,6 +214,7 @@ type State struct {
 	InstalledApps           []InstalledAppEntry     `json:"installedApps,omitempty"`
 	FrecencyScores          map[string]int          `json:"frecencyScores,omitempty"`
 	ListeningPorts          []PortEntry             `json:"listeningPorts,omitempty"`
+	QuickJumpTargets        []QuickJumpTarget       `json:"quickJumpTargets,omitempty"`
 }
 
 // NewInitialState returns a hidden initial State.
@@ -230,6 +235,7 @@ const (
 	EventSetInstalledApps          EventType = "set_installed_apps"
 	EventSetFrecencyScores         EventType = "set_frecency_scores"
 	EventSetListeningPorts         EventType = "set_listening_ports"
+	EventSetQuickJumpTargets       EventType = "set_quick_jump_targets"
 	EventLeaderKeyPress            EventType = "leader_key_press"
 	EventUpdateQuery               EventType = "update_query"
 	EventClearQuery                EventType = "clear_query"
@@ -251,6 +257,7 @@ const (
 	EventAIChunk                        EventType = "ai_chunk"
 	EventAICompleted                    EventType = "ai_completed"
 	EventAIFailed                       EventType = "ai_failed"
+	EventStartAI                        EventType = "start_ai"
 	EventFollowUpAI                     EventType = "follow_up_ai"
 	EventSelectAIProfile                EventType = "select_ai_profile"
 	EventAcceptAIOutput                 EventType = "accept_ai_output"
@@ -266,6 +273,8 @@ type Event struct {
 	Tab              config.CapsuleTab       `json:"tab,omitempty"`
 	Query            string                  `json:"query,omitempty"`
 	Prompt           string                  `json:"prompt,omitempty"`
+	Mode             string                  `json:"mode,omitempty"`
+	SourceText       string                  `json:"sourceText,omitempty"`
 	ProfileID        string                  `json:"profileId,omitempty"`
 	Key              string                  `json:"key,omitempty"`
 	Index            int                     `json:"index,omitempty"`
@@ -278,6 +287,7 @@ type Event struct {
 	InstalledApps    []InstalledAppEntry     `json:"installedApps,omitempty"`
 	FrecencyScores   map[string]int          `json:"frecencyScores,omitempty"`
 	ListeningPorts   []PortEntry             `json:"listeningPorts,omitempty"`
+	QuickJumpTargets []QuickJumpTarget       `json:"quickJumpTargets,omitempty"`
 }
 
 // EffectType identifies a side effect emitted by Reduce.
@@ -302,6 +312,10 @@ const (
 	EffectDeleteClipboard       EffectType = "delete_clipboard_item"
 	EffectBindAppIMERule        EffectType = "bind_app_ime_rule"
 	EffectOpenPromptComposer    EffectType = "open_prompt_composer"
+	EffectRevealPath            EffectType = "reveal_path"
+	EffectOpenPath              EffectType = "open_path"
+	EffectOpenExternal          EffectType = "open_external"
+	EffectFocusHerdrTarget      EffectType = "focus_herdr_target"
 )
 
 // Effect describes a side effect that the host/coordinator should perform.
@@ -316,6 +330,8 @@ type Effect struct {
 	History             []ChatTurn             `json:"history,omitempty"`
 	ProfileID           string                 `json:"profileId,omitempty"`
 	Text                string                 `json:"text,omitempty"`
+	Sensitive           bool                   `json:"sensitive,omitempty"`
+	SecretLabel         string                 `json:"secretLabel,omitempty"`
 	ClipboardID         string                 `json:"clipboardId,omitempty"`
 	ClipboardContent    string                 `json:"clipboardContent,omitempty"`
 	ClipboardMedia      *ClipboardMedia        `json:"clipboardMedia,omitempty"`
@@ -520,6 +536,13 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 
 	case EventSetListeningPorts:
 		next.ListeningPorts = append([]PortEntry(nil), event.ListeningPorts...)
+		if next.Phase == PhaseOmnibox {
+			next.OmniboxItems = buildOmniboxItems(next.OmniboxTab, next.OmniboxQuery, next, cfg)
+		}
+		return next, nil
+
+	case EventSetQuickJumpTargets:
+		next.QuickJumpTargets = append([]QuickJumpTarget(nil), event.QuickJumpTargets...)
 		if next.Phase == PhaseOmnibox {
 			next.OmniboxItems = buildOmniboxItems(next.OmniboxTab, next.OmniboxQuery, next, cfg)
 		}
@@ -928,6 +951,42 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		}
 		return next, nil
 
+	case EventStartAI:
+		mode := strings.TrimSpace(event.Mode)
+		if mode == "" {
+			mode = "ask"
+		}
+		var ctxCopy CapsuleContext
+		if event.Context != nil {
+			ctxCopy = *event.Context
+		} else {
+			ctxCopy = next.Context
+		}
+		profID := strings.TrimSpace(event.ProfileID)
+		if profID == "" {
+			profID = effectiveProfileID(next, cfg)
+		}
+		clearPhaseFields(&next)
+		next.Context = ctxCopy
+		next.Phase = PhaseAIStreaming
+		next.AIMode = mode
+		next.AIPrompt = strings.TrimSpace(event.Prompt)
+		next.AISourceText = event.SourceText
+		if strings.TrimSpace(event.ProfileID) != "" {
+			next.ActiveAIProfileID = strings.TrimSpace(event.ProfileID)
+		}
+		return next, []Effect{
+			{Type: EffectCancelAI},
+			{
+				Type:       EffectStartAI,
+				Mode:       mode,
+				Prompt:     next.AIPrompt,
+				SourceText: event.SourceText,
+				Context:    &ctxCopy,
+				ProfileID:  profID,
+			},
+		}
+
 	case EventFollowUpAI:
 		if state.Phase != PhaseAIStreaming || !state.AIComplete {
 			return next, nil
@@ -1108,22 +1167,43 @@ func AvailableItemActions(item OmniboxItem) []OmniboxActionSpec {
 		if item.KeyHint == KeyHintPinned {
 			pinLabel = i18n.T("engine.action.unpin")
 		}
-		return []OmniboxActionSpec{
+		specs := []OmniboxActionSpec{
 			{ID: "copy", Label: i18n.T("engine.action.copy_clipboard"), Shortcut: "↵"},
 			{ID: "paste", Label: i18n.T("engine.action.paste"), Shortcut: modKey() + "↵"},
 			{ID: "pin", Label: pinLabel, Shortcut: modKey() + "P"},
 			{ID: "delete", Label: i18n.T("engine.action.delete_history"), Shortcut: modKey() + "⌫"},
 		}
+		if item.ClipboardMedia != nil && item.ClipboardMedia.IsMedia() {
+			specs = append(specs,
+				OmniboxActionSpec{ID: "copy_path", Label: copyMatrixLabel("复制路径", "Copy Path")},
+				OmniboxActionSpec{ID: "reveal", Label: copyMatrixLabel("在访达中显示", "Reveal")},
+				OmniboxActionSpec{ID: "copy_meta", Label: copyMatrixLabel("复制元信息", "Copy Metadata")},
+			)
+			if item.ClipboardMedia.Kind == "image" {
+				specs = append(specs, OmniboxActionSpec{ID: "ocr", Label: copyMatrixLabel("AI OCR 识字", "AI OCR")})
+			}
+		} else {
+			specs = append(specs,
+				OmniboxActionSpec{ID: "copy_md", Label: copyMatrixLabel("复制 Markdown", "Copy Markdown")},
+				OmniboxActionSpec{ID: "translate", Label: copyMatrixLabel("AI 双语翻译", "Translate")},
+			)
+		}
+		return specs
 	case ItemSnippet:
 		return []OmniboxActionSpec{
 			{ID: "expand", Label: i18n.T("engine.action.insert_snippet"), Shortcut: "↵"},
 			{ID: "copy", Label: i18n.T("engine.action.copy_snippet"), Shortcut: modKey() + "↵"},
+			{ID: "copy_md", Label: copyMatrixLabel("复制 Markdown", "Copy Markdown")},
 		}
 	case ItemUtility:
-		return []OmniboxActionSpec{
+		specs := []OmniboxActionSpec{
 			{ID: "copy", Label: i18n.T("engine.action.copy_result"), Shortcut: "↵"},
 			{ID: "paste", Label: i18n.T("engine.action.insert_result"), Shortcut: modKey() + "↵"},
 		}
+		if !item.UtilitySensitive {
+			specs = append(specs, OmniboxActionSpec{ID: "copy_md", Label: copyMatrixLabel("复制 Markdown", "Copy Markdown")})
+		}
+		return specs
 	case ItemGlossaryTerm:
 		return []OmniboxActionSpec{
 			{ID: "copy", Label: i18n.T("engine.action.copy_term"), Shortcut: "↵"},
@@ -1159,6 +1239,15 @@ func AvailableItemActions(item OmniboxItem) []OmniboxActionSpec {
 			{ID: "run_workflow", Label: "Run Workflow", Shortcut: "↵"},
 			{ID: "copy_title", Label: i18n.T("engine.action.copy_item_title"), Shortcut: modKey() + "↵"},
 		}
+	case ItemQuickJump:
+		specs := []OmniboxActionSpec{
+			{ID: "jump", Label: copyMatrixLabel("立即跳转", "Jump"), Shortcut: "↵"},
+			{ID: "copy_target", Label: copyMatrixLabel("复制目标", "Copy Target"), Shortcut: modKey() + "↵"},
+		}
+		if item.QuickJump != nil && (item.QuickJump.Kind == "dir" || item.QuickJump.Kind == "worktree") {
+			specs = append(specs, OmniboxActionSpec{ID: "reveal", Label: copyMatrixLabel("在访达中显示", "Reveal")})
+		}
+		return specs
 	default:
 		return []OmniboxActionSpec{
 			{ID: "primary", Label: i18n.T("engine.action.run"), Shortcut: "↵"},
@@ -1237,6 +1326,82 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 				{Type: EffectClose},
 			}
 		}
+		if actID == "copy_md" {
+			txt := item.ClipboardContent
+			if txt == "" {
+				txt = item.Title
+			}
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{
+				{Type: EffectCopyText, Text: formatMarkdownFence(txt), ClipboardID: item.ClipboardID},
+				{Type: EffectClose},
+			}
+		}
+		if actID == "copy_path" && item.ClipboardMedia != nil {
+			pathText := mediaPathsCopyText(*item.ClipboardMedia)
+			if pathText != "" {
+				clearPhaseFields(&next)
+				next.Phase = PhaseHidden
+				return next, []Effect{
+					{Type: EffectCopyText, Text: pathText, ClipboardID: item.ClipboardID},
+					{Type: EffectClose},
+				}
+			}
+		}
+		if actID == "reveal" && item.ClipboardMedia != nil {
+			revealTarget := mediaPrimaryPath(*item.ClipboardMedia)
+			if revealTarget != "" {
+				clearPhaseFields(&next)
+				next.Phase = PhaseHidden
+				return next, []Effect{
+					{Type: EffectRevealPath, Text: revealTarget},
+					{Type: EffectClose},
+				}
+			}
+		}
+		if actID == "copy_meta" && item.ClipboardMedia != nil {
+			meta := formatMediaMetadataSafe(item, *item.ClipboardMedia)
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{
+				{Type: EffectCopyText, Text: meta, ClipboardID: item.ClipboardID},
+				{Type: EffectClose},
+			}
+		}
+		if actID == "translate" {
+			src := item.ClipboardContent
+			if strings.TrimSpace(src) == "" {
+				src = item.Title
+			}
+			dir := DetectTranslateDirection(src)
+			_, instr := BuildTranslatePrompt(src, dir)
+			ctxCopy := next.Context
+			profID := effectiveProfileID(next, cfg)
+			clearPhaseFields(&next)
+			next.Context = ctxCopy
+			next.Phase = PhaseAIStreaming
+			next.AIMode = "translate"
+			next.AIPrompt = instr
+			next.AISourceText = src
+			return next, []Effect{
+				{Type: EffectCancelAI},
+				{Type: EffectStartAI, Mode: "translate", Prompt: instr, SourceText: src, Context: &ctxCopy, ProfileID: profID},
+			}
+		}
+		if actID == "ocr" && item.ClipboardMedia != nil && item.ClipboardMedia.IsMedia() {
+			mCopy := *item.ClipboardMedia
+			ctxCopy := next.Context
+			clearPhaseFields(&next)
+			next.Context = ctxCopy
+			next.Phase = PhaseAIStreaming
+			next.AIMode = "ocr"
+			next.AIPrompt = "Extract all readable text and Markdown formatting from this image."
+			return next, []Effect{
+				{Type: EffectCancelAI},
+				{Type: EffectStartAI, Mode: "ocr", Prompt: next.AIPrompt, ClipboardMedia: &mCopy, Context: &ctxCopy},
+			}
+		}
 		if actID == "paste" {
 			clearPhaseFields(&next)
 			next.Phase = PhaseHidden
@@ -1245,20 +1410,32 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 			}
 		}
 	case ItemSnippet:
-		if actID == "copy" && item.Snippet != nil {
+		if (actID == "copy" || actID == "copy_md") && item.Snippet != nil {
 			rendered := RenderSnippet(item.Snippet.Content, RenderOptions{
 				Now:           time.Now(),
 				ClipboardText: next.Context.ClipboardPreview,
 				AppName:       next.Context.AppName,
 			})
+			txt := rendered.RenderedText
+			if actID == "copy_md" {
+				txt = formatMarkdownFence(txt)
+			}
 			clearPhaseFields(&next)
 			next.Phase = PhaseHidden
 			return next, []Effect{
-				{Type: EffectCopyText, Text: rendered.RenderedText},
+				{Type: EffectCopyText, Text: txt},
 				{Type: EffectClose},
 			}
 		}
 	case ItemUtility:
+		if actID == "copy_md" && !item.UtilitySensitive {
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{
+				{Type: EffectCopyText, Text: formatMarkdownFence(item.UtilityValue)},
+				{Type: EffectClose},
+			}
+		}
 		if actID == "paste" {
 			val := item.UtilityValue
 			clearPhaseFields(&next)
@@ -1436,9 +1613,13 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 			}}
 		}
 		var src string
-		if item.AIMode == "ask" {
+		if strings.TrimSpace(item.AISourceText) != "" {
+			src = item.AISourceText
+		} else if item.AIMode == "ask" || item.AIMode == "translate" {
 			if strings.TrimSpace(next.Context.SelectedText) != "" {
 				src = next.Context.SelectedText
+			} else if item.AIMode == "translate" {
+				src = resolveRewriteSourceText(next.Context)
 			}
 		} else {
 			src = resolveRewriteSourceText(next.Context)
@@ -1471,10 +1652,14 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 
 	case ItemUtility:
 		val := item.UtilityValue
+		secretLabel := ""
+		if item.UtilitySensitive {
+			secretLabel = "Clavis Generated Credential"
+		}
 		clearPhaseFields(&next)
 		next.Phase = PhaseHidden
 		return next, []Effect{
-			{Type: EffectCopyText, Text: val},
+			{Type: EffectCopyText, Text: val, Sensitive: item.UtilitySensitive, SecretLabel: secretLabel},
 			{Type: EffectClose},
 		}
 
@@ -1527,6 +1712,38 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 				next.Phase = PhaseHidden
 				return next, []Effect{{Type: EffectRunAction, Action: &act, Context: &ctxCopy}, {Type: EffectClose}}
 			}
+		}
+
+	case ItemQuickJump:
+		if item.QuickJump == nil {
+			return next, nil
+		}
+		qj := *item.QuickJump
+		if actID == "copy_target" {
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{
+				{Type: EffectCopyText, Text: qj.Target},
+				{Type: EffectClose},
+			}
+		}
+		if actID == "reveal" {
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{
+				{Type: EffectRevealPath, Text: qj.Target},
+				{Type: EffectClose},
+			}
+		}
+		clearPhaseFields(&next)
+		next.Phase = PhaseHidden
+		switch qj.Kind {
+		case "url":
+			return next, []Effect{{Type: EffectOpenExternal, Text: qj.Target}, {Type: EffectClose}}
+		case "workspace", "agent":
+			return next, []Effect{{Type: EffectFocusHerdrTarget, Mode: qj.Kind, Text: qj.Target}, {Type: EffectClose}}
+		default:
+			return next, []Effect{{Type: EffectOpenPath, Text: qj.Target}, {Type: EffectClose}}
 		}
 
 	case ItemPortProcess:
@@ -1591,7 +1808,7 @@ func ParseOmniboxPrefix(rawQuery string) (prefix rune, rest string, routed bool)
 	firstRune, size := utf8.DecodeRuneInString(trimmedLeft)
 	normFirst := NormalizeFullWidthRune(firstRune)
 	switch normFirst {
-	case '>', ';', '@', '?', ':', '=', '/':
+	case '>', ';', '@', '?', ':', '=', '/', '#':
 		return normFirst, strings.TrimSpace(trimmedLeft[size:]), true
 	}
 	lower := strings.ToLower(trimmedLeft)
@@ -1834,6 +2051,7 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 					cmds = append(cmds, OmniboxItem{ID: fmt.Sprintf("port:%d", port.Port), Title: fmt.Sprintf(":%d %s", port.Port, port.Process), Subtitle: port.Command, Keywords: []string{"kill", "port", strconv.Itoa(port.Port)}, Kind: ItemPortProcess, Port: port.Port, PortPID: port.PID, PortProcess: port.Process, Score: 1000})
 				}
 				cmds = append(cmds, flattenLeaderNodes(cfg.Leader.Nodes, nil, nil)...)
+				cmds = append(cmds, makeCaptureActionItems()...)
 				cmds = append(cmds, makeNormalizeGlossaryItem())
 				cmds = append(cmds, makeAppIMERuleItems(state.Context)...)
 				cmds = append(cmds, makeInstalledAppItems(state.InstalledApps)...)
@@ -1877,6 +2095,8 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 				if sourceEnabled(cfg.Components.Sources, "prompts") {
 					return matchPromptItems(cfgPromptItems(cfg, state.Context), query, rest, "/", state.FrecencyScores)
 				}
+			case '#':
+				return BuildQuickJumpItems(state, cfg, rest)
 			}
 		}
 	}
@@ -1905,6 +2125,7 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 		candidates = append(candidates, makeAppIMERuleItems(state.Context)...)
 		candidates = append(candidates, makeSnippetItems(cfg.Snippets.Items)...)
 		candidates = append(candidates, makeInstalledAppItems(state.InstalledApps)...)
+		candidates = append(candidates, makeCaptureActionItems()...)
 		candidates = append(candidates, makeTabSwitchItems(config.TabActions)...)
 	case config.TabSnippets:
 		candidates = makeSnippetItems(cfg.Snippets.Items)
@@ -1962,6 +2183,9 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 	scoredItems := scoreCandidatesWithFrecency(candidates, trimmed, state.FrecencyScores)
 
 	var results []OmniboxItem
+	if trItem, ok := MakeTranslateOmniboxItem(trimmed, state.Context); ok {
+		results = append(results, trItem)
+	}
 	if tab == config.TabActions {
 		utilItems := EvaluateUtilities(trimmed, time.Now())
 		results = append(results, utilItems...)
