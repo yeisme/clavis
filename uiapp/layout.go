@@ -94,15 +94,6 @@ func PreferredCapsuleSizeForState(state engine.State, appearance config.Appearan
 	if state.Phase == engine.PhaseOmnibox && state.OmniboxTab == config.TabClipboard {
 		h += int(clipboardStatsBandHeight)
 	}
-	if state.Phase == engine.PhaseOmnibox && state.SelectedIndex >= 0 && state.SelectedIndex < len(state.OmniboxItems) {
-		item := state.OmniboxItems[state.SelectedIndex]
-		if item.ClipboardMedia != nil && item.ClipboardMedia.IsMedia() && (item.ClipboardMedia.Kind == "image" || item.ClipboardMedia.Kind == "video") {
-			height += int(mediaCanvasHeight - rowHeightOmnibox)
-			if height > 860 {
-				height = 860
-			}
-		}
-	}
 	if state.Phase == engine.PhaseAIStreaming && len(state.AIHistory) > 0 && h < 580 {
 		h = 580
 	}

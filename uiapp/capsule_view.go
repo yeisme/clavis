@@ -695,11 +695,14 @@ func (a *AppController) renderOmniboxView(
 				altHeld := cfg.Main.Appearance.ShowKeyHints && c.Modifiers()&ui.Alt != 0
 				prefs := c.Preferences()
 				plan := resolveStagePlan(stageInputs{
-					Phase:              state.Phase,
-					Preset:             cfg.Main.Appearance.VisualPreset,
-					Animations:         cfg.Main.Appearance.Animations,
-					Intensity:          cfg.Main.Appearance.StageIntensity,
-					ObliqueRows:        cfg.Main.Appearance.ObliqueRows,
+					Phase:      state.Phase,
+					Preset:     cfg.Main.Appearance.VisualPreset,
+					Animations: cfg.Main.Appearance.Animations,
+					Intensity:  cfg.Main.Appearance.StageIntensity,
+					// Clipboard history is a high-frequency list. Keep its rows
+					// planar even when the user enables the stage-wide oblique fan so
+					// changing the selection cannot re-rasterize resting rows.
+					ObliqueRows:        cfg.Main.Appearance.ObliqueRows && state.OmniboxTab != config.TabClipboard,
 					Composing:          a.uiState.isComposing,
 					ReducedMotion:      prefs.ReduceMotion,
 					ReduceTransparency: prefs.ReduceTransparency,
@@ -717,16 +720,12 @@ func (a *AppController) renderOmniboxView(
 						item := items[i]
 						isSelected := i == selectedIdx
 						row := ui.Row(c).
+							Key("omnibox-row:"+item.ID).
 							FillWidth().
 							Padding(space6, space8).
 							Radius(radiusRow).
 							Gap(space10).
-							AlignItems(ui.Center).
-							Transition(ui.ElementTransition{
-								Animation: profile.rowEnterAnimation(i),
-								Enter:     profile.rowEnterMotion(),
-								ExitDelay: -1, // rows leave at once; only entering staggers
-							})
+							AlignItems(ui.Center)
 						// The chosen row is marked by a 2px accent bar at its leading
 						// edge over a faint tint — never a fully blue row, outline or
 						// tile. The 1px transparent border keeps the row's geometry.
@@ -734,9 +733,11 @@ func (a *AppController) renderOmniboxView(
 						if isSelected {
 							fill, bar = rowSelectionFill(theme), rowSelectionBar(theme)
 						}
-						if selAnim := profile.selectionAnimation(); selAnim.Duration > 0 {
-							fill = row.AnimateColor("row-sel", fill, selAnim)
-							bar = row.AnimateColor("row-bar", bar, selAnim)
+						if state.OmniboxTab != config.TabClipboard {
+							if selAnim := profile.selectionAnimation(); selAnim.Duration > 0 {
+								fill = row.AnimateColor("row-sel", fill, selAnim)
+								bar = row.AnimateColor("row-bar", bar, selAnim)
+							}
 						}
 						row.Background(fill).Border(space1, ui.Transparent)
 						if bar.A > 0 {
