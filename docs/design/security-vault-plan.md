@@ -1,5 +1,7 @@
 # Security Vault 执行级设计
 
+> **Status: Superseded / Updated as of 2026-11-25** — 本设计中的 Vault 契约已落地实现（`312a506` / `3977523`），并于 `CLV-P0-1`（`b5c086d`）完成生产级安全加固：敏感正文现加密落盘于独立 `vault_secrets.enc`（AES-256-GCM，32 字节主密钥优先 OS Keychain、回退 `0600` `vault.key`），与 `ai-keys.toml` 完全隔离（[`docs/ROADMAP.md`](../ROADMAP.md) 决策 D4），并补齐撤销即删密文、`FileStore` 并发竞态修复与剪贴板 TTL 归属安全清理。下文保留作原始方案与设计决策依据。
+
 > 阶段：spec
 > 范围：Keychain/SecretRef、user-only 复制、敏感 TTL、审计、Agent 禁止读取正文
 > 本轮只产出设计，不修改生产代码。

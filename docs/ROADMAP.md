@@ -1,158 +1,125 @@
-# Clavis 推进路线（怎么把这条线做完）
+# Clavis 推进路线（Single Source of Truth）
 
-基线 HEAD `21ac2db`（2026-11-19）。三条设计线：
-[模板平台](design/template-platform.md) · [输入法完成](design/input-engine-completion.md) · [多设备](design/multi-device.md)。
+> **权威基线**：HEAD `79d325b`（2026-11-25）
+>
+> **状态口径**：本文件是 Clavis 全仓唯一的推进路线与阶段状态真源。历史规划与专项设计见 §5 文档索引；任何旧文档与本文件冲突时，以本文件与当前代码为准。
 
-## 0. 一句话结论
+---
 
-**功能已经够了，缺的是三条线各自的「最后一公里」加一堆没人关的账。**
+## 0. 一句话结论与 1.x 完成口径
 
-- 引擎、模板、同步协议都不是从零开始——每一块都有可用的代码骨架（有的比预期完整得多，见各设计文档的事实基线）。
-- 真正阻断的是三件事：输入法在 macOS 上的 5 处差集、模板根本没有远端导入能力、同步的加密模型是单向的。
-- 另有 13 个 `.pi/goals` 里 8 个是 0 token 空占位、`docs/` 多篇基线停在 `e7c54fe`/`458d7fe`——**账不清，每轮盘点都会被假未完成项污染**。
+Clavis 的核心功能面（Launcher / 第二输入法 / 媒体剪贴板 / Security Vault / 区域截图标注 / 多协议 AI & Vision OCR / Herdr Agent 控制面）已全部合入 `main`，且 **P0（安全与正确性止血）** 与 **P1（核心引擎、接线与 120Hz 性能收口）** 已全量落地验收。当前处于 **P2（架构减债与可维护性收口）**，随后推进 **P3（统一 Schema、模板平台与多设备同步）** 与 **P4（Windows 实测、CI 打包与可选扩展）**。
 
-所以路线第一波不是写功能，是**先止血再推进**（详见 §2 Wave 0）。
-
-## 1. 「完成」的定义
-
-不同的人对 Clavis「完成」的定义差很远，先把三档写死，避免永远做不完：
-
-| 档 | 定义 | 可验收 |
+| 里程碑 | 目标定义 | 验收门槛 |
 | --- | --- | --- |
-| **可用（1.0）** | 主人在 mini 上把它当日常启动器 + 中文输入主力（第二输入法），模板能从官方目录导入并一键填槽，Windows 侧不是主力但能拉起来跑 | 本文件 §3 的 Wave 0–2 全部机器断言绿 + 一次两平台手测记录 |
-| **好用（1.1）** | 多设备真的能同步（片段/词库/模板清单）、冲突有界面、Windows parity 🟡 收完 | Wave 3 绿 |
-| **能做产品（2.0）** | 签名安装包、自动更新、外部用户能自己配起来 | 不在本路线内（见 §6） |
+| **1.0 自用稳定版** | macOS 日常主力启动器 + 第二输入法 + 截图/OCR/AI/Vault/Herdr 全链路可用，无已知安全/竞态/掉帧缺陷 | `CLV-P0` + `CLV-P1` + `CLV-P2` 全绿，单测与 `-race` 零回归 |
+| **1.1 跨设备与模板完善** | 统一 SQLite 迁移框架、`MergeLearning` 合并、多语言模板库 UI、共享目录密文同步可用 | `CLV-P3` 全绿 + 双目录/双设备密文同步端到端验证 |
+| **1.2 工程与双平台收口** | Windows 桥接测试与真机校验闭环、GitHub Actions CI 与可复现 `ldflags` 打包落地 | `CLV-P4` 核心批次绿 + 三平台 `go vet` & 打包产物校验 |
 
-**本路线只承诺到「好用」。** 2.0 的三件事（签名、更新器、引导）与当前自用定位不匹配，现在做等于给自己造维护负担。
+---
 
-## 2. 四波推进
+## 1. 四项锁定架构决策（D1–D4）
 
-### Wave 0：止血（约 6h，必做，不可并行）
+以下决策已锁定，后续批次严格遵守，不再反复摇摆：
 
-| 任务 | 内容 | 验收 |
+| 编号 | 决策内容 | 落地约束 |
 | --- | --- | --- |
-| W0-1 | `.pi/goals` 清账：13 个文件里 8 个是 0 token 空占位、1 个 paused 带 3.3M token | `ls .pi/goals/active_goal_*.md \| wc -l` 降到「真实在办数」；每个保留项 `revision>0` |
-| W0-2 | `docs/` 基线刷新：`own-input-engine.md`（458d7fe）、`windows-parity-audit.md`（e7c54fe）、`hook-robustness.md`、`media-preview.md` 全部落后 HEAD 10+ 个提交 | 每篇顶部写「基线 <sha>」，且审计结论能 grep 到符号 |
-| W0-3 | README 补缺：目录树缺 `cmd/clavis-imk/`、`internal/daemon/`；`[input_engine]` 段缺失；输入法定位一句话（第二输入法，见 input-engine-completion §3.1） | `grep -q input_engine README.md` 等 3 条全命中 |
-| W0-4 | 删假配置：`cmd/clavis-imk` 的 Info.plist 声明 `ClavisIMKController` 但无实现类 | 打包清单不再声明 IMK；或 binary 摘出 |
-| W0-5 | herdr 台账对账：`T-clavis-ai-select` 自 11-15 挂 working（实际已合入）、`T-clavis-windows-beat` 卡 owner | 两个任务关闭或重新定状态，不留僵尸 |
+| **D1** | **多设备同步采用「共享目录密文同步」优先** | 基于 iCloud Drive / Dropbox / Syncthing 等用户自有同步盘读写加密信封（零服务端运维），密码学升级为 v2 双向可解模型后再视需要扩展 LAN/HTTP 传输；禁止明文落盘敏感数据。 |
+| **D2** | **彻底移除 IMK 死残留；冻结 `plugins` / `skills`；MCP 延至 Phase 4** | 删除 `cmd/clavis-imk/` 与零调用的 `internal/bridge/imk_ipc.go`（`imk_install.go` 仅保留至 `selfcheck.go` 解耦完成）；Clavis 坚持「第二输入法（Inline Hook）」定位；`internal/plugins/` 与 `internal/skills/` 进入冻结态不再扩新功能；MCP stdio 集成放入 `CLV-P4` 可选范围。 |
+| **D3** | **1.x 坚持自用优先 + CI 与可靠打包** | 聚焦个人多设备效率与工程稳定性（GitHub CI、`ldflags` 版本注入、本地可复现打包），不引入 2.0 面向外部大众分发的签名公证/自动更新器/模板发布市场等纯维护负担。 |
+| **D4** | **Security Vault 密文隔离存储，与 `ai-keys.toml` 完全解耦** | Vault 密钥正文独立加密落盘至 `vault_secrets.enc`（AES-256-GCM，32 字节主密钥优先 OS Keychain、回退 `0600` `vault.key`），严禁混入明文 `ai-keys.toml`；Agent 与诊断路径永远只能观测元数据 `SecretRef` 与 `CopyReceipt`。 |
 
-W0 不并行：它要改同一批文件（README/docs/goals），并行只会制造 P1 冲突。
+---
 
-### Wave 1：输入法可用 + 模板能吃（约 40h，两线并行）
+## 2. 五阶段统一执行计划（`CLV-P0` – `CLV-P4`）
 
-| 线 | 任务 | 估时 | 归属 |
+### Phase 0（`CLV-P0`）：安全与核心正确性止血 — **Completed**
+
+| 批次 | 状态 | 合并提交（实现提交） | 核心交付 |
 | --- | --- | --- | --- |
-| A | I1 键语义下沉 + darwin 标点通路 + 数字越界不吞 | 10h | pi（backend） |
-| A | I2 高亮移动 + 中英指示 + 一键退回断言 | 8h | pi（backend，接 I1） |
-| A | I3 收敛假配置（`mode` 白名单 / 混合英文接线） | 6h | pi（backend） |
-| B | T1 catalog 读取 + digest 复核 + CAS | 6h | pi（backend，另一面板） |
-| B | T2 合并视图 + 冲突告警 + 诊断 | 5h | pi（backend，接 T1） |
-| B | T3 合同 → 槽位 + 校验器 | 8h | pi（backend，接 T2） |
+| `CLV-P0-1` | ✅ Completed | `b5c086d` (`c161c7f`) | Security Vault `vault_secrets.enc` AES-256-GCM 加密与 `ai-keys.toml` 隔离（D4）、撤销即删底层密文、`FileStore` 并发竞态修复、安全剪贴板 TTL 归属校验清理 |
+| `CLV-P0-2` | ✅ Completed | `0468f29` (`d378f8c`) | Agent 会话控制态按会话隔离（防跨面板串态）、Herdr 参数防选项注入与统一密钥拦截、过滤态 Capsule 导航索引修复 |
+| `CLV-P0-3` | ✅ Completed | `9dff5b0` (`6ffd7fa`) | 标注文字 CJK 字体回退与 MediaStore 入库、`NSScreenCaptureUsageDescription` 补齐、Shader 时间/Alpha 修复、翻译换源自动重置方向、Hub 导航与设置页滚动修复 |
+| `CLV-P0-4` | ✅ Completed | `5cde130` (`f507087`) | 桌面端剪贴板隐私过滤与 AI 用量遥测接线、翻译/AI 续写（rune 安全切片 + 5s 退格撤销 + 安全输入门禁）/划词悬浮条修复、Annotate 窗口生命周期收口 |
 
-并行约束（血换来的，见 herdr `COORDINATION.md` P1/P2/P4）：**同一 git 工作树同时只允许 1 个会话处于提交状态，活跃写会话 ≤2**。所以 A/B 两线必须**路径不重叠**：
+---
 
-- 线 A 只碰：`pkg/core/inputengine/`、`internal/bridge/input_engine*`、`uiapp/input_*`、`uiapp/settings_input_engine.go`
-- 线 B 只碰：`pkg/core/template/`（新建）、`pkg/core/config/prompts_config.go`、`pkg/core/prompt/`
+### Phase 1（`CLV-P1`）：核心引擎、接线与 120Hz 性能闭环 — **Completed**
 
-`uiapp/settings_view.go` 是**已知撞车点**（B 的模板库页与 C 的设备页都要加 tab）——Wave 1 里谁都不许动它，留到 Wave 3 串行处理。
-
-### Wave 2：模板可用 + 输入法收口 + 真机（约 48h）
-
-| 线 | 任务 | 估时 | 归属 |
+| 批次 | 状态 | 合并提交（实现提交） | 核心交付 |
 | --- | --- | --- | --- |
-| A | I4 darwin 重置/snippet 对齐 + `prevWord` 单源 | 6h | pi |
-| A | I5 真机验证批次（四类 app × 两平台） | 8h | **owner 真机时间**（不可外包给面板） |
-| B | T4 fail-closed 渲染 + 权限门 | 6h | pi |
-| B | T5 设置页「模板库」（含 `settings_view.go` 改造） | 12h | codex（frontend） |
-| D | windows-parity 🟡 收口（ProbeSelection / ActiveURL / hover / secure-input 守卫） | 12h | pi |
-| D | 打包脚本双包 + 体积预算 | 4h | codex |
+| `CLV-P1-1` | ✅ Completed | `021e44c` (`398861b`) | 输入法 Bigram 前缀匹配修复、词典热更新 `DictionaryWatcher` stat/故障恢复加固、starter 词典摘要校验 |
+| `CLV-P1-2` | ✅ Completed | `621b980` (`be4118c`) | macOS IME 钩子重置与自应用防递归守卫、输入引擎动态开关候选 UI、用户黑名单与词库接线、`--self-check` 严格只读化 |
+| `CLV-P1-3` | ✅ Completed | `da85969` (`b869603`) | Codex `state_5.sqlite`（`mode=ro`，禁 `immutable=1`）与 `pkg/core/terminal` Resolver 接入 Agent 会话、设置页 IPC 缓存、去重设置卡片 |
+| `CLV-P1-4` | ✅ Completed | `79d325b` (`f8c7b58`) | 剪贴板卡顿治理 Commit 4：COW Capsule 状态快照（`sealSlice`）、行元数据与预览缓存、60 行首屏预览上限，达成 120Hz 帧预算基准 |
 
-Wave 2 的关键：**I5 必须单独排期**。它是唯一不能靠单测替代的批次，混进代码批次就会永远被「等有 Windows 机器时再说」拖住。
+---
 
-### Wave 3：多设备（约 56h，串行为主）
+### Phase 2（`CLV-P2`）：架构减债、守护生命周期与文档真源 — **In Progress**
 
-| 批 | 任务 | 估时 | 依赖 |
-| --- | --- | --- | --- |
-| S1 | 密码学 v2：ADK + ECDH 包裹 + 恢复码封装 ADK | 12h | 无（可早开工，但无可见收益，放这里） |
-| S2 | 身份落盘（keystore：`internal/secrets` 已有 `SaveKey/ReadKey`） | 6h | S1 |
-| S3 | `Client` 改吃 `SyncStore` 接口 + `Pull` + rebase 冲突 | 10h | S2 |
-| S4 | 传输：TCP/TLS + 指纹 pin + UDP beacon | 14h | S3 |
-| S5 | 配对：短码 + 二维码 + 授权票 + `RemoveDevice` | 10h | S4 |
-| S6 | DataClass 扩展 + 协议 v2 迁移 + 隐私过滤 | 8h | S3 |
-| S7 | 设置页「设备」+ 冲突 UI + 审计 + i18n | 12h | S5/S6 + 与 T5 串行改 `settings_view.go` |
+| 批次 | 状态 | 范围与目标 |
+| --- | --- | --- |
+| `CLV-P2-1` | 🔄 In Progress | `uiapp` 架构重构：拆分超大视图与控制器职责，收敛状态同步与事件分发边界 |
+| `CLV-P2-2` | 🔄 In Progress | i18n 守卫与 UX 抛光：消除残留硬编码文案，补齐中英双语测试守卫与交互细节 |
+| `CLV-P2-3` | 🔄 In Progress | 守护进程生命周期收口：`internal/daemon` 启动/优雅退出/信号/Watcher 生命周期与幂等恢复 |
+| `CLV-P2-4` | 🔄 In Progress | IMK 死残留清理（删除 `cmd/clavis-imk/` 与 `internal/bridge/imk_ipc.go`）、确立 `docs/ROADMAP.md` 唯一真源、刷新 `README.md`、补齐 11-23~24 新特性三篇事实规格 |
 
-**S1 必须在 S4 之前**，这是本路线最重要的排序：现协议用「发送方私钥」当 AES 密钥（`sync.go:910`），接收方物理上解不开。先做传输等于白做。
+---
 
-另外 S7 与 T5 都改 `uapp/settings_view.go`：**串行**，不并行。
+### Phase 3（`CLV-P3`）：数据一致性、模板平台与多设备密文同步 — **Planned**
 
-## 3. 关键路径与并行度
+| 批次 | 状态 | 范围与目标 |
+| --- | --- | --- |
+| `CLV-P3-1` | ⏳ Planned | 统一 SQLite Schema 迁移框架：按库独立版本号、迁移前自动备份、单库事务与未知版本 fail-closed（参见 `docs/backend/schema-migration.md`） |
+| `CLV-P3-2` | ⏳ Planned | Bigram 与学习数据快照：`MergeLearning` 可交换合并、`log1p` 频次压缩与 pinned 永久保护（参见 `docs/design/ime-dictionary-architecture.md`） |
+| `CLV-P3-3` | ⏳ Planned | Template Platform T5：多语言模板目录激活、`promptrepo` 目录集成与设置页模板库管理 UI（参见 `docs/design/template-platform.md`） |
+| `CLV-P3-4` | ⏳ Planned | 多设备同步加固与目录传输（D1）：密码学 v2 双向可解信封（ADK/ECDH）、共享目录密文传输后端、冲突可见性与同步审计 |
 
-```text
-W0（6h，独占）
- └─ Wave 1  A: I1→I2→I3        B: T1→T2→T3          （两线并行，路径隔离）
-     └─ Wave 2  A: I4→I5(真机)  B: T4→T5(codex)  D: parity+打包
-         └─ Wave 3  S1→S2→S3→S4→S5→S6→S7（基本串行，S7 与 T5 互斥）
-```
+---
 
-可并行的只有 Wave 1 的两条线，以及 Wave 2 的 A/B/D 三条线（D 只碰 `internal/bridge` 的 Windows 侧与 `scripts/`，与 A 的 darwin 侧文件不重叠，但同属 `internal/bridge` 包——**必须按文件分配，不能按目录分配**）。
+### Phase 4（`CLV-P4`）：跨平台校验、CI/打包与可选扩展 — **Planned**
 
-合计约 **150h**。按「两个面板并行、每天 6 有效小时」算 ≈ 13 个工作日；按一个面板算 ≈ 25 天。
+| 批次 | 状态 | 范围与目标 |
+| --- | --- | --- |
+| `CLV-P4-1` | ⏳ Planned | Windows Parity 收口与桥接测试：补齐 `internal/bridge/*_windows_test.go`、`internal/capture` 区域框选、真机手测回归记录（参见 `docs/windows-parity-audit.md`） |
+| `CLV-P4-2` | ⏳ Planned | GitHub Actions CI 与可复现打包：三平台 `go vet`、`go test -race`、构建期 `ldflags` 版本/commit 注入与打包体积检查（D3） |
+| `CLV-P4-3` | ⏳ Planned | 可选扩展（按需排期）：`NotificationStore`（只读 DSH/飞书游标通知，参见 `docs/backend/notification-store.md`）、本地模型 C1 路由（参见 `docs/design/local-model-architecture.md`）、MCP stdio 集成（D2） |
 
-## 4. herdr 任务表（可直接 seed）
+---
 
-派发前必须满足：`accept` 有机器断言（P14）；同仓无锁（P1）；目标面板用 magpie 模型（cpa 通道 2026-11-19 已 403，见记忆）。前端/文档走 codex，后端走 pi。
+## 3. 明确不做与冻结范围
 
-| 任务 ID | lane | 目标 | 机器验收 |
-| --- | --- | --- | --- |
-| `T-clavis-w0-ledger` | docs | 清 `.pi/goals` + 刷新 4 篇文档基线 + README 补缺 | `gi t_sha` + `cmd: test $(ls .pi/goals/active_goal_*.md \| wc -l) -lt 13` + `cmd: grep -q input_engine README.md` |
-| `T-clavis-ime-i1` | backend | 键语义下沉 + darwin 标点 + 数字越界 | `git_sha` + `cmd: go test ./pkg/core/inputengine/... ./internal/bridge/...` |
-| `T-clavis-ime-i2` | backend | 高亮移动 + 中英指示 | `git_sha` + `cmd: go test ./uiapp/...` |
-| `T-clavis-ime-i3` | backend | 收敛 `mode` + 删假 IMK 声明 | `git_sha` + `cmd: go test ./...` |
-| `T-clavis-tpl-t1` | backend | catalog + digest + CAS | `git_sha` + `cmd: go test ./pkg/core/template/...` |
-| `T-clavis-tpl-t2` | backend | 合并视图 + 诊断 | 同上 |
-| `T-clavis-tpl-t3` | backend | 合同映射 + 校验器 | 同上 |
-| `T-clavis-tpl-t4` | backend | fail-closed + 权限门 | `cmd: go test ./pkg/core/template/... ./pkg/core/prompt/...` |
-| `T-clavis-tpl-t5` | frontend | 设置页模板库 | `git_sha` + `cmd: go test ./uiapp/...` + `screenshot` |
-| `T-clavis-sync-s1` | backend | 密码学 v2 | `cmd: go test ./pkg/core/sync/...` 且新增「双设备互解」用例 |
-| `T-clavis-sync-s2` | backend | 身份落盘 | `cmd: go test ./pkg/core/sync/... ./internal/secrets/...` |
-| `T-clavis-sync-s3` | backend | Pull + rebase | 同上 + 冲突用例 |
-| `T-clavis-sync-s4` | backend | 传输层 | `cmd: go test ./pkg/core/sync/...` + 两进程互转集成测试 |
-| `T-clavis-parity` | backend | Windows 🟡 收口 | `cmd: go vet ./... && GOOS=windows go vet ./...` + 真机截图 |
+- **原生 IMK / TSF 输入法宿主**：永久否决（D2）。Clavis 定位为英文系统输入法之上的「第二输入法」，不追求内联组字或提权窗口接管。
+- **`internal/plugins` 与 `internal/skills` 扩展**：代码保持编译通过与冻结状态（D2），不再新增宿主扩展面。
+- **2.0 外部商业分发链路**：苹果公证、自动更新器、模板发布市场、团队云账号与实时 CRDT 协同不在 1.x 路线内（D3）。
+- **通用多步 Agent 编排**：超过单步/受控提示的复杂编排交由 `herdr` 独立处理，Clavis 仅提供发现、预览与显式确认控制面。
 
-统一铁律（沿用 herdr `build_prompt`）：只逐路径 `git add`、禁 `git add -A`、提交后立刻回报 sha 并让出工作树、不碰别人未提交的改动。
+---
 
-## 5. 需要主人拍板的三件事（不拍板就卡住）
+## 4. 风险与协作纪律
 
-| # | 事项 | 我的建议 | 不拍板的后果 |
-| --- | --- | --- | --- |
-| G-A | **Windows 真机时间**：I5 与 parity 的验收都要 Windows 手测 | 每周固定一个 2h 窗口，主人开 Windows 机器跑一遍清单，我出脚本与记录表 | I5 永远挂起，输入法只能在 macOS 自称可用 |
-| G-B | **IMK / TSF 做不做**（C1/C2，4–8 人周） | **本轮不做**，把「第二输入法」定位写进 README。理由见 input-engine-completion §2 | 不做则内联组字永远没有；做则这条线多两个月 |
-| G-C | **多设备值不值 80h** | **押注：值，但排在模板之后**。理由：词库与片段跨设备是真实痛点（Windows 与 mac 各学一遍词很蠢）；但它的可见收益在 S4 之后，先做会有一段时间「烧钱看不到东西」 | 不做则 Windows 与 mac 的学习数据永远各自为政 |
+1. **禁止未关账的旧文档继续误导**：每个阶段合入后须同步更新本文件状态与基线 SHA，避免重复盘点已落地项。
+2. **并行 worktree 文件归属隔离**：同一目录不同职责必须按文件显式划分（尤其是 `uiapp/` 与 `internal/bridge/`），严禁使用 `git add -A`。
+3. **跨平台编译门禁常绿**：任何合入前必须通过 `go vet ./...`、`GOOS=windows GOARCH=amd64 go vet ./...`、`GOOS=linux GOARCH=amd64 go vet ./...` 与相关包 `-count=1` 单测。
 
-已定不需要再问的：模板线方向（消费 promptrepo 目录，不自建市场）、输入法定位（第二输入法）、同步冲突策略（都保留而非 LWW）——这三条已写进设计文档，主人有异议再改。
+---
 
-## 6. 明确不做（避免范围蔓延）
+## 5. 设计文档索引
 
-- **签名安装包 / 自动更新 / 外部用户引导**（2.0）：自用定位下是纯维护负担。真要发，先解决签名证书与 notarization 的账号问题，那是另一条线。
-- **模板市场 / 发布端**：发布留在 `template-registry` + git，Clavis 只消费。
-- **通用 agent 编排**：recipe >3 步交给 herdr（见 template-platform §6）。
-- **IMK / TSF 宿主**：本轮不做（G-B）。
-- **团队共享 / 云账号**：多设备只做单人多设备（multi-device §12）。
-- **CRDT / 实时协同**：不做（multi-device §12）。
+### 当前事实规格（Ground Truth）
+- **截图标注与媒体存储**：[`docs/design/capture-annotate-spec.md`](design/capture-annotate-spec.md)
+- **Herdr 控制面与 Agent 会话**：[`docs/design/herdr-control-plane-spec.md`](design/herdr-control-plane-spec.md)
+- **AI 工作台、OCR/翻译与续写**：[`docs/design/ai-workbench-spec.md`](design/ai-workbench-spec.md)
+- **视觉语言与空间 3D 规范**：[`docs/design/visual-language.md`](design/visual-language.md)
+- **模板平台（Phase 3 实施依据）**：[`docs/design/template-platform.md`](design/template-platform.md)
+- **多设备同步（Phase 3 结合 D1）**：[`docs/design/multi-device.md`](design/multi-device.md)
+- **SQLite 迁移契约（Phase 3）**：[`docs/backend/schema-migration.md`](backend/schema-migration.md)
+- **Windows 能力对账（Phase 4）**：[`docs/windows-parity-audit.md`](windows-parity-audit.md)
 
-## 7. 风险
-
-| 风险 | 判断 |
-| --- | --- |
-| **最大的风险不是技术，是没人关账** | 13 个 goal 里 8 个空占位、parity 文档落后 10+ 提交，这不是偶然，是流程问题。W0 之后必须建立「任务完成即改状态」的纪律，否则 Wave 1 结束又攒一批假未完成 |
-| 两线并行撞同一文件 | `uiapp/settings_view.go` 是已知撞车点，Wave 1 禁改；Wave 2/3 串行。按目录分配会失败，必须按文件分配 |
-| 多设备 S1 把既有测试打红 | `sync_test.go` 23 个用例全部围绕 v1 语义，S1 会大面积改签名与密钥派生 → 预留一天专门修测试，不要指望「顺手绿」 |
-| 真机验证被无限推迟 | I5/parity 单独成任务、单独排期、指派到 owner 而不是面板 |
-| 成本 | 150h × 面板单价，按 herdr P6「单面板 >$50 必须回报」，每波结束对一次账；Wave 3 是最大不确定项（80h 里 12h 是重写密码学） |
-
-## 8. 下一步动作（现在就能做的三件）
-
-1. **seed herdr 任务**（§4 前 9 条），`open` 状态不派发，等主人拍 G-A/G-C。
-2. **跑 W0**（6h，纯收尾，不需要拍板）——这是唯一可以立刻开工且不花钱的批次。
-3. **把三份设计文档与这份路线提交并 push**（P10：不 push 等于 Windows 看不见）。
+### 已取代 / 历史归档文档（顶部已标注状态横幅）
+- [`docs/design/security-vault-plan.md`](design/security-vault-plan.md)（已实现并由 `CLV-P0-1` 升级为 `vault_secrets.enc` AES-256-GCM）
+- [`docs/design/clipboard-jank-review.md`](design/clipboard-jank-review.md)（方案 B 全部 4 个 commit 已于 `CLV-P1-4` 收口）
+- [`docs/design/agent-integration-spec.md`](design/agent-integration-spec.md)（已由 `herdr-control-plane-spec.md` 与 `CLV-P0-2`/`CLV-P1-3` 取代）
+- [`docs/design/clavis-followup-spec.md`](design/clavis-followup-spec.md)（已拆分收口至 `CLV-P0`–`CLV-P4`）
+- [`docs/design/backend-roadmap.md`](design/backend-roadmap.md)（2026-11-20 盘点，剩余项并入 `CLV-P3`/`CLV-P4`）
+- [`docs/design/unmerged-branches.md`](design/unmerged-branches.md)（2026-11-22 分支盘点历史记录）
