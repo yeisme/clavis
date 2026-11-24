@@ -78,21 +78,36 @@ func TestAIDebouncerDropsStale(t *testing.T) {
 
 type stubInputEngineBridge struct {
 	bridge.HostService
-	fgStatus   bridge.ForegroundIMEStatus
-	configured bool
-	fgOK       bool
-	snap       host.ContextSnapshot
+	fgStatus       bridge.ForegroundIMEStatus
+	configured     bool
+	configuredCfg  config.InputEngineConfig
+	viewHandlerSet int
+	viewHandler    func(bridge.InputEngineView)
+	forced         bool
+	blockedWords   []string
+	fgOK           bool
+	snap           host.ContextSnapshot
 }
 
-func (s *stubInputEngineBridge) ConfigureInputEngine(config.InputEngineConfig) {
+func (s *stubInputEngineBridge) ConfigureInputEngine(cfg config.InputEngineConfig) {
 	s.configured = true
+	s.configuredCfg = cfg
 }
-func (s *stubInputEngineBridge) ReloadInputEngine(config.InputEngineConfig) {
+func (s *stubInputEngineBridge) ReloadInputEngine(cfg config.InputEngineConfig) {
 	s.configured = true
+	s.configuredCfg = cfg
 }
 
-func (s *stubInputEngineBridge) SetInputEngineViewHandler(func(bridge.InputEngineView)) {}
-func (s *stubInputEngineBridge) SetInputEngineAICandidates(string, []string)            {}
+func (s *stubInputEngineBridge) SetInputEngineViewHandler(fn func(bridge.InputEngineView)) {
+	s.viewHandlerSet++
+	s.viewHandler = fn
+}
+func (s *stubInputEngineBridge) SetInputEngineAICandidates(string, []string) {}
+func (s *stubInputEngineBridge) SetInlineIMEForced(v bool)                   { s.forced = v }
+func (s *stubInputEngineBridge) InlineIMEForced() bool                       { return s.forced }
+func (s *stubInputEngineBridge) UpdateInputEngineBlockedWords(words []string) {
+	s.blockedWords = append([]string(nil), words...)
+}
 
 func (s *stubInputEngineBridge) ForegroundIMEStatus() (bridge.ForegroundIMEStatus, bool) {
 	return s.fgStatus, s.fgOK
@@ -137,4 +152,66 @@ func TestAIDebouncerPassesFrontmostAppName(t *testing.T) {
 		fgOK: false,
 		snap: host.ContextSnapshot{AppName: "Slack", ProcessName: "Slack.exe"},
 	}, "Slack")
+}
+
+func TestApplyRuntimeConfigDynamicallyEnablesInputEngineUIAndStopsOnShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	br := &stubInputEngineBridge{}
+	app := newDesktopApp()
+	app.mu.Lock()
+	app.ctx = ctx
+	app.cancel = cancel
+	app.hostBridge = br
+	app.mu.Unlock()
+
+	// Start with input_engine disabled: no UI created, no view handler registered.
+	cfg := config.DefaultConfig()
+	if ui := app.setupInputEngine(ctx, br, cfg.Main.InputEngine, nil); ui != nil {
+		t.Fatal("disabled input engine must not create inputEngineUI")
+	}
+	if app.inputUI != nil || br.viewHandler != nil {
+		t.Fatalf("expected nil inputUI and viewHandler initially, got ui=%v handler=%v", app.inputUI, br.viewHandler != nil)
+	}
+
+	// Enable input_engine live at runtime via applyRuntimeConfig.
+	cfg.Main.InputEngine.Enabled = true
+	cfg.Main.InputEngine.ForceTakeover = true
+	app.applyRuntimeConfig(cfg)
+
+	app.mu.Lock()
+	ui := app.inputUI
+	app.mu.Unlock()
+	if ui == nil {
+		t.Fatal("applyRuntimeConfig must dynamically create inputUI when enabled becomes true")
+	}
+	if br.viewHandler == nil {
+		t.Fatal("applyRuntimeConfig must register SetInputEngineViewHandler when enabling live")
+	}
+	if !br.configured || !br.configuredCfg.Enabled {
+		t.Fatalf("expected ConfigureInputEngine(Enabled=true), got configured=%v cfg=%+v", br.configured, br.configuredCfg)
+	}
+	if !br.forced {
+		t.Fatal("expected ForceTakeover to be applied on live enable")
+	}
+
+	// Subsequent config apply must reuse the existing inputUI instead of re-registering.
+	prevSetCount := br.viewHandlerSet
+	app.applyRuntimeConfig(cfg)
+	if br.viewHandlerSet != prevSetCount {
+		t.Fatalf("expected existing inputUI to be reused, viewHandlerSet went %d -> %d", prevSetCount, br.viewHandlerSet)
+	}
+
+	// Shutdown must cleanly stop inputUI and clear the bridge view handler.
+	app.shutdown()
+	app.mu.Lock()
+	afterUI := app.inputUI
+	app.mu.Unlock()
+	if afterUI != nil {
+		t.Fatal("shutdown must clear app.inputUI")
+	}
+	if br.viewHandler != nil {
+		t.Fatal("shutdown must unregister SetInputEngineViewHandler(nil)")
+	}
 }

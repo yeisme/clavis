@@ -520,6 +520,7 @@ type darwinBridge struct {
 	triggers       *triggerRuntime
 	lastBundleIDMu sync.RWMutex
 	lastBundleID   string
+	lastFrontApp   AppIdentity
 
 	router        *triggerRouter
 	keymapEngine  *KeymapLayerEngine
@@ -631,7 +632,32 @@ func (b *darwinBridge) setCachedBundleID(bundleID string) {
 	}
 	b.lastBundleIDMu.Lock()
 	b.lastBundleID = bundleID
+	b.lastFrontApp.BundleID = bundleID
 	b.lastBundleIDMu.Unlock()
+}
+
+func (b *darwinBridge) setCachedFrontmostApp(app AppIdentity) {
+	if app.BundleID == "" && app.ProcessName == "" {
+		return
+	}
+	b.lastBundleIDMu.Lock()
+	b.lastFrontApp = app
+	b.lastBundleID = app.BundleID
+	b.lastBundleIDMu.Unlock()
+}
+
+func (b *darwinBridge) cachedFrontmostApp() AppIdentity {
+	b.lastBundleIDMu.RLock()
+	app := b.lastFrontApp
+	if app.BundleID == "" && b.lastBundleID != "" {
+		app.BundleID = b.lastBundleID
+	}
+	b.lastBundleIDMu.RUnlock()
+	return app
+}
+
+func (b *darwinBridge) isSelfFrontmost() bool {
+	return isSelfClavisApp(b.cachedFrontmostApp())
 }
 
 func (b *darwinBridge) cachedFrontmostBundleID() string {
@@ -908,13 +934,7 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 
 	switch eventType {
 	case kCGEventLeftMouseDown, kCGEventRightMouseDown:
-		// A click moves the insertion point / focus: drop any pending double-tap and snippet buffer.
-		b.router.leaderDetector.Reset()
-		b.router.doubleTapDetector.Reset()
-		if eventType == kCGEventLeftMouseDown && b.triggers != nil {
-			b.triggers.autoSelectMouseDown()
-		}
-		b.emitTriggerEvents([]host.TriggerEvent{{Kind: host.TriggerSnippetReset, TimestampMs: nowMs}})
+		b.handleMouseDownReset(eventType == kCGEventLeftMouseDown, nowMs)
 		return event
 	case kCGEventLeftMouseUp:
 		if b.triggers != nil && b.triggers.autoSelectMouseUp() {
@@ -967,7 +987,7 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 				b.shiftHadKey = false
 				b.shiftSide = modName
 			}
-			if right && !isDown && b.shiftDown && b.shiftSide == "right_shift" && !b.shiftHadKey && b.inlineEnabled.Load() && !isSecureEventInputEnabled() && b.inlineIMEGate() {
+			if right && !isDown && b.shiftDown && b.shiftSide == "right_shift" && !b.shiftHadKey && b.inlineEnabled.Load() && !isSecureEventInputEnabled() && b.inlineIMEGate() && !b.isSelfFrontmost() {
 				b.shiftDown = false
 				b.shiftSide = ""
 				// With double-shift selection armed, the first tap must wait out the
@@ -1054,10 +1074,8 @@ func (b *darwinBridge) handleCGEvent(eventType uint32, event uintptr) uintptr {
 		if !secure && !hasNonShiftModifier(mods) && unicodeStr != "" && b.router.snippetExpansionEnabled() {
 			imeComposing = b.hookMarkedText(time.Now())
 		}
-		if b.inlineEnabled.Load() && !secure && b.inlineIMEGate() {
-			if b.callInline(host.InlineKeyEvent{KeyName: keyName, Rune: unicodeStr, KeyCode: keyCode, Modifiers: mods, IsDown: true, TimestampMs: nowMs}) {
-				return 0
-			}
+		if b.tryDispatchInlineKeyDown(host.InlineKeyEvent{KeyName: keyName, Rune: unicodeStr, KeyCode: keyCode, Modifiers: mods, IsDown: true, TimestampMs: nowMs}, secure) {
+			return 0
 		}
 
 		events, consume := b.router.HandleKeyDownWithIME(keyName, unicodeStr, mods, isBackspace, secure, imeComposing, nowMs)
@@ -1120,78 +1138,151 @@ func (b *darwinBridge) runTriggerWorker(ctx context.Context, queue <-chan host.T
 	}
 }
 
+func (b *darwinBridge) handleMouseDownReset(isLeft bool, nowMs int64) {
+	// A click moves the insertion point / focus: drop any pending double-tap,
+	// active inline composition, and snippet buffer.
+	if b.router != nil {
+		b.router.leaderDetector.Reset()
+		b.router.doubleTapDetector.Reset()
+	}
+	b.resetInputEngine()
+	if isLeft && b.triggers != nil {
+		b.triggers.autoSelectMouseDown()
+	}
+	b.emitTriggerEvents([]host.TriggerEvent{{Kind: host.TriggerSnippetReset, Key: "mouse", TimestampMs: nowMs}})
+}
+
+func (b *darwinBridge) tryDispatchInlineKeyDown(ev host.InlineKeyEvent, secure bool) bool {
+	if !b.inlineEnabled.Load() {
+		return false
+	}
+	if !inputEngineEligible(!b.inlineIMEGate(), secure, b.isSelfFrontmost()) {
+		b.resetInputEngine()
+		return false
+	}
+	if b.callInline(ev) {
+		// Engine-owned keys never feed the snippet buffer (matching Windows input_engine_windows.go).
+		b.emitTriggerEvents([]host.TriggerEvent{{
+			Kind:        host.TriggerSnippetReset,
+			Key:         "input_engine",
+			TimestampMs: ev.TimestampMs,
+		}})
+		return true
+	}
+	return false
+}
+
+type darwinIMEObserverOps struct {
+	frontmostApp func() AppIdentity
+	currentInput func(context.Context) (host.InputSourceInfo, error)
+	applySwitch  func(context.Context, IMEDecision) bool
+	waitDelay    func(context.Context, time.Duration) bool
+}
+
+type darwinIMEObserverState struct {
+	prevApp     AppIdentity
+	havePrevApp bool
+	tracker     imeChangeTracker
+}
+
+func (b *darwinBridge) stepIMEObserver(ctx context.Context, st *darwinIMEObserverState, ops darwinIMEObserverOps) bool {
+	b.mu.Lock()
+	enabled := b.imeCfg.Enabled
+	delayMs := b.imeCfg.SwitchDelayMs
+	onIME := b.onIME
+	b.mu.Unlock()
+
+	app := ops.frontmostApp()
+	if app.BundleID == "" && app.ProcessName == "" {
+		return true
+	}
+	b.setCachedFrontmostApp(app)
+
+	// An app activation moves the insertion point: drop any open inline composition,
+	// and never let snippet buffers typed in the previous app leak into the newly focused one.
+	if st.havePrevApp && appIdentityChanged(st.prevApp, app) {
+		b.resetInputEngine()
+		if !isSelfClavisApp(app) {
+			b.emitTriggerEvents([]host.TriggerEvent{{
+				Kind:        host.TriggerSnippetReset,
+				TimestampMs: time.Now().UnixMilli(),
+			}})
+		}
+	}
+	st.prevApp = app
+	st.havePrevApp = true
+
+	// Clavis' own windows have their own IME state; observing them would flash the pill
+	// whenever the capsule, settings, or prompt window opens.
+	if isSelfClavisApp(app) {
+		return true
+	}
+
+	cur, err := ops.currentInput(ctx)
+	if err != nil || cur.ID == "" {
+		return true
+	}
+	b.observeInlineInputSource(cur)
+	changed := st.tracker.Observe(cur)
+
+	if enabled && b.imeEngine != nil {
+		decision := b.imeEngine.EvaluateAppActivation(app, cur.ID)
+		if decision.ShouldSwitch {
+			// Honor the configured settle delay so fast cmd-tab chains do not flap the input source.
+			delayMs = min(max(delayMs, 0), 1000)
+			if delayMs > 0 {
+				if !ops.waitDelay(ctx, time.Duration(delayMs)*time.Millisecond) {
+					return false
+				}
+				if latestApp := ops.frontmostApp(); appIdentityChanged(latestApp, app) {
+					return true
+				}
+			}
+			if ops.applySwitch(ctx, decision) {
+				if updated, err := ops.currentInput(ctx); err == nil && updated.ID != "" {
+					b.observeInlineInputSource(updated)
+					st.tracker.Observe(updated)
+					if onIME != nil {
+						onIME(updated)
+					}
+				}
+				return true
+			}
+		}
+	}
+	if changed && onIME != nil {
+		onIME(cur)
+	}
+	return true
+}
+
 func (b *darwinBridge) runIMEObserver(ctx context.Context) {
 	defer close(b.imeDone)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
-	var (
-		prevApp     AppIdentity
-		havePrevApp bool
-	)
+	var st darwinIMEObserverState
+	ops := darwinIMEObserverOps{
+		frontmostApp: darwinFrontmostAppIdentity,
+		currentInput: b.CurrentInputSource,
+		applySwitch:  b.applyIMEDecision,
+		waitDelay: func(ctx context.Context, d time.Duration) bool {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(d):
+				return true
+			}
+		},
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			b.mu.Lock()
-			enabled := b.imeCfg.Enabled
-			delayMs := b.imeCfg.SwitchDelayMs
-			onIME := b.onIME
-			b.mu.Unlock()
-
-			app := darwinFrontmostAppIdentity()
-			if app.BundleID != "" {
-				b.setCachedBundleID(app.BundleID)
-			}
-			if app.BundleID == "" && app.ProcessName == "" {
-				continue
-			}
-
-			// An app activation moves the insertion point: snippet buffers typed in the
-			// previous app must never leak into the newly focused one.
-			if havePrevApp && appIdentityChanged(prevApp, app) && !isSelfClavisApp(app) {
-				b.emitTriggerEvents([]host.TriggerEvent{{
-					Kind:        host.TriggerSnippetReset,
-					TimestampMs: time.Now().UnixMilli(),
-				}})
-			}
-			prevApp = app
-			havePrevApp = true
-
-			if !enabled {
-				continue
-			}
-			cur, err := b.CurrentInputSource(ctx)
-			if err != nil {
-				continue
-			}
-			decision := b.imeEngine.EvaluateAppActivation(app, cur.ID)
-			if !decision.ShouldSwitch {
-				continue
-			}
-
-			// Honor the configured settle delay so fast cmd-tab chains do not flap the input source.
-			delayMs = min(max(delayMs, 0), 1000)
-			if delayMs > 0 {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(time.Duration(delayMs) * time.Millisecond):
-				}
-				if latestApp := darwinFrontmostAppIdentity(); appIdentityChanged(latestApp, app) {
-					continue
-				}
-			}
-
-			if !b.applyIMEDecision(ctx, decision) {
-				continue
-			}
-			if onIME != nil {
-				if updated, err := b.CurrentInputSource(ctx); err == nil {
-					onIME(updated)
-				}
+			if !b.stepIMEObserver(ctx, &st, ops) {
+				return
 			}
 		}
 	}
@@ -1439,8 +1530,8 @@ func (b *darwinBridge) SnapshotContext(ctx context.Context) (host.ContextSnapsho
 			snap.ClipboardPreview = truncateUTF8(preview, 512)
 		}
 	})
-	if snap.BundleID != "" {
-		b.setCachedBundleID(snap.BundleID)
+	if snap.BundleID != "" || snap.ProcessName != "" {
+		b.setCachedFrontmostApp(AppIdentity{BundleID: snap.BundleID, ProcessName: snap.ProcessName})
 	}
 
 	if axIsProcessTrusted() {
@@ -1827,6 +1918,17 @@ func (b *darwinBridge) InjectText(ctx context.Context, text string, deleteCount 
 }
 
 func trySetAXSelectedText(text string) bool {
+	return trySetAXStringAttr("AXSelectedText", text)
+}
+
+func trySetAXValue(text string) bool {
+	return trySetAXStringAttr("AXValue", text)
+}
+
+func trySetAXStringAttr(attrName, text string) bool {
+	if initDarwin() != nil || axUIElementCreateSystemWide == nil || !axIsProcessTrusted() {
+		return false
+	}
 	sysWide := axUIElementCreateSystemWide()
 	if sysWide == 0 {
 		return false
@@ -1840,7 +1942,7 @@ func trySetAXSelectedText(text string) bool {
 	defer cfRelease(focused)
 
 	var settable bool
-	if axUIElementIsAttributeSettable(focused, axAttr("AXSelectedText"), &settable) != 0 || !settable {
+	if axUIElementIsAttributeSettable(focused, axAttr(attrName), &settable) != 0 || !settable {
 		return false
 	}
 	val := cfString(text)
@@ -1849,7 +1951,7 @@ func trySetAXSelectedText(text string) bool {
 	}
 	defer cfRelease(val)
 
-	return axUIElementSetAttributeValue(focused, axAttr("AXSelectedText"), val) == 0
+	return axUIElementSetAttributeValue(focused, axAttr(attrName), val) == 0
 }
 
 func postTaggedUnicode(units []uint16) {
@@ -3005,7 +3107,7 @@ func (b *darwinBridge) deferShiftToggle(ev host.InlineKeyEvent) {
 		b.shiftMu.Lock()
 		b.shiftToggle = nil
 		b.shiftMu.Unlock()
-		if b.inlineEnabled.Load() && !isSecureEventInputEnabled() && b.inlineIMEGate() {
+		if b.inlineEnabled.Load() && !isSecureEventInputEnabled() && b.inlineIMEGate() && !b.isSelfFrontmost() {
 			_ = b.callInline(ev)
 		}
 	})

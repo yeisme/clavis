@@ -25,6 +25,7 @@ import (
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/pkg/core/i18n"
+	"github.com/yeisme/clavis/pkg/core/inputengine"
 	"github.com/yeisme/clavis/uiapp"
 )
 
@@ -845,5 +846,164 @@ func TestHasVisibleSurfaceIncludesAnnotateAndInputUI(t *testing.T) {
 	}
 	if !app.hasVisibleSurface(func(w *mygo.Window) bool { return w == inputPanel }) {
 		t.Fatal("inputUI.panel visibility must keep Clavis from calling App.Hide()")
+	}
+}
+
+type stubLearningBridge struct {
+	bridge.HostService
+	onCommit     func(bridge.InputEngineCommit)
+	blockedWords []string
+}
+
+func (s *stubLearningBridge) UpdateInputEngineLearning(_ inputengine.UserFrequencyProvider, onCommit func(bridge.InputEngineCommit)) {
+	s.onCommit = onCommit
+}
+
+func (s *stubLearningBridge) UpdateInputEngineBlockedWords(words []string) {
+	s.blockedWords = append([]string(nil), words...)
+}
+
+func TestUserWordsSingleInjectOnSaveAndUnpinOnReload(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfgDir := t.TempDir()
+	cfgStore := config.NewConfigStore(cfgDir)
+	cfg, err := cfgStore.LoadOrInitialize()
+	if err != nil {
+		t.Fatalf("LoadOrInitialize: %v", err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "user_words.db")
+	sqliteStore, err := storage.NewSQLiteClipboardStoreFromConfig(ctx, dbPath, cfg.Main.Clipboard)
+	if err != nil {
+		t.Fatalf("NewSQLiteClipboardStoreFromConfig: %v", err)
+	}
+	learningStore, err := storage.NewLearningStore(sqliteStore.DB())
+	if err != nil {
+		t.Fatalf("NewLearningStore: %v", err)
+	}
+
+	app := newDesktopApp()
+	ctrl := uiapp.NewAppController(uiapp.Options{
+		ConfigStore:     cfgStore,
+		ClipboardStore:  sqliteStore,
+		SecretStore:     secrets.NewMemoryAPIKeyStore(),
+		ClipboardWriter: func(string) {},
+		OnConfigSaved:   app.applySavedConfig,
+	})
+	app.mu.Lock()
+	app.ctx = ctx
+	app.cancel = cancel
+	app.cfgStore = cfgStore
+	app.sqliteStore = sqliteStore
+	app.learningStore = learningStore
+	app.clipStore = sqliteStore
+	app.controller = ctrl
+	app.mu.Unlock()
+	defer app.shutdown()
+
+	// Save a new user word via Settings path -> must inject ONCE (frequency == 1, not 2).
+	if err := ctrl.UpdateMainConfig(func(m *config.MainConfig) {
+		m.InputEngine.UserWords = []string{"叶树根"}
+	}); err != nil {
+		t.Fatalf("UpdateMainConfig: %v", err)
+	}
+	rows, err := sqliteStore.DB().Query(ctx, `SELECT frequency, pinned FROM ime_user_lexicon WHERE word = ?`, "叶树根")
+	if err != nil || len(rows.Values) == 0 {
+		t.Fatalf("expected pinned row for 叶树根, rows=%v err=%v", rows.Values, err)
+	}
+	for _, row := range rows.Values {
+		if freq, ok := row[0].(int64); !ok || freq != 1 {
+			t.Fatalf("frequency after single save = %v, want 1 (must not double-inject)", row[0])
+		}
+		if pinned, ok := row[1].(int64); !ok || pinned != 1 {
+			t.Fatalf("pinned = %v, want 1", row[1])
+		}
+	}
+
+	// External TOML edit removing the word + applyConfigReload must unpin it.
+	mainCfg := cfgStore.Current().Main
+	mainCfg.InputEngine.UserWords = nil
+	if err := os.WriteFile(filepath.Join(cfgDir, string(config.FileMain)), []byte(mainCfg.Encode()), 0o644); err != nil {
+		t.Fatalf("write config.toml: %v", err)
+	}
+	app.applyConfigReload()
+
+	if pinned := learningStore.PinnedIMEWords(ctx); len(pinned) != 0 {
+		t.Fatalf("external reload must unpin removed user words, still pinned: %v", pinned)
+	}
+}
+
+func TestBlocklistAndLexiconHitWiring(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfgStore := config.NewConfigStore(t.TempDir())
+	cfg, err := cfgStore.LoadOrInitialize()
+	if err != nil {
+		t.Fatalf("LoadOrInitialize: %v", err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "blocklist_hits.db")
+	sqliteStore, err := storage.NewSQLiteClipboardStoreFromConfig(ctx, dbPath, cfg.Main.Clipboard)
+	if err != nil {
+		t.Fatalf("NewSQLiteClipboardStoreFromConfig: %v", err)
+	}
+	learningStore, err := storage.NewLearningStore(sqliteStore.DB())
+	if err != nil {
+		t.Fatalf("NewLearningStore: %v", err)
+	}
+	learningWriter := storage.NewLearningWriter(learningStore, storage.LearningWriterOptions{FlushInterval: 20 * time.Millisecond})
+	blocklistStore, err := storage.NewUserBlocklistStore(sqliteStore.DB())
+	if err != nil {
+		t.Fatalf("NewUserBlocklistStore: %v", err)
+	}
+	if err := blocklistStore.Block(ctx, "坏词"); err != nil {
+		t.Fatalf("Block: %v", err)
+	}
+
+	br := &stubLearningBridge{HostService: bridge.NewHostService()}
+	app := newDesktopApp()
+	app.mu.Lock()
+	app.ctx = ctx
+	app.cancel = cancel
+	app.sqliteStore = sqliteStore
+	app.learningStore = learningStore
+	app.learningWriter = learningWriter
+	app.blocklistStore = blocklistStore
+	app.hostBridge = br
+	app.mu.Unlock()
+	defer app.shutdown()
+
+	// 1. Blocklist sync pushes loaded words to InputEngineBlocklistHost on startup and config apply.
+	app.syncInputEngineBlocklist(br, blocklistStore)
+	if !slices.Equal(br.blockedWords, []string{"坏词"}) {
+		t.Fatalf("startup blockedWords = %v, want [坏词]", br.blockedWords)
+	}
+	if err := blocklistStore.Block(ctx, "屏蔽词"); err != nil {
+		t.Fatalf("Block second word: %v", err)
+	}
+	app.applyRuntimeConfig(cfg)
+	if !slices.Equal(br.blockedWords, []string{"坏词", "屏蔽词"}) {
+		t.Fatalf("reload blockedWords = %v, want [坏词 屏蔽词]", br.blockedWords)
+	}
+
+	// 2. Wire input engine learning and verify commits + glossary use populate lexicon_hits_daily.
+	app.wireInputEngineLearning(br, learningStore)
+	if br.onCommit == nil {
+		t.Fatal("wireInputEngineLearning did not register commit callback")
+	}
+	br.onCommit(bridge.InputEngineCommit{PinyinKey: "nihao", Word: "你好", FirstChoice: true, LatencyNs: 1000})
+	br.onCommit(bridge.InputEngineCommit{PinyinKey: "shi", Word: "时", FirstChoice: false, LatencyNs: 1000})
+	app.handleRecordItemUse("glossary:term:Kubernetes")
+
+	if err := learningWriter.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	days, err := learningStore.LexiconHitsDaily(ctx, 1)
+	if err != nil || len(days) != 1 {
+		t.Fatalf("LexiconHitsDaily = (%+v, %v)", days, err)
+	}
+	if days[0].Hits != 2 || days[0].Misses != 1 {
+		t.Fatalf("today lexicon hits/misses = (%d, %d), want (2, 1)", days[0].Hits, days[0].Misses)
 	}
 }

@@ -50,6 +50,9 @@ type InputEngineCommit struct {
 	Word      string
 	PrevWord  string
 	Pinned    bool
+	// FirstChoice is true when the user committed the top-ranked candidate
+	// (page 0, index 0) rather than paging or picking a lower-ranked option.
+	FirstChoice bool
 	// LatencyNs is the hook-side latency from key arrival to commit decision,
 	// measured inside the hook thread (no I/O, no allocation).
 	LatencyNs int64
@@ -129,14 +132,15 @@ func (t *inputEngineCommitTracker) resetPrev() {
 	t.mu.Unlock()
 }
 
-func (t *inputEngineCommitTracker) pushCommit(pinyinKey, word string, latencyNs int64) {
+func (t *inputEngineCommitTracker) pushCommit(pinyinKey, word string, firstChoice bool, latencyNs int64) {
 	t.mu.Lock()
 	if len(t.pending) < maxPendingIMECommits {
 		t.pending = append(t.pending, InputEngineCommit{
-			PinyinKey: pinyinKey,
-			Word:      word,
-			PrevWord:  t.prevWord,
-			LatencyNs: latencyNs,
+			PinyinKey:   pinyinKey,
+			Word:        word,
+			PrevWord:    t.prevWord,
+			FirstChoice: firstChoice,
+			LatencyNs:   latencyNs,
 		})
 	}
 	t.prevWord = word
@@ -182,7 +186,7 @@ func (t *inputEngineCommitTracker) handleKey(eng *inputengine.Engine, k inputeng
 		inputengine.KeyPagePrev, inputengine.KeyPageNext:
 		if k.Chord {
 			res := eng.HandleKey(k)
-			if res.Changed {
+			if eng.Raw() == "" {
 				t.resetPrev()
 			}
 			return res
@@ -192,7 +196,10 @@ func (t *inputEngineCommitTracker) handleKey(eng *inputengine.Engine, k inputeng
 
 	if k.Chord || k.Kind == inputengine.KeyNavigation {
 		res := eng.HandleKey(k)
-		if res.Changed {
+		// Preserve bigram context while navigating within an active composition
+		// (e.g., Up/Down candidate highlight movement or candidate paging). Only reset
+		// prevWord when navigation happens outside composition or aborts composition.
+		if eng.Raw() == "" {
 			t.resetPrev()
 		}
 		return res
@@ -212,7 +219,7 @@ func (t *inputEngineCommitTracker) handleKey(eng *inputengine.Engine, k inputeng
 		return res
 	}
 
-	word, ok := committedCandidateWord(preView, k, res.Commit, eng.Raw() == "")
+	word, firstChoice, ok := committedCandidateWord(preView, k, res.Commit, eng.Raw() == "")
 	if !ok || word == "" {
 		t.resetPrev()
 		return res
@@ -230,38 +237,56 @@ func (t *inputEngineCommitTracker) handleKey(eng *inputengine.Engine, k inputeng
 	}
 
 	if pinyinKey != "" {
-		t.pushCommit(pinyinKey, word, time.Since(start).Nanoseconds())
+		t.pushCommit(pinyinKey, word, firstChoice, time.Since(start).Nanoseconds())
 	} else {
 		t.resetPrev()
 	}
 	return res
 }
 
-func committedCandidateWord(preView inputengine.View, k inputengine.Key, commit string, fullCommit bool) (string, bool) {
+func committedCandidateWord(preView inputengine.View, k inputengine.Key, commit string, fullCommit bool) (string, bool, bool) {
 	switch k.Kind {
 	case inputengine.KeySpace:
 		idx := preView.Selected
 		if idx >= 0 && idx < len(preView.Candidates) && commit == preView.Candidates[idx].Text {
-			return preView.Candidates[idx].Text, true
+			return preView.Candidates[idx].Text, preView.Page == 0 && idx == 0, true
 		}
 	case inputengine.KeyDigit:
 		idx := int(k.Rune-'0') - 1
 		if idx >= 0 && idx < len(preView.Candidates) && commit == preView.Candidates[idx].Text {
-			return preView.Candidates[idx].Text, true
+			return preView.Candidates[idx].Text, preView.Page == 0 && idx == 0, true
 		}
 	default:
-		if fullCommit && len(preView.Candidates) > 0 {
-			cand := preView.Candidates[0].Text
-			expected := cand
-			if k.Rune != 0 {
-				expected += string(k.Rune)
-			}
-			if commit == expected {
-				return cand, true
+		// Align with inputengine.Engine.HandleKey punctuation auto-commit: pick the first
+		// non-AI candidate covering all segments (not blindly preView.Candidates[0]).
+		if fullCommit {
+			segCount := preeditSegmentCount(preView.Preedit)
+			for i, c := range preView.Candidates {
+				if c.AI {
+					continue
+				}
+				if segCount > 0 && c.Consumed < segCount {
+					continue
+				}
+				expected := c.Text
+				if k.Rune != 0 {
+					expected += string(k.Rune)
+				}
+				if commit == expected {
+					return c.Text, preView.Page == 0 && i == 0, true
+				}
+				break
 			}
 		}
 	}
-	return "", false
+	return "", false, false
+}
+
+func preeditSegmentCount(preedit string) int {
+	if preedit == "" {
+		return 0
+	}
+	return strings.Count(preedit, "'") + 1
 }
 
 func defaultInputEngineCacheDir() string {

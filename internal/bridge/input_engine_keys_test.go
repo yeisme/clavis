@@ -322,3 +322,155 @@ func TestInputEngineUserLearningConfigAndCommitTracker(t *testing.T) {
 		t.Fatalf("learn=false must record no commits, got %+v", rem)
 	}
 }
+
+func TestInputEngineCommitTrackerPreservesBigramOnArrowNavigation(t *testing.T) {
+	cfg := config.DefaultInputEngineConfig()
+	cfg.Enabled = true
+	cfg.Mode = "inline_hook"
+	eng := newInputEngineFromConfig(cfg, t.TempDir(), nil)
+	tracker := &inputEngineCommitTracker{}
+	typeStr := func(s string) {
+		for _, r := range s {
+			tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeyLetter, Rune: r}, true)
+		}
+	}
+
+	// 1. Commit first word "我" via Space (top-1 choice).
+	typeStr("wo")
+	res1 := tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeySpace}, true)
+	if res1.Commit == "" {
+		t.Fatalf("expected first commit for wo, got %+v", res1)
+	}
+	firstWord := res1.Commit
+
+	// 2. Compose "shi", navigate Down -> Up -> Down to select candidate #1, then Space.
+	typeStr("shi")
+	v := eng.View()
+	if len(v.Candidates) < 2 {
+		t.Fatalf("expected at least 2 candidates for shi, got %+v", v.Candidates)
+	}
+	wantSecond := v.Candidates[1].Text
+	if nav := tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeyNavigation, NavDir: inputengine.NavDown}, true); !nav.Consume || !nav.Changed {
+		t.Fatalf("Down navigation during composition = %+v", nav)
+	}
+	if nav := tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeyNavigation, NavDir: inputengine.NavUp}, true); !nav.Consume || !nav.Changed {
+		t.Fatalf("Up navigation during composition = %+v", nav)
+	}
+	if nav := tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeyNavigation, NavDir: inputengine.NavDown}, true); !nav.Consume || !nav.Changed {
+		t.Fatalf("second Down navigation during composition = %+v", nav)
+	}
+	res2 := tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeySpace}, true)
+	if res2.Commit != wantSecond {
+		t.Fatalf("commit after Down+Space = %q, want %q", res2.Commit, wantSecond)
+	}
+
+	// 3. Navigation outside composition must reset prevWord so cursor jumps break bigrams.
+	tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeyNavigation}, true)
+	typeStr("hao")
+	res3 := tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeySpace}, true)
+	if res3.Commit == "" {
+		t.Fatalf("expected third commit for hao, got %+v", res3)
+	}
+
+	// 4. Aborting active composition with non-directional navigation (e.g. Left/Home) also resets prevWord.
+	typeStr("ni")
+	tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeyNavigation}, true)
+	if eng.Raw() != "" {
+		t.Fatalf("non-directional navigation must abort composition, raw=%q", eng.Raw())
+	}
+	typeStr("ma")
+	res4 := tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeySpace}, true)
+	if res4.Commit == "" {
+		t.Fatalf("expected fourth commit for ma, got %+v", res4)
+	}
+
+	drained := tracker.drain(nil)
+	if len(drained) != 4 {
+		t.Fatalf("expected 4 commits, got %+v", drained)
+	}
+	if !drained[0].FirstChoice {
+		t.Fatalf("commit[0] should be FirstChoice=true, got %+v", drained[0])
+	}
+	if drained[1].PrevWord != firstWord {
+		t.Fatalf("commit[1].PrevWord = %q, want %q (arrow navigation must not wipe bigram context)", drained[1].PrevWord, firstWord)
+	}
+	if drained[1].FirstChoice {
+		t.Fatalf("commit[1] selected index 1 so FirstChoice must be false, got %+v", drained[1])
+	}
+	if drained[2].PrevWord != "" {
+		t.Fatalf("commit[2].PrevWord = %q, want empty after out-of-composition navigation", drained[2].PrevWord)
+	}
+	if drained[3].PrevWord != "" {
+		t.Fatalf("commit[3].PrevWord = %q, want empty after navigation-aborted composition", drained[3].PrevWord)
+	}
+}
+
+func TestCommittedCandidateWordPunctuationAutoCommit(t *testing.T) {
+	// 1. Leading AI candidate is skipped; first full-syllable local candidate is matched.
+	viewWithAI := inputengine.View{
+		Composing: true,
+		Preedit:   "ni'hao",
+		Candidates: []inputengine.Candidate{
+			{Text: "AI预测", Consumed: 2, AI: true},
+			{Text: "你好", Consumed: 2, AI: false},
+		},
+	}
+	word, firstChoice, ok := committedCandidateWord(viewWithAI, inputengine.Key{Kind: inputengine.KeyOther, Rune: '，'}, "你好，", true)
+	if !ok || word != "你好" || firstChoice {
+		t.Fatalf("with leading AI: got (%q, %v, %v), want (你好, false, true)", word, firstChoice, ok)
+	}
+
+	// 2. Leading partial-syllable candidate is skipped; first full-syllable local candidate is matched.
+	viewWithPartial := inputengine.View{
+		Composing: true,
+		Preedit:   "ni'hao",
+		Candidates: []inputengine.Candidate{
+			{Text: "你", Consumed: 1, AI: false},
+			{Text: "你好", Consumed: 2, AI: false},
+		},
+	}
+	word, firstChoice, ok = committedCandidateWord(viewWithPartial, inputengine.Key{Kind: inputengine.KeyOther, Rune: '.'}, "你好.", true)
+	if !ok || word != "你好" || firstChoice {
+		t.Fatalf("with leading partial: got (%q, %v, %v), want (你好, false, true)", word, firstChoice, ok)
+	}
+
+	// 3. No full-syllable non-AI candidate -> raw fallback is NOT misattributed as a candidate commit.
+	viewNoFull := inputengine.View{
+		Composing: true,
+		Preedit:   "ni'hao",
+		Candidates: []inputengine.Candidate{
+			{Text: "AI预测", Consumed: 2, AI: true},
+			{Text: "你", Consumed: 1, AI: false},
+		},
+	}
+	if w, _, matched := committedCandidateWord(viewNoFull, inputengine.Key{Kind: inputengine.KeyOther, Rune: ','}, "nihao,", true); matched || w != "" {
+		t.Fatalf("raw fallback must not match candidate, got (%q, %v)", w, matched)
+	}
+
+	// 4. End-to-end with Engine: AI candidate sits at index 0 for single-syllable "shi",
+	// punctuation auto-commits local index 1 ("是") and tracker extracts it for learning.
+	cfg := config.DefaultInputEngineConfig()
+	cfg.Enabled = true
+	cfg.Mode = "inline_hook"
+	eng := newInputEngineFromConfig(cfg, t.TempDir(), nil)
+	tracker := &inputEngineCommitTracker{}
+	for _, r := range "shi" {
+		tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeyLetter, Rune: r}, true)
+	}
+	if !eng.SetAICandidates("shi", []string{"人工智能预测"}) {
+		t.Fatal("SetAICandidates returned false")
+	}
+	pre := eng.View()
+	if len(pre.Candidates) < 2 || !pre.Candidates[0].AI {
+		t.Fatalf("expected AI candidate at index 0, got %+v", pre.Candidates)
+	}
+	wantLocal := pre.Candidates[1].Text
+	res := tracker.handleKey(eng, inputengine.Key{Kind: inputengine.KeyOther, Rune: '，'}, true)
+	if res.Commit != wantLocal+"，" {
+		t.Fatalf("punctuation commit = %q, want %q", res.Commit, wantLocal+"，")
+	}
+	drained := tracker.drain(nil)
+	if len(drained) != 1 || drained[0].PinyinKey != "shi" || drained[0].Word != wantLocal {
+		t.Fatalf("drained commits = %+v, want single commit for %q", drained, wantLocal)
+	}
+}

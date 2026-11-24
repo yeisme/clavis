@@ -37,12 +37,17 @@ type inputEngineUI struct {
 	// suppressed is set while another floating surface owns the screen (the quick panel).
 	// Two overlays for one keystroke is the conflict this guards against.
 	suppressed atomic.Bool
+	stopped    atomic.Bool
 }
 
-func (a *desktopApp) setupInputEngine(ctx context.Context, br bridge.HostService, cfg config.InputEngineConfig, suggest suggestFunc) *inputEngineUI {
-	if !cfg.Enabled {
+var newCandidatePanelWindow = func(opts mygo.WindowOptions) *mygo.Window {
+	if !mygo.App.IsReady() {
 		return nil
 	}
+	return mygo.NewWindow(opts)
+}
+
+func (a *desktopApp) createInputEngineUI(br bridge.HostService, suggest suggestFunc) *inputEngineUI {
 	h, ok := br.(bridge.InputEngineHost)
 	if !ok {
 		return nil
@@ -53,7 +58,7 @@ func (a *desktopApp) setupInputEngine(ctx context.Context, br bridge.HostService
 	u := &inputEngineUI{host: h, controller: controller}
 	u.ai = newInputEngineAIDebouncer(br, inputengine.AIDebounce, suggest, h.SetInputEngineAICandidates)
 	w, hgt := uiapp.PreferredCandidatePanelSize(inputengine.View{})
-	u.panel = mygo.NewWindow(mygo.WindowOptions{
+	u.panel = newCandidatePanelWindow(mygo.WindowOptions{
 		Title: "Clavis Input", Width: w, Height: hgt,
 		Panel: true, Hidden: true, Frameless: true, Transparent: true,
 		// The window mask is fixed at creation; the content follows [input_engine.style]
@@ -66,8 +71,106 @@ func (a *desktopApp) setupInputEngine(ctx context.Context, br bridge.HostService
 			}
 		}),
 	})
-	u.panel.OnClose(a.closeHides(u.panel.Hide))
-	h.SetInputEngineViewHandler(func(v bridge.InputEngineView) { u.onView(ctx, v) })
+	if u.panel != nil {
+		u.panel.OnClose(a.closeHides(u.panel.Hide))
+	}
+	return u
+}
+
+// ensureInputEngineUI lazily creates the candidate panel and registers its view handler
+// when [input_engine].enabled becomes true at runtime (without requiring a restart).
+func (a *desktopApp) ensureInputEngineUI(ctx context.Context, br bridge.HostService, cfg config.InputEngineConfig, suggest suggestFunc) *inputEngineUI {
+	if !cfg.Enabled {
+		return nil
+	}
+	h, ok := br.(bridge.InputEngineHost)
+	if !ok {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.mu.Lock()
+	if a.shuttingDown {
+		a.mu.Unlock()
+		return nil
+	}
+	if a.inputUI != nil && a.inputUI.host == h {
+		existing := a.inputUI
+		a.mu.Unlock()
+		return existing
+	}
+	a.mu.Unlock()
+
+	var created *inputEngineUI
+	build := func() {
+		a.mu.Lock()
+		if a.shuttingDown {
+			a.mu.Unlock()
+			return
+		}
+		if a.inputUI != nil && a.inputUI.host == h {
+			created = a.inputUI
+			a.mu.Unlock()
+			return
+		}
+		old := a.inputUI
+		a.mu.Unlock()
+
+		u := a.createInputEngineUI(br, suggest)
+		if u == nil {
+			return
+		}
+		var (
+			installed bool
+			replace   *inputEngineUI
+			discard   *inputEngineUI
+		)
+		a.mu.Lock()
+		if a.shuttingDown {
+			discard = u
+		} else if a.inputUI != nil && a.inputUI.host == h {
+			created = a.inputUI
+			discard = u
+		} else {
+			if old != nil && a.inputUI == old {
+				replace = old
+			}
+			a.inputUI = u
+			created = u
+			installed = true
+		}
+		a.mu.Unlock()
+		if replace != nil {
+			replace.Stop()
+		}
+		if installed {
+			h.SetInputEngineViewHandler(func(v bridge.InputEngineView) { u.onView(ctx, v) })
+		}
+		if discard != nil {
+			discard.stopLocal()
+		}
+	}
+	if mygo.App.IsReady() {
+		mygo.RunOnMain(build)
+	} else {
+		build()
+	}
+	return created
+}
+
+func (a *desktopApp) setupInputEngine(ctx context.Context, br bridge.HostService, cfg config.InputEngineConfig, suggest suggestFunc) *inputEngineUI {
+	if !cfg.Enabled {
+		return nil
+	}
+	h, ok := br.(bridge.InputEngineHost)
+	if !ok {
+		return nil
+	}
+	u := a.ensureInputEngineUI(ctx, br, cfg, suggest)
+	if u == nil {
+		return nil
+	}
 	// Restore the persisted takeover state before the engine is built, so a relaunch lands in
 	// the mode the user left. Without this the engine is unreachable on every fresh launch
 	// whenever the system IME is Chinese: the gate stands down and the double-tap has to be
@@ -79,7 +182,39 @@ func (a *desktopApp) setupInputEngine(ctx context.Context, br bridge.HostService
 	return u
 }
 
+func (u *inputEngineUI) Stop() {
+	if u == nil || !u.stopped.CompareAndSwap(false, true) {
+		return
+	}
+	u.ai.Stop()
+	if u.host != nil {
+		u.host.SetInputEngineViewHandler(nil)
+	}
+	if u.panel != nil && mygo.App.IsReady() {
+		mygo.RunOnMain(func() {
+			u.sizer.Reset()
+			u.panel.Hide()
+		})
+	}
+}
+
+func (u *inputEngineUI) stopLocal() {
+	if u == nil || !u.stopped.CompareAndSwap(false, true) {
+		return
+	}
+	u.ai.Stop()
+	if u.panel != nil && mygo.App.IsReady() {
+		mygo.RunOnMain(func() {
+			u.sizer.Reset()
+			u.panel.Hide()
+		})
+	}
+}
+
 func (u *inputEngineUI) onView(ctx context.Context, v bridge.InputEngineView) {
+	if u == nil || u.stopped.Load() {
+		return
+	}
 	// The controller owns the cached IME mode used by the pill state model.
 	// This callback is already off the hook thread.
 	if u.controller != nil {
@@ -87,7 +222,13 @@ func (u *inputEngineUI) onView(ctx context.Context, v bridge.InputEngineView) {
 	}
 	u.view.Store(&v)
 	u.ai.Changed(ctx, v.Raw, v.View.Composing)
+	if u.panel == nil || !mygo.App.IsReady() {
+		return
+	}
 	mygo.RunOnMain(func() {
+		if u.stopped.Load() || u.panel == nil {
+			return
+		}
 		cur := u.view.Load()
 		if u.suppressed.Load() || cur == nil || !cur.View.Composing || len(cur.View.Candidates) == 0 && cur.View.Preedit == "" {
 			u.sizer.Reset()
@@ -107,12 +248,15 @@ func (u *inputEngineUI) onView(ctx context.Context, v bridge.InputEngineView) {
 // uses it: while that surface is up, the candidate panel must not paint over it, and the
 // engine is suspended anyway so there is nothing to show.
 func (u *inputEngineUI) SetSuppressed(on bool) {
-	if u == nil {
+	if u == nil || u.stopped.Load() {
 		return
 	}
 	was := u.suppressed.Swap(on)
-	if on && !was {
+	if on && !was && u.panel != nil && mygo.App.IsReady() {
 		mygo.RunOnMain(func() {
+			if u.panel == nil {
+				return
+			}
 			u.sizer.Reset()
 			u.panel.Hide()
 		})
@@ -192,6 +336,21 @@ func firstNonEmptyAppLabel(candidates ...string) string {
 		}
 	}
 	return ""
+}
+
+func (d *aiDebouncer) Stop() {
+	d.mu.Lock()
+	d.gen++
+	d.last = ""
+	if d.timer != nil {
+		d.timer.Stop()
+		d.timer = nil
+	}
+	if d.cancel != nil {
+		d.cancel()
+		d.cancel = nil
+	}
+	d.mu.Unlock()
 }
 
 func (d *aiDebouncer) Changed(ctx context.Context, raw string, composing bool) {
