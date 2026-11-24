@@ -2,13 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/yeisme/clavis/internal/secrets"
+	internalsync "github.com/yeisme/clavis/internal/sync"
 	"github.com/yeisme/clavis/pkg/core/automation"
 	"github.com/yeisme/clavis/pkg/core/config"
+	coresync "github.com/yeisme/clavis/pkg/core/sync"
 )
 
 func TestParseGlobalFlagsAllowsFlagsAfterCommand(t *testing.T) {
@@ -195,5 +201,155 @@ func TestRunWorkflowPlanSourceMetadataDoesNotExposeSourceValues(t *testing.T) {
 		if strings.Contains(output, sensitive) {
 			t.Fatalf("plan JSON leaked source value %q: %s", sensitive, output)
 		}
+	}
+}
+
+func TestSyncCLIStatusOfflineAndPlan(t *testing.T) {
+	cfgDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if err := Run([]string{"--config-dir", cfgDir, "--json", "sync", "status"}, &stdout, &stderr); err != nil {
+		t.Fatalf("sync status offline err = %v (stderr=%s)", err, stderr.String())
+	}
+	var status syncStatusOutput
+	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+		t.Fatalf("unmarshal status JSON: %v\nraw=%s", err, stdout.String())
+	}
+	if status.Configured || status.Enabled || status.RecoveryReady || status.Code != "not_configured" {
+		t.Fatalf("unexpected unconfigured status: %+v", status)
+	}
+	if len(status.Allowlist) != 2 || status.Allowlist[0] != coresync.InputMethod || status.Allowlist[1] != coresync.LearningData {
+		t.Fatalf("unexpected allowlist: %+v", status.Allowlist)
+	}
+	// Verify offline status created zero files inside cfgDir!
+	if entries, err := os.ReadDir(cfgDir); err != nil || len(entries) != 0 {
+		t.Fatalf("sync status mutated empty configDir: entries=%v err=%v", entries, err)
+	}
+
+	// Human status output works cleanly too.
+	stdout.Reset()
+	if err := Run([]string{"sync", "status", "--config-dir", cfgDir}, &stdout, &stderr); err != nil {
+		t.Fatalf("sync status human err = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "configured=false") || !strings.Contains(stdout.String(), "allowlist=input_method,learning_data") {
+		t.Fatalf("unexpected human status: %q", stdout.String())
+	}
+
+	// sync plan JSON and human output.
+	stdout.Reset()
+	if err := Run([]string{"sync", "plan", "--json", "--config-dir", cfgDir}, &stdout, &stderr); err != nil {
+		t.Fatalf("sync plan JSON err = %v", err)
+	}
+	var plan syncPlanOutput
+	if err := json.Unmarshal(stdout.Bytes(), &plan); err != nil {
+		t.Fatalf("unmarshal plan JSON: %v", err)
+	}
+	if plan.Transport != "dir" || len(plan.Allowlist) != 2 || len(plan.BlockedClasses) != 2 {
+		t.Fatalf("unexpected plan output: %+v", plan)
+	}
+	stdout.Reset()
+	if err := Run([]string{"sync", "plan", "--config-dir", cfgDir}, &stdout, &stderr); err != nil {
+		t.Fatalf("sync plan human err = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "input_method\tallowed") || !strings.Contains(stdout.String(), "passwords\tforbidden") {
+		t.Fatalf("unexpected human plan: %q", stdout.String())
+	}
+}
+
+func TestSyncCLIRunExitCodesAndEndToEndDirSync(t *testing.T) {
+	cfgDir := t.TempDir()
+	syncDir := filepath.Join(t.TempDir(), "shared")
+	var stdout, stderr bytes.Buffer
+
+	// Missing --dir returns exit code 2 (usage error).
+	err := Run([]string{"sync", "run", "--config-dir", cfgDir}, &stdout, &stderr)
+	if ExitCode(err) != exitCodeUsage {
+		t.Fatalf("missing --dir exit code = %d (err=%v), want %d", ExitCode(err), err, exitCodeUsage)
+	}
+
+	// Uninitialized configDir returns exit code 3 (not initialized), never fake success!
+	stdout.Reset()
+	err = Run([]string{"sync", "run", "--dir", syncDir, "--config-dir", cfgDir, "--json"}, &stdout, &stderr)
+	if ExitCode(err) != exitCodeNotReady {
+		t.Fatalf("uninitialized sync run exit code = %d (err=%v), want %d", ExitCode(err), err, exitCodeNotReady)
+	}
+	if !strings.Contains(stdout.String(), `"code": "not_initialized"`) {
+		t.Fatalf("uninitialized JSON output = %s", stdout.String())
+	}
+
+	// Bootstrap Device A and Device B, upload on A, then execute `clavis sync run --dir <shared> --config-dir <B> --json`!
+	privA := filepath.Join(t.TempDir(), "dev-a-cfg")
+	privB := filepath.Join(t.TempDir(), "dev-b-cfg")
+	ctx := context.Background()
+
+	txA, err := internalsync.OpenDirTransport(ctx, internalsync.DirTransportOptions{
+		SyncDir:     syncDir,
+		PrivateDir:  privA,
+		AccountID:   "cli-acct",
+		DeviceID:    "cli-dev-a",
+		SecretStore: secrets.NewFileStore(secrets.DefaultKeysPath(privA)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := txA.BootstrapAccount(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txB, err := internalsync.OpenDirTransport(ctx, internalsync.DirTransportOptions{
+		SyncDir:     syncDir,
+		PrivateDir:  privB,
+		AccountID:   "cli-acct",
+		DeviceID:    "cli-dev-b",
+		SecretStore: secrets.NewFileStore(secrets.DefaultKeysPath(privB)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	bundle, err := txA.CreatePairingBundle(ctx, "cli-dev-b", txB.DevicePublicKey(), txB.X25519PublicKey(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := txB.AcceptPairingTicket(ctx, bundle.Ticket, bundle.ShortCode, coresync.PairingFingerprint(txA.DevicePublicKey()), code, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := txA.Upload(ctx, coresync.LearningData, "cli-lexicon", 1, []byte("secret-learning-payload")); err != nil {
+		t.Fatal(err)
+	}
+	// Close both transports so CLI opens Device B's local SQLite cleanly.
+	if err := txA.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := txB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := Run([]string{"--config-dir", privB, "--json", "sync", "run", "--dir", syncDir}, &stdout, &stderr); err != nil {
+		t.Fatalf("clavis sync run failed: %v (stderr=%s stdout=%s)", err, stderr.String(), stdout.String())
+	}
+	var runOut syncRunOutput
+	if err := json.Unmarshal(stdout.Bytes(), &runOut); err != nil {
+		t.Fatalf("unmarshal run JSON: %v\nraw=%s", err, stdout.String())
+	}
+	if runOut.Code != "ok" || runOut.IngestedEnvelopes != 1 || runOut.PulledObjects != 1 || runOut.Conflicts != 0 {
+		t.Fatalf("unexpected sync run output: %+v", runOut)
+	}
+	if strings.Contains(stdout.String(), "secret-learning-payload") {
+		t.Fatalf("sync run leaked plaintext payload: %s", stdout.String())
+	}
+
+	// Now verify `clavis sync status --config-dir <privB> --json` shows configured=true, enabled=true, envelopeFiles=1.
+	stdout.Reset()
+	if err := Run([]string{"sync", "status", "--config-dir", privB, "--json"}, &stdout, &stderr); err != nil {
+		t.Fatalf("sync status after run err = %v", err)
+	}
+	var after syncStatusOutput
+	if err := json.Unmarshal(stdout.Bytes(), &after); err != nil {
+		t.Fatal(err)
+	}
+	if !after.Configured || !after.Enabled || !after.RecoveryReady || after.EnvelopeFiles != 1 {
+		t.Fatalf("unexpected status after run: %+v", after)
 	}
 }

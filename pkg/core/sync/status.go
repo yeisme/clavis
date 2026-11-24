@@ -16,11 +16,15 @@ type StatusSnapshot struct {
 	Account           string
 	DeviceID          string
 	LoggedIn          bool
+	RecoveryReady     bool
 	LocalVersion      int64
 	PendingUploads    int
 	PendingTombstones int
+	Conflicts         int
 	LastSyncAt        time.Time
 	Devices           int
+	AllowedClasses    []DataClass
+	SyncDir           string
 }
 
 // LocalStatus is the optional, non-secret status portion of a StateStore. The
@@ -29,8 +33,11 @@ type LocalStatus struct {
 	LocalVersion      int64
 	PendingUploads    int
 	PendingTombstones int
+	Conflicts         int
 	LastSyncAt        time.Time
 	Devices           int
+	AllowedClasses    []DataClass
+	SyncDir           string
 }
 
 // StatusStore exposes additional locally persisted counters for the read-only
@@ -52,6 +59,12 @@ func redactIdentifier(value string) string {
 	return string(runes) + "…"
 }
 
+// RedactIdentifier truncates an account or device identifier for non-secret
+// status display.
+func RedactIdentifier(value string) string {
+	return redactIdentifier(value)
+}
+
 // StatusSnapshot reads only local state. An unconfigured client is a normal
 // ready state; a configured client whose local state cannot be read is
 // unknown, not failed. No server method is called by this function.
@@ -63,12 +76,18 @@ func (c *Client) StatusSnapshot(ctx context.Context) (StatusSnapshot, host.Opera
 	c.mu.Lock()
 	account, device, state := c.accountID, c.deviceID, c.stateStore
 	loggedIn := strings.TrimSpace(account) != ""
+	plan := c.plan
+	conflictCount := len(c.conflicts)
+	recoveryReady := c.recoveryReady
 	c.mu.Unlock()
 
 	snapshot := StatusSnapshot{
-		Account:  redactIdentifier(account),
-		DeviceID: redactIdentifier(device),
-		LoggedIn: loggedIn,
+		Account:        redactIdentifier(account),
+		DeviceID:       redactIdentifier(device),
+		LoggedIn:       loggedIn,
+		RecoveryReady:  recoveryReady,
+		Conflicts:      conflictCount,
+		AllowedClasses: plan.AllowedClasses(),
 	}
 	result := host.OperationResult{State: host.StateReady, ObservedAt: time.Now().UTC()}
 
@@ -82,7 +101,7 @@ func (c *Client) StatusSnapshot(ctx context.Context) (StatusSnapshot, host.Opera
 		return snapshot, result, errors.New("sync: local state store is unavailable")
 	}
 
-	watermark, _, err := state.Load(ctx)
+	watermark, storedReady, err := state.Load(ctx)
 	if err != nil {
 		result.State = host.StateUnknown
 		result.Code = "state_read_failed"
@@ -96,6 +115,7 @@ func (c *Client) StatusSnapshot(ctx context.Context) (StatusSnapshot, host.Opera
 		return snapshot, result, errors.New("sync: local version exceeds display range")
 	}
 	snapshot.LocalVersion = int64(watermark)
+	snapshot.RecoveryReady = storedReady
 
 	if statusStore, ok := state.(StatusStore); ok {
 		status, err := statusStore.LoadStatus(ctx)
@@ -109,8 +129,15 @@ func (c *Client) StatusSnapshot(ctx context.Context) (StatusSnapshot, host.Opera
 		// optional status data cannot replace that source of truth.
 		snapshot.PendingUploads = maxNonNegative(status.PendingUploads)
 		snapshot.PendingTombstones = maxNonNegative(status.PendingTombstones)
+		if status.Conflicts > snapshot.Conflicts {
+			snapshot.Conflicts = status.Conflicts
+		}
 		snapshot.LastSyncAt = status.LastSyncAt
 		snapshot.Devices = maxNonNegative(status.Devices)
+		if len(status.AllowedClasses) > 0 {
+			snapshot.AllowedClasses = append([]DataClass(nil), status.AllowedClasses...)
+		}
+		snapshot.SyncDir = status.SyncDir
 	}
 	return snapshot, result, nil
 }

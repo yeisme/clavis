@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,10 +15,47 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/yeisme/clavis/internal/secrets"
+	internalsync "github.com/yeisme/clavis/internal/sync"
 	"github.com/yeisme/clavis/pkg/core/automation"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/ime"
+	coresync "github.com/yeisme/clavis/pkg/core/sync"
 )
+
+const (
+	exitCodeOK        = 0
+	exitCodeUsage     = 2
+	exitCodeNotReady  = 3
+	exitCodeTransport = 4
+	exitCodeProtocol  = 5
+)
+
+type cliExitError struct {
+	code int
+	err  error
+}
+
+func (e *cliExitError) Error() string { return e.err.Error() }
+func (e *cliExitError) Unwrap() error { return e.err }
+
+// ExitCode maps a Run error to a deterministic CLI exit status:
+//
+//	0: success
+//	2: usage / configuration error
+//	3: not initialized / unauthorized / recovery code unconfirmed
+//	4: retryable transport or storage error
+//	5: protocol rejection (signature/version/class) or unresolved conflict
+func ExitCode(err error) int {
+	if err == nil {
+		return exitCodeOK
+	}
+	var ce *cliExitError
+	if errors.As(err, &ce) && ce.code > 0 {
+		return ce.code
+	}
+	return exitCodeUsage
+}
 
 // Run executes the command using args and streams output to stdout/stderr.
 // It is exported so callers and tests can use the CLI without starting a
@@ -36,6 +74,9 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	}
 	if len(commandArgs) > 0 && commandArgs[0] == "compile-dict" {
 		return compileDict(stdout, stderr, commandArgs[1:])
+	}
+	if len(commandArgs) > 0 && commandArgs[0] == "sync" {
+		return runSyncCommand(stdout, stderr, configDir, jsonOutput, commandArgs[1:])
 	}
 	if len(commandArgs) < 2 {
 		return usageError(stderr)
@@ -75,7 +116,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 func main() {
 	if err := Run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
+		os.Exit(ExitCode(err))
 	}
 }
 
@@ -157,11 +198,312 @@ func defaultConfigDir() string {
 }
 
 func usageError(w io.Writer) error {
-	err := errors.New("usage: clavis [--config-dir DIR] [--json] action list | workflow list | workflow plan WORKFLOW | compile-dict INPUT -o OUTPUT")
+	err := errors.New("usage: clavis [--config-dir DIR] [--json] action list | workflow list | workflow plan WORKFLOW | compile-dict INPUT -o OUTPUT | sync status [--dir DIR] | sync plan | sync run --dir DIR")
 	if w != nil {
 		fmt.Fprintln(w, err)
 	}
+	return &cliExitError{code: exitCodeUsage, err: err}
+}
+
+type syncStatusOutput struct {
+	Code              string               `json:"code"`
+	Configured        bool                 `json:"configured"`
+	Enabled           bool                 `json:"enabled"`
+	RecoveryReady     bool                 `json:"recoveryReady"`
+	Account           string               `json:"account,omitempty"`
+	DeviceID          string               `json:"deviceId,omitempty"`
+	Watermark         uint64               `json:"watermark"`
+	PendingUploads    int                  `json:"pendingUploads"`
+	PendingTombstones int                  `json:"pendingTombstones"`
+	Conflicts         int                  `json:"conflicts"`
+	Devices           int                  `json:"devices"`
+	SyncDir           string               `json:"syncDir,omitempty"`
+	DirExists         bool                 `json:"dirExists"`
+	EnvelopeFiles     int                  `json:"envelopeFiles"`
+	TombstoneFiles    int                  `json:"tombstoneFiles"`
+	Allowlist         []coresync.DataClass `json:"allowlist"`
+	BlockedClasses    []coresync.DataClass `json:"blockedClasses"`
+}
+
+type syncPlanOutput struct {
+	Code           string               `json:"code"`
+	Transport      string               `json:"transport"`
+	Allowlist      []coresync.DataClass `json:"allowlist"`
+	BlockedClasses []coresync.DataClass `json:"blockedClasses"`
+	Items          []coresync.SyncItem  `json:"items"`
+}
+
+type syncRunOutput struct {
+	Code               string               `json:"code"`
+	SyncDir            string               `json:"syncDir"`
+	IngestedEnvelopes  int                  `json:"ingestedEnvelopes"`
+	IngestedTombstones int                  `json:"ingestedTombstones"`
+	PulledObjects      int                  `json:"pulledObjects"`
+	Conflicts          int                  `json:"conflicts"`
+	Watermark          uint64               `json:"watermark"`
+	Allowlist          []coresync.DataClass `json:"allowlist"`
+	Error              string               `json:"error,omitempty"`
+}
+
+func runSyncCommand(stdout, stderr io.Writer, configDir string, jsonOutput bool, args []string) error {
+	if len(args) == 0 {
+		return usageError(stderr)
+	}
+	switch args[0] {
+	case "status":
+		return runSyncStatus(stdout, stderr, configDir, jsonOutput, args[1:])
+	case "plan":
+		if len(args) != 1 {
+			return usageError(stderr)
+		}
+		return runSyncPlan(stdout, jsonOutput)
+	case "run":
+		return runSyncDir(stdout, stderr, configDir, jsonOutput, args[1:])
+	default:
+		return usageError(stderr)
+	}
+}
+
+func parseDirFlag(args []string, required bool) (string, error) {
+	var dir string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--dir":
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return "", &cliExitError{code: exitCodeUsage, err: errors.New("sync: --dir requires a directory path")}
+			}
+			dir = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--dir="):
+			dir = strings.TrimPrefix(arg, "--dir=")
+			if strings.TrimSpace(dir) == "" {
+				return "", &cliExitError{code: exitCodeUsage, err: errors.New("sync: --dir requires a directory path")}
+			}
+		default:
+			return "", &cliExitError{code: exitCodeUsage, err: fmt.Errorf("sync: unexpected argument %q", arg)}
+		}
+	}
+	if required && strings.TrimSpace(dir) == "" {
+		return "", &cliExitError{code: exitCodeUsage, err: errors.New("sync run requires --dir DIR")}
+	}
+	return dir, nil
+}
+
+func runSyncStatus(stdout, _ io.Writer, configDir string, jsonOutput bool, args []string) error {
+	dirFlag, err := parseDirFlag(args, false)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	statePath := filepath.Join(configDir, "sync-state.db")
+	watermark, recoveryReady, meta, exists, err := internalsync.InspectStateFileReadOnly(ctx, statePath)
+	if err != nil {
+		return &cliExitError{code: exitCodeTransport, err: fmt.Errorf("sync status: read local state: %w", err)}
+	}
+	effectiveDir := strings.TrimSpace(dirFlag)
+	if effectiveDir == "" {
+		effectiveDir = strings.TrimSpace(meta.SyncDir)
+	}
+	if effectiveDir == "" {
+		candidate := filepath.Join(configDir, "sync-dir")
+		if info, statErr := os.Lstat(candidate); statErr == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+			effectiveDir = candidate
+		}
+	}
+	inspection, inspErr := internalsync.InspectDirReadOnly(effectiveDir)
+	if inspErr != nil {
+		return &cliExitError{code: exitCodeUsage, err: fmt.Errorf("sync status: inspect dir: %w", inspErr)}
+	}
+	allowlist := meta.AllowedClasses
+	if len(allowlist) == 0 {
+		allowlist = coresync.Phase1SyncPlan().AllowedClasses()
+	}
+	configured := exists && (strings.TrimSpace(meta.AccountID) != "" || recoveryReady || strings.TrimSpace(meta.SyncDir) != "")
+	code := "not_configured"
+	if configured {
+		code = "ok"
+	}
+	out := syncStatusOutput{
+		Code:              code,
+		Configured:        configured,
+		Enabled:           configured && recoveryReady,
+		RecoveryReady:     recoveryReady,
+		Account:           coresync.RedactIdentifier(meta.AccountID),
+		DeviceID:          coresync.RedactIdentifier(meta.DeviceID),
+		Watermark:         watermark,
+		PendingUploads:    meta.PendingUploads,
+		PendingTombstones: meta.PendingTombstones,
+		Conflicts:         meta.Conflicts,
+		Devices:           meta.Devices,
+		SyncDir:           effectiveDir,
+		DirExists:         inspection.Exists,
+		EnvelopeFiles:     inspection.EnvelopeFiles,
+		TombstoneFiles:    inspection.TombstoneFiles,
+		Allowlist:         allowlist,
+		BlockedClasses:    []coresync.DataClass{coresync.Passwords, coresync.KeyManager},
+	}
+	if jsonOutput {
+		return encodeJSON(stdout, out)
+	}
+	_, err = fmt.Fprintf(
+		stdout,
+		"configured=%t\tenabled=%t\trecovery_ready=%t\twatermark=%d\tconflicts=%d\tallowlist=%s\n",
+		out.Configured,
+		out.Enabled,
+		out.RecoveryReady,
+		out.Watermark,
+		out.Conflicts,
+		joinClasses(out.Allowlist),
+	)
 	return err
+}
+
+func runSyncPlan(stdout io.Writer, jsonOutput bool) error {
+	plan := coresync.Phase1SyncPlan()
+	out := syncPlanOutput{
+		Code:           "ok",
+		Transport:      "dir",
+		Allowlist:      plan.AllowedClasses(),
+		BlockedClasses: []coresync.DataClass{coresync.Passwords, coresync.KeyManager},
+		Items:          plan.Items(),
+	}
+	if jsonOutput {
+		return encodeJSON(stdout, out)
+	}
+	for _, item := range out.Items {
+		status := "disabled"
+		if item.Class == coresync.Passwords || item.Class == coresync.KeyManager {
+			status = "forbidden"
+		} else if item.Allowed {
+			status = "allowed"
+		}
+		if _, err := fmt.Fprintf(stdout, "%s\t%s\n", item.Class, status); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runSyncDir(stdout, _ io.Writer, configDir string, jsonOutput bool, args []string) error {
+	dir, err := parseDirFlag(args, true)
+	if err != nil {
+		return err
+	}
+	if info, statErr := os.Lstat(dir); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return &cliExitError{code: exitCodeUsage, err: fmt.Errorf("sync run: %s is not a safe directory", dir)}
+		}
+	} else if !os.IsNotExist(statErr) {
+		return &cliExitError{code: exitCodeTransport, err: fmt.Errorf("sync run: stat %s: %w", dir, statErr)}
+	}
+
+	ctx := context.Background()
+	allowlist := coresync.Phase1SyncPlan().AllowedClasses()
+	statePath := filepath.Join(configDir, "sync-state.db")
+	_, recoveryReady, meta, exists, err := internalsync.InspectStateFileReadOnly(ctx, statePath)
+	if err != nil {
+		return &cliExitError{code: exitCodeTransport, err: fmt.Errorf("sync run: read local state: %w", err)}
+	}
+	if !exists || strings.TrimSpace(meta.AccountID) == "" || strings.TrimSpace(meta.DeviceID) == "" {
+		out := syncRunOutput{Code: "not_initialized", SyncDir: dir, Allowlist: allowlist}
+		if jsonOutput {
+			_ = encodeJSON(stdout, out)
+		}
+		return &cliExitError{code: exitCodeNotReady, err: errors.New("sync run: local sync state is not initialized")}
+	}
+	if !recoveryReady {
+		out := syncRunOutput{Code: "recovery_unconfirmed", SyncDir: dir, Allowlist: allowlist}
+		if jsonOutput {
+			_ = encodeJSON(stdout, out)
+		}
+		return &cliExitError{code: exitCodeNotReady, err: errors.New("sync run: recovery code is not confirmed")}
+	}
+
+	keyStore := secrets.NewFileStore(secrets.DefaultKeysPath(configDir))
+	tx, err := internalsync.OpenDirTransport(ctx, internalsync.DirTransportOptions{
+		SyncDir:     dir,
+		PrivateDir:  configDir,
+		AccountID:   meta.AccountID,
+		DeviceID:    meta.DeviceID,
+		SecretStore: keyStore,
+	})
+	if err != nil {
+		return &cliExitError{code: exitCodeTransport, err: fmt.Errorf("sync run: open dir transport: %w", err)}
+	}
+	defer tx.Close()
+
+	report, err := tx.SyncOnce(ctx)
+	if err != nil {
+		code := exitCodeTransport
+		statusCode := "transport_error"
+		if isSyncProtocolError(err) {
+			code = exitCodeProtocol
+			statusCode = "protocol_rejected"
+		}
+		out := syncRunOutput{Code: statusCode, SyncDir: dir, Allowlist: allowlist, Watermark: report.Watermark, Conflicts: report.ConflictCount}
+		if jsonOutput {
+			_ = encodeJSON(stdout, out)
+		}
+		return &cliExitError{code: code, err: fmt.Errorf("sync run: %w", err)}
+	}
+
+	out := syncRunOutput{
+		Code:               "ok",
+		SyncDir:            dir,
+		IngestedEnvelopes:  report.IngestedEnvelopes,
+		IngestedTombstones: report.IngestedTombstones,
+		PulledObjects:      report.PulledCount,
+		Conflicts:          report.ConflictCount,
+		Watermark:          report.Watermark,
+		Allowlist:          report.AllowedClasses,
+	}
+	if report.ConflictCount > 0 {
+		out.Code = "conflict_detected"
+	}
+	if jsonOutput {
+		if encErr := encodeJSON(stdout, out); encErr != nil {
+			return encErr
+		}
+	} else {
+		if _, fErr := fmt.Fprintf(
+			stdout,
+			"code=%s\tenvelopes=%d\ttombstones=%d\tpulled=%d\tconflicts=%d\twatermark=%d\n",
+			out.Code,
+			out.IngestedEnvelopes,
+			out.IngestedTombstones,
+			out.PulledObjects,
+			out.Conflicts,
+			out.Watermark,
+		); fErr != nil {
+			return fErr
+		}
+	}
+	if report.ConflictCount > 0 {
+		return &cliExitError{code: exitCodeProtocol, err: fmt.Errorf("sync run: %d conflict(s) require explicit resolution", report.ConflictCount)}
+	}
+	return nil
+}
+
+func isSyncProtocolError(err error) bool {
+	if errors.Is(err, coresync.ErrClassForbidden) ||
+		errors.Is(err, coresync.ErrClassNotAllowed) ||
+		errors.Is(err, coresync.ErrStoreDeviceRevoked) ||
+		errors.Is(err, coresync.ErrStoreConflict) ||
+		errors.Is(err, coresync.ErrStoreVersion) ||
+		errors.Is(err, coresync.ErrStorePlaintext) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "signature") || strings.Contains(msg, "invalid envelope") || strings.Contains(msg, "tombstone")
+}
+
+func joinClasses(classes []coresync.DataClass) string {
+	parts := make([]string, 0, len(classes))
+	for _, c := range classes {
+		parts = append(parts, string(c))
+	}
+	return strings.Join(parts, ",")
 }
 
 // actionRecord is a deliberately stable, command-oriented projection of the

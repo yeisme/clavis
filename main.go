@@ -24,6 +24,7 @@ import (
 	"github.com/yeisme/clavis/internal/daemon"
 	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/internal/storage"
+	internalsync "github.com/yeisme/clavis/internal/sync"
 	"github.com/yeisme/clavis/internal/watcher"
 	"github.com/yeisme/clavis/pkg/core/ai"
 	"github.com/yeisme/clavis/pkg/core/automation"
@@ -32,6 +33,7 @@ import (
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/pkg/core/i18n"
+	coresync "github.com/yeisme/clavis/pkg/core/sync"
 	"github.com/yeisme/clavis/uiapp"
 
 	// MyGo controls and menus speak the app language once the zh-Hans
@@ -170,6 +172,7 @@ type desktopApp struct {
 	// learn: RAM mirror at once, SQLite in coalesced background batches.
 	learningWriter       *storage.LearningWriter
 	blocklistStore       *storage.UserBlocklistStore
+	syncStateStore       *internalsync.SQLiteStateStore
 	clipStore            clipboard.Store
 	mediaStore           *clipboard.MediaStore
 	auditLog             *automation.AuditLog
@@ -295,6 +298,36 @@ func sharedLexiconTopWordsReader(store *storage.LearningStore) uiapp.LexiconTopW
 
 func newDesktopApp() *desktopApp {
 	return &desktopApp{}
+}
+
+// initDesktopSyncStatus opens the local per-device sync state database at
+// <userDataDir>/sync-state.db and returns a read-only SyncStatusReader backed
+// by that state store and an optional configured/default shared sync directory.
+func initDesktopSyncStatus(ctx context.Context, userDataDir string) (*internalsync.SQLiteStateStore, uiapp.SyncStatusReader) {
+	if strings.TrimSpace(userDataDir) == "" {
+		return nil, nil
+	}
+	statePath := filepath.Join(userDataDir, "sync-state.db")
+	stateStore, err := internalsync.OpenSQLiteStateStore(ctx, statePath)
+	if err != nil {
+		return nil, func(context.Context) (coresync.StatusSnapshot, host.OperationResult, error) {
+			return coresync.StatusSnapshot{
+				AllowedClasses: coresync.Phase1SyncPlan().AllowedClasses(),
+			}, host.OperationResult{
+				State:      host.StateUnknown,
+				Code:       "state_unavailable",
+				ObservedAt: time.Now().UTC(),
+			}, err
+		}
+	}
+	syncDir := strings.TrimSpace(os.Getenv("CLAVIS_SYNC_DIR"))
+	if syncDir == "" {
+		candidate := filepath.Join(userDataDir, "sync-dir")
+		if info, statErr := os.Lstat(candidate); statErr == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+			syncDir = candidate
+		}
+	}
+	return stateStore, internalsync.NewDirStatusReader(stateStore, syncDir)
 }
 
 // resolveCurrentUserFullName resolves the OS user's display name without spawning
@@ -427,12 +460,15 @@ func (a *desktopApp) start() {
 	var learningStore *storage.LearningStore
 	var learningWriter *storage.LearningWriter
 	var blocklistStore *storage.UserBlocklistStore
+	var syncStateStore *internalsync.SQLiteStateStore
+	var syncStatusReader uiapp.SyncStatusReader
 	var clipStore clipboard.Store
 	var mediaStore *clipboard.MediaStore
 	var dataDir string
 	hadData := false
 	if userDataDir, err := mygo.App.Path(mygo.PathUserData); err == nil && userDataDir != "" {
 		dataDir = userDataDir
+		syncStateStore, syncStatusReader = initDesktopSyncStatus(ctx, userDataDir)
 		// Blobs live next to the DB; an in-memory store gets no media (nothing to reference them).
 		mediaStore = clipboard.NewMediaStore(filepath.Join(userDataDir, "clipboard-media"))
 		dbPath := filepath.Join(userDataDir, "clipboard.db")
@@ -555,6 +591,9 @@ func (a *desktopApp) start() {
 		OnShowSelectionBar:    a.handleShowSelectionBar,
 		OnHideSelectionBar:    a.handleHideSelectionBar,
 	})
+	if syncStatusReader != nil {
+		controller.SetSyncStatusReader(syncStatusReader)
+	}
 
 	initW, initH := uiapp.PreferredCapsuleSize(engine.PhaseLeader, cfg.Main.Appearance)
 	surfaceSpec := func(height int, elevation int, blur mygo.Vibrancy, dismiss uiapp.SurfaceDismissPolicy, focusRestore uiapp.SurfaceFocusRestore) uiapp.SurfaceSpec {
@@ -745,6 +784,7 @@ func (a *desktopApp) start() {
 	a.learningStore = learningStore
 	a.learningWriter = learningWriter
 	a.blocklistStore = blocklistStore
+	a.syncStateStore = syncStateStore
 	a.clipStore = clipStore
 	a.mediaStore = mediaStore
 	a.auditLog = auditLog
@@ -2689,6 +2729,7 @@ func (a *desktopApp) shutdown() {
 		a.inputUI = nil
 		sqliteStore := a.sqliteStore
 		learningWriter := a.learningWriter
+		syncStateStore := a.syncStateStore
 		tray := a.tray
 		a.bridgeRunning = false
 		a.mu.Unlock()
@@ -2726,6 +2767,9 @@ func (a *desktopApp) shutdown() {
 		}
 		if sqliteStore != nil {
 			_ = sqliteStore.Close()
+		}
+		if syncStateStore != nil {
+			_ = syncStateStore.Close()
 		}
 		if tray != nil {
 			tray.Destroy()

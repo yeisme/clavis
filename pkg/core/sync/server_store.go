@@ -11,7 +11,12 @@ import (
 // by a future persistent Server integration.
 type ServerStore struct{ server *Server }
 
-var _ SyncStore = (*ServerStore)(nil)
+var (
+	_ SyncStore     = (*ServerStore)(nil)
+	_ ADKStore      = (*ServerStore)(nil)
+	_ RecoveryStore = (*ServerStore)(nil)
+	_ PairingStore  = (*ServerStore)(nil)
+)
 
 func NewServerStore(server *Server) (*ServerStore, error) {
 	if server == nil {
@@ -47,6 +52,15 @@ func (s *ServerStore) SetWrappedADKForDevice(account, sender, target string, wra
 func (s *ServerStore) GetWrappedADK(account, device string, signature []byte) ([]byte, error) {
 	return s.server.GetWrappedADK(account, device, signature)
 }
+func (s *ServerStore) SetWrappedADKEntryForDevice(account, sender, target, keyID string, wrapped, signature []byte) error {
+	return s.server.SetWrappedADKEntryForDevice(account, sender, target, keyID, wrapped, signature)
+}
+func (s *ServerStore) GetWrappedADKEntry(account, device string, signature []byte) (WrappedADKEntry, error) {
+	return s.server.GetWrappedADKEntry(account, device, signature)
+}
+func (s *ServerStore) ListActiveDevices(account string) ([]string, error) {
+	return s.server.ListActiveDevices(account)
+}
 func (s *ServerStore) GetRecoverySalt(account, device string, signature []byte) ([]byte, error) {
 	return s.server.GetRecoverySalt(account, device, signature)
 }
@@ -59,6 +73,9 @@ func (s *ServerStore) GetRecoveryWrap(account, device string, signature []byte) 
 func (s *ServerStore) DevicePublicKey(account, device string) (ed25519.PublicKey, error) {
 	s.server.mu.Lock()
 	defer s.server.mu.Unlock()
+	if _, revoked := s.server.revokedDevices[account][device]; revoked {
+		return nil, ErrStoreDeviceRevoked
+	}
 	pub := s.server.accounts[account][device]
 	if len(pub) != ed25519.PublicKeySize {
 		return nil, ErrStoreDeviceMissing
@@ -76,6 +93,9 @@ func (s *ServerStore) GetEnvelope(account, object string) (EncryptedEnvelope, er
 		return EncryptedEnvelope{}, ErrStoreObjectMissing
 	}
 	return parseEnvelope(raw)
+}
+func (s *ServerStore) ListObjects(account string) ([]ObjectSummary, error) {
+	return s.server.ListObjects(account)
 }
 func (s *ServerStore) ObjectVersion(account, object string) (uint64, error) {
 	s.server.mu.Lock()

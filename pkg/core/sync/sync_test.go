@@ -106,7 +106,7 @@ func TestSignedDeleteAndOldDeviceSyncBeforeUpload(t *testing.T) {
 
 func TestUnknownClassIsSkippedAndDiagnosed(t *testing.T) {
 	s, a, b := setupClients(t)
-	e, err := clientEnvelope(a.privateKey, "acct", "a", "future-object", 1, DataClass("future_class"), []byte("future payload"))
+	e, err := clientEnvelopeWithADK(a.privateKey, a.ADK(), "acct", "a", "future-object", 1, DataClass("future_class"), []byte("future payload"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -708,7 +708,7 @@ func TestServerStoresOnlyWrappedADKBytes(t *testing.T) {
 
 func TestEnvelopeSignatureRequired(t *testing.T) {
 	s, a, _ := setupClients(t)
-	e, err := clientEnvelope(a.privateKey, "acct", "a", "object", 1, InputMethod, []byte("secret"))
+	e, err := clientEnvelopeWithADK(a.privateKey, a.ADK(), "acct", "a", "object", 1, InputMethod, []byte("secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -727,7 +727,7 @@ func TestEnvelopeRejectsPlaintextAndMismatches(t *testing.T) {
 	if err := s.Upload("acct", "a", "object", 1, []byte("plaintext")); err == nil {
 		t.Fatal("plaintext accepted")
 	}
-	e, err := clientEnvelope(a.privateKey, "acct", "a", "object", 1, InputMethod, []byte("secret"))
+	e, err := clientEnvelopeWithADK(a.privateKey, a.ADK(), "acct", "a", "object", 1, InputMethod, []byte("secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
