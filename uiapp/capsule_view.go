@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -15,6 +16,171 @@ import (
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/i18n"
 )
+
+type rowMetaCacheKey struct {
+	itemID           string
+	contentLen       int
+	contentHash      uint64
+	sourceApp        string
+	subtitleFallback string
+	iconFallback     string
+	keyHint          string
+	copiedAtUnix     int64
+	copiedAtZero     bool
+	timeBucket       int64
+	hasMedia         bool
+	mediaKind        string
+	lang             i18n.Language
+}
+
+type cachedClipboardRowMeta struct {
+	rowKey      string
+	iconName    string
+	lineCount   int
+	subtitle    string
+	hasSwatch   bool
+	swatchColor ui.Color
+}
+
+// rowMetaCache memoizes derived per-row clipboard metadata (row key, leading
+// icon, color swatch, line count, and relative-time subtitle) across frames so
+// rapid arrow/hover movement never rescans clipboard text or rebuilds strings.
+type rowMetaCache struct {
+	mu      sync.Mutex
+	maxSize int
+	entries map[rowMetaCacheKey]cachedClipboardRowMeta
+	hits    uint64
+	misses  uint64
+}
+
+func newRowMetaCache(maxSize int) *rowMetaCache {
+	if maxSize <= 0 {
+		maxSize = rowMetaCacheMaxSize
+	}
+	return &rowMetaCache{
+		maxSize: maxSize,
+		entries: make(map[rowMetaCacheKey]cachedClipboardRowMeta, min(maxSize, 64)),
+	}
+}
+
+func (c *rowMetaCache) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.entries)
+}
+
+func (c *rowMetaCache) stats() (hits, misses uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hits, c.misses
+}
+
+func clipboardTimeBucket(at, nowLocal time.Time) int64 {
+	if at.IsZero() {
+		return 0
+	}
+	d := nowLocal.Sub(at)
+	if d < time.Minute {
+		return -1
+	}
+	if d < 24*time.Hour {
+		return int64(d / time.Minute)
+	}
+	return 1_000_000 + int64(nowLocal.Year())*1000 + int64(nowLocal.YearDay())
+}
+
+func (c *rowMetaCache) getOrCompute(item engine.OmniboxItem, nowLocal time.Time, lang i18n.Language) cachedClipboardRowMeta {
+	hasMedia := item.ClipboardMedia != nil
+	mediaKind := ""
+	if hasMedia {
+		mediaKind = item.ClipboardMedia.Kind
+	}
+	key := rowMetaCacheKey{
+		itemID:           item.ID,
+		contentLen:       len(item.ClipboardContent),
+		contentHash:      contentSampleHash(item.ClipboardContent),
+		sourceApp:        item.ClipboardSourceApp,
+		subtitleFallback: item.Subtitle,
+		iconFallback:     item.Icon,
+		keyHint:          item.KeyHint,
+		copiedAtUnix:     item.ClipboardCopiedAt.Unix(),
+		copiedAtZero:     item.ClipboardCopiedAt.IsZero(),
+		timeBucket:       clipboardTimeBucket(item.ClipboardCopiedAt, nowLocal),
+		hasMedia:         hasMedia,
+		mediaKind:        mediaKind,
+		lang:             lang,
+	}
+
+	c.mu.Lock()
+	if meta, ok := c.entries[key]; ok {
+		c.hits++
+		c.mu.Unlock()
+		return meta
+	}
+	c.mu.Unlock()
+
+	meta := computeClipboardRowMeta(item, nowLocal)
+
+	c.mu.Lock()
+	if existing, ok := c.entries[key]; ok {
+		c.hits++
+		c.mu.Unlock()
+		return existing
+	}
+	c.misses++
+	if len(c.entries) >= c.maxSize {
+		clear(c.entries)
+	}
+	c.entries[key] = meta
+	c.mu.Unlock()
+	return meta
+}
+
+func computeClipboardRowMeta(item engine.OmniboxItem, nowLocal time.Time) cachedClipboardRowMeta {
+	swatchColor, hasSwatch := parseHexSwatch(item.ClipboardContent)
+	iconName := item.Icon
+	if item.ClipboardMedia == nil || item.ClipboardMedia.Kind == "" {
+		iconName = clipboardContentIcon(item.ClipboardContent, item.Icon)
+	}
+	lineCount := 0
+	if item.ClipboardMedia == nil {
+		lineCount = clipboardLineCount(item.ClipboardContent)
+	}
+	var partsBuf [3]string
+	parts := partsBuf[:0]
+	if app := strings.TrimSpace(item.ClipboardSourceApp); app != "" {
+		parts = append(parts, app)
+	}
+	if !item.ClipboardCopiedAt.IsZero() {
+		parts = append(parts, relativeCopyTime(item.ClipboardCopiedAt, nowLocal))
+	}
+	if item.ClipboardMedia == nil && lineCount > 1 {
+		parts = append(parts, i18n.T("clipboard.row.lines", lineCount))
+	}
+	subtitle := item.Subtitle
+	if len(parts) > 0 {
+		subtitle = strings.Join(parts, " · ")
+	}
+	return cachedClipboardRowMeta{
+		rowKey:      omniboxRowKey(item),
+		iconName:    iconName,
+		lineCount:   lineCount,
+		subtitle:    subtitle,
+		hasSwatch:   hasSwatch,
+		swatchColor: swatchColor,
+	}
+}
+
+func (a *AppController) clipboardRowMetaCached(item engine.OmniboxItem, nowLocal time.Time) cachedClipboardRowMeta {
+	return capsuleUI.rowMetaCacheFor(a).getOrCompute(item, nowLocal, i18n.Current())
+}
+
+func (a *AppController) agentHeaderLaneCounts() agentLaneCounts {
+	a.agentMu.RLock()
+	counts := countAgentLanes(a.agentSessions)
+	a.agentMu.RUnlock()
+	return counts
+}
 
 var omniboxTabs = []config.CapsuleTab{
 	config.TabActions,
@@ -271,7 +437,13 @@ func (a *AppController) renderCapsuleHeader(
 			a.renderLeaderTitle(c, theme, state)
 
 		case engine.PhaseOmnibox:
-			labels := make([]string, len(omniboxTabs))
+			var tabBuf [8]string
+			var labels []string
+			if len(omniboxTabs) <= len(tabBuf) {
+				labels = tabBuf[:len(omniboxTabs)]
+			} else {
+				labels = make([]string, len(omniboxTabs))
+			}
 			active := 0
 			for i, tab := range omniboxTabs {
 				labels[i] = omniboxTabLabel(tab)
@@ -346,8 +518,7 @@ func (a *AppController) renderCapsuleHeader(
 			}
 			// Compact neutral Herdr/Agent status micro-chip when browsing other tabs.
 			if state.OmniboxTab != config.TabAgent {
-				sessions, _ := a.cachedAgentData()
-				counts := countAgentLanes(sessions)
+				counts := a.agentHeaderLaneCounts()
 				if counts.Approval > 0 || counts.Running > 0 {
 					dotColor := theme.Success
 					lbl := fmt.Sprintf("%d", counts.Running)
@@ -371,7 +542,8 @@ func (a *AppController) renderCapsuleHeader(
 				}
 			}
 		}
-		items := make([]string, 0, 2)
+		var chipBuf [2]string
+		items := chipBuf[:0]
 		if state.Context.AppName != "" {
 			items = append(items, state.Context.AppName)
 		}
@@ -866,11 +1038,22 @@ func (a *AppController) renderOmniboxView(
 				// swallowed the accent-colored icon and match highlights.
 				ui.Themed(c, rowSelectionTheme(theme)).Background(ui.Transparent).FillWidth().Grow(1).Children(func() {
 					previousRow := selectedIdx
+					frameNow := clipboardClock().In(time.Local)
 					list := stageRowList(c, &a.uiState.listState, plan, len(items), selectedIdx, func(i int) ui.Element {
 						item := items[i]
 						isSelected := i == selectedIdx
+						var clipMeta cachedClipboardRowMeta
+						var hasClipMeta bool
+						rowKey := ""
+						if item.Kind == engine.ItemClipboardEntry {
+							clipMeta = a.clipboardRowMetaCached(item, frameNow)
+							hasClipMeta = true
+							rowKey = clipMeta.rowKey
+						} else {
+							rowKey = omniboxRowKey(item)
+						}
 						row := ui.Row(c).
-							Key(omniboxRowKey(item)).
+							Key(rowKey).
 							FillWidth().
 							Padding(space6, space8).
 							Radius(radiusRow).
@@ -900,23 +1083,29 @@ func (a *AppController) renderOmniboxView(
 							if state.OmniboxTab == config.TabAgent {
 								sessions, _ := a.cachedAgentData()
 								renderAgentRowLeading(c, theme, item, sessions)
+							} else if hasClipMeta {
+								a.renderClipboardRowLeadingIcon(c, theme, item, clipMeta)
 							} else {
 								a.renderOmniboxRowLeadingIcon(c, theme, item)
 							}
 
 							ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(1).Children(func() {
 								ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
-									spans := buildHighlightedSpans(item.Title, item.MatchedIndices, matchMark(theme), theme.Text)
 									// One weight whether chosen or not: a bolder chosen title
 									// re-measures and shifts its ellipsis as hover moves.
-									ui.RichText(c, spans...).FontSize(typeBody).FontWeight(500).SingleLine().Shrink(1)
+									if len(item.MatchedIndices) == 0 {
+										ui.Text(c, item.Title).FontSize(typeBody).FontWeight(500).TextColor(theme.Text).SingleLine().Shrink(1)
+									} else {
+										spans := buildHighlightedSpans(item.Title, item.MatchedIndices, matchMark(theme), theme.Text)
+										ui.RichText(c, spans...).FontSize(typeBody).FontWeight(500).SingleLine().Shrink(1)
+									}
 									if item.Kind == engine.ItemClipboardEntry && item.KeyHint == engine.KeyHintPinned {
 										renderSemanticIcon(c, "pin.fill", typeMeta, secondaryInk(theme))
 									}
 								})
 								subtitle := item.Subtitle
-								if item.Kind == engine.ItemClipboardEntry {
-									subtitle = clipboardRowMeta(item, clipboardClock())
+								if hasClipMeta {
+									subtitle = clipMeta.subtitle
 								}
 								if subtitle != "" {
 									ui.Text(c, subtitle).FontSize(typeMeta).TextColor(secondaryInk(theme)).SingleLine()
@@ -1284,6 +1473,27 @@ func (a *AppController) renderOmniboxFooterFrameToggle(
 	onClick func(),
 ) {
 	kitIconButton(c, theme, icon, active, label, onClick)
+}
+
+func (a *AppController) renderClipboardRowLeadingIcon(
+	c *ui.Context,
+	theme *ui.Theme,
+	item engine.OmniboxItem,
+	meta cachedClipboardRowMeta,
+) {
+	if m := item.ClipboardMedia; m != nil && m.ThumbPath != "" {
+		if bmp := a.ThumbBitmap(m.ThumbPath); bmp != nil {
+			ui.Image(c, bmp).Size(rowLeadingSlot, rowLeadingSlot).Fit(ui.Cover).Radius(radiusTile).Shrink(0)
+			return
+		}
+	}
+	if meta.hasSwatch {
+		ColorSwatch3D(c, item.ClipboardContent, rowLeadingSlot, effectiveSpatialAppearance(c, a.Config().Main.Appearance)).Border(1, hairline(theme))
+		return
+	}
+	ui.Box(c).Size(rowLeadingSlot, rowLeadingSlot).Center().Shrink(0).Children(func() {
+		iconTile(c, theme, meta.iconName, false)
+	})
 }
 
 // renderOmniboxRowLeadingIcon draws a row's leading glyph at one fixed tile

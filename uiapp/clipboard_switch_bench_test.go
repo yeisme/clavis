@@ -54,6 +54,12 @@ func BenchmarkClipboardSwitch(b *testing.B) {
 			w, h := PreferredCapsuleSizeForState(ctrl.State(), ctrl.Config().Main.Appearance)
 			tt := ui.NewTester(ctrl.CapsuleView, w, h)
 			tt.Frame()
+			// Wait for NewAppController's startup agent refresh goroutine to finish
+			// so background discovery allocations do not pollute selection measurements.
+			refreshDeadline := time.Now().Add(2 * time.Second)
+			for ctrl.agentRefreshing() && time.Now().Before(refreshDeadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -70,6 +76,9 @@ func BenchmarkClipboardSwitch(b *testing.B) {
 
 func benchClipboardController(b *testing.B) (*AppController, clipboard.Store) {
 	b.Helper()
+	// Isolate HOME so NewAppController's background agent discovery never scans
+	// the host user's ~/.claude, ~/.codex, or ~/.dsh directories during benchmarks.
+	b.Setenv("HOME", b.TempDir())
 	cfgStore := config.NewConfigStore(b.TempDir())
 	if _, err := cfgStore.LoadOrInitialize(); err != nil {
 		b.Fatal(err)

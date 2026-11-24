@@ -15,9 +15,216 @@ import (
 	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
+const (
+	previewInitialLineLimit  = 60
+	previewExpandedLineLimit = 200
+	previewTextCacheMaxSize  = 32
+	rowMetaCacheMaxSize      = 256
+)
+
+// contentSampleHash computes an O(1) FNV-1a 64-bit digest of s. Short strings
+// (<=384 bytes) are hashed in full; large strings hash their length plus
+// bounded head, middle, and tail windows so cache lookups never scan 256 KiB
+// blobs on every frame.
+func contentSampleHash(s string) uint64 {
+	const (
+		offset64 uint64 = 14695981039346656037
+		prime64  uint64 = 1099511628211
+	)
+	h := offset64
+	mixByte := func(b byte) {
+		h ^= uint64(b)
+		h *= prime64
+	}
+	n := len(s)
+	// Mix exact length first so length differences always perturb the hash.
+	for i := 0; i < 8; i++ {
+		mixByte(byte(uint64(n) >> (8 * i)))
+	}
+	if n <= 384 {
+		for i := 0; i < n; i++ {
+			mixByte(s[i])
+		}
+		return h
+	}
+	for i := 0; i < 256; i++ {
+		mixByte(s[i])
+	}
+	mid := (n - 64) / 2
+	for i := mid; i < mid+64; i++ {
+		mixByte(s[i])
+	}
+	for i := n - 64; i < n; i++ {
+		mixByte(s[i])
+	}
+	return h
+}
+
+type previewTextCacheKey struct {
+	itemID      string
+	contentLen  int
+	contentHash uint64
+	rawMode     bool
+	expanded    bool
+	limit       int
+	lang        i18n.Language
+}
+
+type cachedPreviewText struct {
+	contentKind  previewContentKind
+	hasSwatch    bool
+	swatchColor  ui.Color
+	runeCount    int
+	totalLines   int
+	logicalTotal int
+	statsLabel   string
+
+	// Plain / raw text mode.
+	mono   bool
+	lines  []string
+	hidden int
+
+	// Rich Markdown / JSON / Code mode.
+	mdSource    string
+	mdTruncated bool
+	mdOmitted   int
+}
+
+// previewTextCache caches preprocessed clipboard preview metadata, line splits,
+// and formatted Markdown/code sources so rapid up/down switching reuses prior
+// work without re-scanning or re-splitting large blobs every frame.
+type previewTextCache struct {
+	mu      sync.Mutex
+	maxSize int
+	entries map[previewTextCacheKey]cachedPreviewText
+	hits    uint64
+	misses  uint64
+}
+
+func newPreviewTextCache(maxSize int) *previewTextCache {
+	if maxSize <= 0 {
+		maxSize = previewTextCacheMaxSize
+	}
+	return &previewTextCache{
+		maxSize: maxSize,
+		entries: make(map[previewTextCacheKey]cachedPreviewText, min(maxSize, 32)),
+	}
+}
+
+func (c *previewTextCache) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.entries)
+}
+
+func (c *previewTextCache) stats() (hits, misses uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hits, c.misses
+}
+
+func (c *previewTextCache) getOrCompute(
+	itemID string,
+	content string,
+	rawMode bool,
+	expanded bool,
+	limit int,
+	lang i18n.Language,
+) cachedPreviewText {
+	if limit <= 0 {
+		limit = previewInitialLineLimit
+	}
+	key := previewTextCacheKey{
+		itemID:      itemID,
+		contentLen:  len(content),
+		contentHash: contentSampleHash(content),
+		rawMode:     rawMode,
+		expanded:    expanded,
+		limit:       limit,
+		lang:        lang,
+	}
+
+	c.mu.Lock()
+	if entry, ok := c.entries[key]; ok {
+		c.hits++
+		c.mu.Unlock()
+		return entry
+	}
+	c.mu.Unlock()
+
+	entry := computePreviewText(content, rawMode, limit)
+
+	c.mu.Lock()
+	if existing, ok := c.entries[key]; ok {
+		c.hits++
+		c.mu.Unlock()
+		return existing
+	}
+	c.misses++
+	if len(c.entries) >= c.maxSize {
+		clear(c.entries)
+	}
+	c.entries[key] = entry
+	c.mu.Unlock()
+	return entry
+}
+
+func computePreviewText(content string, rawMode bool, limit int) cachedPreviewText {
+	var entry cachedPreviewText
+	entry.contentKind = detectPreviewContentKind(content, "")
+	entry.swatchColor, entry.hasSwatch = parseHexSwatch(content)
+	if entry.hasSwatch {
+		return entry
+	}
+	entry.runeCount = utf8.RuneCountInString(content)
+	entry.totalLines = previewLineCount(content)
+	entry.logicalTotal = entry.totalLines
+	entry.statsLabel = i18n.Tf("preview.clipboard_stats", entry.runeCount, entry.totalLines)
+
+	if !rawMode && entry.contentKind != previewKindPlain {
+		switch entry.contentKind {
+		case previewKindCode:
+			// Pre-cap code to the visible line budget before fencing so a large
+			// source file never duplicates all bytes just to show the first 60 lines.
+			codeLines, codeHidden := previewLines(content, limit)
+			entry.logicalTotal = len(codeLines) + codeHidden
+			srcInput := content
+			if codeHidden > 0 {
+				srcInput = strings.Join(codeLines, "\n")
+			}
+			src, trunc, omitted := formatMarkdownPreviewSource(srcInput, previewKindCode, "", defaultMarkdownMaxBytes, limit+2)
+			entry.mdSource = src
+			entry.mdTruncated = trunc || codeHidden > 0
+			entry.mdOmitted = codeHidden + omitted
+		case previewKindJSON:
+			src, trunc, omitted := formatMarkdownPreviewSource(content, previewKindJSON, "", defaultMarkdownMaxBytes, limit+2)
+			entry.mdSource = src
+			entry.mdTruncated = trunc
+			entry.mdOmitted = omitted
+			if trunc && limit+omitted > entry.logicalTotal {
+				entry.logicalTotal = limit + omitted
+			}
+		default:
+			src, trunc, omitted := formatMarkdownPreviewSource(content, entry.contentKind, "", defaultMarkdownMaxBytes, limit)
+			entry.mdSource = src
+			entry.mdTruncated = trunc
+			entry.mdOmitted = omitted
+		}
+		return entry
+	}
+
+	entry.mono = previewIsMono(content)
+	entry.lines, entry.hidden = previewLines(content, limit)
+	if n := len(entry.lines) + entry.hidden; n > 0 {
+		entry.logicalTotal = n
+	}
+	return entry
+}
+
 // capsuleEphemeralStore keeps per-controller ephemeral UI state for the
 // CapsuleView upgrades (preview pane override, contextual action menu,
-// follow-up IME composition flag) without widening AppController.
+// follow-up IME composition flag, and bounded row/preview caches) without
+// widening AppController.
 //
 // Everything here is accessed from the UI build thread, but the runtime may
 // repaint from another goroutine, so all access is guarded by mu.
@@ -33,6 +240,9 @@ type capsuleEphemeralStore struct {
 	agentLaneFilter   map[*AppController]string
 	agentDrawerOpen   map[*AppController]bool
 	previewRawMode    map[*AppController]bool
+	previewExpandedID map[*AppController]string
+	rowMetaCaches     map[*AppController]*rowMetaCache
+	previewCaches     map[*AppController]*previewTextCache
 }
 
 var capsuleUI = &capsuleEphemeralStore{
@@ -45,6 +255,9 @@ var capsuleUI = &capsuleEphemeralStore{
 	agentLaneFilter:   make(map[*AppController]string),
 	agentDrawerOpen:   make(map[*AppController]bool),
 	previewRawMode:    make(map[*AppController]bool),
+	previewExpandedID: make(map[*AppController]string),
+	rowMetaCaches:     make(map[*AppController]*rowMetaCache),
+	previewCaches:     make(map[*AppController]*previewTextCache),
 }
 
 func (s *capsuleEphemeralStore) reset(ctrl *AppController) {
@@ -59,7 +272,55 @@ func (s *capsuleEphemeralStore) reset(ctrl *AppController) {
 	delete(s.agentLaneFilter, ctrl)
 	delete(s.agentDrawerOpen, ctrl)
 	delete(s.previewRawMode, ctrl)
+	delete(s.previewExpandedID, ctrl)
+	delete(s.rowMetaCaches, ctrl)
+	delete(s.previewCaches, ctrl)
 	resetComposerState(ctrl)
+}
+
+func (s *capsuleEphemeralStore) isPreviewExpanded(ctrl *AppController, itemID string) bool {
+	if itemID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.previewExpandedID[ctrl] == itemID
+}
+
+func (s *capsuleEphemeralStore) togglePreviewExpanded(ctrl *AppController, itemID string) bool {
+	if itemID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.previewExpandedID[ctrl] == itemID {
+		delete(s.previewExpandedID, ctrl)
+		return false
+	}
+	s.previewExpandedID[ctrl] = itemID
+	return true
+}
+
+func (s *capsuleEphemeralStore) rowMetaCacheFor(ctrl *AppController) *rowMetaCache {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cache := s.rowMetaCaches[ctrl]
+	if cache == nil {
+		cache = newRowMetaCache(rowMetaCacheMaxSize)
+		s.rowMetaCaches[ctrl] = cache
+	}
+	return cache
+}
+
+func (s *capsuleEphemeralStore) previewTextCacheFor(ctrl *AppController) *previewTextCache {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cache := s.previewCaches[ctrl]
+	if cache == nil {
+		cache = newPreviewTextCache(previewTextCacheMaxSize)
+		s.previewCaches[ctrl] = cache
+	}
+	return cache
 }
 
 func (s *capsuleEphemeralStore) rawPreview(ctrl *AppController) bool {
@@ -445,21 +706,34 @@ func (a *AppController) renderOmniboxPreviewCard(
 		flashFrames = []ui.Keyframe{{At: 0, Value: 1}, {At: profile.flash, Value: 0, Ease: ui.EaseOut}}
 	}
 
+	var clipPreview *cachedPreviewText
+	var clipRawMode bool
+	var clipExpanded bool
+	if item.Kind == engine.ItemClipboardEntry && (item.ClipboardMedia == nil || !item.ClipboardMedia.IsMedia()) {
+		content := item.ClipboardContent
+		if content == "" {
+			content = item.Title
+		}
+		clipRawMode = capsuleUI.rawPreview(a)
+		clipExpanded = capsuleUI.isPreviewExpanded(a, item.ID)
+		limit := previewInitialLineLimit
+		if clipExpanded {
+			limit = previewExpandedLineLimit
+		}
+		entry := capsuleUI.previewTextCacheFor(a).getOrCompute(item.ID, content, clipRawMode, clipExpanded, limit, i18n.Current())
+		clipPreview = &entry
+	}
+
 	card := ui.Column(c).FillWidth().Padding(space0, space0).Gap(space6).Background(ui.Transparent).Children(func() {
 		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 			// Neutral: the card's title icon is a label, not a selection.
 			renderSemanticIcon(c, previewIcon(item), typeLabel, secondaryInk(theme))
 			ui.Text(c, i18n.T("preview.title")).FontSize(typeMeta).FontWeight(700).TextColor(theme.Text).SingleLine()
 			ui.Spacer(c)
-			if item.Kind == engine.ItemClipboardEntry && (item.ClipboardMedia == nil || !item.ClipboardMedia.IsMedia()) {
-				txt := item.ClipboardContent
-				if txt == "" {
-					txt = item.Title
-				}
-				if kind := detectPreviewContentKind(txt, ""); kind != previewKindPlain {
-					rawMode := capsuleUI.rawPreview(a)
+			if clipPreview != nil {
+				if kind := clipPreview.contentKind; kind != previewKindPlain {
 					lbl := "MD"
-					if rawMode {
+					if clipRawMode {
 						lbl = pickLang(i18n.IsChinese(), "原文", "Raw")
 					} else if kind == previewKindJSON {
 						lbl = "JSON"
@@ -485,7 +759,7 @@ func (a *AppController) renderOmniboxPreviewCard(
 		// past the list and over the footer.
 		if m := item.ClipboardMedia; m != nil && m.IsMedia() {
 			ui.Column(c).FillWidth().Grow(1).MinHeight(0).Gap(space4).Children(func() {
-				a.renderOmniboxPreviewBody(c, theme, state, item)
+				a.renderOmniboxPreviewBodyWithCache(c, theme, state, item, clipPreview, clipRawMode, clipExpanded)
 				a.renderPreviewQuickCopyBar(c, theme, item)
 				a.renderPreviewActionHints(c, theme, item)
 			})
@@ -493,7 +767,7 @@ func (a *AppController) renderOmniboxPreviewCard(
 		}
 		ui.Scroll(c).FillWidth().Grow(1).Children(func() {
 			ui.Column(c).FillWidth().Gap(space4).Children(func() {
-				a.renderOmniboxPreviewBody(c, theme, state, item)
+				a.renderOmniboxPreviewBodyWithCache(c, theme, state, item, clipPreview, clipRawMode, clipExpanded)
 				a.renderPreviewQuickCopyBar(c, theme, item)
 				a.renderPreviewActionHints(c, theme, item)
 			})
@@ -516,6 +790,18 @@ func (a *AppController) renderOmniboxPreviewBody(
 	state engine.State,
 	item engine.OmniboxItem,
 ) {
+	a.renderOmniboxPreviewBodyWithCache(c, theme, state, item, nil, false, false)
+}
+
+func (a *AppController) renderOmniboxPreviewBodyWithCache(
+	c *ui.Context,
+	theme *ui.Theme,
+	state engine.State,
+	item engine.OmniboxItem,
+	cached *cachedPreviewText,
+	rawMode bool,
+	expanded bool,
+) {
 	switch item.Kind {
 	case engine.ItemClipboardEntry:
 		if m := item.ClipboardMedia; m != nil && m.IsMedia() {
@@ -525,6 +811,18 @@ func (a *AppController) renderOmniboxPreviewBody(
 		content := item.ClipboardContent
 		if content == "" {
 			content = item.Title
+		}
+		var entry cachedPreviewText
+		if cached != nil {
+			entry = *cached
+		} else {
+			rawMode = capsuleUI.rawPreview(a)
+			expanded = capsuleUI.isPreviewExpanded(a, item.ID)
+			limit := previewInitialLineLimit
+			if expanded {
+				limit = previewExpandedLineLimit
+			}
+			entry = capsuleUI.previewTextCacheFor(a).getOrCompute(item.ID, content, rawMode, expanded, limit, i18n.Current())
 		}
 		source := strings.TrimSpace(item.ClipboardSourceApp)
 		if source != "" || item.KeyHint == engine.KeyHintPinned {
@@ -537,25 +835,30 @@ func (a *AppController) renderOmniboxPreviewBody(
 				}
 			})
 		}
-		if col, ok := parseHexSwatch(content); ok {
-			renderColorPreviewCard(c, theme, content, col)
+		if entry.hasSwatch {
+			renderColorPreviewCard(c, theme, content, entry.swatchColor)
 			return
 		}
-		ui.Text(c, i18n.Tf("preview.clipboard_stats", utf8.RuneCountInString(content), previewLineCount(content))).
-			FontSize(typeMicro).
-			TextColor(theme.TextMuted).
-			SingleLine()
-		if !capsuleUI.rawPreview(a) {
-			if kind := detectPreviewContentKind(content, ""); kind != previewKindPlain {
-				src, truncated, omitted := formatMarkdownPreviewSource(content, kind, "", defaultMarkdownMaxBytes, 200)
-				a.renderClavisMarkdown(c, theme, src, false)
-				if truncated && omitted > 0 {
-					ui.Text(c, i18n.Tf("preview.more_lines", omitted)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
-				}
-				return
-			}
+		omitted := entry.hidden
+		if !rawMode && entry.contentKind != previewKindPlain {
+			omitted = entry.mdOmitted
 		}
-		renderPreviewLines(c, theme, content, 200)
+		ui.Row(c).FillWidth().Wrap().Gap(space4).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, entry.statsLabel).
+				FontSize(typeMicro).
+				TextColor(theme.TextMuted).
+				SingleLine()
+			ui.Spacer(c)
+			a.renderPreviewLineExpansionButton(c, theme, item.ID, entry.logicalTotal, omitted, expanded)
+		})
+		if !rawMode && entry.contentKind != previewKindPlain {
+			a.renderClavisMarkdown(c, theme, entry.mdSource, false)
+			if entry.mdTruncated && entry.mdOmitted > 0 {
+				ui.Text(c, i18n.Tf("preview.more_lines", entry.mdOmitted)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+			}
+			return
+		}
+		renderPreviewLinesSlice(c, theme, entry.lines, entry.mono, entry.hidden)
 
 	case engine.ItemSnippet:
 		snippet := item.Snippet
@@ -651,9 +954,9 @@ func (a *AppController) renderOmniboxPreviewBody(
 			renderPreviewLines(c, theme, item.Subtitle, 8)
 			return
 		}
-		ui.Row(c).FillWidth().Gap(4).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).FillWidth().Gap(space4).AlignItems(ui.Center).Children(func() {
 			previewBadge(c, theme, "arrow.triangle.branch", "Safe workflow", true)
-			previewBadge(c, theme, fmt.Sprintf("%d steps", len(workflow.Steps)), "", false)
+			previewBadge(c, theme, "", fmt.Sprintf("%d steps", len(workflow.Steps)), false)
 		})
 		if workflow.Description != "" {
 			renderPreviewLines(c, theme, workflow.Description, 8)
@@ -850,6 +1153,55 @@ func colorToHSL(col ui.Color) (h, s, l int) {
 	return int(math.Round(hf)), int(math.Round(sf * 100)), int(math.Round(lf * 100))
 }
 
+// previewExpandToggleLabel returns the localized label for the 60-line first-
+// screen preview expansion toggle.
+func previewExpandToggleLabel(totalLines, omitted int, expanded bool) string {
+	zh := i18n.IsChinese()
+	if expanded {
+		if zh {
+			return fmt.Sprintf("收起至前 %d 行", previewInitialLineLimit)
+		}
+		return fmt.Sprintf("Show first %d lines", previewInitialLineLimit)
+	}
+	if totalLines > previewExpandedLineLimit {
+		if zh {
+			return fmt.Sprintf("展开其余 %d 行（前 %d 行）", omitted, previewExpandedLineLimit)
+		}
+		return fmt.Sprintf("Expand all %d lines (first %d)", totalLines, previewExpandedLineLimit)
+	}
+	if zh {
+		return fmt.Sprintf("展开其余 %d 行", omitted)
+	}
+	return fmt.Sprintf("Expand all %d lines", totalLines)
+}
+
+func (a *AppController) renderPreviewLineExpansionButton(
+	c *ui.Context,
+	theme *ui.Theme,
+	itemID string,
+	totalLines int,
+	omitted int,
+	expanded bool,
+) {
+	if expanded {
+		if totalLines <= previewInitialLineLimit {
+			return
+		}
+	} else if omitted <= 0 {
+		return
+	}
+	lbl := previewExpandToggleLabel(totalLines, omitted, expanded)
+	btn := ui.ButtonBase(c).Key("preview-expand-lines").Label(lbl).
+		Padding(space1, space6).Radius(radius4).Background(tileFill(theme)).Border(space1, hairline(theme)).FocusRing(false).Shrink(0)
+	btn.Children(func() {
+		ui.Text(c, lbl).FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
+	})
+	if btn.Clicked() {
+		capsuleUI.togglePreviewExpanded(a, itemID)
+		a.uiState.searchHandle.RequestFocus(c)
+	}
+}
+
 // renderPreviewLines renders text line by line so long, multi-line content can
 // scroll inside the preview pane.
 func renderPreviewLines(c *ui.Context, theme *ui.Theme, text string, limit int) {
@@ -860,7 +1212,14 @@ func renderPreviewLines(c *ui.Context, theme *ui.Theme, text string, limit int) 
 	}
 	// Code, commands and paths keep their shape in the monospace face on a
 	// faint well; prose wraps with the wider CJK leading.
-	mono := previewIsMono(text)
+	renderPreviewLinesSlice(c, theme, lines, previewIsMono(text), hidden)
+}
+
+func renderPreviewLinesSlice(c *ui.Context, theme *ui.Theme, lines []string, mono bool, hidden int) {
+	if len(lines) == 0 {
+		ui.Text(c, "—").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+		return
+	}
 	body := ui.Column(c).FillWidth().Gap(space2)
 	if mono {
 		body.Padding(space6, space8).Radius(radiusChip).Background(tileFill(theme)).Border(1, hairline(theme))

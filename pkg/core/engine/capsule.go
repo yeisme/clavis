@@ -406,7 +406,7 @@ func (m *StateMachine) SetExternalClipboardSearch(enabled bool) {
 // Handle reduces an event and updates internal state, returning emitted effects.
 func (m *StateMachine) Handle(ev Event) []Effect {
 	next, effects := Reduce(m.state, ev, m.config)
-	m.state = next
+	m.state = cloneState(next)
 	if ev.Type == EventSetClipboardEntries || ev.Type == EventSetInstalledApps {
 		m.corpusGeneration++
 		m.rebuildCandidateCorpus()
@@ -766,10 +766,16 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		}
 		newPinned := !wasPinned
 		if entryIdx >= 0 {
-			next.ClipboardEntries[entryIdx].IsPinned = newPinned
+			entries := make([]OmniboxClipboardEntry, len(next.ClipboardEntries))
+			copy(entries, next.ClipboardEntries)
+			entries[entryIdx].IsPinned = newPinned
+			next.ClipboardEntries = sealSlice(entries)
 		}
 		if searchIdx >= 0 {
-			next.ClipboardSearchEntries[searchIdx].IsPinned = newPinned
+			searchEntries := make([]OmniboxClipboardEntry, len(next.ClipboardSearchEntries))
+			copy(searchEntries, next.ClipboardSearchEntries)
+			searchEntries[searchIdx].IsPinned = newPinned
+			next.ClipboardSearchEntries = sealSlice(searchEntries)
 		}
 		updatedItems := buildOmniboxItems(state.OmniboxTab, state.OmniboxQuery, next, cfg)
 		clamped := 0
@@ -998,21 +1004,35 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		if followUpPrompt == "" {
 			return next, nil
 		}
-		if strings.TrimSpace(state.AIPrompt) != "" {
-			userContent := state.AIPrompt
-			if len(state.AIHistory) == 0 && strings.TrimSpace(state.AISourceText) != "" {
-				userContent = state.AIPrompt + "\n\n" + state.AISourceText
+		hasPrompt := strings.TrimSpace(state.AIPrompt) != ""
+		hasOutput := strings.TrimSpace(state.AIOutput) != ""
+		if hasPrompt || hasOutput {
+			extra := 0
+			if hasPrompt {
+				extra++
 			}
-			next.AIHistory = append(next.AIHistory, ChatTurn{
-				Role:    "user",
-				Content: userContent,
-			})
-		}
-		if strings.TrimSpace(state.AIOutput) != "" {
-			next.AIHistory = append(next.AIHistory, ChatTurn{
-				Role:    "assistant",
-				Content: state.AIOutput,
-			})
+			if hasOutput {
+				extra++
+			}
+			hist := make([]ChatTurn, len(state.AIHistory), len(state.AIHistory)+extra)
+			copy(hist, state.AIHistory)
+			if hasPrompt {
+				userContent := state.AIPrompt
+				if len(state.AIHistory) == 0 && strings.TrimSpace(state.AISourceText) != "" {
+					userContent = state.AIPrompt + "\n\n" + state.AISourceText
+				}
+				hist = append(hist, ChatTurn{
+					Role:    "user",
+					Content: userContent,
+				})
+			}
+			if hasOutput {
+				hist = append(hist, ChatTurn{
+					Role:    "assistant",
+					Content: state.AIOutput,
+				})
+			}
+			next.AIHistory = sealSlice(hist)
 		}
 		next.AIPrompt = followUpPrompt
 		next.AIOutput = ""
@@ -2563,41 +2583,35 @@ func clearPhaseFields(s *State) {
 	s.HUDMessage = ""
 }
 
+// sealSlice caps a slice's capacity to its length without allocating so any
+// accidental append against a shared immutable snapshot allocates a fresh
+// backing array rather than mutating shared memory.
+func sealSlice[T any](s []T) []T {
+	if s == nil {
+		return nil
+	}
+	return s[:len(s):len(s)]
+}
+
+// cloneState returns a copy-on-write snapshot of s. All slice and map fields
+// stored inside State are treated as immutable once published: State() and
+// selection-only transitions (EventSelectNext, EventSelectPrevious,
+// EventSelectIndex, EventHoverItem) share read-only slice headers and map
+// references with zero heap allocations. Transitions that modify any slice or
+// map allocate a fresh collection before writing, and sealSlice pins slice
+// capacities so callers or subsequent reducers can never alias backing arrays.
 func cloneState(s State) State {
 	out := s
-	if s.LeaderPath != nil {
-		out.LeaderPath = append([]string(nil), s.LeaderPath...)
-	}
-	if s.LeaderBreadcrumbs != nil {
-		out.LeaderBreadcrumbs = append([]string(nil), s.LeaderBreadcrumbs...)
-	}
-	if s.LeaderNodes != nil {
-		out.LeaderNodes = copyLeaderNodes(s.LeaderNodes)
-	}
-	if s.OmniboxItems != nil {
-		out.OmniboxItems = append([]OmniboxItem(nil), s.OmniboxItems...)
-	}
-	if s.ClipboardEntries != nil {
-		out.ClipboardEntries = append([]OmniboxClipboardEntry(nil), s.ClipboardEntries...)
-	}
-	if s.ClipboardSearchEntries != nil {
-		out.ClipboardSearchEntries = append([]OmniboxClipboardEntry(nil), s.ClipboardSearchEntries...)
-	}
-	if s.InstalledApps != nil {
-		out.InstalledApps = append([]InstalledAppEntry(nil), s.InstalledApps...)
-	}
-	if s.FrecencyScores != nil {
-		out.FrecencyScores = make(map[string]int, len(s.FrecencyScores))
-		for k, v := range s.FrecencyScores {
-			out.FrecencyScores[k] = v
-		}
-	}
-	if s.ListeningPorts != nil {
-		out.ListeningPorts = append([]PortEntry(nil), s.ListeningPorts...)
-	}
-	if s.AIHistory != nil {
-		out.AIHistory = copyChatTurns(s.AIHistory)
-	}
+	out.LeaderPath = sealSlice(s.LeaderPath)
+	out.LeaderBreadcrumbs = sealSlice(s.LeaderBreadcrumbs)
+	out.LeaderNodes = sealSlice(s.LeaderNodes)
+	out.OmniboxItems = sealSlice(s.OmniboxItems)
+	out.ClipboardEntries = sealSlice(s.ClipboardEntries)
+	out.ClipboardSearchEntries = sealSlice(s.ClipboardSearchEntries)
+	out.InstalledApps = sealSlice(s.InstalledApps)
+	out.ListeningPorts = sealSlice(s.ListeningPorts)
+	out.QuickJumpTargets = sealSlice(s.QuickJumpTargets)
+	out.AIHistory = sealSlice(s.AIHistory)
 	return out
 }
 
