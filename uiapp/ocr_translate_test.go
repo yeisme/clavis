@@ -323,3 +323,50 @@ func TestClipboardMediaOCRStagingErrorsAndRetry(t *testing.T) {
 		t.Fatalf("expected explicit override %q, got %q", engine.TranslateEnToZh, got)
 	}
 }
+
+func TestTranslateDirectionResetsOnNewSourceButAllowsManualToggle(t *testing.T) {
+	cfgStore := config.NewConfigStore(t.TempDir())
+	if _, err := cfgStore.LoadOrInitialize(); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := NewAppController(Options{
+		ConfigStore:     cfgStore,
+		SecretStore:     secrets.NewMemoryAPIKeyStore(),
+		ClipboardStore:  clipboard.NewMemoryStore(clipboard.NewPrivacyFilter()),
+		HerdrExecutor:   disabledHerdrExecutor{},
+		ClipboardWriter: func(string) {},
+	})
+	t.Cleanup(ctrl.Close)
+
+	// 1. Initial English source auto-detects EN->ZH.
+	if got := ctrl.translateDirectionFor("Hello, world"); got != engine.TranslateEnToZh {
+		t.Fatalf("initial English direction = %q, want %q", got, engine.TranslateEnToZh)
+	}
+
+	// 2. Manual toggle on the same source overrides to ZH->EN and sticks while source is unchanged.
+	ctrl.StartTranslation("Hello, world", string(engine.TranslateZhToEn))
+	if got := ctrl.translateDirectionFor("Hello, world"); got != engine.TranslateZhToEn {
+		t.Fatalf("manual toggle on same source = %q, want %q", got, engine.TranslateZhToEn)
+	}
+
+	// 3. New Chinese source resets manual override back to TranslateAuto and detects ZH->EN.
+	if got := ctrl.translateDirectionFor("请把这段说明翻成英文"); got != engine.TranslateZhToEn {
+		t.Fatalf("new Chinese source direction = %q, want %q", got, engine.TranslateZhToEn)
+	}
+
+	// 4. Manual toggle on the Chinese source overrides to EN->ZH while source is unchanged.
+	ctrl.StartTranslation("请把这段说明翻成英文", string(engine.TranslateEnToZh))
+	if got := ctrl.translateDirectionFor("请把这段说明翻成英文"); got != engine.TranslateEnToZh {
+		t.Fatalf("manual toggle on Chinese source = %q, want %q", got, engine.TranslateEnToZh)
+	}
+
+	// 5. Another new Chinese source must NOT inherit the stale EN->ZH override — it resets and auto-detects ZH->EN.
+	if got := ctrl.translateDirectionFor("修复并发锁竞争问题"); got != engine.TranslateZhToEn {
+		t.Fatalf("subsequent Chinese source inherited sticky dir: got %q, want %q", got, engine.TranslateZhToEn)
+	}
+
+	// 6. Another new English source auto-detects EN->ZH.
+	if got := ctrl.translateDirectionFor("Refactor mutex carefully"); got != engine.TranslateEnToZh {
+		t.Fatalf("subsequent English source direction = %q, want %q", got, engine.TranslateEnToZh)
+	}
+}

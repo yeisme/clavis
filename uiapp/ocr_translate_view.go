@@ -2,6 +2,7 @@ package uiapp
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -23,11 +24,16 @@ import (
 
 const ocrMaxDimension = 2048
 
+// TranslateAuto resets any manual direction override and delegates to script detection.
+const TranslateAuto engine.TranslateDirection = ""
+
 type ocrTranslateControllerState struct {
-	mu           sync.Mutex
-	translateDir engine.TranslateDirection
-	pendingImgs  []ai.ImageAttachment
-	lastOCRImg   *ai.ImageAttachment
+	mu             sync.Mutex
+	translateDir   engine.TranslateDirection
+	lastSourceHash [32]byte
+	hasLastSource  bool
+	pendingImgs    []ai.ImageAttachment
+	lastOCRImg     *ai.ImageAttachment
 }
 
 var ocrTranslateStore = struct {
@@ -55,12 +61,28 @@ func (c *AppController) setTranslateDirection(dir engine.TranslateDirection) {
 	st.mu.Unlock()
 }
 
-func (c *AppController) translateDirectionFor(text string) engine.TranslateDirection {
+func (c *AppController) setTranslateDirectionFor(text string, dir engine.TranslateDirection) {
+	h := sha256.Sum256([]byte(text))
 	st := ocrTranslateStateFor(c)
 	st.mu.Lock()
+	st.translateDir = dir
+	st.lastSourceHash = h
+	st.hasLastSource = true
+	st.mu.Unlock()
+}
+
+func (c *AppController) translateDirectionFor(text string) engine.TranslateDirection {
+	h := sha256.Sum256([]byte(text))
+	st := ocrTranslateStateFor(c)
+	st.mu.Lock()
+	if st.hasLastSource && st.lastSourceHash != h {
+		st.translateDir = TranslateAuto
+	}
+	st.lastSourceHash = h
+	st.hasLastSource = true
 	dir := st.translateDir
 	st.mu.Unlock()
-	if dir == "" {
+	if dir == TranslateAuto {
 		return engine.DetectTranslateDirection(text)
 	}
 	return dir
@@ -172,12 +194,22 @@ func (c *AppController) StartImageOCR(imgBytes []byte, mimeType, prompt string) 
 	if visErr == nil {
 		profID = visProf.ID
 	}
-	c.Dispatch(engine.Event{
+	effects := c.Dispatch(engine.Event{
 		Type:      engine.EventStartAI,
 		Mode:      "ocr",
 		Prompt:    prompt,
 		ProfileID: profID,
 	})
+	presented := false
+	for _, eff := range effects {
+		if eff.Type == engine.EffectPresentCapsule {
+			presented = true
+			break
+		}
+	}
+	if !presented {
+		c.handlePresentCapsule(engine.PhaseAIStreaming)
+	}
 	return nil
 }
 
@@ -242,8 +274,8 @@ func (c *AppController) StartTranslation(text, direction string) {
 		return
 	}
 	dir := engine.TranslateDirection(strings.TrimSpace(direction))
-	c.setTranslateDirection(dir)
-	if dir == "" {
+	c.setTranslateDirectionFor(text, dir)
+	if dir == TranslateAuto {
 		dir = engine.DetectTranslateDirection(text)
 	}
 	_, instr := engine.BuildTranslatePrompt(text, dir)

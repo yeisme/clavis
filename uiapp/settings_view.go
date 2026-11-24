@@ -274,42 +274,46 @@ func (a *AppController) renderSettingsSidebar(c *ui.Context, section int, cfg co
 			}
 		}
 		q := strings.ToLower(strings.TrimSpace(search))
-		lastGroup := ""
-		for _, meta := range settingsNavigationSections() {
-			item := meta
-			if q != "" && !settingsSectionMatches(item, q, cfg) {
-				continue
-			}
-			if item.Group != lastGroup {
-				for _, group := range settingsGroups() {
-					if group.Key == item.Group {
-						ui.Text(c.Key("settings-rail-group:"+group.Key), group.Label).FontSize(typeMeta).FontWeight(600).TextColor(theme.TextMuted).Padding(space8, space4).SingleLine()
-						break
+		ui.Scroll(c).Key("settings-rail-scroll").FillWidth().Grow(1).MinHeight(space0).Children(func() {
+			ui.Column(c).FillWidth().Gap(space4).Children(func() {
+				lastGroup := ""
+				for _, meta := range settingsNavigationSections() {
+					item := meta
+					if q != "" && !settingsSectionMatches(item, q, cfg) {
+						continue
+					}
+					if item.Group != lastGroup {
+						for _, group := range settingsGroups() {
+							if group.Key == item.Group {
+								ui.Text(c.Key("settings-rail-group:"+group.Key), group.Label).FontSize(typeMeta).FontWeight(600).TextColor(theme.TextMuted).Padding(space8, space4).SingleLine()
+								break
+							}
+						}
+						lastGroup = item.Group
+					}
+					active := item.Key == selected
+					row := ui.ButtonBase(c).Key("settings-rail:"+item.Key).FillWidth().Height(controlHeight).
+						Padding(space4, space8).Radius(radiusRow).Gap(space8).AlignItems(ui.Center).FocusRing(false)
+					if active {
+						row = kitInteractive(c, theme, row, interactionState{Selected: true}, motionProfiles[animationOff])
+						x, y, blur, spread, shadow := elevationShadow(theme, elev1)
+						row.Shadow(x, y, blur, spread, shadow)
+					}
+					row.Children(func() {
+						kitIconTile(c, theme, item.Icon, active)
+						ui.Text(c, item.Label).FontSize(typeLabel).TextColor(theme.Text).SingleLine().Grow(1).MinWidth(0)
+						if badge := settingsSectionBadge(item.Index, cfg); badge != "" {
+							ui.Text(c, badge).FontSize(typeMeta).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+						}
+					})
+					if row.Clicked() {
+						if index, ok := settingsSectionFromKey(item.Key); ok {
+							a.requestSettingsSection(index)
+						}
 					}
 				}
-				lastGroup = item.Group
-			}
-			active := item.Key == selected
-			row := ui.ButtonBase(c).Key("settings-rail:"+item.Key).FillWidth().Height(controlHeight).
-				Padding(space4, space8).Radius(radiusRow).Gap(space8).AlignItems(ui.Center).FocusRing(false)
-			if active {
-				row = kitInteractive(c, theme, row, interactionState{Selected: true}, motionProfiles[animationOff])
-				x, y, blur, spread, shadow := elevationShadow(theme, elev1)
-				row.Shadow(x, y, blur, spread, shadow)
-			}
-			row.Children(func() {
-				kitIconTile(c, theme, item.Icon, active)
-				ui.Text(c, item.Label).FontSize(typeLabel).TextColor(theme.Text).SingleLine().Grow(1).MinWidth(0)
-				if badge := settingsSectionBadge(item.Index, cfg); badge != "" {
-					ui.Text(c, badge).FontSize(typeMeta).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
-				}
 			})
-			if row.Clicked() {
-				if index, ok := settingsSectionFromKey(item.Key); ok {
-					a.requestSettingsSection(index)
-				}
-			}
-		}
+		})
 		se := a.settingsEditor()
 		if seGet(se, func(s *settingsEditorState) bool { return s.leavePrompt }) {
 			ui.Row(c).Key("settings-draft-warning").FillWidth().Gap(space4).Children(func() {
@@ -327,16 +331,45 @@ func (a *AppController) renderSettingsSidebar(c *ui.Context, section int, cfg co
 	})
 }
 
-func settingsSectionMatches(meta settingsSectionMeta, query string, cfg config.ClavisConfig) bool {
+func settingsSectionKeywords(key string) string {
+	switch key {
+	case "triggers", "general":
+		return "general triggers leader_key double_tap_key double_tap_interval_ms leader_reveal_delay_ms capsule_shortcut clipboard_shortcut screenshot_shortcut snippet_expansion_enabled snippet_backspace_undo capture hotkey shortcut reload 常规 触发 引导键 双击 胶囊快捷键 剪贴板快捷键 截图快捷键 截图标注 快捷键 截图 剪贴板 代码片段 展开 撤销 重载"
+	case "ime-keymap":
+		return "ime keymap input method engine pinyin user_words ime_rules remap tap_hold_threshold_ms input_engine_toggle_shortcut layer caps lock escape hyper ascii native chinese english 输入法 键位 映射 词库 用户词 拼音 规则 层 切换"
+	case "leader":
+		return "leader tree key which-key menu submenu node action hotkey shortcut 引导键 按键树 菜单 子菜单 节点 动作"
+	case "snippets":
+		return "snippets text expansion trigger template inline expand abbrev 代码片段 文本展开 触发词 模板 缩写"
+	case "glossary":
+		return "glossary terms lexicon alias canonical domain dictionary terminology 术语 术语表 词库 别名 规范 领域 词典"
+	case "clipboard":
+		return "clipboard history retention_days max_history_items media_capture media_quota_mb excluded_bundle_ids privacy filter sensitive ttl pasteboard 剪贴板 历史 保留 天数 上限 媒体 配额 隐私 过滤 排除 敏感"
+	case "workflows":
+		return "workflows automation pipeline step action schedule trigger macro 工作流 自动化 步骤 流程 编排 宏"
+	case "ai":
+		return "ai model provider profile api_key keychain secretref vision ocr translate endpoint base_url timeout temperature stream anthropic openai gemini deepseek 模型 接口 密钥 视觉 识图 翻译 端点 连接 测试"
+	case "appearance":
+		return "appearance theme dark light system language animations show_key_hints show_preview_pane capsule_width max_visible_results corner_radius hud_duration_ms spatial visual_preset stage_intensity oblique_rows glass_clarity shader 外观 主题 深色 浅色 语言 动画 预览 胶囊 宽度 圆角 空间 玻璃 着色器"
+	case "permissions":
+		return "permissions diagnostics accessibility input_monitoring screen_recording secure_input monitor recovery hook validation health 权限 诊断 辅助功能 输入监控 录屏 屏幕录制 安全输入 校验 健康"
+	case "configs":
+		return "configs config files toml directory folder open main leader snippets glossary ime_rules prompts components workflows quickjump 配置文件 目录 文件夹 打开 书签 快跳"
+	case "security":
+		return "security vault password secret secretref keychain ttl user-only audit metadata 1password bitwarden 安全 密码 保险库 密钥 引用 审计 元数据"
+	case "about":
+		return "about version sync account device cloud local status 关于 版本 同步 账号 设备 云端 本地 状态"
+	default:
+		return ""
+	}
+}
+
+func settingsSectionMatches(meta settingsSectionMeta, query string, _ config.ClavisConfig) bool {
 	compact := func(value string) string {
 		value = strings.ToLower(value)
 		return strings.NewReplacer("_", "", "-", "", " ", "").Replace(value)
 	}
-	extra := ""
-	if meta.Key == "security" {
-		extra = "security vault password secret keychain ttl 安全 密码 密钥"
-	}
-	haystack := compact(strings.Join([]string{meta.Key, meta.Label, meta.Hint, extra, fmt.Sprintf("%+v", cfg)}, " "))
+	haystack := compact(strings.Join([]string{meta.Key, meta.Label, meta.Hint, settingsSectionKeywords(meta.Key)}, " "))
 	return strings.Contains(haystack, compact(query))
 }
 
@@ -492,6 +525,9 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 		a.renderShortcutEditor(c, theme, se, "clipboard_shortcut", "alt+shift+c",
 			i18n.T("settings.trigger.clipboard_shortcut"), trigger.ClipboardShortcut,
 			func(m *config.MainConfig, v string) { m.Trigger.ClipboardShortcut = v })
+		a.renderShortcutEditor(c, theme, se, "screenshot_shortcut", "alt+shift+a",
+			pickLang(i18n.IsChinese(), "截图快捷键", "Screenshot Shortcut"), trigger.ScreenshotShortcut,
+			func(m *config.MainConfig, v string) { m.Trigger.ScreenshotShortcut = v })
 
 		settingsCardDivider(c, theme)
 		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.trigger.snippet_expansion"),
@@ -924,6 +960,8 @@ func configFileDescription(kind config.ConfigFileKind) string {
 		return "Custom scripts and panel components"
 	case config.FileWorkflows:
 		return i18n.T("settings.configs.desc.workflows")
+	case config.FileQuickJump:
+		return pickLang(i18n.IsChinese(), "统一快跳书签（URL、目录与脚本）", "Unified Quick Jump bookmarks (URLs, paths, and scripts)")
 	default:
 		return ""
 	}

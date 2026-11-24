@@ -185,8 +185,8 @@ func (a *AppController) renderManageSyncCard(c *ui.Context, theme *ui.Theme, st 
 		}
 		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 			if ui.Button(c, pickLang(zh, "同步详情", "Sync Details")).Key("manage-sync-details").Clicked() {
-				a.setSettingsSection(settingsSectionAbout)
-				a.OpenSettings(SettingsTabGeneral)
+				a.CloseHubSurface()
+				a.OpenSettingsSection(settingsSectionAbout)
 			}
 		})
 	})
@@ -222,8 +222,8 @@ func (a *AppController) renderManageMediaCard(c *ui.Context, theme *ui.Theme, cf
 				a.retryClipboardStats()
 			}
 			if ui.Button(c, pickLang(zh, "存储策略", "Policy")).Key("manage-media-policy").Clicked() {
-				a.setSettingsSection(settingsSectionClipboard)
-				a.OpenSettings(SettingsTabGeneral)
+				a.CloseHubSurface()
+				a.OpenSettingsSection(settingsSectionClipboard)
 			}
 		})
 	})
@@ -286,12 +286,12 @@ func (a *AppController) renderManageLexiconCard(c *ui.Context, theme *ui.Theme, 
 		}
 		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 			if ui.Button(c, pickLang(zh, "管理术语", "Glossary")).Key("manage-lex-glossary").Clicked() {
-				a.setSettingsSection(settingsSectionGlossary)
-				a.OpenSettings(SettingsTabGeneral)
+				a.CloseHubSurface()
+				a.OpenSettingsSection(settingsSectionGlossary)
 			}
 			if ui.Button(c, pickLang(zh, "我的词库", "User Words")).Key("manage-lex-ime").Clicked() {
-				a.setSettingsSection(settingsSectionIMEKeymap)
-				a.OpenSettings(SettingsTabIMEKeymap)
+				a.CloseHubSurface()
+				a.OpenSettingsSection(settingsSectionIMEKeymap)
 			}
 		})
 	})
