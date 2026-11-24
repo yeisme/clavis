@@ -15,14 +15,17 @@ Clavis 需要保存密码、令牌、恢复码和其他高敏感值，同时让�
 
 受影响的主体是密码管理用户、Agent 运行时、Host/Clipboard 桥接层和 Keychain 后端。用户需要可验证的复制结果，Agent 需要知道某个 SecretRef 是否可用以及下一步由谁处理，但 Agent 不需要也不应获得正文。
 
-当前能凑合使用的路径是把敏感值交给普通复制流程，再依赖清理计时器和密码条目过滤。这个路径无法表达用户授权与 Agent 请求的区别，也无法证明正文没有进入历史、请求结果、追踪或错误边界。安全边界必须在数据契约和调用者身份处固定下来，不能由 UI 文案或调用方自律维持。
+当前能凑合使用的路径是让 AI profile 通过 APIKeyStore 直接解析出 string，再由调用方自行决定是否放入请求、诊断或其他动作。文件层、环境变量和旧 Keychain 迁移已经有边界，但没有 SecretRef、调用者身份、user-only 复制、TTL ownership 或 Agent 禁读的统一契约。安全边界必须在数据契约和调用者身份处固定下来，不能由 UI 文案或调用方自律维持。
 
 ## 二、现状证据
 
-- 指定基线文件 docs/design/security-vault-plan.md 在本轮开始时不存在。命令 sed -n '1,260p' docs/design/security-vault-plan.md 返回 No such file or directory，find docs/design -maxdepth 1 -type f -print | grep 'security\|vault' 无匹配。这意味着本轮没有可继承的安全设计契约，下面的字段和状态需要作为新基线冻结。
-- 任务已确认的边界是只写设计文档，不改生产代码。设计因此把 Keychain、Host、Clipboard、Agent 之间的接口写成待实现契约，不能把尚未实现的接口描述成现状。
-- 项目收尾记录已确认敏感内容复制有自动清除时间，密码类条目不进入普通历史。这些行为只能作为迁移兼容目标，不能替代本设计对 user-only 身份、清理竞态和 Secret 正文不可观测性的约束。实现阶段必须用回归测试重新证明。
-- 现状证据缺口是没有一份可读的 SecretRef/Keychain/审计 schema。实现放行前需要以机器检查补齐这些证据：接口定义、序列化快照、日志字段清单、剪贴板清理测试和 Agent 工具返回值测试。
+- `internal/secrets/secrets.go:27-68` 当前的权威抽象是 `APIKeyStore`，读写接口直接返回 `string`，来源枚举为 `none|keychain|env|file`。`MyGoSecretsStore` 在 `:70-150` 封装 OS Keychain/Credential Manager/Secret Service，`MemoryAPIKeyStore` 是测试 fake store。
+- `internal/secrets/file_store.go:15-37,56-105,107-148` 当前生产优先路径是独立的 `0600` `ai-keys.toml`，父目录 `0700`，临时文件原子 rename，权限过宽或解析失败会返回错误而不会静默回退。
+- `internal/secrets/layered_store.go:12-25,37-75,122-146` 的 `LayeredStore` 文件优先、写入只落文件，`Migrate` 默认关闭；显式迁移才从旧 Keychain 复制到账户文件。`file_store_test.go:71-88,130-169` 验证禁用迁移时零 Keychain 调用、写入只到文件和迁移幂等。
+- `pkg/core/config/main_config.go:325-338,531-540,543-605` 的 `AIProfile` 只有 `keychain_account`、`api_key_env_var` 等引用字段，配置解码明确拒绝 `api_key`、`apiKey`、`secret_key`、`secretKey` 原文。
+- `internal/secrets/secrets.go:371-444` 的 profile 解析按账户、显式环境变量和 provider 默认变量处理 keyless。`docs/backend/ai-provider-magpie-env.md:100-124,132-148` 明确文件优先、环境变量 fallback、非 loopback provider 不得无 key 成功。
+- `docs/backend/schema-migration.md:20-39,79-94,177-185` 要求每个 SQLite 文件独立版本、迁移前备份、单库事务、未知版本拒绝和失败回滚。`docs/backend/notification-store.md:120-157,206-215` 要求短预览白名单、cursor 事务和原始响应不入库，这些规则同样适用于 Secret 审计。
+- 当前代码没有 SecretRef、user-only copy、TTL ownership marker 或 metadata-only audit 的实现。它仍有直接返回 key 正文的 `APIKeyStore` 路径，因此本设计必须把现有 APIKeyStore 作为兼容层，新增安全边界，而不能把当前接口误称为已完成的 Vault。
 
 ## 三、方案对比
 
@@ -63,6 +66,7 @@ Clavis 需要保存密码、令牌、恢复码和其他高敏感值，同时让�
 **怎么做**
 
 - 系统 Keychain 保存正文，应用保存不可逆的 SecretRef 元数据。
+- 先保留现有 APIKeyStore 作为兼容 adapter，新增不返回正文的 metadata/read boundary；FileStore 和 LayeredStore 迁移为 SecretRef 后再关闭兼容读取。
 - Agent 只能读取元数据和状态，不能调用正文读取接口。
 - 只有带用户会话和一次性授权的 Host/Clipboard 路径可以解析正文并写入系统剪贴板。
 - 清理任务只在剪贴板内容仍匹配本次复制凭据时执行。
@@ -82,6 +86,7 @@ Clavis 需要保存密码、令牌、恢复码和其他高敏感值，同时让�
 **代价**
 
 - 跨平台 Keychain 能力不完全一致。
+- 当前 FileStore 和 APIKeyStore 会在受信任的 AI 调用路径返回正文，迁移期间必须同时维护旧接口和新边界，不能直接删除旧接口。
 - 用户复制是异步且可能处于 unknown，需要明确反馈和重试语义。
 - 自动清除无法保证系统剪贴板永远未被外部程序读取，只能保证 Clavis 不继续保留。
 
@@ -133,6 +138,15 @@ Clavis 需要保存密码、令牌、恢复码和其他高敏感值，同时让�
 
 ### 4.1 数据契约
 
+#### 现有兼容契约
+
+实现阶段必须继续满足 `APIKeyStore` 的现有调用者，直到迁移完成：
+
+- `ReadKey`、`ResolveAPIKey`、`ResolveAPIKeyWithEnv` 只允许在受信任的 provider request boundary 内调用，禁止被 Agent tool、诊断 snapshot、通知投影和普通历史调用。
+- `ResolveAPIKeySource` 只返回 `none|keychain|env|file`，不返回正文。`FileStore` 的 `0600`、原子写、错误不降级和 `LayeredStore.Migrate=false` 语义必须保留。
+- `MemoryAPIKeyStore` 继续作为 fake store，仅用于测试，不得成为生产默认后端。
+- 兼容 adapter 的每次正文读取必须有内部 audit correlation，但不得记录正文、正文摘要或环境变量值。
+
 #### SecretRef
 
 SecretRef 是唯一对 Agent、UI、审计和普通存储可见的引用对象：
@@ -140,8 +154,8 @@ SecretRef 是唯一对 Agent、UI、审计和普通存储可见的引用对象�
 | 字段 | 类型 | 缺省值 | 说明 |
 |---|---|---:|---|
 | id | string | 必填 | 本机稳定随机 ID，不含正文、路径或可逆编码 |
-| backend | enum | keychain | 权威后端类型，第一期只允许 keychain |
-| record_key | string | 必填 | Keychain 内部索引，禁止把正文放入 key |
+| backend | enum | layered | 权威后端类型，第一期允许 layered/keychain/env |
+| record_key | string | 必填 | 现有 `keychain_account` 或账户文件 key，禁止把正文放入 key |
 | label | string | 空 | 用户可见标签，禁止写密码和令牌 |
 | kind | enum | password | password/token/recovery_code/other |
 | sensitivity | enum | secret | secret/high，不能降为普通文本 |
@@ -158,7 +172,7 @@ SecretRef 是唯一对 Agent、UI、审计和普通存储可见的引用对象�
 - 任何可由 label、record_key 或错误消息反推出正文的字段。
 - 正文摘要、正文长度和正文熵等可形成侧信道的派生字段，除非主人单独批准。
 
-权威来源是系统 Keychain 中由 backend + record_key + version 定位的条目。数据库、Agent 状态、UI 行和审计记录都是派生视图。数据库只允许保存 SecretRef 和非敏感元数据。应用重启、同步和备份都不得复制正文。
+权威来源是由 backend + record_key + version 定位的 layered store。layered 的读取优先级沿用现状：`ai-keys.toml` 文件、显式环境变量、provider 默认环境变量，旧 Keychain 只在显式迁移期间可读。迁移完成后，Keychain 或其他后端才可作为正文权威来源。数据库、Agent 状态、UI 行和审计记录都是派生视图。数据库只允许保存 SecretRef 和非敏感元数据。应用重启、同步和备份都不得复制正文。
 
 #### UserCopyRequest
 
@@ -189,6 +203,8 @@ Receipt、Agent 事件和 UI 状态都不得包含正文。Agent 只能看到 st
 
 ### 4.2 接口与调用边界
 
+以下是目标接口名，不是当前已存在的 Go 接口。当前唯一可复用的存储接口是 `internal/secrets.APIKeyStore`。
+
 ```text
 UserSession
   -> VaultMetadataService      读取 SecretRef 元数据
@@ -204,6 +220,7 @@ Agent
 
 抽象接口契约：
 
+- `LayeredSecretStore` 先包住现有 `APIKeyStore`，暴露 `GetMetadata(ref)`、`ResolveForUser(ref, session, requestID)` 和 `ResolveSource(ref)`；旧的返回 string 方法只在兼容 adapter 内可见。
 - KeychainStore.Put(ref, value, expectedVersion)：仅由用户创建/更新入口调用。正文只在调用栈内存中出现，成功后立即释放引用。版本冲突返回 version_conflict，不能覆盖写。
 - KeychainStore.GetMetadata(ref)：返回非敏感元数据，可被 Agent 通过 metadata service 调用。
 - KeychainStore.ResolveForUser(ref, session, requestID)：仅 user-only actor 可调用。返回内部 opaque value handle，不允许 JSON、日志或 Agent tool result 携带。Keychain 锁定返回 keychain_locked。
@@ -294,6 +311,19 @@ Agent 只能观察状态和 next_actor，不能触发 stored -> copy_pending，�
 4. 清理任务重复执行必须幂等。
 5. 应用重启后未完成的清理任务进入 unknown，不直接清空系统剪贴板。
 
+### 4.6 迁移顺序与 commit 粒度
+
+每一步都必须能独立编译、测试、回滚。后一步不能假设前一步已经把正文写入数据库：
+
+1. `docs/security-vault-contract`：冻结 SecretRef、actor、错误码、禁止字段和审计白名单，只改契约测试与文档。
+2. `secrets/metadata-adapter`：在 `internal/secrets` 增加 metadata-only adapter 和 fake store，保留现有 APIKeyStore 行为。失败时只回滚 adapter，不改变 FileStore/LayeredStore。
+3. `secrets/user-copy`：新增 user-only copy、TTL、ownership marker 和清理状态机。Keychain 锁定、Host unknown 和审计失败先由 fake store 覆盖。
+4. `secrets/agent-deny`：在 Agent 调用边界拒绝正文读取和复制请求，返回 `agent_forbidden`。这一提交必须独立验证 Agent snapshot、diagnostics 和 tool result 无正文。
+5. `secrets/migrate-ref`：把现有 `keychain_account`、FileStore account 和 env source 映射成 SecretRef。迁移只新增引用和审计元数据，不把正文复制进应用 SQLite。
+6. `secrets/retire-raw`：在所有受信任调用者迁移并通过兼容测试后，收窄旧 APIKeyStore 的可见范围。若任一调用者未迁移，停止在此步，不删除旧实现。
+
+迁移使用独立的 SecretRef ledger 版本，不修改应用 SQLite、sync SQLite 或 device state 的 `user_version`。迁移前生成私有权限备份，失败保留旧 FileStore/Keychain 条目并返回明确错误，不生成空库覆盖原数据。
+
 ## 五、分期与验收
 
 ### P0：契约与不可观测边界
@@ -306,10 +336,12 @@ Agent 只能观察状态和 next_actor，不能触发 stored -> copy_pending，�
 
 机器断言：
 
-- grep -RInE 'Secret(Value|Plaintext|Body)|clipboard_text|cleanup_token' agent-facing schema 只能命中禁止字段测试或内部实现边界。
+- `go test -count=1 -v ./internal/secrets ./pkg/core/config -run 'Test(DefaultEnvVarForProvider|LayeredStore|FileStore|.*ReasoningEffort.*)'` 必须通过，且输出包含现有 FileStore 权限、文件优先和禁用迁移测试。
+- `grep -RInE 'api_key|apiKey|secret_key|secretKey' pkg/core/config` 只能命中禁止字段解码和对应测试，不能出现 raw secret 字段定义。
+- 新增 SecretRef 序列化测试中，Agent-facing JSON 不得包含 value/plaintext/secret/token 字段；当前 APIKeyStore 的正文返回只能在受信任 adapter 测试中出现。
 - Agent 工具测试中，所有返回 JSON 不包含 value/plaintext/secret/token 字段。
 - 以 Agent actor 调用复制或正文解析接口必须得到 agent_forbidden 和 failed。
-- 关键包 go test ./... -race 通过。
+- `go test -race -count=1 ./internal/secrets ./pkg/core/config` 通过，且测试只使用 MemoryAPIKeyStore、临时目录和显式环境变量。
 
 ### P1：Keychain 与 user-only 复制
 
@@ -321,6 +353,7 @@ Agent 只能观察状态和 next_actor，不能触发 stored -> copy_pending，�
 
 机器断言：
 
+- `go test -count=1 -v ./internal/secrets -run 'Test(LayeredStore|FileStore|.*Migration.*)'` 必须显示 `=== RUN` 和 `PASS`，不得以匹配零用例的 `ok` 作为迁移完成证据。
 - 相同 request_id + secret_ref_id + session_id 重试只产生一个复制事件和一个清理任务。
 - TTL 只接受默认值和上限范围，越界返回 ttl_invalid。
 - 用户替换剪贴板后，清理返回 cleanup_ownership_lost，新内容保持不变。
@@ -351,6 +384,7 @@ Agent 只能观察状态和 next_actor，不能触发 stored -> copy_pending，�
 | Keychain 锁定被误报为失败 | 锁定/解锁集成测试，检查 error code | 返回 locked/degraded，用户解锁后重试，不删除 SecretRef |
 | Host 写入结果未知却显示成功 | 注入断连、超时和进程重启 | 状态固定为 unknown，禁止自动重试写入，等待用户显式重试 |
 | 审计失败导致安全动作不可追踪 | 审计 sink 故障注入、计数器和本地告警 | 复制结果标记 degraded，不写正文到备用日志 |
+| 现有 0600 FileStore 被误当作不可观测 Keychain | `APIKeyStore` adapter 的字段/调用图检查，确认正文读取只在受信任边界 | 保留 FileStore 兼容读取但禁止 Agent 和诊断调用，停止 SecretRef 迁移，不删除旧凭据 |
 | 迁移把正文复制到普通数据库 | migration schema 检查、备份扫描、回滚演练 | 停止迁移，回到旧只读视图；保留 Keychain 原条目 |
 | 多用户环境 actor 绑定错误 | session、UID、桌面会话隔离测试 | 拒绝复制并返回 user_auth_required，不进入 Keychain |
 
