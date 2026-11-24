@@ -123,6 +123,11 @@ func (c *AppController) VaultSnapshot() secrets.AgentVaultSnapshot {
 	snap := c.SecretVault().Snapshot()
 	sort.Slice(snap.SecretRefs, func(i, j int) bool {
 		if snap.SecretRefs[i].State != snap.SecretRefs[j].State {
+			iStored := snap.SecretRefs[i].State == secrets.SecretStateStored
+			jStored := snap.SecretRefs[j].State == secrets.SecretStateStored
+			if iStored != jStored {
+				return iStored
+			}
 			return snap.SecretRefs[i].State < snap.SecretRefs[j].State
 		}
 		if !snap.SecretRefs[i].UpdatedAt.Equal(snap.SecretRefs[j].UpdatedAt) {

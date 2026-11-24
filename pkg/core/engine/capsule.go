@@ -1338,26 +1338,34 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 				{Type: EffectClose},
 			}
 		}
-		if actID == "copy_path" && item.ClipboardMedia != nil {
+		if actID == "copy_path" {
+			if item.ClipboardMedia == nil {
+				return next, nil
+			}
 			pathText := mediaPathsCopyText(*item.ClipboardMedia)
-			if pathText != "" {
-				clearPhaseFields(&next)
-				next.Phase = PhaseHidden
-				return next, []Effect{
-					{Type: EffectCopyText, Text: pathText, ClipboardID: item.ClipboardID},
-					{Type: EffectClose},
-				}
+			if pathText == "" {
+				return next, nil
+			}
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{
+				{Type: EffectCopyText, Text: pathText, ClipboardID: item.ClipboardID},
+				{Type: EffectClose},
 			}
 		}
-		if actID == "reveal" && item.ClipboardMedia != nil {
+		if actID == "reveal" {
+			if item.ClipboardMedia == nil {
+				return next, nil
+			}
 			revealTarget := mediaPrimaryPath(*item.ClipboardMedia)
-			if revealTarget != "" {
-				clearPhaseFields(&next)
-				next.Phase = PhaseHidden
-				return next, []Effect{
-					{Type: EffectRevealPath, Text: revealTarget},
-					{Type: EffectClose},
-				}
+			if revealTarget == "" {
+				return next, nil
+			}
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{
+				{Type: EffectRevealPath, Text: revealTarget},
+				{Type: EffectClose},
 			}
 		}
 		if actID == "copy_meta" && item.ClipboardMedia != nil {

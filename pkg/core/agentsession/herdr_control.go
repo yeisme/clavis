@@ -19,7 +19,7 @@ var allowedHerdrAgentCLIs = map[string]bool{
 	"opencode": true,
 }
 
-var sendSecretPattern = regexp.MustCompile(`(?i)\b(sk-[a-z0-9_-]{8,}|ghp_[a-z0-9]{10,}|glpat-[a-z0-9_-]{10,}|akia[0-9a-z]{12,}|-----begin [a-z ]+private key-----)`)
+var sendSecretPattern = regexp.MustCompile(`(?i)(?:\b(?:sk-[a-z0-9_-]{8,}|ghp_[a-z0-9]{10,}|glpat-[a-z0-9_-]{10,}|akia[0-9a-z]{12,})|-----begin [a-z ]+private key-----)`)
 
 // SendPromptRequest carries gated parameters for `herdr agent send`.
 type SendPromptRequest struct {
