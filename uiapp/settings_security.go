@@ -20,10 +20,11 @@ const (
 	vaultStatusLocked  vaultStatusKind = "locked"
 	vaultStatusMissing vaultStatusKind = "missing"
 	vaultStatusDenied  vaultStatusKind = "denied"
+	vaultStatusInvalid vaultStatusKind = "invalid"
 )
 
-// classifyVaultFailure maps Vault copy/store errors into the three explicit UI
-// error/degraded states (locked, missing, denied) without ever exposing secrets.
+// classifyVaultFailure maps Vault copy/store errors into explicit UI states
+// (locked, missing, denied, invalid) without ever exposing secrets.
 func classifyVaultFailure(receipt secrets.CopyReceipt, err error, zh bool) (vaultStatusKind, string, string) {
 	code := strings.TrimSpace(receipt.ErrorCode)
 	errLower := ""
@@ -32,6 +33,26 @@ func classifyVaultFailure(receipt secrets.CopyReceipt, err error, zh bool) (vaul
 	}
 
 	switch {
+	case code == secrets.CopyErrorInvalidInput ||
+		code == secrets.CopyErrorTTLInvalid ||
+		code == secrets.CopyErrorVersionConflict ||
+		errors.Is(err, secrets.ErrInvalidInput) ||
+		errors.Is(err, secrets.ErrTTLInvalid) ||
+		strings.Contains(errLower, secrets.CopyErrorInvalidInput) ||
+		strings.Contains(errLower, "label may not") ||
+		strings.Contains(errLower, "already exists") ||
+		strings.Contains(errLower, "are required") ||
+		strings.Contains(errLower, "is required") ||
+		strings.Contains(errLower, "unsupported backend") ||
+		strings.Contains(errLower, secrets.CopyErrorVersionConflict):
+		resolvedCode := nonEmptyOr(code, secrets.CopyErrorInvalidInput)
+		if errors.Is(err, secrets.ErrTTLInvalid) {
+			resolvedCode = secrets.CopyErrorTTLInvalid
+		} else if strings.Contains(errLower, secrets.CopyErrorVersionConflict) {
+			resolvedCode = secrets.CopyErrorVersionConflict
+		}
+		return vaultStatusInvalid, resolvedCode, formatVaultInvalidInputDetail(errLower, zh)
+
 	case code == secrets.CopyErrorRefNotFound ||
 		errors.Is(err, secrets.ErrSecretNotFound) ||
 		errors.Is(err, os.ErrNotExist) ||
@@ -77,6 +98,46 @@ func classifyVaultFailure(receipt secrets.CopyReceipt, err error, zh bool) (vaul
 		return vaultStatusLocked, nonEmptyOr(code, secrets.CopyErrorKeychainLocked), pickLang(zh,
 			"安全存储暂不可用或处于锁定状态，请解锁后重试。",
 			"Secret store is currently locked or unavailable; retry after unlocking.",
+		)
+	}
+}
+
+func formatVaultInvalidInputDetail(errLower string, zh bool) string {
+	switch {
+	case strings.Contains(errLower, "label"):
+		return pickLang(zh,
+			"业务别名不合法：Label 不能包含 password / token / secret 等敏感字样，请改用中性业务别名。",
+			"Invalid alias label: Label must not contain 'password', 'token', or 'secret'; use a neutral service alias.",
+		)
+	case strings.Contains(errLower, "duplicate") || strings.Contains(errLower, "already exists"):
+		return pickLang(zh,
+			"该记录标识（Record Key）已存在活跃引用，请更换标识或先吊销旧引用。",
+			"Record key already exists in an active reference; choose a different Record Key or revoke the existing reference first.",
+		)
+	case strings.Contains(errLower, "value is required"):
+		return pickLang(zh,
+			"凭据正文不能为空，请填写后再保存。",
+			"Credential value is required before saving.",
+		)
+	case strings.Contains(errLower, "record_key"):
+		return pickLang(zh,
+			"请填写有效的记录标识（Record Key）。",
+			"A valid Record Key is required.",
+		)
+	case strings.Contains(errLower, secrets.CopyErrorTTLInvalid):
+		return pickLang(zh,
+			"短时复制 TTL 超出允许范围（最长 5 分钟）。",
+			"Copy TTL is outside the allowed range (up to 5 minutes).",
+		)
+	case strings.Contains(errLower, secrets.CopyErrorVersionConflict):
+		return pickLang(zh,
+			"引用版本冲突，请刷新后重试。",
+			"Reference version conflict; refresh and try again.",
+		)
+	default:
+		return pickLang(zh,
+			"输入校验未通过，请检查记录标识、业务别名和凭据内容。",
+			"Invalid Vault input; check record key, alias label, and credential fields.",
 		)
 	}
 }
@@ -153,6 +214,9 @@ func renderVaultStatusCard(c *ui.Context, theme *ui.Theme, st *vaultViewState, k
 	case vaultStatusDenied:
 		stateBadge = pickLang(zh, "访问被拒绝 · Denied", "Denied")
 		stateTone = chipDanger
+	case vaultStatusInvalid:
+		stateBadge = pickLang(zh, "输入无效 · Invalid", "Invalid Input")
+		stateTone = chipWarning
 	default:
 		stateBadge = pickLang(zh, "异常", "Warning")
 		stateTone = chipWarning

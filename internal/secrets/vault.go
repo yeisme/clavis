@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,13 +29,14 @@ type SecretRef struct {
 }
 
 const (
-	SecretBackendKeychain = "keychain"
-	SecretBackendLayered  = "layered"
-	SecretBackendEnv      = "env"
-	SecretKindPassword    = "password"
-	SecretSensitivity     = "secret"
-	SecretStateStored     = "stored"
-	SecretStateRevoked    = "revoked"
+	SecretBackendKeychain  = "keychain"
+	SecretBackendLayered   = "layered"
+	SecretBackendEncrypted = "encrypted"
+	SecretBackendEnv       = "env"
+	SecretKindPassword     = "password"
+	SecretSensitivity      = "secret"
+	SecretStateStored      = "stored"
+	SecretStateRevoked     = "revoked"
 
 	ActorUserSession = "user_session"
 	ActorAgent       = "agent"
@@ -52,16 +54,22 @@ const (
 	CopyErrorUserAuth        = "user_auth_required"
 	CopyErrorAgentForbidden  = "agent_forbidden"
 	CopyErrorTTLInvalid      = "ttl_invalid"
+	CopyErrorInvalidInput    = "invalid_input"
 	CopyErrorCleanupLost     = "cleanup_ownership_lost"
 	CopyErrorAuditFailed     = "audit_write_failed"
 	CopyErrorVersionConflict = "version_conflict"
 	CopyDestinationClipboard = "system_clipboard"
+
+	DefaultMaxAuditEvents = 500
+	DefaultMaxReceipts    = 500
 )
 
 var (
-	ErrAgentForbidden = errors.New(CopyErrorAgentForbidden)
-	ErrTTLInvalid     = errors.New(CopyErrorTTLInvalid)
-	ErrOwnershipLost  = errors.New(CopyErrorCleanupLost)
+	ErrAgentForbidden     = errors.New(CopyErrorAgentForbidden)
+	ErrTTLInvalid         = errors.New(CopyErrorTTLInvalid)
+	ErrOwnershipLost      = errors.New(CopyErrorCleanupLost)
+	ErrInvalidInput       = errors.New(CopyErrorInvalidInput)
+	ErrDuplicateRecordKey = fmt.Errorf("%w: duplicate record_key", ErrInvalidInput)
 )
 
 const (
@@ -182,9 +190,10 @@ func (s *FakeSecretStore) DeleteKey(account string) error {
 }
 
 type MemoryAuditSink struct {
-	mu     sync.Mutex
-	Events []AuditEvent
-	Err    error
+	mu        sync.Mutex
+	Events    []AuditEvent
+	Err       error
+	MaxEvents int
 }
 
 func (s *MemoryAuditSink) Append(e AuditEvent) error {
@@ -193,7 +202,17 @@ func (s *MemoryAuditSink) Append(e AuditEvent) error {
 	if s.Err != nil {
 		return s.Err
 	}
+	limit := s.MaxEvents
+	if limit <= 0 {
+		limit = DefaultMaxAuditEvents
+	}
 	s.Events = append(s.Events, e)
+	if len(s.Events) > limit {
+		excess := len(s.Events) - limit
+		copy(s.Events, s.Events[excess:])
+		clear(s.Events[limit:])
+		s.Events = s.Events[:limit]
+	}
 	return nil
 }
 
@@ -215,31 +234,49 @@ type AgentVaultSnapshot struct {
 // Vault enforces metadata-only access and user-only copy. Values are held only
 // between ResolveForUser and ClipboardAdapter.Write.
 type Vault struct {
-	mu        sync.Mutex
-	store     SecretValueStore
-	clipboard ClipboardAdapter
-	audit     AuditSink
-	now       func() time.Time
-	refs      map[string]SecretRef
-	receipts  map[string]CopyReceipt
+	mu          sync.Mutex
+	store       SecretValueStore
+	clipboard   ClipboardAdapter
+	audit       AuditSink
+	now         func() time.Time
+	refs        map[string]SecretRef
+	receipts    map[string]CopyReceipt
+	timers      map[string]*time.Timer
+	maxReceipts int
 }
 
 func NewVault(store SecretValueStore, clipboard ClipboardAdapter, audit AuditSink) *Vault {
-	return &Vault{store: store, clipboard: clipboard, audit: audit, now: time.Now, refs: make(map[string]SecretRef), receipts: make(map[string]CopyReceipt)}
+	return &Vault{
+		store:       store,
+		clipboard:   clipboard,
+		audit:       audit,
+		now:         time.Now,
+		refs:        make(map[string]SecretRef),
+		receipts:    make(map[string]CopyReceipt),
+		timers:      make(map[string]*time.Timer),
+		maxReceipts: DefaultMaxReceipts,
+	}
 }
 
 func (v *Vault) Put(ref SecretRef, value string) (SecretRef, error) {
 	if v.store == nil {
 		return SecretRef{}, errors.New("secrets: value store is required")
 	}
+	ref.ID = strings.TrimSpace(ref.ID)
+	ref.RecordKey = strings.TrimSpace(ref.RecordKey)
+	ref.Label = strings.TrimSpace(ref.Label)
 	if err := validateSecretRef(ref); err != nil {
 		return SecretRef{}, err
 	}
 	if strings.TrimSpace(value) == "" {
-		return SecretRef{}, errors.New("secrets: value is required")
+		return SecretRef{}, fmt.Errorf("%w: value is required", ErrInvalidInput)
 	}
 	if ref.Backend == "" {
-		ref.Backend = SecretBackendLayered
+		if _, ok := v.store.(*EncryptedVaultStore); ok {
+			ref.Backend = SecretBackendEncrypted
+		} else {
+			ref.Backend = SecretBackendLayered
+		}
 	}
 	if ref.Kind == "" {
 		ref.Kind = SecretKindPassword
@@ -259,6 +296,12 @@ func (v *Vault) Put(ref SecretRef, value string) (SecretRef, error) {
 	ref.UpdatedAt = v.now().UTC()
 	ref.State = SecretStateStored
 	v.mu.Lock()
+	for _, existing := range v.refs {
+		if existing.ID != ref.ID && existing.State != SecretStateRevoked && existing.RecordKey == ref.RecordKey {
+			v.mu.Unlock()
+			return SecretRef{}, fmt.Errorf("%w: record_key %q already exists in active ref %q", ErrDuplicateRecordKey, ref.RecordKey, existing.ID)
+		}
+	}
 	if old, exists := v.refs[ref.ID]; exists {
 		if ref.Version != old.Version {
 			v.mu.Unlock()
@@ -416,21 +459,33 @@ func (v *Vault) Copy(req UserCopyRequest) (CopyReceipt, error) {
 		return v.failReceipt(req, key, now, "clipboard_write_unknown", true, err)
 	}
 	receipt := CopyReceipt{RequestID: req.RequestID, State: CopyStateCopied, ExpiresAt: now.Add(req.TTL), ObservedAt: now, Retryable: false, cleanupToken: token}
-	v.receipts[key] = receipt
+	v.storeReceiptLocked(key, receipt, now)
+	if v.timers == nil {
+		v.timers = make(map[string]*time.Timer)
+	}
+	if oldTimer, ok := v.timers[key]; ok {
+		oldTimer.Stop()
+	}
+	v.timers[key] = time.AfterFunc(req.TTL, func() { _ = v.Cleanup(req.RequestID, req.SecretRefID, req.SessionID) })
 	v.mu.Unlock()
 	if err := v.appendAudit(AuditEvent{At: now, Action: "copied", Actor: req.Actor, RequestID: req.RequestID, SecretRefID: ref.ID, State: receipt.State}); err != nil {
 		receipt.State, receipt.ErrorCode, receipt.Retryable = CopyStateDegraded, CopyErrorAuditFailed, true
 		v.mu.Lock()
-		v.receipts[key] = receipt
+		if _, exists := v.receipts[key]; exists {
+			v.receipts[key] = receipt
+		}
 		v.mu.Unlock()
 	}
-	time.AfterFunc(req.TTL, func() { _ = v.Cleanup(req.RequestID, req.SecretRefID, req.SessionID) })
 	return receipt, nil
 }
 
 func (v *Vault) Cleanup(requestID, refID, sessionID string) error {
 	key := requestID + "\x00" + refID + "\x00" + sessionID
 	v.mu.Lock()
+	if t, ok := v.timers[key]; ok {
+		t.Stop()
+		delete(v.timers, key)
+	}
 	receipt, ok := v.receipts[key]
 	if !ok {
 		v.mu.Unlock()
@@ -462,25 +517,90 @@ func (v *Vault) Cleanup(requestID, refID, sessionID string) error {
 func (v *Vault) Revoke(id string) error {
 	v.mu.Lock()
 	ref, ok := v.refs[id]
-	if ok {
-		ref.State, ref.RevokedAt, ref.UpdatedAt = SecretStateRevoked, v.now().UTC(), v.now().UTC()
-		ref.MetadataRevision++
-		v.refs[id] = ref
-	}
-	v.mu.Unlock()
 	if !ok {
+		v.mu.Unlock()
 		return errors.New(CopyErrorRefNotFound)
 	}
+	if ref.State == SecretStateRevoked {
+		v.mu.Unlock()
+		return nil
+	}
+	if v.store != nil {
+		if err := v.store.DeleteKey(ref.RecordKey); err != nil && !errors.Is(err, ErrSecretNotFound) {
+			v.mu.Unlock()
+			return err
+		}
+	}
+	now := v.now().UTC()
+	ref.State, ref.RevokedAt, ref.UpdatedAt = SecretStateRevoked, now, now
+	ref.MetadataRevision++
+	v.refs[id] = ref
+	v.mu.Unlock()
 	return v.appendAudit(AuditEvent{At: ref.UpdatedAt, Action: "revoked", SecretRefID: id, State: ref.State})
 }
 
 func (v *Vault) failReceipt(req UserCopyRequest, key string, now time.Time, code string, retryable bool, err error) (CopyReceipt, error) {
 	r := CopyReceipt{RequestID: req.RequestID, State: CopyStateFailed, ObservedAt: now, Retryable: retryable, ErrorCode: code}
 	v.mu.Lock()
-	v.receipts[key] = r
+	v.storeReceiptLocked(key, r, now)
 	v.mu.Unlock()
 	_ = v.appendAudit(AuditEvent{At: now, Action: "copy_failed", Actor: req.Actor, RequestID: req.RequestID, SecretRefID: req.SecretRefID, State: r.State, ErrorCode: code})
 	return r, err
+}
+
+func (v *Vault) storeReceiptLocked(key string, r CopyReceipt, now time.Time) {
+	if v.receipts == nil {
+		v.receipts = make(map[string]CopyReceipt)
+	}
+	if _, exists := v.receipts[key]; !exists {
+		v.pruneReceiptsLocked(now)
+	}
+	v.receipts[key] = r
+}
+
+func (v *Vault) pruneReceiptsLocked(now time.Time) {
+	limit := v.maxReceipts
+	if limit <= 0 {
+		limit = DefaultMaxReceipts
+	}
+	if len(v.receipts) < limit {
+		return
+	}
+	type receiptEntry struct {
+		key  string
+		done bool
+		at   time.Time
+	}
+	entries := make([]receiptEntry, 0, len(v.receipts))
+	for k, r := range v.receipts {
+		done := r.State == CopyStateExpired ||
+			r.State == CopyStateOwnershipLost ||
+			r.State == CopyStateFailed ||
+			(!r.ExpiresAt.IsZero() && !now.Before(r.ExpiresAt))
+		at := r.ObservedAt
+		if at.IsZero() {
+			at = r.ExpiresAt
+		}
+		entries = append(entries, receiptEntry{key: k, done: done, at: at})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].done != entries[j].done {
+			return entries[i].done
+		}
+		if !entries[i].at.Equal(entries[j].at) {
+			return entries[i].at.Before(entries[j].at)
+		}
+		return entries[i].key < entries[j].key
+	})
+	toRemove := len(v.receipts) - limit + 1
+	for i := 0; i < toRemove && i < len(entries); i++ {
+		k := entries[i].key
+		delete(v.receipts, k)
+		if t, ok := v.timers[k]; ok {
+			t.Stop()
+			delete(v.timers, k)
+		}
+	}
 }
 
 func (v *Vault) appendAudit(e AuditEvent) error {
@@ -492,16 +612,20 @@ func (v *Vault) appendAudit(e AuditEvent) error {
 
 func validateSecretRef(ref SecretRef) error {
 	if strings.TrimSpace(ref.ID) == "" || strings.TrimSpace(ref.RecordKey) == "" {
-		return errors.New("secrets: id and record_key are required")
+		return fmt.Errorf("%w: id and record_key are required", ErrInvalidInput)
 	}
 	if strings.TrimSpace(ref.Label) != "" {
 		lower := strings.ToLower(ref.Label)
 		if strings.Contains(lower, "password") || strings.Contains(lower, "token") || strings.Contains(lower, "secret") {
-			return errors.New("secrets: label may not identify secret material")
+			return fmt.Errorf("%w: label may not identify secret material", ErrInvalidInput)
 		}
 	}
-	if ref.Backend != "" && ref.Backend != SecretBackendLayered && ref.Backend != SecretBackendKeychain && ref.Backend != SecretBackendEnv {
-		return errors.New("secrets: unsupported backend")
+	if ref.Backend != "" &&
+		ref.Backend != SecretBackendLayered &&
+		ref.Backend != SecretBackendKeychain &&
+		ref.Backend != SecretBackendEncrypted &&
+		ref.Backend != SecretBackendEnv {
+		return fmt.Errorf("%w: unsupported backend", ErrInvalidInput)
 	}
 	return nil
 }

@@ -9,11 +9,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/egoist/mygo"
+	"github.com/yeisme/clavis/internal/bridge"
+	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/i18n"
 )
+
+type concealedClipboardWriter interface {
+	WriteConcealedClipboard(text string) (int64, error)
+}
 
 // ClipboardCopyOrigin identifies who initiated a clipboard copy or paste action.
 // Sensitive copies are strictly restricted to ClipboardCopyOriginUser.
@@ -71,22 +78,28 @@ type SensitiveClipboardStatus struct {
 }
 
 type clipboardKeyManagerState struct {
-	mu                 sync.Mutex
-	policy             config.ClipboardKeyManagerPolicy
-	sensitiveActive    bool
-	sensitiveLabel     string
-	sensitiveHash      string
-	sensitiveTTL       time.Duration
-	sensitiveExpiresAt time.Time
-	sensitiveGen       uint64
-	sensitiveTimer     *time.Timer
-	recentSecretHashes map[string]time.Time
-	clearHook          func() error
-	lastStatus         string
-	lastError          string
-	demoItem           *clipboard.ClipboardItem
-	demoSecretValue    string
-	demoSecretLabel    string
+	mu                  sync.Mutex
+	policy              config.ClipboardKeyManagerPolicy
+	sensitiveActive     bool
+	sensitiveLabel      string
+	sensitiveHash       string
+	sensitiveSeq        int64
+	sensitiveHasSeq     bool
+	sensitiveTTL        time.Duration
+	sensitiveExpiresAt  time.Time
+	sensitiveGen        uint64
+	sensitiveTimer      *time.Timer
+	sensitiveVaultToken string
+	sensitiveVaultClean func() error
+	vaultClipboard      *hostVaultClipboard
+	recentSecretHashes  map[string]time.Time
+	clearHook           func() error
+	readHook            func() (string, bool)
+	lastStatus          string
+	lastError           string
+	demoItem            *clipboard.ClipboardItem
+	demoSecretValue     string
+	demoSecretLabel     string
 }
 
 var clipboardKeyManagerStore = struct {
@@ -138,6 +151,128 @@ func (a *AppController) SetSensitiveClipboardClearHook(fn func() error) {
 	st.mu.Lock()
 	st.clearHook = fn
 	st.mu.Unlock()
+}
+
+// SetSensitiveClipboardReadHook overrides clipboard text inspection used to
+// verify clipboard ownership before clearing on sensitive TTL expiry.
+func (a *AppController) SetSensitiveClipboardReadHook(fn func() (string, bool)) {
+	st := a.clipboardKeyManager()
+	st.mu.Lock()
+	st.readHook = fn
+	st.mu.Unlock()
+}
+
+func (a *AppController) clipboardSequence() (int64, bool) {
+	if a == nil {
+		return 0, false
+	}
+	a.mu.Lock()
+	br := a.Bridge
+	a.mu.Unlock()
+	seq, ok := br.(bridge.ClipboardSequencer)
+	if !ok || seq == nil {
+		return 0, false
+	}
+	return seq.ClipboardSequence(), true
+}
+
+func (a *AppController) readClipboardTextForOwnership() (string, bool) {
+	if a == nil {
+		return "", false
+	}
+	st := a.clipboardKeyManager()
+	st.mu.Lock()
+	readHook := st.readHook
+	st.mu.Unlock()
+	if readHook != nil {
+		return readHook()
+	}
+	if mygo.App.IsReady() {
+		return mygo.Clipboard.ReadText(), true
+	}
+	return "", false
+}
+
+// clipboardStillOwned verifies that the clipboard has not been replaced by
+// another copy since the sensitive write. Both pasteboard change sequence
+// (when available) and content hash (when readable) must still match.
+func (a *AppController) clipboardStillOwned(expectedHash string, expectedSeq int64, hasSeq bool) bool {
+	if hasSeq {
+		if curSeq, ok := a.clipboardSequence(); ok && curSeq != expectedSeq {
+			return false
+		}
+	}
+	if expectedHash != "" {
+		if curText, ok := a.readClipboardTextForOwnership(); ok {
+			if hashClipboardPayload(curText) != expectedHash {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (a *AppController) writeSensitiveClipboard(value string) (int64, bool, error) {
+	if a == nil {
+		return 0, false, errors.New("controller unavailable")
+	}
+	a.mu.Lock()
+	br := a.Bridge
+	a.mu.Unlock()
+
+	var seq bridge.ClipboardSequencer
+	if s, ok := br.(bridge.ClipboardSequencer); ok && s != nil {
+		seq = s
+		if br != nil {
+			prev := seq.ClipboardSequence()
+			br.IgnoreSelfPasteboardChange(prev + 1)
+		}
+	}
+
+	if cw, ok := br.(concealedClipboardWriter); ok && cw != nil {
+		if writtenSeq, err := cw.WriteConcealedClipboard(value); err == nil {
+			if br != nil {
+				br.IgnoreSelfPasteboardChange(writtenSeq)
+			}
+			return writtenSeq, true, nil
+		}
+	}
+
+	if err := a.writeClipboardText(value); err != nil {
+		return 0, false, err
+	}
+
+	if seq != nil {
+		post := seq.ClipboardSequence()
+		if br != nil {
+			br.IgnoreSelfPasteboardChange(post)
+		}
+		return post, true, nil
+	}
+	return 0, false, nil
+}
+
+func (a *AppController) clearClipboardTextSafe() error {
+	if a == nil {
+		return errors.New("controller unavailable")
+	}
+	a.mu.Lock()
+	br := a.Bridge
+	a.mu.Unlock()
+
+	var seq bridge.ClipboardSequencer
+	if s, ok := br.(bridge.ClipboardSequencer); ok && s != nil {
+		seq = s
+		if br != nil {
+			prev := seq.ClipboardSequence()
+			br.IgnoreSelfPasteboardChange(prev + 1)
+		}
+	}
+	err := a.writeClipboardText("")
+	if err == nil && seq != nil && br != nil {
+		br.IgnoreSelfPasteboardChange(seq.ClipboardSequence())
+	}
+	return err
 }
 
 // SetClipboardKeyManagerDemoTarget seeds a non-secret sample item and optional
@@ -413,10 +548,19 @@ func (a *AppController) copySensitiveUserOnly(req ClipboardCopyRequest, payload 
 	// clipboard poller can never ingest this sensitive payload into history.
 	st := a.clipboardKeyManager()
 	st.mu.Lock()
+	if st.recentSecretHashes == nil {
+		st.recentSecretHashes = make(map[string]time.Time)
+	}
 	st.recentSecretHashes[payloadHash] = expiresAt.Add(15 * time.Second)
+	vc := st.vaultClipboard
 	st.mu.Unlock()
 
-	if err := a.writeClipboardText(payload); err != nil {
+	if vc != nil {
+		vc.invalidate()
+	}
+
+	expectedSeq, hasSeq, err := a.writeSensitiveClipboard(payload)
+	if err != nil {
 		a.setClipboardActionStatus("", err.Error())
 		return ClipboardActionResult{}, err
 	}
@@ -435,8 +579,12 @@ func (a *AppController) copySensitiveUserOnly(req ClipboardCopyRequest, payload 
 	st.sensitiveActive = true
 	st.sensitiveLabel = label
 	st.sensitiveHash = payloadHash
+	st.sensitiveSeq = expectedSeq
+	st.sensitiveHasSeq = hasSeq
 	st.sensitiveTTL = ttl
 	st.sensitiveExpiresAt = expiresAt
+	st.sensitiveVaultToken = ""
+	st.sensitiveVaultClean = nil
 	st.sensitiveTimer = time.AfterFunc(ttl, func() {
 		a.clearSensitiveClipboardForGen(gen)
 	})
@@ -469,11 +617,20 @@ func (a *AppController) disarmSensitiveTimerOnly() {
 		st.sensitiveTimer.Stop()
 		st.sensitiveTimer = nil
 	}
+	st.sensitiveGen++
 	st.sensitiveActive = false
 	st.sensitiveHash = ""
+	st.sensitiveSeq = 0
+	st.sensitiveHasSeq = false
 	st.sensitiveLabel = ""
 	st.sensitiveExpiresAt = time.Time{}
+	st.sensitiveVaultToken = ""
+	st.sensitiveVaultClean = nil
+	vc := st.vaultClipboard
 	st.mu.Unlock()
+	if vc != nil {
+		vc.invalidate()
+	}
 }
 
 func (a *AppController) clearSensitiveClipboardForGen(gen uint64) {
@@ -483,18 +640,30 @@ func (a *AppController) clearSensitiveClipboardForGen(gen uint64) {
 		st.mu.Unlock()
 		return
 	}
+	expectedHash := st.sensitiveHash
+	expectedSeq := st.sensitiveSeq
+	hasSeq := st.sensitiveHasSeq
 	st.sensitiveActive = false
 	st.sensitiveHash = ""
+	st.sensitiveSeq = 0
+	st.sensitiveHasSeq = false
 	st.sensitiveLabel = ""
 	st.sensitiveExpiresAt = time.Time{}
 	st.sensitiveTimer = nil
 	hook := st.clearHook
 	st.mu.Unlock()
 
+	if !a.clipboardStillOwned(expectedHash, expectedSeq, hasSeq) {
+		skippedMsg := pickLang(i18n.IsChinese(), "剪贴板已被其他内容替换，已跳过自动清除", "Clipboard changed; skipped auto-clear")
+		a.setClipboardActionStatus(skippedMsg, "")
+		a.notifyClipboardKeyManagerRepaint()
+		return
+	}
+
 	if hook != nil {
 		_ = hook()
 	} else {
-		_ = a.writeClipboardText("")
+		_ = a.clearClipboardTextSafe()
 	}
 	clearedMsg := pickLang(i18n.IsChinese(), "已自动清除敏感剪贴板内容", "Auto-cleared sensitive clipboard content")
 	a.setClipboardActionStatus(clearedMsg, "")
@@ -513,16 +682,29 @@ func (a *AppController) ClearSensitiveClipboardNow() error {
 	st.sensitiveGen++
 	st.sensitiveActive = false
 	st.sensitiveHash = ""
+	st.sensitiveSeq = 0
+	st.sensitiveHasSeq = false
 	st.sensitiveLabel = ""
 	st.sensitiveExpiresAt = time.Time{}
+	st.sensitiveVaultToken = ""
+	vaultClean := st.sensitiveVaultClean
+	st.sensitiveVaultClean = nil
 	hook := st.clearHook
 	st.mu.Unlock()
 
 	var err error
-	if hook != nil {
+	if vaultClean != nil {
+		err = vaultClean()
+		if errors.Is(err, secrets.ErrOwnershipLost) {
+			skippedMsg := pickLang(i18n.IsChinese(), "剪贴板已被其他内容替换，已跳过清除", "Clipboard changed; skipped clearing")
+			a.setClipboardActionStatus(skippedMsg, "")
+			a.notifyClipboardKeyManagerRepaint()
+			return nil
+		}
+	} else if hook != nil {
 		err = hook()
 	} else {
-		err = a.writeClipboardText("")
+		err = a.clearClipboardTextSafe()
 	}
 	if err != nil {
 		a.setClipboardActionStatus("", err.Error())
