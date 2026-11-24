@@ -14,6 +14,8 @@ import (
 	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
+	"github.com/yeisme/clavis/pkg/core/host"
+	runtimecoord "github.com/yeisme/clavis/pkg/core/runtime"
 )
 
 type mockHerdrManageCLI struct {
@@ -222,17 +224,28 @@ func TestAgentManageWorkspaceFilterFocusRenameAndWatch(t *testing.T) {
 	// RenameHerdrAgent: >40 runes fails; valid rename clears draft & invokes `agent rename`.
 	st := agentManageStateFor(ctrl)
 	st.mu.Lock()
-	st.renameOpen = true
-	st.renameDraft = "draft"
+	cs := st.sessionLocked("w4:p1", true)
+	cs.renameOpen = true
+	cs.renameDraft = "draft"
 	st.mu.Unlock()
-	if _, err := ctrl.RenameHerdrAgent("w4:p1", strings.Repeat("x", 41)); err == nil || !st.statusIsErr {
+	if _, err := ctrl.RenameHerdrAgent("w4:p1", strings.Repeat("x", 41)); err == nil {
 		t.Fatal("expected >40 rune rename failure")
+	}
+	st.mu.Lock()
+	renameErr := st.sessionLocked("w4:p1", false) != nil && st.sessionLocked("w4:p1", false).statusIsErr
+	st.mu.Unlock()
+	if !renameErr {
+		t.Fatal("expected session statusIsErr set on rename failure")
 	}
 	if _, err := ctrl.RenameHerdrAgent("w4:p1", "builder"); err != nil {
 		t.Fatalf("RenameHerdrAgent valid failed: %v", err)
 	}
 	st.mu.Lock()
-	openAfter, draftAfter := st.renameOpen, st.renameDraft
+	var openAfter bool
+	var draftAfter string
+	if cur := st.sessionLocked("w4:p1", false); cur != nil {
+		openAfter, draftAfter = cur.renameOpen, cur.renameDraft
+	}
 	st.mu.Unlock()
 	if openAfter || draftAfter != "" {
 		t.Fatalf("expected rename state cleared, got open=%v draft=%q", openAfter, draftAfter)
@@ -251,4 +264,211 @@ func TestAgentManageWorkspaceFilterFocusRenameAndWatch(t *testing.T) {
 		st.mu.Unlock()
 		return hasWait && !watching
 	}, "WatchHerdrAgentCompletion executes wait and clears active flag")
+}
+
+func TestAgentManageControlsIsolateStatePerSession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	mockCLI := &mockHerdrManageCLI{
+		workspc: `{"result":{"workspaces":[{"workspace_id":"w4","label":"clavis","number":4}]}}`,
+		agents: `{"result":{"agents":[` +
+			`{"agent":"codex","agent_session":{"value":"s-1"},"agent_status":"working","name":"coder-a","pane_id":"w4:p1","workspace_id":"w4"},` +
+			`{"agent":"claude","agent_session":{"value":"s-2"},"agent_status":"idle","name":"reviewer-b","pane_id":"w4:p2","workspace_id":"w4"}` +
+			`]}}`,
+	}
+	cfgStore := config.NewConfigStore(t.TempDir())
+	if _, err := cfgStore.LoadOrInitialize(); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := NewAppController(Options{
+		ConfigStore:     cfgStore,
+		ClipboardStore:  clipboard.NewMemoryStore(clipboard.NewPrivacyFilter()),
+		HerdrExecutor:   mockCLI,
+		ClipboardWriter: func(string) {},
+	})
+	t.Cleanup(ctrl.Close)
+
+	now := time.Now()
+	settleAgentTabForTest(t, ctrl, []agentsession.Session{
+		{ID: "s-1", Provider: "codex", Title: "Coder A", AgentName: "coder-a", PaneID: "w4:p1", WorkspaceID: "w4", WorkspaceLabel: "clavis", Status: agentsession.StatusRunning, LastActivityAt: now, HerdrManaged: true},
+		{ID: "s-2", Provider: "claude", Title: "Reviewer B", AgentName: "reviewer-b", PaneID: "w4:p2", WorkspaceID: "w4", WorkspaceLabel: "clavis", Status: agentsession.StatusWaiting, LastActivityAt: now.Add(-time.Minute), HerdrManaged: true},
+	}, nil, host.OperationResult{State: host.StateReady, ObservedAt: now})
+
+	// Arm a prompt + rename draft + status message on Session A (w4:p1).
+	st := agentManageStateFor(ctrl)
+	st.mu.Lock()
+	csA := st.sessionLocked("w4:p1", true)
+	csA.promptOpen = true
+	csA.promptDraft = "delete temp cache on A"
+	csA.confirmArmed = true
+	csA.renameOpen = true
+	csA.renameDraft = "renamed-a"
+	csA.statusMsg = "session-a-warning"
+	csA.statusIsErr = true
+	st.mu.Unlock()
+
+	w, h := PreferredCapsuleSize(engine.PhaseOmnibox, ctrl.Config().Main.Appearance)
+	tt := ui.NewTester(ctrl.CapsuleView, w, h)
+	tt.Frame()
+	if !tt.HasText("Confirm Send") && !tt.HasText("确认发送到终端") {
+		t.Fatalf("expected Session A to show Confirm Send when armed, got %v", tt.Texts())
+	}
+	if !tt.HasText("session-a-warning") {
+		t.Fatalf("expected Session A status message visible, got %v", tt.Texts())
+	}
+
+	// Switch to Session B (w4:p2): MUST NOT inherit confirmArmed, promptDraft, renameDraft, or statusMsg.
+	ctrl.mu.Lock()
+	ctrl.uiState.agentSelected = 1
+	ctrl.mu.Unlock()
+	tt.Frame()
+	if tt.HasText("Confirm Send") || tt.HasText("确认发送到终端") {
+		t.Fatalf("Session B inherited Session A confirmArmed state: %v", tt.Texts())
+	}
+	if tt.HasText("delete temp cache on A") || tt.HasText("renamed-a") || tt.HasText("session-a-warning") {
+		t.Fatalf("Session B leaked Session A draft/status: %v", tt.Texts())
+	}
+	st.mu.Lock()
+	if csB := st.sessionLocked("w4:p2", false); csB != nil && (csB.confirmArmed || csB.promptDraft != "" || csB.renameDraft != "" || csB.statusMsg != "") {
+		st.mu.Unlock()
+		t.Fatalf("Session B unexpectedly populated control state: %+v", csB)
+	}
+	st.mu.Unlock()
+
+	// Sending on Session A clears only Session A and leaves Session B untouched.
+	if _, err := ctrl.SendHerdrPrompt("w4:p1", "safe prompt", true); err != nil {
+		t.Fatalf("SendHerdrPrompt on Session A failed: %v", err)
+	}
+	st.mu.Lock()
+	if curA := st.sessionLocked("w4:p1", false); curA == nil || curA.confirmArmed || curA.promptOpen || curA.promptDraft != "" {
+		st.mu.Unlock()
+		t.Fatalf("Session A prompt state not cleared after send: %+v", curA)
+	}
+	if curB := st.sessionLocked("w4:p2", false); curB != nil && curB.statusMsg != "" {
+		st.mu.Unlock()
+		t.Fatalf("Session A status bled into Session B: %+v", curB)
+	}
+	// Bounded cleanup prevents unbounded session map growth.
+	for i := 0; i < maxAgentSessionControlStates+25; i++ {
+		cs := st.sessionLocked("pane-"+string(rune('A'+(i%26)))+"-"+time.Duration(i).String(), true)
+		cs.promptDraft = "draft"
+	}
+	count := len(st.sessions)
+	st.mu.Unlock()
+	if count > maxAgentSessionControlStates {
+		t.Fatalf("session control state map exceeded cap: got %d, max %d", count, maxAgentSessionControlStates)
+	}
+}
+
+type blockingHerdrWaitCLI struct {
+	started   chan string
+	cancelled chan string
+}
+
+func (b *blockingHerdrWaitCLI) LookPath(string) (string, error) { return "/fake/herdr", nil }
+func (b *blockingHerdrWaitCLI) Output(ctx context.Context, _ string, args ...string) ([]byte, error) {
+	if len(args) >= 3 && args[0] == "agent" && args[1] == "wait" {
+		select {
+		case b.started <- args[2]:
+		default:
+		}
+		<-ctx.Done()
+		select {
+		case b.cancelled <- args[2]:
+		default:
+		}
+		return nil, ctx.Err()
+	}
+	return []byte("{}"), nil
+}
+
+func TestWatchHerdrAgentCompletionCancelledByStopAllAndClose(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	waitCLI := &blockingHerdrWaitCLI{
+		started:   make(chan string, 4),
+		cancelled: make(chan string, 4),
+	}
+	cfgStore := config.NewConfigStore(t.TempDir())
+	if _, err := cfgStore.LoadOrInitialize(); err != nil {
+		t.Fatal(err)
+	}
+	var toastMu sync.Mutex
+	var toasts []string
+	ctrl := NewAppController(Options{
+		ConfigStore:     cfgStore,
+		ClipboardStore:  clipboard.NewMemoryStore(clipboard.NewPrivacyFilter()),
+		HerdrExecutor:   waitCLI,
+		ClipboardWriter: func(string) {},
+	})
+	ctrl.mu.Lock()
+	ctrl.OnShowIMEPill = func(msg string, _ *host.CursorAnchor) {
+		toastMu.Lock()
+		toasts = append(toasts, msg)
+		toastMu.Unlock()
+	}
+	ctrl.mu.Unlock()
+	t.Cleanup(ctrl.Close)
+
+	// 1. StopAll cancels an active WatchHerdrAgentCompletion via runtimecoord.AgentWait.
+	ctrl.WatchHerdrAgentCompletion("w4:p1", "coder")
+	select {
+	case got := <-waitCLI.started:
+		if got != "w4:p1" {
+			t.Fatalf("wait started for %q, want w4:p1", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WatchHerdrAgentCompletion did not start WaitState")
+	}
+
+	report := ctrl.StopAll("user")
+	foundAgentWait := false
+	for _, op := range report.Operations {
+		if op.Kind == runtimecoord.AgentWait && op.WasCancelled {
+			foundAgentWait = true
+			break
+		}
+	}
+	if !foundAgentWait {
+		t.Fatalf("expected runtimecoord.AgentWait in StopAll report, got %+v", report.Operations)
+	}
+	select {
+	case got := <-waitCLI.cancelled:
+		if got != "w4:p1" {
+			t.Fatalf("cancelled target = %q, want w4:p1", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("StopAll did not cancel in-flight WaitState context")
+	}
+	st := agentManageStateFor(ctrl)
+	waitUntil(t, 2*time.Second, func() bool {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		return !st.watching["w4:p1"]
+	}, "watching flag cleared after StopAll cancellation")
+
+	toastMu.Lock()
+	gotToasts := append([]string(nil), toasts...)
+	toastMu.Unlock()
+	if len(gotToasts) != 0 {
+		t.Fatalf("cancelled watch should not emit spurious error toast, got %v", gotToasts)
+	}
+
+	// 2. Close() cancels an active WatchHerdrAgentCompletion cleanly.
+	ctrl.WatchHerdrAgentCompletion("w4:p2", "reviewer")
+	select {
+	case got := <-waitCLI.started:
+		if got != "w4:p2" {
+			t.Fatalf("second wait started for %q, want w4:p2", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second WatchHerdrAgentCompletion did not start")
+	}
+	ctrl.Close()
+	select {
+	case got := <-waitCLI.cancelled:
+		if got != "w4:p2" {
+			t.Fatalf("Close cancelled target = %q, want w4:p2", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close() did not cancel in-flight WatchHerdrAgentCompletion")
+	}
 }

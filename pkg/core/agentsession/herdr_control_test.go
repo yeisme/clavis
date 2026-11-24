@@ -268,3 +268,114 @@ func TestHerdrControlErrorAndBoundaryPaths(t *testing.T) {
 		t.Fatalf("WaitState error: %+v %v", res, err)
 	}
 }
+
+func TestHerdrSendPromptBlocksUnifiedSecretPatterns(t *testing.T) {
+	exec := &mockHerdrMatrixExec{
+		listOut: `{"result":{"agents":[{"pane_id":"w4:p1","name":"coder","agent":"codex","agent_status":"idle"}]}}`,
+	}
+	ctrl := NewHerdrController(exec)
+
+	blocked := []struct {
+		name string
+		msg  string
+	}{
+		{"bearer_token", "curl -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig'"},
+		{"bearer_quoted", `use bearer "my-secret-token-value"`},
+		{"github_pat", "export TOKEN=github_pat_11ABCDEF1234567890"},
+		{"gho_token", "gho_1234567890abcdef"},
+		{"ghu_token", "ghu_1234567890abcdef"},
+		{"ghs_token", "ghs_1234567890abcdef"},
+		{"slack_bot", "send xoxb-1234567890-abcdef"},
+		{"slack_user", "send xoxp-1234567890-abcdef"},
+		{"api_key_eq", "api_key=supersecret123"},
+		{"api_key_quoted", `api_key="quotedsecret123"`},
+		{"secret_key_colon", "secret_key: topsecret123"},
+		{"access_token_eq", "access_token=tok_abcdef123"},
+		{"password_eq", "password=hunter2"},
+		{"passwd_quoted", "passwd='my-secret-pass'"},
+		{"token_eq", "token=xyz987654"},
+		{"openai_sk", "sk-12345678"},
+		{"gitlab_pat", "glpat-1234567890abcdef"},
+		{"aws_akia", "AKIA1234567890ABCDEF"},
+		{"pem_generic", "-----BEGIN PRIVATE KEY-----"},
+		{"pem_openssh", "-----BEGIN OPENSSH PRIVATE KEY-----"},
+	}
+
+	for _, tc := range blocked {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := ctrl.SendPrompt(context.Background(), SendPromptRequest{
+				Target:    "w4:p1",
+				Message:   tc.msg,
+				Confirmed: true,
+			})
+			if err == nil || res.Code != "secret_blocked" || res.Retryable {
+				t.Fatalf("%s: expected secret_blocked non-retryable failure, got res=%+v err=%v", tc.name, res, err)
+			}
+		})
+	}
+	if len(exec.calls) != 0 {
+		t.Fatalf("blocked secret prompts must never invoke herdr CLI, got calls=%v", exec.calls)
+	}
+
+	// Benign prompts mentioning keywords without credential assignments pass.
+	for _, msg := range []string{
+		"check api_key documentation",
+		"review password reset flow",
+		"run go test ./pkg/core/agentsession/...",
+	} {
+		if res, err := ctrl.SendPrompt(context.Background(), SendPromptRequest{
+			Target:    "w4:p1",
+			Message:   msg,
+			Confirmed: true,
+		}); err != nil || res.Code != "sent" {
+			t.Fatalf("benign prompt %q was wrongly rejected: res=%+v err=%v", msg, res, err)
+		}
+	}
+}
+
+func TestHerdrControlRejectsLeadingDashOptionInjection(t *testing.T) {
+	exec := &mockHerdrMatrixExec{
+		listOut: `{"result":{"agents":[{"pane_id":"-evil","name":"--help","agent":"codex","agent_status":"idle"}]}}`,
+	}
+	ctrl := NewHerdrController(exec)
+
+	if res, err := ctrl.FocusPane(context.Background(), "--help"); err == nil || res.Code != "invalid_target" {
+		t.Fatalf("FocusPane leading dash: res=%+v err=%v", res, err)
+	}
+	if res, err := ctrl.FocusPane(context.Background(), " -f "); err == nil || res.Code != "invalid_target" {
+		t.Fatalf("FocusPane padded leading dash: res=%+v err=%v", res, err)
+	}
+	if res, err := ctrl.FocusPane(context.Background(), "w4:p1\n--evil"); err == nil || res.Code != "invalid_target" {
+		t.Fatalf("FocusPane newline injection: res=%+v err=%v", res, err)
+	}
+	if res, err := ctrl.FocusWorkspace(context.Background(), "--all"); err == nil || res.Code != "invalid_workspace" {
+		t.Fatalf("FocusWorkspace leading dash: res=%+v err=%v", res, err)
+	}
+	if res, err := ctrl.RenameAgent(context.Background(), "--target", "safe-name"); err == nil || res.Code != "invalid_target" {
+		t.Fatalf("RenameAgent leading dash target: res=%+v err=%v", res, err)
+	}
+	if res, err := ctrl.RenameAgent(context.Background(), "w4:p1", "--force"); err == nil || res.Code != "invalid_name" {
+		t.Fatalf("RenameAgent leading dash name: res=%+v err=%v", res, err)
+	}
+	if res, err := ctrl.RenameAgent(context.Background(), "w4:p1", "\n--force"); err == nil || res.Code != "invalid_name" {
+		t.Fatalf("RenameAgent newline+dash name: res=%+v err=%v", res, err)
+	}
+	if res, err := ctrl.SendPrompt(context.Background(), SendPromptRequest{Target: "-evil", Message: "hi", Confirmed: true}); err == nil || res.Code != "invalid_target" {
+		t.Fatalf("SendPrompt leading dash target: res=%+v err=%v", res, err)
+	}
+	if res, err := ctrl.StartAgent(context.Background(), "--workspace-evil", "codex", ""); err == nil || res.Code != "invalid_workspace" {
+		t.Fatalf("StartAgent leading dash workspace: res=%+v err=%v", res, err)
+	}
+	if res, err := ctrl.StartAgent(context.Background(), "w4", "codex", "--exec"); err == nil || res.Code != "invalid_name" {
+		t.Fatalf("StartAgent leading dash name: res=%+v err=%v", res, err)
+	}
+	if res, err := ctrl.WaitState(context.Background(), "--timeout", "idle", time.Second); err == nil || res.Code != "invalid_target" {
+		t.Fatalf("WaitState leading dash target: res=%+v err=%v", res, err)
+	}
+	if res, err := ctrl.WaitState(context.Background(), "w4:p1", "--state-evil", time.Second); err == nil || res.Code != "invalid_state" {
+		t.Fatalf("WaitState leading dash state: res=%+v err=%v", res, err)
+	}
+	if len(exec.calls) != 0 {
+		t.Fatalf("option injection attempts must never invoke herdr CLI, got calls=%v", exec.calls)
+	}
+}

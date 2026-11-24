@@ -54,7 +54,7 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 
 	if state.Phase == engine.PhaseHidden {
 		capsuleUI.reset(a)
-		a.CloseHubSurface()
+		a.clearHubSurfaceSilently()
 		ui.Box(c).Fill()
 		return
 	}
@@ -106,6 +106,96 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 			col.Children(renderInteractivePhase)
 		})
 	})
+}
+
+// clearHubSurfaceSilently clears any active hub surface without invoking
+// OnRepaint, avoiding re-entrant repaint loops during PhaseHidden renders.
+func (a *AppController) clearHubSurfaceSilently() {
+	hubSurfaceStore.mu.Lock()
+	delete(hubSurfaceStore.active, a)
+	hubSurfaceStore.mu.Unlock()
+}
+
+type visibleOmniboxList struct {
+	items       []engine.OmniboxItem
+	rawIndices  []int // non-nil when items is a filtered slice of state.OmniboxItems
+	selectedRow int   // clamped to [0, len(items)-1], or -1 when empty
+	filtered    bool  // true when a tab-local filter (agent lane/workspace or clipboard kind) is active
+}
+
+func (l visibleOmniboxList) rawIndex(row int) int {
+	if l.rawIndices != nil {
+		return l.rawIndices[row]
+	}
+	return row
+}
+
+func (a *AppController) currentOmniboxState(fallback engine.State) engine.State {
+	a.mu.Lock()
+	sm := a.StateMachine
+	a.mu.Unlock()
+	if sm == nil {
+		return fallback
+	}
+	return sm.State()
+}
+
+func (a *AppController) visibleOmniboxItems(state engine.State) visibleOmniboxList {
+	if state.OmniboxTab == config.TabAgent {
+		items := a.agentVisibleItems(state.OmniboxQuery)
+		filtered := false
+		if lane := agentLaneKind(capsuleUI.laneFilter(a)); lane != agentLaneAll {
+			sessions, _ := a.cachedAgentData()
+			items = filterAgentItemsByLane(items, sessions, lane)
+			filtered = true
+		}
+		if ws := a.agentWorkspaceFilter(); ws != "" {
+			sessions, _ := a.cachedAgentData()
+			items = FilterAgentItemsByWorkspace(items, sessions, ws)
+			filtered = true
+		}
+		a.mu.Lock()
+		sel := a.uiState.agentSelected
+		a.mu.Unlock()
+		if len(items) == 0 {
+			return visibleOmniboxList{items: items, selectedRow: -1, filtered: filtered}
+		}
+		sel = max(0, min(sel, len(items)-1))
+		return visibleOmniboxList{items: items, selectedRow: sel, filtered: filtered}
+	}
+
+	items := state.OmniboxItems
+	if state.OmniboxTab == config.TabClipboard {
+		if kind := a.clipboardStatsFilter(); kind != "" {
+			filteredItems := make([]engine.OmniboxItem, 0, len(items))
+			rawIndices := make([]int, 0, len(items))
+			for i, item := range items {
+				if clipboardItemMatchesKind(item, kind) {
+					filteredItems = append(filteredItems, item)
+					rawIndices = append(rawIndices, i)
+				}
+			}
+			if len(filteredItems) == 0 {
+				return visibleOmniboxList{items: filteredItems, rawIndices: rawIndices, selectedRow: -1, filtered: true}
+			}
+			sel := slices.Index(rawIndices, state.SelectedIndex)
+			if sel < 0 {
+				sel = 0
+			}
+			return visibleOmniboxList{
+				items:       filteredItems,
+				rawIndices:  rawIndices,
+				selectedRow: sel,
+				filtered:    true,
+			}
+		}
+	}
+
+	if len(items) == 0 {
+		return visibleOmniboxList{items: items, selectedRow: -1}
+	}
+	sel := max(0, min(state.SelectedIndex, len(items)-1))
+	return visibleOmniboxList{items: items, selectedRow: sel}
 }
 
 // IMEPillView renders the floating, non-activating pill beside the caret: a
@@ -387,50 +477,20 @@ func (a *AppController) renderOmniboxView(
 	if a.uiState.lastPhase != engine.PhaseOmnibox || a.uiState.lastTab != state.OmniboxTab {
 		a.uiState.searchHandle.RequestFocus(c)
 	}
-	items := state.OmniboxItems
-	var itemIndices []int
-	selectedIdx := state.SelectedIndex
-	if state.OmniboxTab == config.TabAgent {
-		items = a.agentVisibleItems(state.OmniboxQuery)
-		if lane := agentLaneKind(capsuleUI.laneFilter(a)); lane != agentLaneAll {
-			sessions, _ := a.cachedAgentData()
-			items = filterAgentItemsByLane(items, sessions, lane)
-		}
-		if ws := a.agentWorkspaceFilter(); ws != "" {
-			sessions, _ := a.cachedAgentData()
-			items = FilterAgentItemsByWorkspace(items, sessions, ws)
-		}
-		a.mu.Lock()
-		selectedIdx = a.uiState.agentSelected
-		a.mu.Unlock()
-	} else if state.OmniboxTab == config.TabClipboard {
-		if kind := a.clipboardStatsFilter(); kind != "" {
-			filtered := make([]engine.OmniboxItem, 0, len(items))
-			itemIndices = make([]int, 0, len(items))
-			for i, item := range items {
-				if clipboardItemMatchesKind(item, kind) {
-					filtered = append(filtered, item)
-					itemIndices = append(itemIndices, i)
-				}
-			}
-			items = filtered
-			selectedIdx = slices.Index(itemIndices, selectedIdx)
-		}
-	}
-	selectedIdx = max(0, min(selectedIdx, len(items)-1))
+	vis := a.visibleOmniboxItems(state)
+	items := vis.items
+	itemIndices := vis.rawIndices
+	selectedIdx := max(0, vis.selectedRow)
 	defer func() { a.uiState.lastSelectedIdx = selectedIdx }()
 	itemIndex := func(row int) int {
-		if itemIndices != nil {
-			return itemIndices[row]
-		}
-		return row
+		return vis.rawIndex(row)
 	}
 
 	escape := func() {
 		if a.uiState.isComposing {
 			return
 		}
-		current := a.State()
+		current := a.currentOmniboxState(state)
 		if current.Phase != engine.PhaseOmnibox || a.handleActionMenuKey(ui.KeyEscape, 0, current) {
 			return
 		}
@@ -457,25 +517,32 @@ func (a *AppController) renderOmniboxView(
 			a.uiState.searchHandle.RequestFocus(c)
 			return
 		}
+		if current.OmniboxTab == config.TabAgent && a.agentWorkspaceFilter() != "" {
+			a.SetAgentWorkspaceFilter("")
+			a.uiState.searchHandle.RequestFocus(c)
+			return
+		}
 		a.Dispatch(engine.Event{Type: engine.EventEscape})
 	}
 	page := func(key ui.Key, mods ui.Modifiers) bool {
 		if a.uiState.isComposing && imeOwnsKey(key, mods) {
 			return false
 		}
-		row, ok := a.omniboxPagingTarget(key, mods, selectedIdx, len(items))
-		if !ok || len(items) == 0 {
+		current := a.currentOmniboxState(state)
+		curVis := a.visibleOmniboxItems(current)
+		row, ok := a.omniboxPagingTarget(key, mods, max(0, curVis.selectedRow), len(curVis.items))
+		if !ok || len(curVis.items) == 0 {
 			return ok
 		}
 		a.mu.Lock()
 		a.uiState.armKeyboardSelection()
-		if state.OmniboxTab == config.TabAgent {
+		if current.OmniboxTab == config.TabAgent {
 			a.uiState.agentSelected = row
 		}
 		a.mu.Unlock()
 		a.uiState.listState.ScrollIntoView(row)
-		if state.OmniboxTab != config.TabAgent {
-			a.Dispatch(engine.Event{Type: engine.EventSelectIndex, Index: itemIndex(row)})
+		if current.OmniboxTab != config.TabAgent {
+			a.Dispatch(engine.Event{Type: engine.EventSelectIndex, Index: curVis.rawIndex(row)})
 		}
 		return true
 	}
@@ -487,7 +554,7 @@ func (a *AppController) renderOmniboxView(
 			escape()
 			return true
 		}
-		return page(key, mods) || a.handleOmniboxKey(key, mods, state)
+		return page(key, mods) || a.handleOmniboxKey(key, mods, a.currentOmniboxState(state))
 	}
 
 	rootCol := ui.Column(c).FillWidth().Grow(1).Padding(space10, space14).Gap(8)
@@ -497,6 +564,11 @@ func (a *AppController) renderOmniboxView(
 		// application shortcuts and must still work.
 		return ev.Kind == ui.InputKeyDown && handleKey(ev.Key, ev.Mods)
 	})
+	if a.ActiveHubSurface() != HubSurfaceNone {
+		// Hub views replace the Omnibox search field, so no search IME preedit
+		// can be active while a hub surface is shown.
+		a.uiState.isComposing = false
+	}
 	if state.OmniboxTab == config.TabAgent {
 		c.OnWindowShortcut(primaryMod(), ui.KeyR, func() { a.AgentRefresh() })
 	}
@@ -519,8 +591,22 @@ func (a *AppController) renderOmniboxView(
 		shortcut := shortcut
 		c.OnWindowShortcut(mods, shortcut.key, func() {
 			// Modified chords remain application-owned during IME preedit.
-			a.handleOmniboxKey(shortcut.key, mods, state)
+			a.handleOmniboxKey(shortcut.key, mods, a.currentOmniboxState(state))
 		})
+	}
+	// Register window-level ⌘1..6 / Ctrl+1..6 tab shortcuts symmetrically with
+	// ⌘7..9 so tab switching works from hub surfaces, lists, and footers too,
+	// while strictly deferring to active IME preedit composition.
+	if !a.uiState.isComposing {
+		for _, key := range []ui.Key{ui.Key1, ui.Key2, ui.Key3, ui.Key4, ui.Key5, ui.Key6} {
+			key := key
+			c.OnWindowShortcut(mods, key, func() {
+				if a.uiState.isComposing {
+					return
+				}
+				a.handleOmniboxKey(key, mods, a.currentOmniboxState(state))
+			})
+		}
 	}
 	if a.ActiveHubSurface() != HubSurfaceNone {
 		c.OnWindowShortcut(mods, ui.KeyR, func() {
@@ -536,7 +622,7 @@ func (a *AppController) renderOmniboxView(
 			if a.uiState.isComposing {
 				return
 			}
-			a.handleOmniboxKey(key, mods, state)
+			a.handleOmniboxKey(key, mods, a.currentOmniboxState(state))
 		})
 	}
 	// Do not claim Escape while an IME preedit is active: the focused text
@@ -710,11 +796,13 @@ func (a *AppController) renderOmniboxView(
 			renderClipboardStats()
 			hasClipboardFilter := state.OmniboxTab == config.TabClipboard && a.clipboardStatsFilter() != ""
 			hasAgentLaneFilter := state.OmniboxTab == config.TabAgent && capsuleUI.laneFilter(a) != ""
+			hasAgentWSFilter := state.OmniboxTab == config.TabAgent && a.agentWorkspaceFilter() != ""
+			hasAgentFilter := hasAgentLaneFilter || hasAgentWSFilter
 			hasQuery := strings.TrimSpace(state.OmniboxQuery) != ""
-			if state.OmniboxTab == config.TabAgent && a.agentRefreshing() && !hasQuery && !hasAgentLaneFilter {
+			if state.OmniboxTab == config.TabAgent && a.agentRefreshing() && !hasQuery && !hasAgentFilter {
 				kitStateView(c, theme, kitStateLoading, "arrow.clockwise", "正在加载 Agent 会话…", "", nil)
-			} else if hasQuery || hasClipboardFilter || hasAgentLaneFilter {
-				kitSearchEmptyState(c, theme, omniboxEmptyText(state.OmniboxTab), state.OmniboxQuery, hasClipboardFilter || hasAgentLaneFilter, func() {
+			} else if hasQuery || hasClipboardFilter || hasAgentFilter {
+				kitSearchEmptyState(c, theme, omniboxEmptyText(state.OmniboxTab), state.OmniboxQuery, hasClipboardFilter || hasAgentFilter, func() {
 					if hasClipboardFilter {
 						a.clipboardStatsMu.Lock()
 						a.clipboardStats.filter = ""
@@ -722,6 +810,9 @@ func (a *AppController) renderOmniboxView(
 					}
 					if hasAgentLaneFilter {
 						capsuleUI.setLaneFilter(a, "")
+					}
+					if hasAgentWSFilter {
+						a.SetAgentWorkspaceFilter("")
 					}
 					a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: ""})
 					a.uiState.searchHandle.RequestFocus(c)
@@ -900,6 +991,10 @@ func (a *AppController) renderOmniboxView(
 					if list.Submitted() {
 						if state.OmniboxTab == config.TabAgent && selectedIdx >= 0 && selectedIdx < len(items) {
 							_ = a.agentItemAction(items[selectedIdx])
+						} else if itemIndices != nil {
+							if selectedIdx >= 0 && selectedIdx < len(items) {
+								a.Dispatch(engine.Event{Type: engine.EventSelectAndConfirmIndex, Index: itemIndex(selectedIdx)})
+							}
 						} else {
 							a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
 						}
@@ -1288,32 +1383,40 @@ func (a *AppController) omniboxPagingTarget(key ui.Key, mods ui.Modifiers, selec
 }
 
 func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state engine.State) bool {
-	if state.OmniboxTab == config.TabAgent && mods == 0 && (key == ui.KeyDown || key == ui.KeyUp) {
-		items := a.agentVisibleItems(state.OmniboxQuery)
-		if len(items) == 0 {
+	vis := a.visibleOmniboxItems(state)
+
+	if state.OmniboxTab == config.TabAgent {
+		switch {
+		case (key == ui.KeyDown && mods == 0) || (key == ui.KeyN && mods == ui.Ctrl):
+			if len(vis.items) == 0 {
+				return true
+			}
+			idx := (vis.selectedRow + 1) % len(vis.items)
+			a.mu.Lock()
+			a.uiState.armKeyboardSelection()
+			a.uiState.agentSelected = idx
+			a.mu.Unlock()
+			a.uiState.listState.ScrollIntoView(idx)
+			a.SelectIndex(idx)
+			return true
+		case (key == ui.KeyUp && mods == 0) || (key == ui.KeyP && mods == ui.Ctrl):
+			if len(vis.items) == 0 {
+				return true
+			}
+			idx := (vis.selectedRow - 1 + len(vis.items)) % len(vis.items)
+			a.mu.Lock()
+			a.uiState.armKeyboardSelection()
+			a.uiState.agentSelected = idx
+			a.mu.Unlock()
+			a.uiState.listState.ScrollIntoView(idx)
+			a.SelectIndex(idx)
+			return true
+		case (key == ui.KeyEnter && mods == 0) || (key == ui.KeyEnter && isPrimaryMod(mods)):
+			if vis.selectedRow >= 0 && vis.selectedRow < len(vis.items) {
+				return a.agentItemAction(vis.items[vis.selectedRow])
+			}
 			return true
 		}
-		a.mu.Lock()
-		idx := a.uiState.agentSelected
-		if key == ui.KeyDown {
-			idx = (idx + 1) % len(items)
-		} else {
-			idx = (idx - 1 + len(items)) % len(items)
-		}
-		a.uiState.agentSelected = idx
-		a.mu.Unlock()
-		a.SelectIndex(idx)
-		return true
-	}
-	if state.OmniboxTab == config.TabAgent && key == ui.KeyEnter && mods == 0 {
-		items := a.agentVisibleItems(state.OmniboxQuery)
-		a.mu.Lock()
-		idx := a.uiState.agentSelected
-		a.mu.Unlock()
-		if idx >= 0 && idx < len(items) {
-			return a.agentItemAction(items[idx])
-		}
-		return true
 	}
 	// The contextual action menu takes navigation keys while it is open.
 	if a.handleActionMenuKey(key, mods, state) {
@@ -1324,27 +1427,45 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 	if mods == ui.Alt {
 		if idx, ok := rowQuickKeyIndex(key); ok {
 			if state.OmniboxTab == config.TabAgent {
-				items := a.agentVisibleItems(state.OmniboxQuery)
-				if idx < len(items) {
+				if idx < len(vis.items) {
 					a.mu.Lock()
 					a.uiState.agentSelected = idx
 					a.mu.Unlock()
-					return a.agentItemAction(items[idx])
+					return a.agentItemAction(vis.items[idx])
 				}
-			} else if idx < len(state.OmniboxItems) {
-				a.Dispatch(engine.Event{Type: engine.EventSelectAndConfirmIndex, Index: idx})
+				return true
+			}
+			if idx < len(vis.items) {
+				a.Dispatch(engine.Event{Type: engine.EventSelectAndConfirmIndex, Index: vis.rawIndex(idx)})
+				return true
+			}
+			if vis.filtered {
 				return true
 			}
 		}
 	}
 	if mods == (ui.Alt|primaryMod()) || mods == (ui.Alt|ui.Cmd) || mods == (ui.Alt|ui.Ctrl) {
-		if idx, ok := rowQuickKeyIndex(key); ok && idx < len(state.OmniboxItems) {
-			a.Dispatch(engine.Event{
-				Type:      engine.EventSelectAndConfirmIndex,
-				Index:     idx,
-				Secondary: true,
-			})
-			return true
+		if idx, ok := rowQuickKeyIndex(key); ok {
+			if state.OmniboxTab == config.TabAgent {
+				if idx < len(vis.items) {
+					a.mu.Lock()
+					a.uiState.agentSelected = idx
+					a.mu.Unlock()
+					return a.agentItemAction(vis.items[idx])
+				}
+				return true
+			}
+			if idx < len(vis.items) {
+				a.Dispatch(engine.Event{
+					Type:      engine.EventSelectAndConfirmIndex,
+					Index:     vis.rawIndex(idx),
+					Secondary: true,
+				})
+				return true
+			}
+			if vis.filtered {
+				return true
+			}
 		}
 	}
 
@@ -1370,12 +1491,28 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 
 	// Clipboard pin/delete works wherever a clipboard entry is selected
 	// (the Clipboard tab, or '@' prefix routing in the Actions tab).
-	if selected, ok := selectedOmniboxItem(state); ok && selected.Kind == engine.ItemClipboardEntry {
+	selected, hasSelected := selectedOmniboxItem(state)
+	if vis.selectedRow >= 0 && vis.selectedRow < len(vis.items) {
+		selected, hasSelected = vis.items[vis.selectedRow], true
+	} else if vis.filtered {
+		hasSelected = false
+	}
+	if hasSelected && selected.Kind == engine.ItemClipboardEntry {
 		if isPrimaryMod(mods) && key == ui.KeyP {
+			if vis.filtered {
+				if rawIdx := vis.rawIndex(vis.selectedRow); rawIdx != state.SelectedIndex {
+					a.Dispatch(engine.Event{Type: engine.EventSelectIndex, Index: rawIdx})
+				}
+			}
 			a.Dispatch(engine.Event{Type: engine.EventTogglePinSelectedClipboardItem})
 			return true
 		}
 		if isPrimaryMod(mods) && (key == ui.KeyBackspace || key == ui.KeyDelete) {
+			if vis.filtered {
+				if rawIdx := vis.rawIndex(vis.selectedRow); rawIdx != state.SelectedIndex {
+					a.Dispatch(engine.Event{Type: engine.EventSelectIndex, Index: rawIdx})
+				}
+			}
 			a.Dispatch(engine.Event{Type: engine.EventDeleteSelectedClipboardItem})
 			return true
 		}
@@ -1384,9 +1521,28 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 	if isPrimaryMod(mods) {
 		switch {
 		case key == ui.KeyEnter:
+			if vis.filtered {
+				if vis.selectedRow >= 0 && vis.selectedRow < len(vis.items) {
+					a.Dispatch(engine.Event{
+						Type:      engine.EventSelectAndConfirmIndex,
+						Index:     vis.rawIndex(vis.selectedRow),
+						Secondary: true,
+					})
+				}
+				return true
+			}
 			a.Dispatch(engine.Event{Type: engine.EventConfirmSecondarySelection})
 			return true
 		case key == ui.KeyK:
+			if vis.filtered {
+				if vis.selectedRow >= 0 && vis.selectedRow < len(vis.items) {
+					if rawIdx := vis.rawIndex(vis.selectedRow); rawIdx != state.SelectedIndex {
+						a.Dispatch(engine.Event{Type: engine.EventSelectIndex, Index: rawIdx})
+					}
+					a.toggleOmniboxActionMenu()
+				}
+				return true
+			}
 			if len(state.OmniboxItems) > 0 {
 				a.toggleOmniboxActionMenu()
 			}
@@ -1400,6 +1556,9 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 			return true
 		}
 		if idx, ok := numberKeyIndex(key); ok && idx < len(omniboxTabs) {
+			if a.uiState.isComposing {
+				return false
+			}
 			a.CloseHubSurface()
 			capsuleUI.setActionMenuShown(a, false)
 			a.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: omniboxTabs[idx]})
@@ -1409,12 +1568,36 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 
 	switch {
 	case key == ui.KeyDown && mods == 0, key == ui.KeyN && mods == ui.Ctrl:
+		if vis.filtered {
+			if len(vis.items) == 0 {
+				return true
+			}
+			nextRow := (vis.selectedRow + 1) % len(vis.items)
+			a.Dispatch(engine.Event{Type: engine.EventSelectIndex, Index: vis.rawIndex(nextRow)})
+			a.uiState.listState.ScrollIntoView(nextRow)
+			return true
+		}
 		a.Dispatch(engine.Event{Type: engine.EventSelectNext})
 		return true
 	case key == ui.KeyUp && mods == 0, key == ui.KeyP && mods == ui.Ctrl:
+		if vis.filtered {
+			if len(vis.items) == 0 {
+				return true
+			}
+			prevRow := (vis.selectedRow - 1 + len(vis.items)) % len(vis.items)
+			a.Dispatch(engine.Event{Type: engine.EventSelectIndex, Index: vis.rawIndex(prevRow)})
+			a.uiState.listState.ScrollIntoView(prevRow)
+			return true
+		}
 		a.Dispatch(engine.Event{Type: engine.EventSelectPrevious})
 		return true
 	case key == ui.KeyEnter && mods == 0:
+		if vis.filtered {
+			if vis.selectedRow >= 0 && vis.selectedRow < len(vis.items) {
+				a.Dispatch(engine.Event{Type: engine.EventSelectAndConfirmIndex, Index: vis.rawIndex(vis.selectedRow)})
+			}
+			return true
+		}
 		a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
 		return true
 	case key == ui.KeyEscape && mods == 0:
