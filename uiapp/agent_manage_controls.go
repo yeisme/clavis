@@ -2,6 +2,7 @@ package uiapp
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -11,7 +12,25 @@ import (
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/pkg/core/i18n"
+	runtimecoord "github.com/yeisme/clavis/pkg/core/runtime"
 )
+
+const maxAgentSessionControlStates = 64
+
+type agentSessionControlState struct {
+	renameOpen   bool
+	renameDraft  string
+	promptOpen   bool
+	promptDraft  string
+	confirmArmed bool
+	statusMsg    string
+	statusIsErr  bool
+	touchedAt    time.Time
+}
+
+func (cs *agentSessionControlState) isEmpty() bool {
+	return cs == nil || (!cs.renameOpen && cs.renameDraft == "" && !cs.promptOpen && cs.promptDraft == "" && !cs.confirmArmed && cs.statusMsg == "")
+}
 
 type agentManageUIState struct {
 	mu              sync.Mutex
@@ -19,14 +38,10 @@ type agentManageUIState struct {
 	startOpen       bool
 	startCLI        string
 	startName       string
-	renameOpen      bool
-	renameDraft     string
-	promptOpen      bool
-	promptDraft     string
-	confirmArmed    bool
 	statusMsg       string
 	statusIsErr     bool
 	watching        map[string]bool
+	sessions        map[string]*agentSessionControlState
 }
 
 var agentManageStore = struct {
@@ -44,10 +59,91 @@ func agentManageStateFor(c *AppController) *agentManageUIState {
 		st = &agentManageUIState{
 			startCLI: "codex",
 			watching: make(map[string]bool),
+			sessions: make(map[string]*agentSessionControlState),
 		}
 		agentManageStore.byCtl[c] = st
 	}
 	return st
+}
+
+func agentSessionControlKey(session agentsession.Session) string {
+	if id := strings.TrimSpace(session.PaneID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(session.ID)
+}
+
+func (c *AppController) resolveAgentControlKey(target string) string {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return ""
+	}
+	sessions, _ := c.cachedAgentData()
+	for _, s := range sessions {
+		if strings.TrimSpace(s.PaneID) == target || strings.TrimSpace(s.ID) == target || strings.TrimSpace(s.AgentName) == target {
+			if key := agentSessionControlKey(s); key != "" {
+				return key
+			}
+		}
+	}
+	return target
+}
+
+func (s *agentManageUIState) sessionLocked(sessionID string, create bool) *agentSessionControlState {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	if s.sessions == nil {
+		if !create {
+			return nil
+		}
+		s.sessions = make(map[string]*agentSessionControlState)
+	}
+	if cs, ok := s.sessions[sessionID]; ok && cs != nil {
+		cs.touchedAt = time.Now()
+		return cs
+	}
+	if !create {
+		return nil
+	}
+	s.evictSessionsLocked()
+	cs := &agentSessionControlState{touchedAt: time.Now()}
+	s.sessions[sessionID] = cs
+	return cs
+}
+
+func (s *agentManageUIState) evictSessionsLocked() {
+	if len(s.sessions) < maxAgentSessionControlStates {
+		return
+	}
+	for k, v := range s.sessions {
+		if v.isEmpty() {
+			delete(s.sessions, k)
+		}
+	}
+	for len(s.sessions) >= maxAgentSessionControlStates {
+		var oldestKey string
+		var oldestTime time.Time
+		first := true
+		for k, v := range s.sessions {
+			if first || v.touchedAt.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.touchedAt
+				first = false
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(s.sessions, oldestKey)
+	}
+}
+
+func (s *agentManageUIState) pruneIfEmptyLocked(sessionID string) {
+	if cs := s.sessions[sessionID]; cs != nil && cs.isEmpty() {
+		delete(s.sessions, sessionID)
+	}
 }
 
 func (c *AppController) agentWorkspaceFilter() string {
@@ -92,18 +188,38 @@ func FilterAgentItemsByWorkspace(items []engine.OmniboxItem, sessions []agentses
 	return filtered
 }
 
-func (c *AppController) setAgentManageStatus(msg string, isErr bool) {
-	st := agentManageStateFor(c)
-	st.mu.Lock()
-	st.statusMsg = msg
-	st.statusIsErr = isErr
-	st.mu.Unlock()
+func (c *AppController) triggerAgentManageRepaint() {
 	c.mu.Lock()
 	repaint := c.OnRepaint
 	c.mu.Unlock()
 	if repaint != nil {
 		repaint()
 	}
+}
+
+func (c *AppController) setAgentManageStatus(msg string, isErr bool) {
+	st := agentManageStateFor(c)
+	st.mu.Lock()
+	st.statusMsg = msg
+	st.statusIsErr = isErr
+	st.mu.Unlock()
+	c.triggerAgentManageRepaint()
+}
+
+func (c *AppController) setAgentSessionStatus(target, msg string, isErr bool) {
+	key := c.resolveAgentControlKey(target)
+	if key == "" {
+		c.setAgentManageStatus(msg, isErr)
+		return
+	}
+	st := agentManageStateFor(c)
+	st.mu.Lock()
+	cs := st.sessionLocked(key, true)
+	cs.statusMsg = msg
+	cs.statusIsErr = isErr
+	st.pruneIfEmptyLocked(key)
+	st.mu.Unlock()
+	c.triggerAgentManageRepaint()
 }
 
 // FocusHerdrWorkspace focuses a Herdr workspace synchronously or async.
@@ -125,18 +241,22 @@ func (c *AppController) FocusHerdrWorkspace(workspaceID string) (host.OperationR
 func (c *AppController) RenameHerdrAgent(target, newName string) (host.OperationResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+	key := c.resolveAgentControlKey(target)
 	hc := agentsession.NewHerdrController(c.currentHerdrExecutor())
 	res, err := hc.RenameAgent(ctx, target, newName)
 	if err != nil {
-		c.setAgentManageStatus(nonEmptyOr(res.Message, err.Error()), true)
+		c.setAgentSessionStatus(key, nonEmptyOr(res.Message, err.Error()), true)
 		return res, err
 	}
 	st := agentManageStateFor(c)
 	st.mu.Lock()
-	st.renameOpen = false
-	st.renameDraft = ""
+	if cs := st.sessionLocked(key, false); cs != nil {
+		cs.renameOpen = false
+		cs.renameDraft = ""
+		st.pruneIfEmptyLocked(key)
+	}
 	st.mu.Unlock()
-	c.setAgentManageStatus(pickLang(i18n.IsChinese(), "已重命名为 "+newName, "Renamed to "+newName), false)
+	c.setAgentSessionStatus(key, pickLang(i18n.IsChinese(), "已重命名为 "+newName, "Renamed to "+newName), false)
 	c.AgentRefresh()
 	return res, nil
 }
@@ -145,6 +265,7 @@ func (c *AppController) RenameHerdrAgent(target, newName string) (host.Operation
 func (c *AppController) SendHerdrPrompt(target, message string, confirmed bool) (host.OperationResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	key := c.resolveAgentControlKey(target)
 	hc := agentsession.NewHerdrController(c.currentHerdrExecutor())
 	res, err := hc.SendPrompt(ctx, agentsession.SendPromptRequest{
 		Target:    target,
@@ -153,18 +274,21 @@ func (c *AppController) SendHerdrPrompt(target, message string, confirmed bool) 
 	})
 	st := agentManageStateFor(c)
 	st.mu.Lock()
-	st.confirmArmed = false
-	if err == nil {
-		st.promptOpen = false
-		st.promptDraft = ""
+	if cs := st.sessionLocked(key, false); cs != nil {
+		cs.confirmArmed = false
+		if err == nil {
+			cs.promptOpen = false
+			cs.promptDraft = ""
+		}
+		st.pruneIfEmptyLocked(key)
 	}
 	st.mu.Unlock()
 
 	if err != nil {
-		c.setAgentManageStatus(nonEmptyOr(res.Message, err.Error()), true)
+		c.setAgentSessionStatus(key, nonEmptyOr(res.Message, err.Error()), true)
 		return res, err
 	}
-	c.setAgentManageStatus(pickLang(i18n.IsChinese(), "指令已发送至终端", "Prompt delivered"), false)
+	c.setAgentSessionStatus(key, pickLang(i18n.IsChinese(), "指令已发送至终端", "Prompt delivered"), false)
 	c.ForceRefreshAgentOutput(target)
 	return res, nil
 }
@@ -204,19 +328,27 @@ func (c *AppController) WatchHerdrAgentCompletion(target, title string) {
 	st.watching[target] = true
 	st.mu.Unlock()
 
+	lbl := nonEmptyOr(strings.TrimSpace(title), target)
+	regCtx, done := c.ensureRuntime().Begin(runtimecoord.AgentWait, "Agent wait "+lbl)
 	exec := c.currentHerdrExecutor()
 	go func() {
+		defer done()
 		defer func() {
 			st.mu.Lock()
 			delete(st.watching, target)
 			st.mu.Unlock()
 		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(regCtx, 60*time.Second)
 		defer cancel()
 		res, err := agentsession.NewHerdrController(exec).WaitState(ctx, target, "idle", 45*time.Second)
-		lbl := nonEmptyOr(strings.TrimSpace(title), target)
 		if err != nil {
+			if regCtx.Err() != nil || errors.Is(err, context.Canceled) {
+				return
+			}
 			c.ShowToastOrHUD(nonEmptyOr(res.Message, err.Error()))
+			return
+		}
+		if regCtx.Err() != nil {
 			return
 		}
 		c.ShowToastOrHUD(pickLang(i18n.IsChinese(), "Agent "+lbl+" 已完成当前回合", "Agent "+lbl+" finished turn"))
@@ -234,9 +366,11 @@ func (a *AppController) renderAgentWorkspaceStrip(c *ui.Context, theme *ui.Theme
 	startOpen := st.startOpen
 	startCLI := st.startCLI
 	startName := st.startName
+	wsStatusMsg := st.statusMsg
+	wsStatusErr := st.statusIsErr
 	st.mu.Unlock()
 
-	if len(workspaces) == 0 && !startOpen {
+	if len(workspaces) == 0 && !startOpen && wsStatusMsg == "" {
 		return
 	}
 
@@ -330,6 +464,13 @@ func (a *AppController) renderAgentWorkspaceStrip(c *ui.Context, theme *ui.Theme
 				})
 			})
 		}
+		if wsStatusMsg != "" {
+			if wsStatusErr {
+				kitWarningBanner(c, theme, wsStatusMsg)
+			} else {
+				ui.Text(c, wsStatusMsg).FontSize(typeMicro).TextColor(theme.TextMuted).Wrap()
+			}
+		}
 	})
 }
 
@@ -338,24 +479,35 @@ func (a *AppController) renderAgentManageControls(c *ui.Context, theme *ui.Theme
 		return
 	}
 	zh := i18n.IsChinese()
+	target := strings.TrimSpace(session.PaneID)
+	sessionKey := agentSessionControlKey(session)
 	st := agentManageStateFor(a)
 	st.mu.Lock()
-	renameOpen := st.renameOpen
-	renameDraft := st.renameDraft
-	promptOpen := st.promptOpen
-	promptDraft := st.promptDraft
-	confirmArmed := st.confirmArmed
-	statusMsg := st.statusMsg
-	statusErr := st.statusIsErr
-	watching := st.watching[session.PaneID]
+	var (
+		renameOpen   bool
+		renameDraft  string
+		promptOpen   bool
+		promptDraft  string
+		confirmArmed bool
+		statusMsg    string
+		statusErr    bool
+	)
+	if cs := st.sessionLocked(sessionKey, false); cs != nil {
+		renameOpen = cs.renameOpen
+		renameDraft = cs.renameDraft
+		promptOpen = cs.promptOpen
+		promptDraft = cs.promptDraft
+		confirmArmed = cs.confirmArmed
+		statusMsg = cs.statusMsg
+		statusErr = cs.statusIsErr
+	}
+	watching := st.watching[target]
 	st.mu.Unlock()
 
-	target := session.PaneID
-
-	ui.Column(c).Key("agent-manage-controls").FillWidth().Gap(space4).Children(func() {
+	ui.Column(c).Key("agent-manage-controls:" + sessionKey).FillWidth().Gap(space4).Children(func() {
 		ui.Row(c).FillWidth().Wrap().Gap(space4).AlignItems(ui.Center).Children(func() {
 			actionBtn := func(key, label string, active bool, fn func()) {
-				b := ui.ButtonBase(c).Key(key).Label(label).Padding(space2, space6).Radius(radius4).FocusRing(false)
+				b := ui.ButtonBase(c).Key(key + ":" + sessionKey).Label(label).Padding(space2, space6).Radius(radius4).FocusRing(false)
 				if active {
 					b.Background(theme.Accent.Alpha(alphaSubtle)).Border(space1, theme.Accent.Alpha(alphaHalf))
 				} else {
@@ -380,10 +532,12 @@ func (a *AppController) renderAgentManageControls(c *ui.Context, theme *ui.Theme
 			}
 			actionBtn("agent-rename-toggle", pickLang(zh, "重命名", "Rename"), renameOpen, func() {
 				st.mu.Lock()
-				st.renameOpen = !st.renameOpen
-				if st.renameOpen && st.renameDraft == "" {
-					st.renameDraft = nonEmptyOr(session.AgentName, session.Title)
+				cs := st.sessionLocked(sessionKey, true)
+				cs.renameOpen = !cs.renameOpen
+				if cs.renameOpen && cs.renameDraft == "" {
+					cs.renameDraft = nonEmptyOr(session.AgentName, session.Title)
 				}
+				st.pruneIfEmptyLocked(sessionKey)
 				st.mu.Unlock()
 			})
 			watchLbl := pickLang(zh, "完成后提醒", "Watch Done")
@@ -395,8 +549,10 @@ func (a *AppController) renderAgentManageControls(c *ui.Context, theme *ui.Theme
 			})
 			actionBtn("agent-send-toggle", pickLang(zh, "发送指令", "Send Prompt"), promptOpen, func() {
 				st.mu.Lock()
-				st.promptOpen = !st.promptOpen
-				st.confirmArmed = false
+				cs := st.sessionLocked(sessionKey, true)
+				cs.promptOpen = !cs.promptOpen
+				cs.confirmArmed = false
+				st.pruneIfEmptyLocked(sessionKey)
 				st.mu.Unlock()
 			})
 		})
@@ -411,15 +567,16 @@ func (a *AppController) renderAgentManageControls(c *ui.Context, theme *ui.Theme
 
 		if renameOpen {
 			ui.Row(c).FillWidth().Gap(space4).AlignItems(ui.Center).Children(func() {
-				in := ui.TextInput(c.Key("agent-rename-input"), &renameDraft).
+				in := ui.TextInput(c.Key("agent-rename-input:"+sessionKey), &renameDraft).
 					Placeholder(pickLang(zh, "输入新名称", "New agent name")).Grow(1)
 				if in.Changed() {
 					st.mu.Lock()
-					st.renameDraft = renameDraft
+					cs := st.sessionLocked(sessionKey, true)
+					cs.renameDraft = renameDraft
 					st.mu.Unlock()
 				}
 				applyLbl := pickLang(zh, "应用", "Apply")
-				if ui.Button(c, applyLbl).Key("agent-rename-apply").Label(applyLbl).Padding(space2, space8).Clicked() {
+				if ui.Button(c, applyLbl).Key("agent-rename-apply:"+sessionKey).Label(applyLbl).Padding(space2, space8).Clicked() {
 					go a.RenameHerdrAgent(target, renameDraft)
 				}
 			})
@@ -431,41 +588,44 @@ func (a *AppController) renderAgentManageControls(c *ui.Context, theme *ui.Theme
 					ui.Row(c).FillWidth().Wrap().Gap(space4).Children(func() {
 						for _, preset := range []string{"继续并修复", "总结当前改动", "仅只读检查测试"} {
 							pCopy := preset
-							pb := ui.ButtonBase(c).Key("agent-preset-"+pCopy).Label(pCopy).Padding(space2, space6).Radius(radius4).
+							pb := ui.ButtonBase(c).Key("agent-preset-"+pCopy+":"+sessionKey).Label(pCopy).Padding(space2, space6).Radius(radius4).
 								Background(theme.Surface).Border(space1, hairline(theme)).FocusRing(false)
 							pb.Children(func() {
 								ui.Text(c, pCopy).FontSize(typeMicro).TextColor(secondaryInk(theme)).SingleLine()
 							})
 							if pb.Clicked() {
 								st.mu.Lock()
-								st.promptDraft = pCopy
-								st.confirmArmed = false
+								cs := st.sessionLocked(sessionKey, true)
+								cs.promptDraft = pCopy
+								cs.confirmArmed = false
 								st.mu.Unlock()
 							}
 						}
 					})
-					in := ui.TextInput(c.Key("agent-prompt-input"), &promptDraft).
+					in := ui.TextInput(c.Key("agent-prompt-input:"+sessionKey), &promptDraft).
 						Placeholder(pickLang(zh, "输入终端指令（需二次确认）", "Prompt text (requires confirmation)")).FillWidth()
 					if in.Changed() {
 						st.mu.Lock()
-						st.promptDraft = promptDraft
-						st.confirmArmed = false
+						cs := st.sessionLocked(sessionKey, true)
+						cs.promptDraft = promptDraft
+						cs.confirmArmed = false
 						st.mu.Unlock()
 					}
 					ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 						ui.Text(c, pickLang(zh, "目标: "+target, "Target: "+target)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine().Grow(1)
 						if !confirmArmed {
 							armLbl := pickLang(zh, "准备发送", "Prepare Send")
-							if ui.Button(c, armLbl).Key("agent-send-arm").Label(armLbl).Padding(space2, space8).Clicked() {
+							if ui.Button(c, armLbl).Key("agent-send-arm:"+sessionKey).Label(armLbl).Padding(space2, space8).Clicked() {
 								if strings.TrimSpace(promptDraft) != "" {
 									st.mu.Lock()
-									st.confirmArmed = true
+									cs := st.sessionLocked(sessionKey, true)
+									cs.confirmArmed = true
 									st.mu.Unlock()
 								}
 							}
 						} else {
 							confirmLbl := pickLang(zh, "确认发送到终端", "Confirm Send")
-							if ui.PrimaryButton(c, confirmLbl).Key("agent-send-confirm").Label(confirmLbl).Padding(space2, space10).Clicked() {
+							if ui.PrimaryButton(c, confirmLbl).Key("agent-send-confirm:"+sessionKey).Label(confirmLbl).Padding(space2, space10).Clicked() {
 								go a.SendHerdrPrompt(target, promptDraft, true)
 							}
 						}

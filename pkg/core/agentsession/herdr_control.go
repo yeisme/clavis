@@ -19,7 +19,22 @@ var allowedHerdrAgentCLIs = map[string]bool{
 	"opencode": true,
 }
 
-var sendSecretPattern = regexp.MustCompile(`(?i)(?:\b(?:sk-[a-z0-9_-]{8,}|ghp_[a-z0-9]{10,}|glpat-[a-z0-9_-]{10,}|akia[0-9a-z]{12,})|-----begin [a-z ]+private key-----)`)
+// sendSecretPattern supplements sanitize.go's secretRE with PEM private-key
+// blocks, additional provider token prefixes, and quoted credential assignments
+// so SendPrompt never writes credentials to a terminal.
+var sendSecretPattern = regexp.MustCompile(`(?i)(?:\b(?:sk-[a-z0-9_-]{8,}|gh[pous]_[a-z0-9_]{8,}|github_pat_[a-z0-9_]{8,}|glpat-[a-z0-9_-]{10,}|xox[bp]-[a-z0-9_-]{8,}|akia[0-9a-z]{12,})|(?:bearer\s+|(?:api_?key|secret_?key|access_?token|password|passwd|token)\s*[=:]\s*)["'][^\s"']+|-----begin [a-z0-9 -]*private key-----)`)
+
+func containsSendSecret(msg string) bool {
+	return secretRE.MatchString(msg) || sendSecretPattern.MatchString(msg)
+}
+
+func isUnsafeCLIValue(v string) bool {
+	return strings.HasPrefix(v, "-") || strings.ContainsRune(v, '\x00')
+}
+
+func isUnsafeCLIIdentifier(v string) bool {
+	return isUnsafeCLIValue(v) || strings.ContainsAny(v, "\r\n")
+}
 
 // SendPromptRequest carries gated parameters for `herdr agent send`.
 type SendPromptRequest struct {
@@ -66,6 +81,10 @@ func (c *HerdrClient) FocusPane(ctx context.Context, paneID string) (host.Operat
 		res.State, res.Code, res.Message = host.StateFailed, "invalid_target", "缺少目标面板 ID"
 		return res, fmt.Errorf("agentsession: empty pane id")
 	}
+	if isUnsafeCLIIdentifier(paneID) {
+		res.State, res.Code, res.Message = host.StateFailed, "invalid_target", "目标面板 ID 不能以 - 开头"
+		return res, fmt.Errorf("agentsession: unsafe pane id %q", paneID)
+	}
 	path, ok := c.resolveBinary()
 	if !ok {
 		res.State, res.Code, res.Message = host.StateFailed, "herdr_unavailable", "未检测到 herdr"
@@ -95,6 +114,10 @@ func (c *HerdrController) FocusWorkspace(ctx context.Context, workspaceID string
 	if workspaceID == "" {
 		res.State, res.Code, res.Message = host.StateFailed, "invalid_workspace", "缺少目标工作区 ID"
 		return res, fmt.Errorf("agentsession: empty workspace id")
+	}
+	if isUnsafeCLIIdentifier(workspaceID) {
+		res.State, res.Code, res.Message = host.StateFailed, "invalid_workspace", "工作区 ID 不能以 - 开头"
+		return res, fmt.Errorf("agentsession: unsafe workspace id %q", workspaceID)
 	}
 	path, ok := c.resolveBinary()
 	if !ok {
@@ -126,6 +149,14 @@ func (c *HerdrController) RenameAgent(ctx context.Context, target, newName strin
 	if target == "" || cleanName == "" || len([]rune(cleanName)) > 40 {
 		res.State, res.Code, res.Message = host.StateFailed, "invalid_name", "名称无效（需 1-40 字符）"
 		return res, fmt.Errorf("agentsession: invalid target or name")
+	}
+	if isUnsafeCLIIdentifier(target) {
+		res.State, res.Code, res.Message = host.StateFailed, "invalid_target", "目标面板 ID 不能以 - 开头"
+		return res, fmt.Errorf("agentsession: unsafe rename target %q", target)
+	}
+	if isUnsafeCLIValue(cleanName) {
+		res.State, res.Code, res.Message = host.StateFailed, "invalid_name", "名称不能以 - 开头"
+		return res, fmt.Errorf("agentsession: unsafe agent name %q", cleanName)
 	}
 	path, ok := c.resolveBinary()
 	if !ok {
@@ -162,11 +193,15 @@ func (c *HerdrController) SendPrompt(ctx context.Context, req SendPromptRequest)
 	}
 	target := strings.TrimSpace(req.Target)
 	msg := strings.TrimSpace(req.Message)
-	if target == "" || msg == "" {
+	if target == "" || msg == "" || strings.ContainsRune(msg, '\x00') {
 		res.State, res.Code, res.Message = host.StateFailed, "invalid_send_request", "目标面板或指令内容为空"
 		return res, fmt.Errorf("agentsession: empty target or message")
 	}
-	if sendSecretPattern.MatchString(msg) {
+	if isUnsafeCLIIdentifier(target) {
+		res.State, res.Code, res.Message, res.Retryable = host.StateFailed, "invalid_target", "目标面板 ID 不能以 - 开头", false
+		return res, fmt.Errorf("agentsession: unsafe send target %q", target)
+	}
+	if containsSendSecret(msg) {
 		res.State, res.Code, res.Message, res.Retryable = host.StateFailed, "secret_blocked", "检测到疑似密钥或令牌前缀，已阻止向终端明文发送", false
 		return res, fmt.Errorf("agentsession: blocked secret-like token in prompt")
 	}
@@ -215,16 +250,26 @@ func (c *HerdrController) StartAgent(ctx context.Context, workspace, agentCLI, n
 		res.State, res.Code, res.Message = host.StateFailed, "disallowed_agent_cli", "仅允许启动受信任白名单 Agent (claude/codex/pi/agy/gemini/opencode)"
 		return res, fmt.Errorf("agentsession: disallowed agent CLI %q", agentCLI)
 	}
+	ws := strings.TrimSpace(workspace)
+	if ws != "" && isUnsafeCLIIdentifier(ws) {
+		res.State, res.Code, res.Message = host.StateFailed, "invalid_workspace", "工作区 ID 不能以 - 开头"
+		return res, fmt.Errorf("agentsession: unsafe workspace %q", ws)
+	}
+	nm := strings.TrimSpace(name)
+	if nm != "" && isUnsafeCLIIdentifier(nm) {
+		res.State, res.Code, res.Message = host.StateFailed, "invalid_name", "名称不能以 - 开头"
+		return res, fmt.Errorf("agentsession: unsafe agent name %q", nm)
+	}
 	path, ok := c.resolveBinary()
 	if !ok {
 		res.State, res.Code, res.Message = host.StateFailed, "herdr_unavailable", "未检测到 herdr"
 		return res, fmt.Errorf("herdr binary not found")
 	}
 	args := []string{"agent", "start", "--agent", cli}
-	if ws := strings.TrimSpace(workspace); ws != "" {
+	if ws != "" {
 		args = append(args, "--workspace", ws)
 	}
-	if nm := strings.TrimSpace(name); nm != "" {
+	if nm != "" {
 		args = append(args, "--name", nm)
 	}
 	if ctx == nil {
@@ -248,8 +293,17 @@ func (c *HerdrController) WaitState(ctx context.Context, target, state string, t
 		res.State, res.Code, res.Message = host.StateFailed, "invalid_target", "缺少监听目标"
 		return res, fmt.Errorf("agentsession: empty wait target")
 	}
-	if strings.TrimSpace(state) == "" {
+	if isUnsafeCLIIdentifier(target) {
+		res.State, res.Code, res.Message = host.StateFailed, "invalid_target", "监听目标不能以 - 开头"
+		return res, fmt.Errorf("agentsession: unsafe wait target %q", target)
+	}
+	state = strings.TrimSpace(state)
+	if state == "" {
 		state = "idle"
+	}
+	if isUnsafeCLIIdentifier(state) {
+		res.State, res.Code, res.Message = host.StateFailed, "invalid_state", "等待状态不能以 - 开头"
+		return res, fmt.Errorf("agentsession: unsafe wait state %q", state)
 	}
 	if timeout <= 0 {
 		timeout = 30 * time.Second
