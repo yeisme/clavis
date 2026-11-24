@@ -210,25 +210,8 @@ type annotateControllerState struct {
 	statusMsg   string
 }
 
-var annotateStateStore = struct {
-	mu    sync.Mutex
-	byCtl map[*AppController]*annotateControllerState
-}{
-	byCtl: make(map[*AppController]*annotateControllerState),
-}
-
 func annotateStateFor(c *AppController) *annotateControllerState {
-	annotateStateStore.mu.Lock()
-	defer annotateStateStore.mu.Unlock()
-	st := annotateStateStore.byCtl[c]
-	if st == nil {
-		st = &annotateControllerState{
-			tool:        annotate.ToolRect,
-			strokeWidth: 4,
-		}
-		annotateStateStore.byCtl[c] = st
-	}
-	return st
+	return c.annotateStateForCtrl()
 }
 
 // AnnotateOpen reports whether an annotation document session is currently active.
@@ -507,13 +490,14 @@ func (c *AppController) recordPNGToMediaAndClipboard(pngBytes []byte) error {
 	if mediaDir := annotateMediaDir(cfgDir); mediaDir != "" && c.ClipboardStore != nil {
 		ms := clipboard.NewMediaStore(mediaDir)
 		if media, err := ms.SaveImage(pngBytes); err == nil {
-			_, _, _ = c.ClipboardStore.Record(context.Background(), clipboard.CaptureCandidate{
+			ctx := c.lifeCtx()
+			_, _, _ = c.ClipboardStore.Record(ctx, clipboard.CaptureCandidate{
 				Content:       fmt.Sprintf("Screenshot %dx%d", media.Width, media.Height),
 				SourceAppName: "Clavis Annotate",
 				Timestamp:     time.Now(),
 				Media:         media,
 			})
-			c.syncClipboardEntries(context.Background())
+			c.syncClipboardEntries(ctx)
 		}
 	}
 	if c.AnnotateCopyWriter != nil {

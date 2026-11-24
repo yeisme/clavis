@@ -221,281 +221,326 @@ func computePreviewText(content string, rawMode bool, limit int) cachedPreviewTe
 	return entry
 }
 
-// capsuleEphemeralStore keeps per-controller ephemeral UI state for the
-// CapsuleView upgrades (preview pane override, contextual action menu,
-// follow-up IME composition flag, and bounded row/preview caches) without
-// widening AppController.
-//
-// Everything here is accessed from the UI build thread, but the runtime may
-// repaint from another goroutine, so all access is guarded by mu.
-type capsuleEphemeralStore struct {
+// capsuleUIState holds per-controller ephemeral UI state for CapsuleView
+// upgrades (preview pane override, contextual action menu, follow-up IME
+// composition flag, and bounded row/preview caches). Owned by AppController
+// via controllerSubStates.
+type capsuleUIState struct {
 	mu sync.Mutex
 
-	previewVisible    map[*AppController]bool // presence = explicit user override
-	actionMenuOpen    map[*AppController]bool
-	actionMenuIdx     map[*AppController]int
-	followUpComposing map[*AppController]bool
-	aiStepsExpanded   map[*AppController]bool
-	aiReviseOpen      map[*AppController]bool
-	agentLaneFilter   map[*AppController]string
-	agentDrawerOpen   map[*AppController]bool
-	previewRawMode    map[*AppController]bool
-	previewExpandedID map[*AppController]string
-	rowMetaCaches     map[*AppController]*rowMetaCache
-	previewCaches     map[*AppController]*previewTextCache
+	hasPreviewVisible bool
+	previewVisible    bool
+	actionMenuOpen    bool
+	actionMenuIdx     int
+	followUpComposing bool
+	aiStepsExpanded   bool
+	aiReviseOpen      bool
+	agentLaneFilter   string
+	agentDrawerOpen   bool
+	previewRawMode    bool
+	previewExpandedID string
+	rowMetaCache      *rowMetaCache
+	previewCache      *previewTextCache
 }
 
-var capsuleUI = &capsuleEphemeralStore{
-	previewVisible:    make(map[*AppController]bool),
-	actionMenuOpen:    make(map[*AppController]bool),
-	actionMenuIdx:     make(map[*AppController]int),
-	followUpComposing: make(map[*AppController]bool),
-	aiStepsExpanded:   make(map[*AppController]bool),
-	aiReviseOpen:      make(map[*AppController]bool),
-	agentLaneFilter:   make(map[*AppController]string),
-	agentDrawerOpen:   make(map[*AppController]bool),
-	previewRawMode:    make(map[*AppController]bool),
-	previewExpandedID: make(map[*AppController]string),
-	rowMetaCaches:     make(map[*AppController]*rowMetaCache),
-	previewCaches:     make(map[*AppController]*previewTextCache),
-}
+// capsuleEphemeralStore is a stateless facade forwarding CapsuleView UI helper
+// calls to per-controller owned state on AppController.
+type capsuleEphemeralStore struct{}
+
+var capsuleUI = &capsuleEphemeralStore{}
 
 func (s *capsuleEphemeralStore) reset(ctrl *AppController) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.previewVisible, ctrl)
-	delete(s.actionMenuOpen, ctrl)
-	delete(s.actionMenuIdx, ctrl)
-	delete(s.followUpComposing, ctrl)
-	delete(s.aiStepsExpanded, ctrl)
-	delete(s.aiReviseOpen, ctrl)
-	delete(s.agentLaneFilter, ctrl)
-	delete(s.agentDrawerOpen, ctrl)
-	delete(s.previewRawMode, ctrl)
-	delete(s.previewExpandedID, ctrl)
-	delete(s.rowMetaCaches, ctrl)
-	delete(s.previewCaches, ctrl)
+	if ctrl == nil {
+		return
+	}
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	st.hasPreviewVisible = false
+	st.previewVisible = false
+	st.actionMenuOpen = false
+	st.actionMenuIdx = 0
+	st.followUpComposing = false
+	st.aiStepsExpanded = false
+	st.aiReviseOpen = false
+	st.agentLaneFilter = ""
+	st.agentDrawerOpen = false
+	st.previewRawMode = false
+	st.previewExpandedID = ""
+	st.rowMetaCache = nil
+	st.previewCache = nil
+	st.mu.Unlock()
 	resetComposerState(ctrl)
 }
 
 func (s *capsuleEphemeralStore) isPreviewExpanded(ctrl *AppController, itemID string) bool {
-	if itemID == "" {
+	if ctrl == nil || itemID == "" {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.previewExpandedID[ctrl] == itemID
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.previewExpandedID == itemID
 }
 
 func (s *capsuleEphemeralStore) togglePreviewExpanded(ctrl *AppController, itemID string) bool {
-	if itemID == "" {
+	if ctrl == nil || itemID == "" {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.previewExpandedID[ctrl] == itemID {
-		delete(s.previewExpandedID, ctrl)
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.previewExpandedID == itemID {
+		st.previewExpandedID = ""
 		return false
 	}
-	s.previewExpandedID[ctrl] = itemID
+	st.previewExpandedID = itemID
 	return true
 }
 
 func (s *capsuleEphemeralStore) rowMetaCacheFor(ctrl *AppController) *rowMetaCache {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cache := s.rowMetaCaches[ctrl]
-	if cache == nil {
-		cache = newRowMetaCache(rowMetaCacheMaxSize)
-		s.rowMetaCaches[ctrl] = cache
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.rowMetaCache == nil {
+		st.rowMetaCache = newRowMetaCache(rowMetaCacheMaxSize)
 	}
-	return cache
+	return st.rowMetaCache
 }
 
 func (s *capsuleEphemeralStore) previewTextCacheFor(ctrl *AppController) *previewTextCache {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cache := s.previewCaches[ctrl]
-	if cache == nil {
-		cache = newPreviewTextCache(previewTextCacheMaxSize)
-		s.previewCaches[ctrl] = cache
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.previewCache == nil {
+		st.previewCache = newPreviewTextCache(previewTextCacheMaxSize)
 	}
-	return cache
+	return st.previewCache
 }
 
 func (s *capsuleEphemeralStore) rawPreview(ctrl *AppController) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.previewRawMode[ctrl]
+	if ctrl == nil {
+		return false
+	}
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.previewRawMode
 }
 
 func (s *capsuleEphemeralStore) toggleRawPreview(ctrl *AppController) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	next := !s.previewRawMode[ctrl]
-	if next {
-		s.previewRawMode[ctrl] = true
-	} else {
-		delete(s.previewRawMode, ctrl)
+	if ctrl == nil {
+		return false
 	}
-	return next
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.previewRawMode = !st.previewRawMode
+	return st.previewRawMode
 }
 
 func (s *capsuleEphemeralStore) laneFilter(ctrl *AppController) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.agentLaneFilter[ctrl]
+	if ctrl == nil {
+		return ""
+	}
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.agentLaneFilter
 }
 
 func (s *capsuleEphemeralStore) setLaneFilter(ctrl *AppController, lane string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if lane == "" {
-		delete(s.agentLaneFilter, ctrl)
+	if ctrl == nil {
 		return
 	}
-	s.agentLaneFilter[ctrl] = lane
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.agentLaneFilter = lane
 }
 
 func (s *capsuleEphemeralStore) drawerOpen(ctrl *AppController) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.agentDrawerOpen[ctrl]
+	if ctrl == nil {
+		return false
+	}
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.agentDrawerOpen
 }
 
 func (s *capsuleEphemeralStore) toggleDrawerOpen(ctrl *AppController) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	next := !s.agentDrawerOpen[ctrl]
-	if next {
-		s.agentDrawerOpen[ctrl] = true
-	} else {
-		delete(s.agentDrawerOpen, ctrl)
+	if ctrl == nil {
+		return false
 	}
-	return next
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.agentDrawerOpen = !st.agentDrawerOpen
+	return st.agentDrawerOpen
 }
 
 func (s *capsuleEphemeralStore) stepsExpanded(ctrl *AppController) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.aiStepsExpanded[ctrl]
+	if ctrl == nil {
+		return false
+	}
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.aiStepsExpanded
 }
 
 func (s *capsuleEphemeralStore) toggleStepsExpanded(ctrl *AppController) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	next := !s.aiStepsExpanded[ctrl]
-	if next {
-		s.aiStepsExpanded[ctrl] = true
-	} else {
-		delete(s.aiStepsExpanded, ctrl)
+	if ctrl == nil {
+		return false
 	}
-	return next
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.aiStepsExpanded = !st.aiStepsExpanded
+	return st.aiStepsExpanded
 }
 
 func (s *capsuleEphemeralStore) reviseOpen(ctrl *AppController) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.aiReviseOpen[ctrl]
+	if ctrl == nil {
+		return false
+	}
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.aiReviseOpen
 }
 
 func (s *capsuleEphemeralStore) setReviseOpen(ctrl *AppController, open bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if open {
-		s.aiReviseOpen[ctrl] = true
+	if ctrl == nil {
 		return
 	}
-	delete(s.aiReviseOpen, ctrl)
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.aiReviseOpen = open
 }
 
 func (s *capsuleEphemeralStore) previewFor(ctrl *AppController, configured bool) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if v, ok := s.previewVisible[ctrl]; ok {
-		return v
+	if ctrl == nil {
+		return configured
+	}
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.hasPreviewVisible {
+		return st.previewVisible
 	}
 	return configured
 }
 
 func (s *capsuleEphemeralStore) setPreviewVisible(ctrl *AppController, visible bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.previewVisible[ctrl] = visible
+	if ctrl == nil {
+		return
+	}
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.hasPreviewVisible = true
+	st.previewVisible = visible
 }
 
 func (s *capsuleEphemeralStore) togglePreview(ctrl *AppController, configured bool) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	next := true
-	if v, ok := s.previewVisible[ctrl]; ok {
-		next = !v
-	} else {
-		next = !configured
+	if ctrl == nil {
+		return !configured
 	}
-	s.previewVisible[ctrl] = next
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	next := !configured
+	if st.hasPreviewVisible {
+		next = !st.previewVisible
+	}
+	st.hasPreviewVisible = true
+	st.previewVisible = next
 	return next
 }
 
 func (s *capsuleEphemeralStore) actionMenuShown(ctrl *AppController) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.actionMenuOpen[ctrl]
+	if ctrl == nil {
+		return false
+	}
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.actionMenuOpen
 }
 
 func (s *capsuleEphemeralStore) setActionMenuShown(ctrl *AppController, open bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if open {
-		s.actionMenuOpen[ctrl] = true
+	if ctrl == nil {
 		return
 	}
-	delete(s.actionMenuOpen, ctrl)
-	delete(s.actionMenuIdx, ctrl)
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.actionMenuOpen = open
+	if !open {
+		st.actionMenuIdx = 0
+	}
 }
 
 func (s *capsuleEphemeralStore) actionMenuSelection(ctrl *AppController) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.actionMenuIdx[ctrl]
+	if ctrl == nil {
+		return 0
+	}
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.actionMenuIdx
 }
 
 func (s *capsuleEphemeralStore) setActionMenuSelection(ctrl *AppController, idx int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.actionMenuIdx[ctrl] = idx
+	if ctrl == nil {
+		return
+	}
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.actionMenuIdx = idx
 }
 
 func (s *capsuleEphemeralStore) moveActionMenuSelection(ctrl *AppController, delta, count int) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if count <= 0 {
-		s.actionMenuIdx[ctrl] = 0
+	if ctrl == nil {
 		return 0
 	}
-	idx := s.actionMenuIdx[ctrl] + delta
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if count <= 0 {
+		st.actionMenuIdx = 0
+		return 0
+	}
+	idx := st.actionMenuIdx + delta
 	for idx < 0 {
 		idx += count
 	}
 	idx %= count
-	s.actionMenuIdx[ctrl] = idx
+	st.actionMenuIdx = idx
 	return idx
 }
 
 func (s *capsuleEphemeralStore) composingFollowUp(ctrl *AppController) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.followUpComposing[ctrl]
+	if ctrl == nil {
+		return false
+	}
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.followUpComposing
 }
 
 func (s *capsuleEphemeralStore) setFollowUpComposing(ctrl *AppController, composing bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if composing {
-		s.followUpComposing[ctrl] = true
+	if ctrl == nil {
 		return
 	}
-	delete(s.followUpComposing, ctrl)
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.followUpComposing = composing
 }
 
 // followUpComposing reports whether the AI follow-up input is mid IME composition.

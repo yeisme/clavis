@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/egoist/mygo/plugins/sqlite"
 	"github.com/egoist/mygo/ui"
@@ -15,10 +16,15 @@ import (
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/host"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 	"github.com/yeisme/clavis/pkg/core/terminal"
 )
 
 func TestAgentItemsConversationAndCommandCompletion(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
+	i18n.SetLanguage(i18n.Chinese)
+
 	now := time.Now()
 	sessions := []agentsession.Session{{ID: "cx-1", Provider: "codex", Title: "输入法验收", Status: agentsession.StatusRunning, LastActivityAt: now, LastMessage: "请运行 go test", PendingReview: true, Workspace: "clavis"}}
 	items := agentItems(sessions, nil, "验收")
@@ -29,9 +35,19 @@ func TestAgentItemsConversationAndCommandCompletion(t *testing.T) {
 	if len(commands) != 1 || commands[0].UtilityValue != "agent-command:test" {
 		t.Fatalf("command completion = %+v", commands)
 	}
+
+	i18n.SetLanguage(i18n.English)
+	enCmds := agentItems(sessions, nil, "/test")
+	if len(enCmds) != 1 || enCmds[0].UtilityValue != "agent-command:test" || enCmds[0].Title != "Run tests & report evidence" {
+		t.Fatalf("English command completion = %+v", enCmds)
+	}
 }
 
 func TestAgentTabRendersCachedSessionAndDiagnostic(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
+	i18n.SetLanguage(i18n.Chinese)
+
 	ctrl, _, _, _ := newTestController(t, nil)
 	ctrl.agentMu.Lock()
 	ctrl.agentRefreshStarted = true
@@ -80,6 +96,10 @@ func TestAgentStatusMessageRendersFailureStateWithTester(t *testing.T) {
 }
 
 func TestAgentOperationResultStatesAndUnknownDoesNotRetry(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
+	i18n.SetLanguage(i18n.Chinese)
+
 	for _, tc := range []struct {
 		name        string
 		sessions    int
@@ -158,6 +178,10 @@ func (r *fakeTerminalRunner) Run(program string, args ...string) error {
 }
 
 func TestAgentFocusUnavailableCopiesWithHonestToast(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
+	i18n.SetLanguage(i18n.Chinese)
+
 	ctrl, _, _, _ := newTestController(t, nil)
 	var mu sync.Mutex
 	var copied, toast string
@@ -215,6 +239,10 @@ func TestAgentFocusUnavailableCopiesWithHonestToast(t *testing.T) {
 }
 
 func TestAgentFocusSuccessAndUnknownUseThreeHonestBranches(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
+	i18n.SetLanguage(i18n.Chinese)
+
 	for _, tc := range []struct {
 		name   string
 		result host.OperationResult
@@ -419,4 +447,95 @@ func TestAgentFallbackUsesConfiguredTerminalProfileAndWorkspace(t *testing.T) {
 	if runner.calls != 1 || runner.program != "/usr/local/bin/wezterm" || !slices.Equal(runner.args, []string{"start", "--cwd", "/tmp/my-workspace"}) {
 		t.Fatalf("unexpected resolved command: program=%q args=%v calls=%d", runner.program, runner.args, runner.calls)
 	}
+}
+
+func TestAgentSessionsEnglishLocalization(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
+	i18n.SetLanguage(i18n.English)
+
+	assertNoHan := func(label, s string) {
+		t.Helper()
+		for _, r := range s {
+			if unicode.Is(unicode.Han, r) {
+				t.Fatalf("%s leaked Chinese rune in English mode: %q", label, s)
+			}
+		}
+	}
+
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	for _, msg := range []string{
+		agentStatusMessage(host.OperationResult{State: host.StateRefreshing}),
+		agentStatusMessage(host.OperationResult{State: host.StateDegraded}),
+		agentStatusMessage(host.OperationResult{State: host.StateDegraded, Message: "Codex source unavailable"}),
+		agentStatusMessage(host.OperationResult{State: host.StateFailed}),
+		agentStatusMessage(host.OperationResult{State: host.StateUnknown}),
+		agentStatusSubtitle(host.OperationResult{State: host.StateFailed, Retryable: true}),
+		agentStatusSubtitle(host.OperationResult{State: host.StateUnknown}),
+		agentDiagnosticSummary(nil),
+		agentDiagnosticSummary([]agentsession.Diagnostic{{Provider: "codex"}}),
+		agentRelativeTime(time.Time{}, now),
+		agentRelativeTime(now.Add(-10*time.Second), now),
+		agentRelativeTime(now.Add(-5*time.Minute), now),
+		agentRelativeTime(now.Add(-2*time.Hour), now),
+		agentRelativeTime(now.Add(-3*24*time.Hour), now),
+		agentStatusLabel(agentsession.StatusRunning),
+		agentStatusLabel(agentsession.StatusStopped),
+		agentStatusLabel(agentsession.StatusWaiting),
+		agentStatusLabel(agentsession.Status("")),
+	} {
+		assertNoHan("helper", msg)
+	}
+
+	items := agentItemsForResult(
+		[]agentsession.Session{{ID: "s1", Provider: "codex", Title: "Refactor", Status: agentsession.StatusRunning, LastActivityAt: now.Add(-2 * time.Minute), PendingReview: true}},
+		[]agentsession.Diagnostic{{Provider: "claude", Code: "missing", Message: "not found"}},
+		"",
+		host.OperationResult{State: host.StateDegraded, Message: "Claude source unavailable", Retryable: true},
+	)
+	for _, it := range items {
+		assertNoHan("item.Title", it.Title)
+		assertNoHan("item.Subtitle", it.Subtitle)
+	}
+	for _, cmd := range agentItems(nil, nil, "/") {
+		assertNoHan("cmd.Title", cmd.Title)
+		assertNoHan("cmd.Subtitle", cmd.Subtitle)
+	}
+
+	ctrl, _, _, _ := newTestController(t, nil)
+	var mu sync.Mutex
+	var toasts []string
+	ctrl.mu.Lock()
+	ctrl.ClipboardWriter = func(string) {}
+	ctrl.OnShowIMEPill = func(message string, _ *host.CursorAnchor) {
+		mu.Lock()
+		toasts = append(toasts, message)
+		mu.Unlock()
+	}
+	ctrl.mu.Unlock()
+
+	ctrl.agentItemAction(engine.OmniboxItem{UtilityValue: "agent-command:test"})
+	mu.Lock()
+	gotCmdToast := len(toasts) > 0 && strings.Contains(toasts[0], "Copied draft command")
+	mu.Unlock()
+	if !gotCmdToast {
+		t.Fatalf("expected English command copy toast, got %v", toasts)
+	}
+
+	restore := setAgentFocuserForTest(&fakeAgentFocuser{available: true, result: host.OperationResult{State: host.StateReady}})
+	defer restore()
+	ctrl.agentMu.Lock()
+	ctrl.agentSessions = []agentsession.Session{{ID: "en-1", Provider: "codex"}}
+	ctrl.agentMu.Unlock()
+	ctrl.agentItemAction(engine.OmniboxItem{UtilityValue: "agent-session:codex:en-1"})
+	waitUntil(t, time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, m := range toasts {
+			if m == "Focused agent session" {
+				return true
+			}
+		}
+		return false
+	}, "English focus success toast")
 }

@@ -16,8 +16,8 @@ import (
 	coresync "github.com/yeisme/clavis/pkg/core/sync"
 )
 
-// manageSyncSnapshot caches readSyncStatus per controller so render frames
-// never invoke disk/SQL/network reads on every build pass.
+// manageSyncSnapshot is the lock-free value snapshot of readSyncStatus rendered
+// by ManagementHubView so render frames never invoke disk/SQL/network reads.
 type manageSyncSnapshot struct {
 	loaded   bool
 	loading  bool
@@ -26,38 +26,45 @@ type manageSyncSnapshot struct {
 	err      error
 }
 
-var manageSyncStore = struct {
-	mu    sync.Mutex
-	byCtl map[*AppController]*manageSyncSnapshot
-}{
-	byCtl: make(map[*AppController]*manageSyncSnapshot),
+type manageSyncState struct {
+	mu   sync.Mutex
+	snap manageSyncSnapshot
 }
 
 func (a *AppController) ensureManageSyncRefresh() {
-	manageSyncStore.mu.Lock()
-	st, ok := manageSyncStore.byCtl[a]
-	if !ok {
-		st = &manageSyncSnapshot{}
-		manageSyncStore.byCtl[a] = st
-	}
-	if st.loaded || st.loading {
-		manageSyncStore.mu.Unlock()
+	if a.isClosed() {
 		return
 	}
-	st.loading = true
-	manageSyncStore.mu.Unlock()
+	st := a.manageSyncStateFor()
+	st.mu.Lock()
+	if st.snap.loaded || st.snap.loading {
+		st.mu.Unlock()
+		return
+	}
+	st.snap.loading = true
+	st.mu.Unlock()
 
+	lifeCtx := a.lifeCtx()
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(lifeCtx, 2*time.Second)
 		defer cancel()
 		snap, res, err := readSyncStatus(ctx)
-		manageSyncStore.mu.Lock()
-		st.snapshot = snap
-		st.result = res
-		st.err = err
-		st.loaded = true
-		st.loading = false
-		manageSyncStore.mu.Unlock()
+		if lifeCtx.Err() != nil {
+			st.mu.Lock()
+			st.snap.loading = false
+			st.mu.Unlock()
+			return
+		}
+		st.mu.Lock()
+		st.snap.snapshot = snap
+		st.snap.result = res
+		st.snap.err = err
+		st.snap.loaded = true
+		st.snap.loading = false
+		st.mu.Unlock()
+		if a.isClosed() {
+			return
+		}
 		a.mu.Lock()
 		repaint := a.OnRepaint
 		a.mu.Unlock()
@@ -68,23 +75,19 @@ func (a *AppController) ensureManageSyncRefresh() {
 }
 
 func (a *AppController) retryManageSyncStatus() {
-	manageSyncStore.mu.Lock()
-	if st, ok := manageSyncStore.byCtl[a]; ok {
-		st.loaded = false
-		st.err = nil
-	}
-	manageSyncStore.mu.Unlock()
+	st := a.manageSyncStateFor()
+	st.mu.Lock()
+	st.snap.loaded = false
+	st.snap.err = nil
+	st.mu.Unlock()
 	a.ensureManageSyncRefresh()
 }
 
 func (a *AppController) manageSyncStatusSnapshot() manageSyncSnapshot {
-	manageSyncStore.mu.Lock()
-	defer manageSyncStore.mu.Unlock()
-	st := manageSyncStore.byCtl[a]
-	if st == nil {
-		return manageSyncSnapshot{}
-	}
-	return *st
+	st := a.manageSyncStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.snap
 }
 
 // renderManagementHubView renders the operational Management hub (Sync,

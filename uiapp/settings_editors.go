@@ -91,16 +91,9 @@ type settingsEditorState struct {
 	imeInFlight   bool
 }
 
-var settingsEditorStates sync.Map // map[*AppController]*settingsEditorState
-
 // settingsEditor returns the editor state of ctrl, creating it on first use.
 func (a *AppController) settingsEditor() *settingsEditorState {
-	if v, ok := settingsEditorStates.Load(a); ok {
-		return v.(*settingsEditorState)
-	}
-	fresh := &settingsEditorState{}
-	actual, _ := settingsEditorStates.LoadOrStore(a, fresh)
-	return actual.(*settingsEditorState)
+	return a.settingsEditorStateFor()
 }
 
 // seGet reads the editor state under its lock.
@@ -466,6 +459,9 @@ func splitTokens(raw string) []string {
 const imeSettingsCacheTTL = 2 * time.Second
 
 func (a *AppController) refreshIMEConfigSourcesAsync(svc ui.Services, force bool) {
+	if a.isClosed() {
+		return
+	}
 	se := a.settingsEditor()
 	se.mu.Lock()
 	if se.imeInFlight || (!force && !se.imeFetchedAt.IsZero() && time.Since(se.imeFetchedAt) < imeSettingsCacheTTL) {
@@ -475,11 +471,19 @@ func (a *AppController) refreshIMEConfigSourcesAsync(svc ui.Services, force bool
 	se.imeInFlight = true
 	se.mu.Unlock()
 
+	lifeCtx := a.lifeCtx()
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), imeSwitchTimeout)
+		ctx, cancel := context.WithTimeout(lifeCtx, imeSwitchTimeout)
 		defer cancel()
 		cur, curErr := a.CurrentInputSource(ctx)
 		sources := a.AvailableInputSources(ctx)
+
+		if lifeCtx.Err() != nil {
+			se.mu.Lock()
+			se.imeInFlight = false
+			se.mu.Unlock()
+			return
+		}
 
 		se.mu.Lock()
 		if curErr == nil {
@@ -493,6 +497,9 @@ func (a *AppController) refreshIMEConfigSourcesAsync(svc ui.Services, force bool
 		se.imeInFlight = false
 		se.mu.Unlock()
 
+		if a.isClosed() {
+			return
+		}
 		svc.Invalidate()
 		if a != nil {
 			a.mu.Lock()

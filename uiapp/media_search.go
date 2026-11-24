@@ -67,26 +67,8 @@ type mediaSearchControllerState struct {
 	inFlight    map[string]bool
 }
 
-var mediaSearchStore = struct {
-	mu    sync.Mutex
-	byCtl map[*AppController]*mediaSearchControllerState
-}{
-	byCtl: make(map[*AppController]*mediaSearchControllerState),
-}
-
 func (a *AppController) mediaSearchState() *mediaSearchControllerState {
-	mediaSearchStore.mu.Lock()
-	defer mediaSearchStore.mu.Unlock()
-	st, ok := mediaSearchStore.byCtl[a]
-	if !ok {
-		st = &mediaSearchControllerState{
-			category: MediaCategoryAll,
-			probes:   make(map[string]MediaProbeSnapshot),
-			inFlight: make(map[string]bool),
-		}
-		mediaSearchStore.byCtl[a] = st
-	}
-	return st
+	return a.mediaSearchStateFor()
 }
 
 // SetMediaSearchItems injects a media item slice for MediaSearchView (used by
@@ -270,7 +252,7 @@ func (a *AppController) MediaProbe(m engine.ClipboardMedia) MediaProbeSnapshot {
 		st.mu.Unlock()
 		return snap
 	}
-	if !st.inFlight[path] {
+	if !st.inFlight[path] && !a.isClosed() {
 		st.inFlight[path] = true
 		go a.runMediaProbeAsync(path, m)
 	}
@@ -299,7 +281,7 @@ func (a *AppController) RetryMediaProbe(m engine.ClipboardMedia) {
 	st := a.mediaSearchState()
 	st.mu.Lock()
 	delete(st.probes, path)
-	if !st.inFlight[path] {
+	if !st.inFlight[path] && !a.isClosed() {
 		st.inFlight[path] = true
 		go a.runMediaProbeAsync(path, m)
 	}
@@ -307,7 +289,14 @@ func (a *AppController) RetryMediaProbe(m engine.ClipboardMedia) {
 }
 
 func (a *AppController) runMediaProbeAsync(path string, m engine.ClipboardMedia) {
+	lifeCtx := a.lifeCtx()
+	if lifeCtx.Err() != nil {
+		return
+	}
 	snap := probeMediaFile(path, m)
+	if lifeCtx.Err() != nil {
+		return
+	}
 	st := a.mediaSearchState()
 	st.mu.Lock()
 	if len(st.probes) >= 128 {
@@ -317,6 +306,9 @@ func (a *AppController) runMediaProbeAsync(path string, m engine.ClipboardMedia)
 	delete(st.inFlight, path)
 	st.mu.Unlock()
 
+	if a.isClosed() {
+		return
+	}
 	a.mu.Lock()
 	repaint := a.OnRepaint
 	a.mu.Unlock()

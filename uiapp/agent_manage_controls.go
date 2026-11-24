@@ -44,26 +44,8 @@ type agentManageUIState struct {
 	sessions        map[string]*agentSessionControlState
 }
 
-var agentManageStore = struct {
-	mu    sync.Mutex
-	byCtl map[*AppController]*agentManageUIState
-}{
-	byCtl: make(map[*AppController]*agentManageUIState),
-}
-
 func agentManageStateFor(c *AppController) *agentManageUIState {
-	agentManageStore.mu.Lock()
-	defer agentManageStore.mu.Unlock()
-	st := agentManageStore.byCtl[c]
-	if st == nil {
-		st = &agentManageUIState{
-			startCLI: "codex",
-			watching: make(map[string]bool),
-			sessions: make(map[string]*agentSessionControlState),
-		}
-		agentManageStore.byCtl[c] = st
-	}
-	return st
+	return c.agentManageStateForCtrl()
 }
 
 func agentSessionControlKey(session agentsession.Session) string {
@@ -224,7 +206,7 @@ func (c *AppController) setAgentSessionStatus(target, msg string, isErr bool) {
 
 // FocusHerdrWorkspace focuses a Herdr workspace synchronously or async.
 func (c *AppController) FocusHerdrWorkspace(workspaceID string) (host.OperationResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(c.lifeCtx(), 2*time.Second)
 	defer cancel()
 	hc := agentsession.NewHerdrController(c.currentHerdrExecutor())
 	res, err := hc.FocusWorkspace(ctx, workspaceID)
@@ -239,7 +221,7 @@ func (c *AppController) FocusHerdrWorkspace(workspaceID string) (host.OperationR
 
 // RenameHerdrAgent renames an agent pane and refreshes discovery.
 func (c *AppController) RenameHerdrAgent(target, newName string) (host.OperationResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(c.lifeCtx(), 2*time.Second)
 	defer cancel()
 	key := c.resolveAgentControlKey(target)
 	hc := agentsession.NewHerdrController(c.currentHerdrExecutor())
@@ -263,7 +245,7 @@ func (c *AppController) RenameHerdrAgent(target, newName string) (host.Operation
 
 // SendHerdrPrompt sends a gated prompt to target (`confirmed == true` required).
 func (c *AppController) SendHerdrPrompt(target, message string, confirmed bool) (host.OperationResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(c.lifeCtx(), 3*time.Second)
 	defer cancel()
 	key := c.resolveAgentControlKey(target)
 	hc := agentsession.NewHerdrController(c.currentHerdrExecutor())
@@ -295,7 +277,7 @@ func (c *AppController) SendHerdrPrompt(target, message string, confirmed bool) 
 
 // StartHerdrAgent starts an allowlisted AI CLI inside a Herdr workspace.
 func (c *AppController) StartHerdrAgent(workspace, cli, name string) (host.OperationResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(c.lifeCtx(), 4*time.Second)
 	defer cancel()
 	hc := agentsession.NewHerdrController(c.currentHerdrExecutor())
 	res, err := hc.StartAgent(ctx, workspace, cli, name)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/host"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 	coresync "github.com/yeisme/clavis/pkg/core/sync"
 )
 
@@ -38,22 +39,8 @@ type syncStatusCacheEntry struct {
 	done      chan struct{}
 }
 
-var syncStatusCacheStore = struct {
-	mu    sync.Mutex
-	byCtl map[*AppController]*syncStatusCacheEntry
-}{
-	byCtl: make(map[*AppController]*syncStatusCacheEntry),
-}
-
 func (a *AppController) syncStatusCache() *syncStatusCacheEntry {
-	syncStatusCacheStore.mu.Lock()
-	defer syncStatusCacheStore.mu.Unlock()
-	entry, ok := syncStatusCacheStore.byCtl[a]
-	if !ok {
-		entry = &syncStatusCacheEntry{}
-		syncStatusCacheStore.byCtl[a] = entry
-	}
-	return entry
+	return a.syncStatusCacheStateFor()
 }
 
 // SetSyncStatusReader installs the local-only reader used by the settings
@@ -95,14 +82,15 @@ func (a *AppController) startSyncStatusRefreshAsync(entry *syncStatusCacheEntry,
 	done := make(chan struct{})
 	entry.inFlight = true
 	entry.done = done
+	lifeCtx := a.lifeCtx()
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(lifeCtx, 2*time.Second)
 		defer cancel()
 		snap, res, err := reader(ctx)
 
 		entry.mu.Lock()
 		_, latestGen := currentSyncStatusReader()
-		if latestGen == gen {
+		if lifeCtx.Err() == nil && latestGen == gen {
 			entry.hasValue = true
 			entry.cachedGen = gen
 			entry.snapshot = snap
@@ -117,6 +105,9 @@ func (a *AppController) startSyncStatusRefreshAsync(entry *syncStatusCacheEntry,
 		close(done)
 		entry.mu.Unlock()
 
+		if lifeCtx.Err() != nil || a.isClosed() {
+			return
+		}
 		svc.Invalidate()
 		if a != nil {
 			a.mu.Lock()
@@ -133,6 +124,9 @@ func (a *AppController) startSyncStatusRefreshAsync(entry *syncStatusCacheEntry,
 func (a *AppController) cachedSyncStatus(svc ui.Services) (coresync.StatusSnapshot, host.OperationResult, error, bool) {
 	reader, gen := currentSyncStatusReader()
 	if reader == nil {
+		return coresync.StatusSnapshot{}, host.OperationResult{State: host.StateReady}, nil, false
+	}
+	if a.isClosed() {
 		return coresync.StatusSnapshot{}, host.OperationResult{State: host.StateReady}, nil, false
 	}
 	entry := a.syncStatusCache()
@@ -175,6 +169,9 @@ func (a *AppController) cachedSyncStatus(svc ui.Services) (coresync.StatusSnapsh
 }
 
 func (a *AppController) forceRefreshSyncStatus(svc ui.Services) {
+	if a.isClosed() {
+		return
+	}
 	reader, gen := currentSyncStatusReader()
 	if reader == nil {
 		return
@@ -188,48 +185,55 @@ func (a *AppController) forceRefreshSyncStatus(svc ui.Services) {
 }
 
 func (a *AppController) renderSyncStatusCard(c *ui.Context, theme *ui.Theme) {
+	zh := i18n.IsChinese()
 	svc := c.Services()
 	snapshot, result, err, loading := a.cachedSyncStatus(svc)
 	reader, _ := currentSyncStatusReader()
-	settingsSourceCard(c, theme, "同步", "只读", func() {
+	settingsSourceCard(c, theme, pickLang(zh, "同步", "Sync"), pickLang(zh, "只读", "Read-only"), func() {
 		switch {
 		case result.State == host.StateRefreshing && !snapshot.LoggedIn:
 			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 				kitStatusDot(c, kitStateLoadingColor(theme), true)
-				kitStatusPill(c, theme, "正在读取同步状态…", chipAccent)
+				kitStatusPill(c, theme, pickLang(zh, "正在读取同步状态…", "Reading sync status…"), chipAccent)
 			})
 		case result.State == host.StateUnknown:
-			kitWarningBanner(c, theme, "同步本地状态暂不可用，当前未执行任何同步操作。")
+			kitWarningBanner(c, theme, pickLang(zh,
+				"同步本地状态暂不可用，当前未执行任何同步操作。",
+				"Local sync status is temporarily unavailable; no sync actions were performed.",
+			))
 		case !snapshot.LoggedIn:
 			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 				kitStatusDot(c, kitStateEmptyColor(theme), false)
-				kitStatusPill(c, theme, "未配置同步", chipNeutral)
+				kitStatusPill(c, theme, pickLang(zh, "未配置同步", "Sync not configured"), chipNeutral)
 			})
-			settingsHint(c, theme, "当前未登录同步账号，配置与数据仅保存在本地。")
+			settingsHint(c, theme, pickLang(zh,
+				"当前未登录同步账号，配置与数据仅保存在本地。",
+				"Not signed in to a sync account. Settings and data stay local.",
+			))
 		default:
 			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, "登录状态").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+				ui.Text(c, pickLang(zh, "登录状态", "Sign-in Status")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 				ui.Spacer(c)
-				kitStatusPill(c, theme, "已登录", chipSuccess)
+				kitStatusPill(c, theme, pickLang(zh, "已登录", "Signed in"), chipSuccess)
 			})
-			settingsKeyValueRow(c, theme, "账号", snapshot.Account)
-			settingsKeyValueRow(c, theme, "设备 ID", snapshot.DeviceID)
-			settingsKeyValueRow(c, theme, "本地版本", fmt.Sprintf("%d", snapshot.LocalVersion))
-			settingsKeyValueRow(c, theme, "待上传", fmt.Sprintf("%d", snapshot.PendingUploads))
-			settingsKeyValueRow(c, theme, "待处理删除", fmt.Sprintf("%d", snapshot.PendingTombstones))
-			settingsKeyValueRow(c, theme, "上次同步", formatSyncRelativeTime(snapshot.LastSyncAt, time.Now()))
-			settingsKeyValueRow(c, theme, "已知设备", fmt.Sprintf("%d", snapshot.Devices))
+			settingsKeyValueRow(c, theme, pickLang(zh, "账号", "Account"), snapshot.Account)
+			settingsKeyValueRow(c, theme, pickLang(zh, "设备 ID", "Device ID"), snapshot.DeviceID)
+			settingsKeyValueRow(c, theme, pickLang(zh, "本地版本", "Local Version"), fmt.Sprintf("%d", snapshot.LocalVersion))
+			settingsKeyValueRow(c, theme, pickLang(zh, "待上传", "Pending Uploads"), fmt.Sprintf("%d", snapshot.PendingUploads))
+			settingsKeyValueRow(c, theme, pickLang(zh, "待处理删除", "Pending Tombstones"), fmt.Sprintf("%d", snapshot.PendingTombstones))
+			settingsKeyValueRow(c, theme, pickLang(zh, "上次同步", "Last Sync"), formatSyncRelativeTime(snapshot.LastSyncAt, time.Now()))
+			settingsKeyValueRow(c, theme, pickLang(zh, "已知设备", "Known Devices"), fmt.Sprintf("%d", snapshot.Devices))
 		}
 		if err != nil && result.State != host.StateUnknown {
 			// Keep diagnostics neutral and avoid rendering raw implementation errors.
-			kitWarningBanner(c, theme, "同步状态读取暂不可用。")
+			kitWarningBanner(c, theme, pickLang(zh, "同步状态读取暂不可用。", "Sync status is temporarily unavailable."))
 		}
 		if reader != nil {
 			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 				ui.Spacer(c)
-				label := "刷新"
+				label := pickLang(zh, "刷新", "Refresh")
 				if loading {
-					label = "刷新中…"
+					label = pickLang(zh, "刷新中…", "Refreshing…")
 				}
 				if ui.Button(c, label).Key("sync-status-refresh").Disabled(loading).Padding(space2, space8).Shrink(0).Clicked() {
 					a.forceRefreshSyncStatus(svc)
@@ -240,21 +244,25 @@ func (a *AppController) renderSyncStatusCard(c *ui.Context, theme *ui.Theme) {
 }
 
 func formatSyncRelativeTime(at, now time.Time) string {
+	zh := i18n.IsChinese()
 	if at.IsZero() {
-		return "从未同步"
+		return pickLang(zh, "从未同步", "Never synced")
 	}
 	if now.Before(at) {
-		return "刚刚"
+		return pickLang(zh, "刚刚", "Just now")
 	}
 	d := now.Sub(at)
 	switch {
 	case d < time.Minute:
-		return "刚刚"
+		return pickLang(zh, "刚刚", "Just now")
 	case d < time.Hour:
-		return fmt.Sprintf("%d 分钟前", int(d/time.Minute))
+		mins := int(d / time.Minute)
+		return pickLang(zh, fmt.Sprintf("%d 分钟前", mins), fmt.Sprintf("%dm ago", mins))
 	case d < 24*time.Hour:
-		return fmt.Sprintf("%d 小时前", int(d/time.Hour))
+		hours := int(d / time.Hour)
+		return pickLang(zh, fmt.Sprintf("%d 小时前", hours), fmt.Sprintf("%dh ago", hours))
 	default:
-		return fmt.Sprintf("%d 天前", int(d/(24*time.Hour)))
+		days := int(d / (24 * time.Hour))
+		return pickLang(zh, fmt.Sprintf("%d 天前", days), fmt.Sprintf("%dd ago", days))
 	}
 }

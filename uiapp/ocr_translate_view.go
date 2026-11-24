@@ -36,22 +36,8 @@ type ocrTranslateControllerState struct {
 	lastOCRImg     *ai.ImageAttachment
 }
 
-var ocrTranslateStore = struct {
-	mu    sync.Mutex
-	byCtl map[*AppController]*ocrTranslateControllerState
-}{
-	byCtl: make(map[*AppController]*ocrTranslateControllerState),
-}
-
 func ocrTranslateStateFor(c *AppController) *ocrTranslateControllerState {
-	ocrTranslateStore.mu.Lock()
-	defer ocrTranslateStore.mu.Unlock()
-	st := ocrTranslateStore.byCtl[c]
-	if st == nil {
-		st = &ocrTranslateControllerState{}
-		ocrTranslateStore.byCtl[c] = st
-	}
-	return st
+	return c.ocrTranslateStateForCtrl()
 }
 
 func (c *AppController) setTranslateDirection(dir engine.TranslateDirection) {

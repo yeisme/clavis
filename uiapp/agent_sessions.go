@@ -14,23 +14,64 @@ import (
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/host"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 	"github.com/yeisme/clavis/pkg/core/terminal"
 )
 
 type agentCommand struct{ ID, Label, Detail string }
 
-var agentOperationResults sync.Map
-var agentFocuserMu sync.RWMutex
-var agentFocuser agentsession.Focuser = agentsession.NewHerdrFocuser()
-var agentLatestResult struct {
-	sync.RWMutex
-	result host.OperationResult
+type agentCommandSpec struct {
+	ID       string
+	LabelZH  string
+	LabelEN  string
+	DetailZH string
+	DetailEN string
 }
 
+var agentFocuserMu sync.RWMutex
+var agentFocuser agentsession.Focuser = agentsession.NewHerdrFocuser()
+
+// agentCommands retains the default command catalog referenced by agent_workbench_view.go.
 var agentCommands = []agentCommand{
-	{ID: "continue", Label: "继续当前任务", Detail: "继续最近一轮工作"},
-	{ID: "review", Label: "总结待验收项", Detail: "整理会话中的验收状态"},
-	{ID: "test", Label: "运行测试并回报证据", Detail: "请求测试结果和关键输出"},
+	{ID: "continue", Label: "Continue current task", Detail: "Resume the most recent work turn"},
+	{ID: "review", Label: "Summarize pending review", Detail: "List items awaiting review in this session"},
+	{ID: "test", Label: "Run tests & report evidence", Detail: "Request test results and key output"},
+}
+
+var agentCommandSpecs = []agentCommandSpec{
+	{
+		ID:       "continue",
+		LabelZH:  "继续当前任务",
+		LabelEN:  "Continue current task",
+		DetailZH: "继续最近一轮工作",
+		DetailEN: "Resume the most recent work turn",
+	},
+	{
+		ID:       "review",
+		LabelZH:  "总结待验收项",
+		LabelEN:  "Summarize pending review",
+		DetailZH: "整理会话中的验收状态",
+		DetailEN: "List items awaiting review in this session",
+	},
+	{
+		ID:       "test",
+		LabelZH:  "运行测试并回报证据",
+		LabelEN:  "Run tests & report evidence",
+		DetailZH: "请求测试结果和关键输出",
+		DetailEN: "Request test results and key output",
+	},
+}
+
+func localizedAgentCommands(zh bool) []agentCommand {
+	out := make([]agentCommand, len(agentCommandSpecs))
+	for i, spec := range agentCommandSpecs {
+		out[i] = agentCommand{
+			ID:     spec.ID,
+			Label:  pickLang(zh, spec.LabelZH, spec.LabelEN),
+			Detail: pickLang(zh, spec.DetailZH, spec.DetailEN),
+		}
+	}
+	return out
 }
 
 type agentOutputSnapshot struct {
@@ -41,13 +82,14 @@ type agentOutputSnapshot struct {
 	FetchedAt time.Time
 }
 
-var agentOutputStore = struct {
-	mu       sync.Mutex
-	byCtl    map[*AppController]map[string]agentOutputSnapshot
-	inFlight map[*AppController]map[string]bool
-}{
-	byCtl:    make(map[*AppController]map[string]agentOutputSnapshot),
-	inFlight: make(map[*AppController]map[string]bool),
+// agentSessionsSubState holds per-controller Agent operation result and Herdr
+// output cache state inside AppController.subStates.
+type agentSessionsSubState struct {
+	mu          sync.Mutex
+	hasOpResult bool
+	opResult    host.OperationResult
+	outputs     map[string]agentOutputSnapshot
+	inFlight    map[string]bool
 }
 
 func (c *AppController) currentHerdrExecutor() agentsession.CommandExecutor {
@@ -71,13 +113,13 @@ func (c *AppController) cachedAgentOutput(target string) agentOutputSnapshot {
 	if target == "" {
 		return agentOutputSnapshot{}
 	}
-	agentOutputStore.mu.Lock()
-	defer agentOutputStore.mu.Unlock()
-	m := agentOutputStore.byCtl[c]
-	if m == nil {
+	st := c.agentSessionsStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.outputs == nil {
 		return agentOutputSnapshot{Target: target}
 	}
-	return m[target]
+	return st.outputs[target]
 }
 
 // EnsureAgentOutput triggers an asynchronous read of recent terminal output for
@@ -93,43 +135,41 @@ func (c *AppController) ForceRefreshAgentOutput(target string) {
 
 func (c *AppController) fetchAgentOutput(target string, force bool) {
 	target = strings.TrimSpace(target)
-	if target == "" {
+	if target == "" || c.isClosed() {
 		return
 	}
-	agentOutputStore.mu.Lock()
-	m := agentOutputStore.byCtl[c]
-	if m == nil {
-		m = make(map[string]agentOutputSnapshot)
-		agentOutputStore.byCtl[c] = m
+	st := c.agentSessionsStateFor()
+	st.mu.Lock()
+	if st.outputs == nil {
+		st.outputs = make(map[string]agentOutputSnapshot)
 	}
-	inflight := agentOutputStore.inFlight[c]
-	if inflight == nil {
-		inflight = make(map[string]bool)
-		agentOutputStore.inFlight[c] = inflight
+	if st.inFlight == nil {
+		st.inFlight = make(map[string]bool)
 	}
-	if inflight[target] {
-		agentOutputStore.mu.Unlock()
+	if st.inFlight[target] {
+		st.mu.Unlock()
 		return
 	}
-	existing := m[target]
+	existing := st.outputs[target]
 	if !force && existing.ErrText == "" && !existing.FetchedAt.IsZero() && time.Since(existing.FetchedAt) < 3*time.Second {
-		agentOutputStore.mu.Unlock()
+		st.mu.Unlock()
 		return
 	}
-	inflight[target] = true
+	st.inFlight[target] = true
 	existing.Target = target
 	existing.Loading = true
-	m[target] = existing
-	agentOutputStore.mu.Unlock()
+	st.outputs[target] = existing
+	st.mu.Unlock()
 
 	exec := c.currentHerdrExecutor()
+	lifeCtx := c.lifeCtx()
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		ctx, cancel := context.WithTimeout(lifeCtx, 1500*time.Millisecond)
 		defer cancel()
 		text, _, err := agentsession.NewHerdrClientWithExecutor(exec).ReadOutput(ctx, target, 80)
 
-		agentOutputStore.mu.Lock()
-		if cm := agentOutputStore.byCtl[c]; cm != nil {
+		st.mu.Lock()
+		if lifeCtx.Err() == nil && st.outputs != nil {
 			snap := agentOutputSnapshot{
 				Target:    target,
 				Content:   text,
@@ -142,13 +182,16 @@ func (c *AppController) fetchAgentOutput(target string, force bool) {
 					snap.Content = existing.Content
 				}
 			}
-			cm[target] = snap
+			st.outputs[target] = snap
 		}
-		if inf := agentOutputStore.inFlight[c]; inf != nil {
-			delete(inf, target)
+		if st.inFlight != nil {
+			delete(st.inFlight, target)
 		}
-		agentOutputStore.mu.Unlock()
+		st.mu.Unlock()
 
+		if lifeCtx.Err() != nil || c.isClosed() {
+			return
+		}
 		c.mu.Lock()
 		repaint := c.OnRepaint
 		c.mu.Unlock()
@@ -204,6 +247,10 @@ func setAgentTerminalResolverForTest(factory func(config.TerminalConfig) *termin
 }
 
 func (c *AppController) refreshAgentSessions() {
+	lifeCtx := c.lifeCtx()
+	if lifeCtx.Err() != nil {
+		return
+	}
 	c.agentMu.Lock()
 	if c.agentRefreshStarted {
 		c.agentMu.Unlock()
@@ -212,6 +259,7 @@ func (c *AppController) refreshAgentSessions() {
 	c.agentRefreshStarted = true
 	setAgentOperationResult(c, host.OperationResult{State: host.StateRefreshing, ObservedAt: time.Now()})
 	c.agentMu.Unlock()
+
 	db := currentCodexDBPath()
 	var codexReader agentsession.CodexThreadsReader
 	if reader, err := internalagentsession.NewCodexSQLiteReader(db); err == nil {
@@ -219,22 +267,38 @@ func (c *AppController) refreshAgentSessions() {
 	}
 	previousSessions, _ := c.cachedAgentData()
 	herdrExec := c.currentHerdrExecutor()
-	sessions, diagnostics := agentsession.Discover(context.Background(), agentsession.Options{
+	sessions, diagnostics := agentsession.Discover(lifeCtx, agentsession.Options{
 		CodexDB:       db,
 		CodexReader:   codexReader,
 		HerdrExecutor: herdrExec,
 	})
+	if lifeCtx.Err() != nil {
+		c.agentMu.Lock()
+		c.agentRefreshStarted = false
+		c.agentMu.Unlock()
+		return
+	}
 	var workspaces []agentsession.HerdrWorkspace
 	if herdrExec != nil {
-		wsCtx, wsCancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		wsCtx, wsCancel := context.WithTimeout(lifeCtx, 600*time.Millisecond)
 		if ws, wsErr := agentsession.NewHerdrClientWithExecutor(herdrExec).ListWorkspaces(wsCtx); wsErr == nil {
 			workspaces = ws
 		}
 		wsCancel()
 	}
+	if lifeCtx.Err() != nil {
+		c.agentMu.Lock()
+		c.agentRefreshStarted = false
+		c.agentMu.Unlock()
+		return
+	}
 	result := agentOperationResult(sessions, diagnostics, len(previousSessions) > 0)
 	if result.State == host.StateUnknown {
-		diagnostics = append(diagnostics, agentsession.Diagnostic{Provider: "aggregate", Code: "unknown", Message: "状态未知"})
+		diagnostics = append(diagnostics, agentsession.Diagnostic{
+			Provider: "aggregate",
+			Code:     "unknown",
+			Message:  pickLang(i18n.IsChinese(), "状态未知", "Status unknown"),
+		})
 	}
 	c.agentMu.Lock()
 	c.agentSessions = append([]agentsession.Session(nil), sessions...)
@@ -247,6 +311,9 @@ func (c *AppController) refreshAgentSessions() {
 	allWS := append([]agentsession.HerdrWorkspace(nil), c.agentWorkspaces...)
 	c.agentMu.Unlock()
 
+	if c.isClosed() {
+		return
+	}
 	c.syncAgentQuickJumpTargets(allWS, sessions)
 
 	c.mu.Lock()
@@ -258,21 +325,22 @@ func (c *AppController) refreshAgentSessions() {
 }
 
 func agentStatusMessage(result host.OperationResult) string {
+	zh := i18n.IsChinese()
 	switch result.State {
 	case host.StateRefreshing:
-		return "刷新中…"
+		return pickLang(zh, "刷新中…", "Refreshing…")
 	case host.StateDegraded:
 		if result.Message != "" {
-			return "部分源不可用 · " + result.Message
+			return pickLang(zh, "部分源不可用 · ", "Partial sources unavailable · ") + result.Message
 		}
-		return "部分源不可用"
+		return pickLang(zh, "部分源不可用", "Partial sources unavailable")
 	case host.StateFailed:
 		if result.Message != "" {
 			return result.Message
 		}
-		return "Agent 刷新失败"
+		return pickLang(zh, "Agent 刷新失败", "Agent refresh failed")
 	case host.StateUnknown:
-		return "状态未知"
+		return pickLang(zh, "状态未知", "Status unknown")
 	default:
 		return ""
 	}
@@ -299,6 +367,7 @@ func agentOperationResultUnknown() host.OperationResult {
 }
 
 func agentDiagnosticSummary(diagnostics []agentsession.Diagnostic) string {
+	zh := i18n.IsChinese()
 	providers := make([]string, 0, len(diagnostics))
 	for _, diagnostic := range diagnostics {
 		provider := agentProviderLabel(diagnostic.Provider)
@@ -307,9 +376,12 @@ func agentDiagnosticSummary(diagnostics []agentsession.Diagnostic) string {
 		}
 	}
 	if len(providers) == 0 {
-		return "Agent 数据源不可用"
+		return pickLang(zh, "Agent 数据源不可用", "Agent data sources unavailable")
 	}
-	return strings.Join(providers, "、") + " 数据源不可用"
+	return pickLang(zh,
+		strings.Join(providers, "、")+" 数据源不可用",
+		strings.Join(providers, ", ")+" source unavailable",
+	)
 }
 
 func (c *AppController) cachedAgentData() ([]agentsession.Session, []agentsession.Diagnostic) {
@@ -325,22 +397,34 @@ func (c *AppController) agentRefreshing() bool {
 }
 
 func (c *AppController) agentOperationResult() host.OperationResult {
-	if value, ok := agentOperationResults.Load(c); ok {
-		return value.(host.OperationResult)
+	st := c.agentSessionsStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.hasOpResult {
+		return st.opResult
 	}
 	return host.OperationResult{State: host.StateUnknown, ObservedAt: time.Now(), Retryable: false}
 }
 
 func setAgentOperationResult(c *AppController, result host.OperationResult) {
-	agentOperationResults.Store(c, result)
-	agentLatestResult.Lock()
-	agentLatestResult.result = result
-	agentLatestResult.Unlock()
+	if c == nil {
+		return
+	}
+	st := c.agentSessionsStateFor()
+	st.mu.Lock()
+	st.opResult = result
+	st.hasOpResult = true
+	st.mu.Unlock()
 }
 
 func (c *AppController) agentRecordedOperationResult() host.OperationResult {
-	if value, ok := agentOperationResults.Load(c); ok {
-		return value.(host.OperationResult)
+	st := c.agentSessionsStateFor()
+	st.mu.Lock()
+	has := st.hasOpResult
+	res := st.opResult
+	st.mu.Unlock()
+	if has {
+		return res
 	}
 	if c.agentRefreshing() {
 		return host.OperationResult{State: host.StateRefreshing}
@@ -367,33 +451,40 @@ func agentSessionForItem(item engine.OmniboxItem, sessions []agentsession.Sessio
 }
 
 func agentRelativeTime(at, now time.Time) string {
+	zh := i18n.IsChinese()
 	if at.IsZero() {
-		return "时间未知"
+		return pickLang(zh, "时间未知", "Unknown time")
 	}
 	d := now.Sub(at)
 	if d < time.Minute {
-		return "刚刚"
+		return pickLang(zh, "刚刚", "Just now")
 	}
 	if d < time.Hour {
-		return fmt.Sprintf("%d 分钟前", int(d/time.Minute))
+		mins := int(d / time.Minute)
+		return pickLang(zh, fmt.Sprintf("%d 分钟前", mins), fmt.Sprintf("%dm ago", mins))
 	}
 	if d < 24*time.Hour {
-		return fmt.Sprintf("%d 小时前", int(d/time.Hour))
+		hours := int(d / time.Hour)
+		return pickLang(zh, fmt.Sprintf("%d 小时前", hours), fmt.Sprintf("%dh ago", hours))
 	}
-	return fmt.Sprintf("%d 天前", int(d/(24*time.Hour)))
+	days := int(d / (24 * time.Hour))
+	return pickLang(zh, fmt.Sprintf("%d 天前", days), fmt.Sprintf("%dd ago", days))
 }
+
 func agentStatusLabel(s agentsession.Status) string {
+	zh := i18n.IsChinese()
 	switch s {
 	case agentsession.StatusRunning:
-		return "运行中"
+		return pickLang(zh, "运行中", "Running")
 	case agentsession.StatusStopped:
-		return "已停止"
+		return pickLang(zh, "已停止", "Stopped")
 	case agentsession.StatusWaiting:
-		return "等待中"
+		return pickLang(zh, "等待中", "Waiting")
 	default:
-		return "未知"
+		return pickLang(zh, "未知", "Unknown")
 	}
 }
+
 func agentProviderLabel(p string) string {
 	switch strings.ToLower(strings.TrimSpace(p)) {
 	case "codex":
@@ -414,18 +505,17 @@ func agentProviderLabel(p string) string {
 }
 
 func agentItems(sessions []agentsession.Session, diagnostics []agentsession.Diagnostic, query string) []engine.OmniboxItem {
-	agentLatestResult.RLock()
-	result := agentLatestResult.result
-	agentLatestResult.RUnlock()
-	return agentItemsForResult(sessions, diagnostics, query, result)
+	return agentItemsForResult(sessions, diagnostics, query, host.OperationResult{})
 }
 
 func agentItemsForResult(sessions []agentsession.Session, diagnostics []agentsession.Diagnostic, query string, result host.OperationResult) []engine.OmniboxItem {
+	zh := i18n.IsChinese()
 	trimmed := strings.TrimSpace(query)
 	if strings.HasPrefix(trimmed, "/") {
 		rest := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(trimmed, "/")))
-		items := make([]engine.OmniboxItem, 0, len(agentCommands))
-		for _, command := range agentCommands {
+		commands := localizedAgentCommands(zh)
+		items := make([]engine.OmniboxItem, 0, len(commands))
+		for _, command := range commands {
 			if rest != "" && !strings.Contains(strings.ToLower(command.Label+" "+command.ID+" "+command.Detail), rest) {
 				continue
 			}
@@ -434,10 +524,8 @@ func agentItemsForResult(sessions []agentsession.Session, diagnostics []agentses
 		return items
 	}
 	items := make([]engine.OmniboxItem, 0, len(sessions)+len(diagnostics)+1)
-	// 刷新中且列表为空时，状态交给「居中加载态」渲染（capsule_view 的 len(items)==0 分支），
-	// 不要在这种情况再塞一条状态行——否则 items 永不为空，居中加载态成了死代码，
-	// 用户只看到列表里孤零零一行「刷新中…」。有缓存会话时仍保留状态行，否则用户看不到刷新中的提示。
-	// 2026-11-22 实测 TestAgentTabShowsLoadingStateDuringRefresh 因此失败。
+	// When refreshing with an empty session list, let capsule_view render the
+	// centered loading state instead of emitting a standalone status row.
 	refreshingWithNothingToShow := result.State == host.StateRefreshing && len(sessions) == 0
 	showStatusRow := trimmed == "" && result.State != "" && result.State != host.StateReady && !refreshingWithNothingToShow
 	statusAtTop := showStatusRow && (len(sessions) == 0 || result.State == host.StateFailed || result.State == host.StateUnknown)
@@ -458,7 +546,7 @@ func agentItemsForResult(sessions []agentsession.Session, diagnostics []agentses
 			subtitle = ws + " · " + subtitle
 		}
 		if session.PendingReview {
-			subtitle += " · 待验收"
+			subtitle += pickLang(zh, " · 待验收", " · Pending Review")
 		}
 		if session.LastMessage != "" {
 			subtitle += " · " + agentsession.SanitizeDiagnosticText(session.LastMessage)
@@ -468,21 +556,24 @@ func agentItemsForResult(sessions []agentsession.Session, diagnostics []agentses
 	if showStatusRow && !statusAtTop {
 		appendStatusRow()
 	}
+	diagPrefix := pickLang(zh, "诊断：", "Diagnostic: ")
 	for _, diagnostic := range diagnostics {
-		items = append(items, engine.OmniboxItem{ID: "agent-diagnostic:" + diagnostic.Provider + ":" + diagnostic.Code, Title: agentProviderLabel(diagnostic.Provider), Subtitle: "诊断：" + agentsession.SanitizeDiagnosticText(diagnostic.Message), Icon: "info.circle", Kind: engine.ItemUtility, UtilityValue: "agent-diagnostic"})
+		items = append(items, engine.OmniboxItem{ID: "agent-diagnostic:" + diagnostic.Provider + ":" + diagnostic.Code, Title: agentProviderLabel(diagnostic.Provider), Subtitle: diagPrefix + agentsession.SanitizeDiagnosticText(diagnostic.Message), Icon: "info.circle", Kind: engine.ItemUtility, UtilityValue: "agent-diagnostic"})
 	}
 	return items
 }
 
 func agentStatusSubtitle(result host.OperationResult) string {
+	zh := i18n.IsChinese()
 	if result.State == host.StateFailed && result.Retryable {
-		return "点击重试"
+		return pickLang(zh, "点击重试", "Click to retry")
 	}
 	if result.State == host.StateUnknown {
-		return "请手动刷新确认"
+		return pickLang(zh, "请手动刷新确认", "Refresh manually to verify")
 	}
 	return ""
 }
+
 func safeAgentWorkspaceLabel(session agentsession.Session) string {
 	ws := strings.TrimSpace(session.WorkspaceLabel)
 	if ws == "" {
@@ -505,6 +596,7 @@ func safeAgentWorkspaceLabel(session agentsession.Session) string {
 }
 
 func isAgentItem(item engine.OmniboxItem) bool { return strings.HasPrefix(item.ID, "agent-") }
+
 func currentAgentFocuser() agentsession.Focuser {
 	agentFocuserMu.RLock()
 	defer agentFocuserMu.RUnlock()
@@ -520,17 +612,31 @@ func setAgentFocuserForTest(f agentsession.Focuser) func() {
 }
 
 func (c *AppController) focusAgentSession(session agentsession.Session) {
-	focuser := currentAgentFocuser()
-	if focuser == nil {
-		c.ShowToastOrHUD("已复制会话 ID（未检测到 herdr，无法直接跳转）")
+	if c.isClosed() {
 		return
 	}
+	zh := i18n.IsChinese()
+	focuser := currentAgentFocuser()
+	if focuser == nil {
+		c.ShowToastOrHUD(pickLang(zh,
+			"已复制会话 ID（未检测到 herdr，无法直接跳转）",
+			"Copied session ID (herdr not detected, cannot jump directly)",
+		))
+		return
+	}
+	lifeCtx := c.lifeCtx()
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(lifeCtx, 3*time.Second)
 		defer cancel()
 		available, err := focuser.Available(ctx)
+		if lifeCtx.Err() != nil {
+			return
+		}
 		if err != nil || !available {
-			c.ShowToastOrHUD("已复制会话 ID（未检测到 herdr，无法直接跳转）")
+			c.ShowToastOrHUD(pickLang(zh,
+				"已复制会话 ID（未检测到 herdr，无法直接跳转）",
+				"Copied session ID (herdr not detected, cannot jump directly)",
+			))
 			c.openTerminalForAgentFallback(session)
 			return
 		}
@@ -547,19 +653,28 @@ func (c *AppController) focusAgentSession(session agentsession.Session) {
 		} else {
 			result, focusErr = focuser.Focus(ctx, session.ID)
 		}
+		if lifeCtx.Err() != nil {
+			return
+		}
 		if focusErr != nil || result.State == host.StateFailed {
 			message := agentsession.SanitizeDiagnosticText(result.Message)
 			if message == "" {
-				message = "无法直接跳转"
+				message = pickLang(zh, "无法直接跳转", "cannot jump directly")
 			}
-			c.ShowToastOrHUD("已复制会话 ID（" + message + "）")
+			c.ShowToastOrHUD(pickLang(zh,
+				"已复制会话 ID（"+message+"）",
+				"Copied session ID ("+message+")",
+			))
 			return
 		}
 		if result.State == host.StateUnknown {
-			c.ShowToastOrHUD("已复制会话 ID（未找到该会话的面板）")
+			c.ShowToastOrHUD(pickLang(zh,
+				"已复制会话 ID（未找到该会话的面板）",
+				"Copied session ID (pane not found for this session)",
+			))
 			return
 		}
-		c.ShowToastOrHUD("已跳转到该会话")
+		c.ShowToastOrHUD(pickLang(zh, "已跳转到该会话", "Focused agent session"))
 	}()
 }
 
@@ -588,7 +703,7 @@ func (c *AppController) openTerminalForAgentFallback(session agentsession.Sessio
 		bridge := c.Bridge
 		c.mu.Unlock()
 		if bridge != nil {
-			_ = bridge.OpenApp(context.Background(), plan.Profile.BundleID)
+			_ = bridge.OpenApp(c.lifeCtx(), plan.Profile.BundleID)
 		}
 	}
 }
@@ -602,8 +717,9 @@ func (c *AppController) agentItemAction(item engine.OmniboxItem) bool {
 		return true
 	}
 	if strings.HasPrefix(value, "agent-command:") {
+		zh := i18n.IsChinese()
 		message := ""
-		for _, command := range agentCommands {
+		for _, command := range localizedAgentCommands(zh) {
 			if value == "agent-command:"+command.ID {
 				message = command.Label + "\n" + command.Detail
 				break
@@ -612,7 +728,7 @@ func (c *AppController) agentItemAction(item engine.OmniboxItem) bool {
 		if err := c.writeClipboardText(message); err != nil {
 			c.ShowToastOrHUD(err.Error())
 		} else {
-			c.ShowToastOrHUD("已复制待发消息，未发送")
+			c.ShowToastOrHUD(pickLang(zh, "已复制待发消息，未发送", "Copied draft command (not sent)"))
 		}
 		return true
 	}
@@ -644,6 +760,9 @@ func (c *AppController) agentItemAction(item engine.OmniboxItem) bool {
 }
 
 func (c *AppController) syncAgentQuickJumpTargets(workspaces []agentsession.HerdrWorkspace, sessions []agentsession.Session) {
+	if c == nil || c.StateMachine == nil {
+		return
+	}
 	var targets []engine.QuickJumpTarget
 	for _, ws := range workspaces {
 		id := strings.TrimSpace(ws.WorkspaceID)
@@ -682,7 +801,12 @@ func (c *AppController) syncAgentQuickJumpTargets(workspaces []agentsession.Herd
 	})
 }
 
-func (c *AppController) AgentRefresh() { go c.refreshAgentSessions() }
+func (c *AppController) AgentRefresh() {
+	if c.isClosed() {
+		return
+	}
+	go c.refreshAgentSessions()
+}
 
 func (c *AppController) agentRefreshRetryable() bool {
 	return c.agentOperationResult().Retryable && c.agentOperationResult().State != host.StateUnknown

@@ -3,7 +3,6 @@ package uiapp
 import (
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/config"
@@ -19,23 +18,12 @@ const (
 	assetsSubVault
 )
 
-var assetsSubStore = struct {
-	mu    sync.Mutex
-	byCtl map[*AppController]assetsSubTab
-}{
-	byCtl: make(map[*AppController]assetsSubTab),
-}
-
 func (a *AppController) assetsSubTab() assetsSubTab {
-	assetsSubStore.mu.Lock()
-	defer assetsSubStore.mu.Unlock()
-	return assetsSubStore.byCtl[a]
+	return a.assetsSubTabState()
 }
 
 func (a *AppController) setAssetsSubTab(tab assetsSubTab) {
-	assetsSubStore.mu.Lock()
-	assetsSubStore.byCtl[a] = tab
-	assetsSubStore.mu.Unlock()
+	a.setAssetsSubTabState(tab)
 }
 
 func (a *AppController) collectMediaAssetItems(state engine.State) []engine.OmniboxItem {

@@ -102,25 +102,8 @@ type clipboardKeyManagerState struct {
 	demoSecretLabel     string
 }
 
-var clipboardKeyManagerStore = struct {
-	mu    sync.Mutex
-	byCtl map[*AppController]*clipboardKeyManagerState
-}{
-	byCtl: make(map[*AppController]*clipboardKeyManagerState),
-}
-
 func (a *AppController) clipboardKeyManager() *clipboardKeyManagerState {
-	clipboardKeyManagerStore.mu.Lock()
-	defer clipboardKeyManagerStore.mu.Unlock()
-	st, ok := clipboardKeyManagerStore.byCtl[a]
-	if !ok {
-		st = &clipboardKeyManagerState{
-			policy:             config.DefaultClipboardKeyManagerPolicy(),
-			recentSecretHashes: make(map[string]time.Time),
-		}
-		clipboardKeyManagerStore.byCtl[a] = st
-	}
-	return st
+	return a.clipboardKeyManagerStateFor()
 }
 
 // ClipboardKeyManagerPolicy returns the active clipboard key-manager policy.
