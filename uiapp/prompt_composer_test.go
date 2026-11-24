@@ -1,7 +1,9 @@
 package uiapp
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/pkg/core/i18n"
+	"github.com/yeisme/clavis/pkg/core/template"
 )
 
 func TestPromptTemplateOmniboxAndSlotComposerFlow(t *testing.T) {
@@ -308,5 +311,193 @@ func TestPromptComposerChineseLocalization(t *testing.T) {
 		if !pt.HasText(want) {
 			t.Fatalf("Chinese prompt composer missing %q, got %v", want, pt.Texts())
 		}
+	}
+}
+
+func TestPromptComposerContractFailClosedAndExecuteAIReviewGate(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
+	i18n.SetLanguage(i18n.English)
+
+	f := newInteractionFixture(t, nil)
+
+	minCount, maxCount := 1.0, 5.0
+	zhContract := template.Contract{
+		SchemaVersion: template.ContractSchema,
+		PackageID:     "demo/writing",
+		SolutionID:    "zh-brief",
+		Version:       "1.0.0",
+		Role:          "main",
+		Locale:        "zh-CN",
+		License:       "MIT",
+		Permissions:   []string{"preview", template.ExecuteRequiresReview},
+		Inputs: []template.InputDefinition{
+			{Name: "topic", Type: "string", Required: true, Labels: map[string]string{"zh-CN": "主题", "en": "Topic"}},
+			{Name: "tone", Type: "enum", Enum: []string{"正式", "简洁"}, Default: "正式", Labels: map[string]string{"zh-CN": "语气"}},
+			{Name: "points", Type: "integer", Min: &minCount, Max: &maxCount, Default: "3"},
+		},
+	}
+
+	var execPrompts []string
+	fakeExec := template.AIExecutorFunc(func(_ context.Context, rendered string) error {
+		execPrompts = append(execPrompts, rendered)
+		return nil
+	})
+	f.ctrl.SetPromptComposerAIExecutor(fakeExec)
+	f.ctrl.OpenContractTemplateWithBody(zhContract, "请用{{tone}}语气写出关于{{topic}}的{{points}}条要点。", "中文摘要合同", engine.CapsuleContext{AppName: "Notes"})
+
+	if !f.ctrl.PromptComposerOpen() || !f.ctrl.PromptComposerContractActive() {
+		t.Fatal("expected contract-backed prompt composer to be open")
+	}
+
+	pw, ph := PreferredPromptComposerPanelSize(f.ctrl.PromptComposerSlotCount())
+	pt := ui.NewTester(f.ctrl.PromptComposerView, pw, ph)
+	pt.Frame()
+
+	// Chinese localized slot labels and contract badge render cleanly.
+	if !pt.HasText("中文摘要合同") || !pt.HasText("主题") || !pt.HasText("Contract · zh-CN") {
+		t.Fatalf("expected contract title, localized Chinese label, and locale badge, got %v", pt.Texts())
+	}
+
+	// 1. Fail-closed on missing required slot: blocks preview, commit, copy, and AI review.
+	if prev := f.ctrl.PromptComposerPreview(); prev.RenderedText != "" {
+		t.Fatalf("expected fail-closed empty preview when required slot missing, got %q", prev.RenderedText)
+	}
+	if f.ctrl.CommitPromptComposer() {
+		t.Fatal("CommitPromptComposer must fail closed when required slot is missing")
+	}
+	if f.ctrl.CopyPromptComposer() {
+		t.Fatal("CopyPromptComposer must fail closed when required slot is missing")
+	}
+	if err := f.ctrl.RequestPromptComposerAIReview(); err == nil {
+		t.Fatal("RequestPromptComposerAIReview must fail closed when required slot is missing")
+	}
+	if len(execPrompts) != 0 {
+		t.Fatalf("AI executor must not be called on failed render, calls=%d", len(execPrompts))
+	}
+
+	// 2. Fail-closed on invalid enum or out-of-range integer.
+	f.ctrl.SetPromptSlotValue("topic", "模板平台")
+	f.ctrl.SetPromptSlotValue("tone", "非法选项")
+	if prev := f.ctrl.PromptComposerPreview(); prev.RenderedText != "" {
+		t.Fatalf("invalid enum must fail closed, got %q", prev.RenderedText)
+	}
+	if f.ctrl.CommitPromptComposer() {
+		t.Fatal("CommitPromptComposer must reject invalid enum value")
+	}
+
+	f.ctrl.SetPromptSlotValue("tone", "简洁")
+	f.ctrl.SetPromptSlotValue("points", "99")
+	if prev := f.ctrl.PromptComposerPreview(); prev.RenderedText != "" {
+		t.Fatalf("out-of-range integer must fail closed, got %q", prev.RenderedText)
+	}
+	f.ctrl.SetPromptSlotValue("points", "3")
+
+	// 3. Valid zh-CN slots render live preview.
+	pt.Frame()
+	wantRendered := "请用简洁语气写出关于模板平台的3条要点。"
+	if prev := f.ctrl.PromptComposerPreview(); prev.RenderedText != wantRendered {
+		t.Fatalf("rendered zh-CN contract = %q, want %q", prev.RenderedText, wantRendered)
+	}
+	if !pt.HasText(wantRendered) {
+		t.Fatalf("rendered zh-CN preview missing from UI: %v", pt.Texts())
+	}
+
+	// 4. ConfirmPromptComposerAI WITHOUT prior review request MUST fail closed (0 calls).
+	if err := f.ctrl.ConfirmPromptComposerAI(context.Background()); err == nil {
+		t.Fatal("ConfirmPromptComposerAI without review must fail closed")
+	} else {
+		var execErr *template.ExecutionError
+		if !errors.As(err, &execErr) || execErr.Code != template.ExecutionReviewRequired {
+			t.Fatalf("unexpected error = %v, want ExecutionReviewRequired", err)
+		}
+	}
+	if len(execPrompts) != 0 {
+		t.Fatalf("AI executor called without review: %d", len(execPrompts))
+	}
+
+	// 5. Clicking Send to AI arms one-shot review banner without calling AI yet.
+	if err := pt.Click(i18n.T("prompts.contract.send_ai")); err != nil {
+		t.Fatalf("click Send to AI: %v (texts=%v)", err, pt.Texts())
+	}
+	pt.Frame()
+	if !f.ctrl.PromptComposerReviewPending() || !pt.HasText(i18n.T("prompts.contract.confirm_send")) {
+		t.Fatalf("expected review confirmation banner armed, pending=%v texts=%v", f.ctrl.PromptComposerReviewPending(), pt.Texts())
+	}
+	if len(execPrompts) != 0 {
+		t.Fatalf("arming review must not call AI executor, calls=%d", len(execPrompts))
+	}
+
+	// Editing any slot invalidates the armed review confirmation!
+	f.ctrl.SetPromptSlotValue("topic", "更新后的主题")
+	if f.ctrl.PromptComposerReviewPending() {
+		t.Fatal("editing a slot must invalidate armed review confirmation")
+	}
+
+	// Re-arm review and click Confirm Send -> calls executor exactly once, then consumes confirmation.
+	pt.Frame()
+	if err := pt.Click(i18n.T("prompts.contract.send_ai")); err != nil {
+		t.Fatalf("re-click Send to AI: %v", err)
+	}
+	pt.Frame()
+	if err := pt.Click(i18n.T("prompts.contract.confirm_send")); err != nil {
+		t.Fatalf("click Confirm Send: %v", err)
+	}
+	pt.Frame()
+	if len(execPrompts) != 1 || execPrompts[0] != "请用简洁语气写出关于更新后的主题的3条要点。" {
+		t.Fatalf("unexpected AI execution calls: %+v", execPrompts)
+	}
+	if f.ctrl.PromptComposerReviewPending() {
+		t.Fatal("one-shot review confirmation must be cleared after execution")
+	}
+	// Second confirm without fresh review must fail closed (never remembered).
+	if err := f.ctrl.ConfirmPromptComposerAI(context.Background()); err == nil || len(execPrompts) != 1 {
+		t.Fatalf("second confirm must not reuse confirmation: err=%v calls=%d", err, len(execPrompts))
+	}
+}
+
+func TestPromptComposerContractWithoutExecutePermissionDeniesAI(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
+	i18n.SetLanguage(i18n.English)
+
+	f := newInteractionFixture(t, nil)
+	copyOnlyContract := template.Contract{
+		SchemaVersion: template.ContractSchema,
+		SolutionID:    "en-copy-only",
+		Locale:        "en",
+		Permissions:   []string{"preview"}, // deliberately omits execute_requires_review
+		Inputs:        []template.InputDefinition{{Name: "subject", Type: "string", Required: true}},
+	}
+	calls := 0
+	f.ctrl.SetPromptComposerAIExecutor(template.AIExecutorFunc(func(_ context.Context, _ string) error {
+		calls++
+		return nil
+	}))
+
+	// OpenContractTemplate directly (without explicit body -> synthesizes placeholder body from Inputs).
+	f.ctrl.OpenContractTemplate(copyOnlyContract, "Copy Only Template")
+	f.ctrl.SetPromptSlotValue("subject", "release notes")
+
+	if err := f.ctrl.RequestPromptComposerAIReview(); err == nil {
+		t.Fatal("contract without execute_requires_review must deny AI review")
+	} else {
+		var execErr *template.ExecutionError
+		if !errors.As(err, &execErr) || execErr.Code != template.ExecutionPermissionDenied {
+			t.Fatalf("error = %v, want ExecutionPermissionDenied", err)
+		}
+	}
+	if err := f.ctrl.ConfirmPromptComposerAI(context.Background()); err == nil || calls != 0 {
+		t.Fatalf("contract without execute_requires_review must never call AI: err=%v calls=%d", err, calls)
+	}
+
+	// Copy still succeeds cleanly.
+	var copied string
+	f.ctrl.ClipboardWriter = func(s string) { copied = s }
+	if !f.ctrl.CopyPromptComposer() {
+		t.Fatal("CopyPromptComposer should succeed for valid preview-only contract")
+	}
+	if !strings.Contains(copied, "release notes") {
+		t.Fatalf("copied text = %q, want 'release notes'", copied)
 	}
 }

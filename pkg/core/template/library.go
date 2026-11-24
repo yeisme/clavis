@@ -279,7 +279,7 @@ func (l *Library) Import(directory, packageID, solutionID, role, locale string, 
 		return []Diagnostic{diagnostic(DanglingReference, stem, "no eligible canonical text template at this identity")}
 	}
 	s, t := *foundS, *foundT
-	rec := ImportRecord{Version: s.Version, Digest: t.Digest, ImportedAt: time.Now().UTC(), SourceKind: kind, RepositoryID: c.Repository.ID, PackageID: s.PackageID, SolutionID: s.ID, Role: t.Role, Locale: t.Locale, Title: s.Locales[locale].Title, Category: s.Category, Maturity: s.Maturity}
+	rec := ImportRecord{Version: s.Version, Digest: t.Digest, ImportedAt: time.Now().UTC(), SourceKind: kind, RepositoryID: c.Repository.ID, PackageID: s.PackageID, SolutionID: s.ID, Role: t.Role, Locale: t.Locale, Title: solutionLocaleTitle(s, locale), Category: s.Category, Maturity: s.Maturity}
 	rec.Ref = recordRef(rec)
 	name := "imports/" + stem + ".json"
 	if old, err := l.root.ReadFile(name); err == nil {
@@ -400,17 +400,36 @@ func (l *Library) View(local []Item) ([]Item, []Diagnostic) {
 			ds = append(ds, err.(Diagnostic))
 			continue
 		}
+		var parsedContract *Contract
+		var contractDiags []Diagnostic
+		contractStatus := "degraded_no_contract"
 		if rec.ContractDigest != "" {
-			if _, err = l.readObject(rec.ContractDigest); err != nil {
+			sidecarBytes, err := l.readObject(rec.ContractDigest)
+			if err != nil {
 				ds = append(ds, err.(Diagnostic))
 				continue
 			}
+			parsedContract, contractStatus, contractDiags = validateCASContract(sidecarBytes, rec, body, stem)
+			ds = append(ds, contractDiags...)
 		} else {
-			ds = append(ds, diagnostic(DegradedNoContract, stem, "contract absent; execution contract is not validated"))
+			d := diagnostic(DegradedNoContract, stem, "contract absent; execution contract is not validated")
+			contractDiags = []Diagnostic{d}
+			ds = append(ds, d)
 		}
-		item := Item{ID: stem, Trigger: "/" + rec.SolutionID, Title: rec.Title, Category: rec.Category, Body: string(body), Enabled: true, SourceKind: rec.SourceKind, Maturity: rec.Maturity, Provenance: &rec, UpdateStatus: "current", ContractStatus: "header_only_unvalidated"}
-		if rec.ContractDigest == "" {
-			item.ContractStatus = "degraded_no_contract"
+		item := Item{
+			ID:                  stem,
+			Trigger:             "/" + rec.SolutionID,
+			Title:               rec.Title,
+			Category:            rec.Category,
+			Body:                string(body),
+			Enabled:             true,
+			SourceKind:          rec.SourceKind,
+			Maturity:            rec.Maturity,
+			Provenance:          &rec,
+			UpdateStatus:        "current",
+			ContractStatus:      contractStatus,
+			Contract:            parsedContract,
+			ContractDiagnostics: contractDiags,
 		}
 		if snap != nil && snap.Repository.ID == rec.RepositoryID {
 			present := false
@@ -489,4 +508,144 @@ func (l *Library) atomicWrite(name string, b []byte) error {
 		return diagnostic(IOError, name, "cannot publish staged file inside root")
 	}
 	return nil
+}
+
+// SnapshotCatalog returns the currently stored verified catalog snapshot, if any.
+func (l *Library) SnapshotCatalog() (*Catalog, []Diagnostic) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.snapshot()
+}
+
+// ReadCASObject reads and digest-verifies one content-addressed object from CAS.
+func (l *Library) ReadCASObject(digest string) ([]byte, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.readObject(digest)
+}
+
+// ReadOverlay returns the raw TOML overlay bytes for an installed variant.
+func (l *Library) ReadOverlay(solution, role, locale string) ([]byte, bool, []Diagnostic) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	stem, err := identityStem(solution, role, locale)
+	if err != nil {
+		return nil, false, []Diagnostic{err.(Diagnostic)}
+	}
+	b, err := l.root.ReadFile("overlays/" + stem + ".toml")
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, []Diagnostic{diagnostic(IOError, "overlays/"+stem+".toml", "overlay inaccessible inside root")}
+	}
+	return b, true, nil
+}
+
+// DeleteOverlay removes any local overlay file for an installed variant.
+func (l *Library) DeleteOverlay(solution, role, locale string) []Diagnostic {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	stem, err := identityStem(solution, role, locale)
+	if err != nil {
+		return []Diagnostic{err.(Diagnostic)}
+	}
+	err = l.root.Remove("overlays/" + stem + ".toml")
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return []Diagnostic{diagnostic(IOError, "overlays/"+stem+".toml", "cannot remove overlay inside root")}
+	}
+	return nil
+}
+
+// RemoveImport removes an installed import record while leaving CAS objects intact.
+func (l *Library) RemoveImport(solution, role, locale string) []Diagnostic {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	stem, err := identityStem(solution, role, locale)
+	if err != nil {
+		return []Diagnostic{err.(Diagnostic)}
+	}
+	err = l.root.Remove("imports/" + stem + ".json")
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return []Diagnostic{diagnostic(IOError, "imports/"+stem+".json", "cannot remove import inside root")}
+	}
+	return nil
+}
+
+func solutionLocaleTitle(s Solution, locale string) string {
+	if loc, ok := s.Locales[locale]; ok && strings.TrimSpace(loc.Title) != "" {
+		return loc.Title
+	}
+	for k, loc := range s.Locales {
+		if LocalesMatch(k, locale) && strings.TrimSpace(loc.Title) != "" {
+			return loc.Title
+		}
+	}
+	if loc, ok := s.Locales["en"]; ok && strings.TrimSpace(loc.Title) != "" {
+		return loc.Title
+	}
+	return s.ID
+}
+
+// validateCASContract performs full contract parsing, canonical digest verification,
+// identity/body binding, locale check, and static placeholder declaration check on a
+// sidecar stored in CAS. It returns the validated Contract (or nil), status, and
+// body-free diagnostics.
+func validateCASContract(sidecar []byte, rec ImportRecord, body []byte, stem string) (*Contract, string, []Diagnostic) {
+	var raw Contract
+	if err := json.Unmarshal(sidecar, &raw); err != nil {
+		return nil, "contract_invalid", []Diagnostic{diagnostic(InvalidJSON, stem, "invalid contract JSON")}
+	}
+	if raw.SchemaVersion != ContractSchema {
+		return nil, "contract_invalid", []Diagnostic{diagnostic(UnknownSchema, stem, "unsupported contract schema")}
+	}
+	if strings.TrimSpace(raw.Digest) == "" {
+		return nil, "header_only_unvalidated", []Diagnostic{diagnostic(InvalidDigest, stem, "contract sidecar is header-only and missing canonical digest")}
+	}
+
+	var diags []Diagnostic
+	parsed, pds := ParseContract(sidecar)
+	for _, d := range pds {
+		diags = append(diags, diagnostic(d.Code, stem+"/"+d.Path, d.Message))
+	}
+
+	if raw.TemplateDigest != rec.Digest {
+		diags = append(diags, diagnostic(DigestMismatch, stem+"/template_digest", "contract does not bind imported template digest"))
+	}
+	for _, pair := range [][3]string{
+		{"package_id", raw.PackageID, rec.PackageID},
+		{"solution_id", raw.SolutionID, rec.SolutionID},
+		{"version", raw.Version, rec.Version},
+		{"role", raw.Role, rec.Role},
+		{"locale", raw.Locale, rec.Locale},
+	} {
+		if pair[1] == "" || pair[1] != pair[2] {
+			diags = append(diags, diagnostic(UpstreamMismatch, stem+"/"+pair[0], "contract identity differs from imported template"))
+		}
+	}
+
+	if parsed != nil {
+		tokens, _, syntaxOK := parseRenderTemplate(string(body))
+		if !syntaxOK {
+			diags = append(diags, diagnostic(InvalidBody, stem+"/body", "template contains an unterminated placeholder"))
+		} else {
+			declared := make(map[string]bool, len(parsed.Inputs))
+			for _, in := range parsed.Inputs {
+				declared[in.Name] = true
+			}
+			reported := make(map[string]bool)
+			for _, tok := range tokens {
+				if tok.name == "" || declared[tok.name] || tok.builtin || reported[tok.name] {
+					continue
+				}
+				reported[tok.name] = true
+				diags = append(diags, diagnostic(UndeclaredPlaceholder, stem+"/"+tok.name, "placeholder is not declared by the contract"))
+			}
+		}
+	}
+
+	if len(diags) > 0 || parsed == nil {
+		return nil, "contract_invalid", diags
+	}
+	return parsed, "validated", nil
 }

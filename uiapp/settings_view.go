@@ -31,6 +31,7 @@ const (
 	settingsSectionClipboard   = 10
 	settingsSectionAbout       = 11
 	settingsSectionSecurity    = 12
+	settingsSectionTemplates   = 13
 )
 
 // settingsSectionMeta describes one navigation rail entry.
@@ -77,6 +78,7 @@ func settingsSections() []settingsSectionMeta {
 func settingsNavigationSections() []settingsSectionMeta {
 	sections := append([]settingsSectionMeta(nil), settingsSections()...)
 	sections = append(sections[:6], append([]settingsSectionMeta{
+		{settingsSectionTemplates, "templates", i18n.T("settings.section.templates"), "doc.text", i18n.T("settings.section.templates.hint"), SettingsTabGeneral, "productivity"},
 		{settingsSectionClipboard, "clipboard", i18n.T("settings.section.clipboard"), "doc.on.clipboard", i18n.T("settings.section.clipboard.hint"), SettingsTabGeneral, "productivity"},
 	}, sections[6:]...)...)
 	sections = append(sections,
@@ -88,7 +90,7 @@ func settingsNavigationSections() []settingsSectionMeta {
 		switch sections[i].Key {
 		case "general", "ime-keymap", "leader":
 			sections[i].Group = "input"
-		case "snippets", "glossary", "clipboard", "workflows":
+		case "snippets", "glossary", "templates", "clipboard", "workflows":
 			sections[i].Group = "productivity"
 		case "ai":
 			sections[i].Group = "intelligence"
@@ -347,6 +349,8 @@ func settingsSectionKeywords(key string) string {
 		return "clipboard history retention_days max_history_items media_capture media_quota_mb excluded_bundle_ids privacy filter sensitive ttl pasteboard 剪贴板 历史 保留 天数 上限 媒体 配额 隐私 过滤 排除 敏感"
 	case "workflows":
 		return "workflows automation pipeline step action schedule trigger macro 工作流 自动化 步骤 流程 编排 宏"
+	case "templates":
+		return i18n.T("settings.section.templates.keywords")
 	case "ai":
 		return "ai model provider profile api_key keychain secretref vision ocr translate endpoint base_url timeout temperature stream anthropic openai gemini deepseek 模型 接口 密钥 视觉 识图 翻译 端点 连接 测试"
 	case "appearance":
@@ -391,6 +395,8 @@ func settingsSectionBadge(index int, cfg config.ClavisConfig) string {
 		return fmt.Sprintf("%d", len(cfg.Glossary.Terms))
 	case settingsSectionWorkflows:
 		return fmt.Sprintf("%d", len(cfg.Workflows.Workflows))
+	case settingsSectionTemplates:
+		return fmt.Sprintf("%d", len(cfg.Prompts.Items))
 	case settingsSectionAI:
 		return fmt.Sprintf("%d", len(cfg.Main.AI.Profiles))
 	case settingsSectionClipboard:
@@ -454,6 +460,8 @@ func (a *AppController) renderSettingsSection(
 		a.renderGlossarySection(c, theme, cfg)
 	case settingsSectionWorkflows:
 		a.renderWorkflowsSection(c, theme, cfg)
+	case settingsSectionTemplates:
+		a.renderSettingsTemplatesSection(c, theme, cfg)
 	case settingsSectionClipboard:
 		a.renderSettingsClipboardSection(c, theme, cfg)
 	case settingsSectionAppearance:

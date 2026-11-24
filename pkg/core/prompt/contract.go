@@ -45,7 +45,11 @@ type ContractRenderResult struct {
 func PromptSlotsFromContract(c template.Contract) []config.PromptSlot {
 	out := make([]config.PromptSlot, 0, len(c.Inputs))
 	for _, in := range c.Inputs {
-		s := config.PromptSlot{Name: in.Name, Label: in.Name, Default: in.Default, Required: in.Required}
+		label := in.LocalizedLabel(c.Locale)
+		if strings.TrimSpace(label) == "" {
+			label = in.Name
+		}
+		s := config.PromptSlot{Name: in.Name, Label: label, Default: in.Default, Required: in.Required}
 		switch strings.ToLower(in.Type) {
 		case "string", "enum":
 			s.Kind = "text"
@@ -77,6 +81,17 @@ func ValidateContractInputs(c template.Contract, values map[string]string) []Con
 	return diagnostics
 }
 
+// RenderContractPromptForLocale strictly renders a body against c for a
+// specific requestedLocale, failing closed when c does not support it.
+func RenderContractPromptForLocale(c template.Contract, body any, values map[string]string, ctx RenderContext, requestedLocale string) ContractRenderResult {
+	if strings.TrimSpace(requestedLocale) != "" && !c.SupportsLocale(requestedLocale) {
+		return ContractRenderResult{
+			Diagnostics: []ContractDiagnostic{{Code: "locale_unsupported", Message: "contract locale is not renderable"}},
+		}
+	}
+	return RenderContractPrompt(c, body, values, ctx)
+}
+
 // RenderContractPrompt strictly renders a body against c. Unlike RenderPrompt,
 // this API rejects undeclared placeholders and invalid input values.
 func RenderContractPrompt(c template.Contract, body any, values map[string]string, ctx RenderContext) ContractRenderResult {
@@ -86,7 +101,7 @@ func RenderContractPrompt(c template.Contract, body any, values map[string]strin
 		result.Diagnostics = append(result.Diagnostics, ContractDiagnostic{Code: "invalid_body", Message: "template body must be text"})
 		return result
 	}
-	if c.Locale != "en" {
+	if !c.LocaleRenderable() {
 		result.Diagnostics = append(result.Diagnostics, ContractDiagnostic{Code: "locale_unsupported", Message: "contract locale is not renderable"})
 		return result
 	}
@@ -118,6 +133,11 @@ func RenderContractPrompt(c template.Contract, body any, values map[string]strin
 	}
 	if _, ds := validateContractValues(c, values); len(ds) != 0 {
 		result.Diagnostics = append(result.Diagnostics, ds...)
+		for _, d := range ds {
+			if d.Code == "missing_required" && d.Name != "" && !seenMissing(result.MissingRequired, d.Name) {
+				result.MissingRequired = append(result.MissingRequired, d.Name)
+			}
+		}
 	}
 	fatal := false
 	for _, d := range result.Diagnostics {

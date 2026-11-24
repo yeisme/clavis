@@ -49,8 +49,66 @@ type Item struct {
 	Provenance   *ImportRecord          `json:"provenance,omitempty"`
 	Orphaned     bool                   `json:"orphaned"`
 	UpdateStatus string                 `json:"updateStatus"`
-	// Header checks alone never authorize rendering or execution.
-	ContractStatus string `json:"contractStatus"`
+	// ContractStatus reports full contract validation status:
+	// "validated", "header_only_unvalidated", "contract_invalid", or "degraded_no_contract".
+	ContractStatus      string       `json:"contractStatus"`
+	Contract            *Contract    `json:"-"`
+	ContractDiagnostics []Diagnostic `json:"contractDiagnostics,omitempty"`
+}
+
+func cloneContract(c *Contract) *Contract {
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	if c.Permissions != nil {
+		cp.Permissions = append([]string(nil), c.Permissions...)
+	}
+	if c.SupportedLocales != nil {
+		cp.SupportedLocales = append([]string(nil), c.SupportedLocales...)
+	}
+	if c.Inputs != nil {
+		cp.Inputs = make([]InputDefinition, len(c.Inputs))
+		for i, in := range c.Inputs {
+			inCopy := in
+			if in.Examples != nil {
+				inCopy.Examples = append([]string(nil), in.Examples...)
+			}
+			if in.Enum != nil {
+				inCopy.Enum = append([]string(nil), in.Enum...)
+			}
+			if in.Min != nil {
+				v := *in.Min
+				inCopy.Min = &v
+			}
+			if in.Max != nil {
+				v := *in.Max
+				inCopy.Max = &v
+			}
+			if in.MinLength != nil {
+				v := *in.MinLength
+				inCopy.MinLength = &v
+			}
+			if in.MaxLength != nil {
+				v := *in.MaxLength
+				inCopy.MaxLength = &v
+			}
+			if in.Labels != nil {
+				inCopy.Labels = make(map[string]string, len(in.Labels))
+				for k, v := range in.Labels {
+					inCopy.Labels[k] = v
+				}
+			}
+			if in.Descriptions != nil {
+				inCopy.Descriptions = make(map[string]string, len(in.Descriptions))
+				for k, v := range in.Descriptions {
+					inCopy.Descriptions[k] = v
+				}
+			}
+			cp.Inputs[i] = inCopy
+		}
+	}
+	return &cp
 }
 
 func cloneItem(v Item) Item {
@@ -58,6 +116,10 @@ func cloneItem(v Item) Item {
 	if v.Provenance != nil {
 		p := *v.Provenance
 		v.Provenance = &p
+	}
+	v.Contract = cloneContract(v.Contract)
+	if v.ContractDiagnostics != nil {
+		v.ContractDiagnostics = append([]Diagnostic(nil), v.ContractDiagnostics...)
 	}
 	if v.SlotDefaults != nil {
 		m := make(map[string]SlotDefault, len(v.SlotDefaults))
@@ -92,6 +154,8 @@ func MergeView(local, imported, bundled []Item) ([]Item, []Diagnostic) {
 				v.Provenance = nil
 				v.UpdateStatus = "no_updates"
 				v.ContractStatus = "degraded_no_contract"
+				v.Contract = nil
+				v.ContractDiagnostics = nil
 				v.Orphaned = false
 			case 1:
 				v.Source = Imported
@@ -130,6 +194,8 @@ func Fork(item Item) Item {
 	item.Orphaned = false
 	item.UpdateStatus = "no_updates"
 	item.ContractStatus = "degraded_no_contract"
+	item.Contract = nil
+	item.ContractDiagnostics = nil
 	return item
 }
 
