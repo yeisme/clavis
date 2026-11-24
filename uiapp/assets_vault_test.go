@@ -1,6 +1,7 @@
 package uiapp
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,5 +207,108 @@ func TestCopyMatrixActionsMarkdownPathRevealAndMeta(t *testing.T) {
 	ctrl.Dispatch(engine.Event{Type: engine.EventExecuteItemAction, ActionID: "copy_meta"})
 	if !strings.Contains(copied, "dimensions: 12x12") || !strings.Contains(copied, "kind: image") {
 		t.Fatalf("copy_meta = %q", copied)
+	}
+}
+
+func TestVaultClipboardOwnershipAndAssetsHubEdgePaths(t *testing.T) {
+	dir := t.TempDir()
+	// Corrupted vault_refs.json on disk must be ignored cleanly during startup without panicking.
+	if err := os.WriteFile(filepath.Join(dir, "vault_refs.json"), []byte("{not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgStore := config.NewConfigStore(dir)
+	if _, err := cfgStore.LoadOrInitialize(); err != nil {
+		t.Fatal(err)
+	}
+	secStore := secrets.NewMemoryAPIKeyStore()
+	clipValue := ""
+	ctrl := NewAppController(Options{
+		ConfigStore:     cfgStore,
+		SecretStore:     secStore,
+		ClipboardStore:  clipboard.NewMemoryStore(clipboard.NewPrivacyFilter()),
+		HerdrExecutor:   disabledHerdrExecutor{},
+		ClipboardWriter: func(s string) { clipValue = s },
+	})
+	t.Cleanup(ctrl.Close)
+
+	// hostVaultClipboard ownership isolation + nil guard + clearHook override.
+	var nilAdapter *hostVaultClipboard
+	if _, err := nilAdapter.Write("v"); err == nil {
+		t.Fatal("nil hostVaultClipboard Write should fail")
+	}
+	if err := nilAdapter.ClearIfOwned("tok"); err == nil {
+		t.Fatal("nil hostVaultClipboard ClearIfOwned should fail")
+	}
+
+	adapter := &hostVaultClipboard{ctrl: ctrl}
+	tok1, err := adapter.Write("first-secret")
+	if err != nil || clipValue != "first-secret" {
+		t.Fatalf("Write tok1 failed: err=%v clip=%q", err, clipValue)
+	}
+	tok2, err := adapter.Write("second-secret")
+	if err != nil || clipValue != "second-secret" {
+		t.Fatalf("Write tok2 failed: err=%v clip=%q", err, clipValue)
+	}
+	// Stale token MUST fail ownership check and NOT clear second-secret.
+	if err := adapter.ClearIfOwned(tok1); !errors.Is(err, secrets.ErrOwnershipLost) {
+		t.Fatalf("expected ErrOwnershipLost for stale token, got %v", err)
+	}
+	if clipValue != "second-secret" {
+		t.Fatalf("stale token overwrote clipboard: %q", clipValue)
+	}
+	// Active token clears cleanly, honoring custom clearHook when configured.
+	hookCalls := 0
+	ctrl.clipboardKeyManager().mu.Lock()
+	ctrl.clipboardKeyManager().clearHook = func() error { hookCalls++; clipValue = "hook-cleared"; return nil }
+	ctrl.clipboardKeyManager().mu.Unlock()
+	if err := adapter.ClearIfOwned(tok2); err != nil || hookCalls != 1 || clipValue != "hook-cleared" {
+		t.Fatalf("ClearIfOwned active token with clearHook failed: err=%v hookCalls=%d clip=%q", err, hookCalls, clipValue)
+	}
+
+	// VaultPutSecret errors, version bump on update, VaultRevoke missing error, and VaultSnapshot sort order.
+	if _, err := ctrl.VaultPutSecret("bad-empty", "clavis.empty.val", "Empty", secrets.SecretKindPassword, "   "); err == nil {
+		t.Fatal("expected VaultPutSecret blank value to fail")
+	}
+	r1, err := ctrl.VaultPutSecret("ref-a", "clavis.service.alpha", "Alpha", secrets.SecretKindPassword, "secret-alpha-v1")
+	if err != nil || r1.Version != 1 {
+		t.Fatalf("VaultPutSecret v1 failed: ref=%+v err=%v", r1, err)
+	}
+	r1Upd, err := ctrl.VaultPutSecret("ref-a", "clavis.service.alpha", "Alpha", secrets.SecretKindPassword, "secret-alpha-v2")
+	if err != nil || r1Upd.Version != 2 {
+		t.Fatalf("VaultPutSecret update should bump Version=2, got ref=%+v err=%v", r1Upd, err)
+	}
+	if _, err := ctrl.VaultPutSecret("ref-b", "clavis.service.beta", "Beta", secrets.SecretKindPassword, "secret-beta-v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctrl.VaultRevoke("missing-ref"); err == nil {
+		t.Fatal("expected VaultRevoke missing ref error")
+	}
+	if err := ctrl.VaultRevoke("ref-a"); err != nil {
+		t.Fatalf("VaultRevoke ref-a failed: %v", err)
+	}
+	snap := ctrl.VaultSnapshot()
+	if len(snap.SecretRefs) != 2 || snap.SecretRefs[0].ID != "ref-b" || snap.SecretRefs[1].ID != "ref-a" {
+		t.Fatalf("expected active ref-b sorted before revoked ref-a, got %+v", snap.SecretRefs)
+	}
+
+	// collectMediaAssetItems falls back to ClipboardEntries when MediaSearchItems is empty.
+	items := ctrl.collectMediaAssetItems(engine.State{
+		ClipboardEntries: []engine.OmniboxClipboardEntry{
+			{ID: "txt-1", Content: "just text"},
+			{
+				ID:            "pic-1",
+				Content:       "",
+				IsPinned:      true,
+				SourceAppName: "Preview",
+				CopiedAt:      time.Now(),
+				Media:         engine.ClipboardMedia{Kind: "image", Path: "/tmp/a.png"},
+			},
+		},
+	})
+	if len(items) != 1 || items[0].ID != "clip:pic-1" || items[0].KeyHint != engine.KeyHintPinned {
+		t.Fatalf("collectMediaAssetItems fallback failed: %+v", items)
+	}
+	if got := previewSingleLine("  line1\n  line2\tline3  ", 8); got != "line1 li…" {
+		t.Fatalf("previewSingleLine = %q", got)
 	}
 }

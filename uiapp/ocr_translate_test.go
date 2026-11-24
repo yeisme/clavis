@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -216,4 +219,107 @@ func TestTranslationDirectionAndPWUsesSensitiveTTL(t *testing.T) {
 	}
 	_ = ai.MaxImageAttachmentBytes
 	_ = written
+}
+
+func TestPrepareOCRImageErrorsFormatsAndTallScale(t *testing.T) {
+	if _, err := PrepareOCRImage(nil, "image/png"); err == nil {
+		t.Fatal("expected error for empty OCR payload")
+	}
+	if _, err := PrepareOCRImage([]byte("not-a-valid-image"), "image/png"); err == nil {
+		t.Fatal("expected error for corrupted image payload")
+	}
+
+	// Tall image (h > w, > 2048px) scales down proportionally on height and encodes PNG.
+	tallPNG := makeSolidPNG(1000, 4000)
+	tallAtt, err := PrepareOCRImage(tallPNG, "image/png")
+	if err != nil {
+		t.Fatalf("PrepareOCRImage tall PNG: %v", err)
+	}
+	tallCfg, _, err := image.DecodeConfig(bytes.NewReader(tallAtt.Data))
+	if err != nil || tallCfg.Width != 512 || tallCfg.Height != 2048 {
+		t.Fatalf("expected 512x2048 scaled PNG, got %dx%d err=%v", tallCfg.Width, tallCfg.Height, err)
+	}
+
+	// Unlisted/empty MIME infers decoded format ("image/jpeg") while keeping <=2048 dimensions intact.
+	var jpgBuf bytes.Buffer
+	src := image.NewRGBA(image.Rect(0, 0, 64, 48))
+	if err := jpeg.Encode(&jpgBuf, src, nil); err != nil {
+		t.Fatal(err)
+	}
+	jpgAtt, err := PrepareOCRImage(jpgBuf.Bytes(), "image/x-unknown")
+	if err != nil {
+		t.Fatalf("PrepareOCRImage jpeg format fallback: %v", err)
+	}
+	if jpgAtt.MIMEType != "image/jpeg" || jpgAtt.Detail != "high" {
+		t.Fatalf("unexpected jpeg attachment metadata: %+v", jpgAtt)
+	}
+}
+
+func TestClipboardMediaOCRStagingErrorsAndRetry(t *testing.T) {
+	cfgStore := config.NewConfigStore(t.TempDir())
+	if _, err := cfgStore.LoadOrInitialize(); err != nil {
+		t.Fatal(err)
+	}
+	sec := secrets.NewMemoryAPIKeyStore()
+	_ = sec.SaveKey("clavis.ai.gemini", "gm-test")
+
+	mockHTTP := &sseMockDoer{
+		body: "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"table-ocr-ok\"}]}}]}\n\n",
+	}
+	ctrl := NewAppController(Options{
+		ConfigStore:     cfgStore,
+		SecretStore:     sec,
+		ClipboardStore:  clipboard.NewMemoryStore(clipboard.NewPrivacyFilter()),
+		HerdrExecutor:   disabledHerdrExecutor{},
+		HTTPDoer:        mockHTTP,
+		ClipboardWriter: func(string) {},
+	})
+	t.Cleanup(ctrl.Close)
+
+	if err := ctrl.UpdateMainConfig(func(m *config.MainConfig) {
+		m.AI.VisionProfileID = "gemini"
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nil controller & invalid media / missing file paths reject cleanly.
+	var nilCtrl *AppController
+	if err := nilCtrl.StartImageOCR([]byte{1}, "image/png", ""); err == nil {
+		t.Fatal("nil controller StartImageOCR should error")
+	}
+	if err := ctrl.StartClipboardImageOCR(engine.ClipboardMedia{Kind: "text"}); err == nil {
+		t.Fatal("non-media ClipboardMedia should fail StartClipboardImageOCR")
+	}
+	missingPath := filepath.Join(t.TempDir(), "missing.jpg")
+	if err := ctrl.StartClipboardImageOCR(engine.ClipboardMedia{Kind: "image", Path: missingPath}); err == nil {
+		t.Fatal("missing image file should fail StartClipboardImageOCR")
+	}
+
+	// Real temp JPEG file with empty Mime infers image/jpeg from .jpg extension and triggers Vision OCR.
+	var jpgBuf bytes.Buffer
+	_ = jpeg.Encode(&jpgBuf, image.NewRGBA(image.Rect(0, 0, 40, 30)), nil)
+	jpgPath := filepath.Join(t.TempDir(), "clip-ocr.jpg")
+	if err := os.WriteFile(jpgPath, jpgBuf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctrl.StartClipboardImageOCR(engine.ClipboardMedia{Kind: "image", Path: jpgPath}); err != nil {
+		t.Fatalf("StartClipboardImageOCR failed: %v", err)
+	}
+	waitUntil(t, 2*time.Second, func() bool {
+		st := ctrl.State()
+		return st.AIComplete && strings.Contains(st.AIOutput, "table-ocr-ok")
+	}, "clipboard media OCR completed")
+
+	// consumeOCRImages retains lastOCRImg so MD Table re-run works without re-reading file.
+	reused := ctrl.consumeOCRImages()
+	if len(reused) != 1 || reused[0].MIMEType != "image/jpeg" {
+		t.Fatalf("expected retained lastOCRImg for retry, got %+v", reused)
+	}
+	if !strings.Contains(defaultOCRPrompt(true), "Markdown tables") || strings.Contains(defaultOCRPrompt(false), "Markdown tables") {
+		t.Fatal("defaultOCRPrompt tableMode toggle mismatch")
+	}
+	ctrl.StartTranslation("测试方向重置", string(engine.TranslateEnToZh))
+	if got := ctrl.translateDirectionFor("测试方向重置"); got != engine.TranslateEnToZh {
+		t.Fatalf("expected explicit override %q, got %q", engine.TranslateEnToZh, got)
+	}
 }

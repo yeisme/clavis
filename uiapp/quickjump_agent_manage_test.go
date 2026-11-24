@@ -3,12 +3,14 @@ package uiapp
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/yeisme/clavis/pkg/core/agentsession"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
@@ -156,4 +158,97 @@ func TestAgentManageGatedControlsAndManagement2x3Hub(t *testing.T) {
 	if !ltt.HasText("OCR") || (!ltt.HasText("Capture") && !ltt.HasText("截图")) {
 		t.Fatalf("Leader Quick Tools missing: %v", ltt.Texts())
 	}
+}
+
+func TestAgentManageWorkspaceFilterFocusRenameAndWatch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	mockCLI := &mockHerdrManageCLI{
+		workspc: `{"result":{"workspaces":[{"workspace_id":"w4","label":"clavis","number":4},{"workspace_id":"w9","label":"novels","number":9}]}}`,
+		agents:  `{"result":{"agents":[{"agent":"codex","agent_session":{"value":"s-1"},"agent_status":"working","name":"coder","pane_id":"w4:p1","workspace_id":"w4"}]}}`,
+	}
+	cfgStore := config.NewConfigStore(t.TempDir())
+	if _, err := cfgStore.LoadOrInitialize(); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := NewAppController(Options{
+		ConfigStore:     cfgStore,
+		ClipboardStore:  clipboard.NewMemoryStore(clipboard.NewPrivacyFilter()),
+		HerdrExecutor:   mockCLI,
+		ClipboardWriter: func(string) {},
+	})
+	t.Cleanup(ctrl.Close)
+
+	// SetAgentWorkspaceFilter sets, resets agentSelected, and toggles off on repeat call.
+	ctrl.SetAgentWorkspaceFilter("w4")
+	if got := ctrl.agentWorkspaceFilter(); got != "w4" {
+		t.Fatalf("workspace filter = %q, want w4", got)
+	}
+	ctrl.SetAgentWorkspaceFilter("w4")
+	if got := ctrl.agentWorkspaceFilter(); got != "" {
+		t.Fatalf("repeat SetAgentWorkspaceFilter should clear, got %q", got)
+	}
+
+	// FilterAgentItemsByWorkspace matches WorkspaceID or WorkspaceLabel and preserves controls/refresh items.
+	sessions := []agentsession.Session{
+		{ID: "s1", Provider: "codex", PaneID: "w4:p1", WorkspaceID: "w4", WorkspaceLabel: "clavis", HerdrManaged: true},
+		{ID: "s2", Provider: "agy", PaneID: "w9:p1", WorkspaceID: "w9", WorkspaceLabel: "novels", HerdrManaged: true},
+	}
+	allItems := []engine.OmniboxItem{
+		{ID: "agent:s1", Kind: engine.ItemUtility, UtilityValue: "agent-session:codex:s1"},
+		{ID: "agent:s2", Kind: engine.ItemUtility, UtilityValue: "agent-session:agy:s2"},
+		{ID: "cmd:1", Kind: engine.ItemUtility, UtilityValue: "agent-command:refresh"},
+		{ID: "cmd:2", Kind: engine.ItemUtility, UtilityValue: "agent-refresh-status"},
+	}
+	if unfiltered := FilterAgentItemsByWorkspace(allItems, sessions, ""); len(unfiltered) != 4 {
+		t.Fatalf("empty filter returned %d items", len(unfiltered))
+	}
+	byID := FilterAgentItemsByWorkspace(allItems, sessions, "w4")
+	if len(byID) != 3 || byID[0].ID != "agent:s1" {
+		t.Fatalf("FilterAgentItemsByWorkspace by ID = %+v", byID)
+	}
+	byLabel := FilterAgentItemsByWorkspace(allItems, sessions, "NOVELS")
+	if len(byLabel) != 3 || byLabel[0].ID != "agent:s2" {
+		t.Fatalf("FilterAgentItemsByWorkspace by case-insensitive label = %+v", byLabel)
+	}
+
+	// FocusHerdrWorkspace: empty workspace sets error status, valid workspace calls `workspace focus w9`.
+	if _, err := ctrl.FocusHerdrWorkspace(""); err == nil || !agentManageStateFor(ctrl).statusIsErr {
+		t.Fatal("expected empty workspace FocusHerdrWorkspace to fail and set statusIsErr")
+	}
+	if _, err := ctrl.FocusHerdrWorkspace("w9"); err != nil || agentManageStateFor(ctrl).statusIsErr {
+		t.Fatalf("FocusHerdrWorkspace w9 failed: err=%v statusIsErr=%v", err, agentManageStateFor(ctrl).statusIsErr)
+	}
+
+	// RenameHerdrAgent: >40 runes fails; valid rename clears draft & invokes `agent rename`.
+	st := agentManageStateFor(ctrl)
+	st.mu.Lock()
+	st.renameOpen = true
+	st.renameDraft = "draft"
+	st.mu.Unlock()
+	if _, err := ctrl.RenameHerdrAgent("w4:p1", strings.Repeat("x", 41)); err == nil || !st.statusIsErr {
+		t.Fatal("expected >40 rune rename failure")
+	}
+	if _, err := ctrl.RenameHerdrAgent("w4:p1", "builder"); err != nil {
+		t.Fatalf("RenameHerdrAgent valid failed: %v", err)
+	}
+	st.mu.Lock()
+	openAfter, draftAfter := st.renameOpen, st.renameDraft
+	st.mu.Unlock()
+	if openAfter || draftAfter != "" {
+		t.Fatalf("expected rename state cleared, got open=%v draft=%q", openAfter, draftAfter)
+	}
+
+	// WatchHerdrAgentCompletion: empty target is a no-op; valid target invokes wait once & clears watching.
+	ctrl.WatchHerdrAgentCompletion("  ", "ignored")
+	ctrl.WatchHerdrAgentCompletion("w4:p1", "coder")
+	ctrl.WatchHerdrAgentCompletion("w4:p1", "coder") // dedup while active or sequential
+	waitUntil(t, 2*time.Second, func() bool {
+		mockCLI.mu.Lock()
+		hasWait := slices.Contains(mockCLI.calls, "agent wait w4:p1 --state idle --timeout 45")
+		mockCLI.mu.Unlock()
+		st.mu.Lock()
+		watching := st.watching["w4:p1"]
+		st.mu.Unlock()
+		return hasWait && !watching
+	}, "WatchHerdrAgentCompletion executes wait and clears active flag")
 }

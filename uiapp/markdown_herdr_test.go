@@ -2,10 +2,12 @@ package uiapp
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
@@ -199,4 +201,90 @@ func TestAgentTabWithLiveHerdrOutputMarkdownAndHeaderPill(t *testing.T) {
 		defer pf.mu.Unlock()
 		return pf.paneID == "w4:pB"
 	}, "direct PaneFocuser should receive w4:pB")
+}
+
+func TestMarkdownKitDetectionFormattingAndBudgetEdges(t *testing.T) {
+	// Extension hints & content detection boundaries.
+	cases := []struct {
+		text string
+		ext  string
+		want previewContentKind
+	}{
+		{"   \t\n ", "", previewKindPlain},
+		{`{"invalid": `, ".json", previewKindCode},
+		{`{"ok":true}`, ".json", previewKindJSON},
+		{"package main", ".go", previewKindCode},
+		{"# Header", ".markdown", previewKindMarkdown},
+		{"- only a single list line", "", previewKindPlain},
+		{"| a | b |\n| --- | --- |\n> quote with **bold**", "", previewKindMarkdown},
+	}
+	for _, tc := range cases {
+		if got := detectPreviewContentKind(tc.text, tc.ext); got != tc.want {
+			t.Fatalf("detectPreviewContentKind(%q, %q) = %v, want %v", tc.text, tc.ext, got, tc.want)
+		}
+	}
+	longPlain := strings.Repeat("a", clipboardSniffBytes+64) + "\n# Late Heading\n- bullet\n"
+	if got := detectPreviewContentKind(longPlain, ""); got != previewKindPlain {
+		t.Fatalf("markdown markers beyond sniff window should stay plain in O(1) classifier, got %v", got)
+	}
+
+	// formatMarkdownPreviewSource: JSON indentation, >16KB bypass, .yml normalization.
+	formattedJSON, _, _ := formatMarkdownPreviewSource(`{"a":1}`, previewKindJSON, ".json", 0, 0)
+	if !strings.HasPrefix(formattedJSON, "```json\n{\n  \"a\": 1") {
+		t.Fatalf("expected pretty-printed json fence, got %q", formattedJSON)
+	}
+	hugeJSON := `{"k":"` + strings.Repeat("x", maxJSONIndentBytes+128) + `"}`
+	hugeOut, trunc, _ := formatMarkdownPreviewSource(hugeJSON, previewKindJSON, ".json", 120, 10)
+	if !trunc || !strings.HasPrefix(hugeOut, "```json\n") || !strings.HasSuffix(hugeOut, "\n```") {
+		t.Fatalf("expected bounded raw json fence on >16KB input, got trunc=%v out=%q", trunc, hugeOut)
+	}
+	yamlOut, _, _ := formatMarkdownPreviewSource("key: val\r\n\r\n", previewKindCode, "config.YML", 0, 0)
+	if yamlOut != "```yaml\nkey: val\n```" {
+		t.Fatalf("expected normalized yaml fence, got %q", yamlOut)
+	}
+
+	// prepareMarkdownBudget preserves valid UTF-8 across multi-byte CJK truncation & enforces maxLines.
+	cjk := strings.Repeat("汉", 30)
+	cutCJK, cjkTrunc, cjkOmit := prepareMarkdownBudget(cjk, 10, 50)
+	if !cjkTrunc || cjkOmit <= 0 || !utf8.ValidString(cutCJK) || len(cutCJK) > 10 {
+		t.Fatalf("CJK byte budget broke UTF-8 or cap: len=%d valid=%v omit=%d %q", len(cutCJK), utf8.ValidString(cutCJK), cjkOmit, cutCJK)
+	}
+	multiLine := "1\n2\n3\n4\n5"
+	cutLines, lineTrunc, lineOmit := prepareMarkdownBudget(multiLine, 1024, 3)
+	if !lineTrunc || lineOmit != 2 || cutLines != "1\n2\n3" {
+		t.Fatalf("line budget got (%q, %v, %d)", cutLines, lineTrunc, lineOmit)
+	}
+
+	// isSafeExternalURL & openExternalURL safety gate.
+	for _, safe := range []string{"https://clavis.dev/a", " http://127.0.0.1:8080 ", "mailto:hi@example.com"} {
+		if !isSafeExternalURL(safe) {
+			t.Fatalf("expected safe URL %q", safe)
+		}
+	}
+	for _, unsafe := range []string{"", "://bad", "https:///nohost", "javascript:alert(1)", "file:///etc/passwd", "data:text/html,x"} {
+		if isSafeExternalURL(unsafe) {
+			t.Fatalf("expected unsafe URL rejected: %q", unsafe)
+		}
+	}
+
+	cfgStore := config.NewConfigStore(t.TempDir())
+	_, _ = cfgStore.LoadOrInitialize()
+	var opened []string
+	var copied []string
+	ctrl := NewAppController(Options{
+		ConfigStore:     cfgStore,
+		ClipboardStore:  clipboard.NewMemoryStore(clipboard.NewPrivacyFilter()),
+		HerdrExecutor:   disabledHerdrExecutor{},
+		ClipboardWriter: func(s string) { copied = append(copied, s) },
+		OpenExternal:    func(u string) error { opened = append(opened, u); return nil },
+	})
+	t.Cleanup(ctrl.Close)
+
+	ctrl.openExternalURL("javascript:alert(1)")
+	ctrl.openExternalURL("https://herdr.dev")
+	if len(opened) != 1 || opened[0] != "https://herdr.dev" {
+		t.Fatalf("openExternalURL leaked unsafe or missed safe URL: %v", opened)
+	}
+	_ = errors.New
+	_ = copied
 }
