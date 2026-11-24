@@ -3,7 +3,9 @@ package inputengine
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"testing"
 )
@@ -61,5 +63,36 @@ func TestStarterDataDigestAndShape(t *testing.T) {
 	}
 	if len(d.Words) < 100 {
 		t.Fatalf("starter has %d words, expected the phrase list", len(d.Words))
+	}
+}
+
+func TestStarterMetaMatchesStarterData(t *testing.T) {
+	rawMeta, err := os.ReadFile("data/starter.meta.json")
+	if err != nil {
+		t.Fatalf("read starter.meta.json: %v", err)
+	}
+	var meta struct {
+		Digest     string `json:"digest"`
+		HanziRunes int    `json:"hanziRunes"`
+		Version    int    `json:"version"`
+		WordCount  int    `json:"wordCount"`
+	}
+	if err := json.Unmarshal(rawMeta, &meta); err != nil {
+		t.Fatalf("parse starter.meta.json: %v", err)
+	}
+	sum := sha256.Sum256(starterJSON)
+	gotDigest := "sha256:" + hex.EncodeToString(sum[:])
+	if meta.Digest != gotDigest || meta.Digest != starterDigest {
+		t.Fatalf("starter.meta.json digest = %q, want %q (starterDigest=%q)", meta.Digest, gotDigest, starterDigest)
+	}
+	d := loadStarter()
+	if meta.Version != d.Version {
+		t.Fatalf("starter.meta.json version = %d, want %d", meta.Version, d.Version)
+	}
+	if wantRunes := len([]rune(d.Hanzi)); meta.HanziRunes != wantRunes {
+		t.Fatalf("starter.meta.json hanziRunes = %d, want %d", meta.HanziRunes, wantRunes)
+	}
+	if meta.WordCount != len(d.Words) {
+		t.Fatalf("starter.meta.json wordCount = %d, want %d", meta.WordCount, len(d.Words))
 	}
 }

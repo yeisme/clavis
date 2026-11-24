@@ -280,8 +280,8 @@ func TestCandidateCountClamping(t *testing.T) {
 		}
 		if tc.want < 9 {
 			r := e.HandleKey(Key{Kind: KeyDigit, Rune: rune('0' + tc.want + 1)})
-			if r.Consume || r.Commit != "" {
-				t.Fatalf("CandidateCount(%d) out-of-page digit consumed or committed: %+v", tc.in, r)
+			if !r.Consume || r.Commit != "" || e.Raw() != "shi" {
+				t.Fatalf("CandidateCount(%d) out-of-page digit must consume cleanly without commit: %+v raw=%q", tc.in, r, e.Raw())
 			}
 		}
 	}
@@ -315,8 +315,22 @@ func (m *mockUserFreq) CustomWordsForPrefix(prefix string) []UserCandidate {
 }
 
 func (m *mockUserFreq) BigramWordsForPrefix(prevWord, prefix string) []UserCandidate {
-	if prevWord == "我" && prefix == "men" {
-		return []UserCandidate{{PinyinKey: "women", Word: "我们", Frequency: 8}}
+	if prevWord != "我" {
+		return nil
+	}
+	switch prefix {
+	case "men":
+		// Include a bad suffix-only reading ("women") alongside the valid prefix
+		// reading ("menkou") to verify bigramConsumed rejects non-prefix readings.
+		return []UserCandidate{
+			{PinyinKey: "women", Word: "我们", Frequency: 20},
+			{PinyinKey: "menkou", Word: "门口", Frequency: 8},
+		}
+	case "xi", "xh":
+		return []UserCandidate{{PinyinKey: "xihuan", Word: "喜欢", Frequency: 8}}
+	case "huan":
+		// Even if a provider returned a suffix-only match, bigramConsumed must reject it.
+		return []UserCandidate{{PinyinKey: "xihuan", Word: "喜欢", Frequency: 8}}
 	}
 	return nil
 }
@@ -324,28 +338,47 @@ func (m *mockUserFreq) BigramWordsForPrefix(prevWord, prefix string) []UserCandi
 func TestBigramGenerationAndColdStartSnapshot(t *testing.T) {
 	withBigram := &mockUserFreq{}
 	e := New(Options{CandidateCount: 7, UserFrequency: withBigram})
-	typeLetters(e, "wo")
-	wo := e.View()
-	idx := slices.IndexFunc(wo.Candidates, func(c Candidate) bool { return c.Text == "我" })
-	if idx < 0 {
-		t.Fatalf("previous-word candidate missing: %v", texts(wo))
+	commitWo := func() {
+		t.Helper()
+		e.Reset()
+		typeLetters(e, "wo")
+		wo := e.View()
+		idx := slices.IndexFunc(wo.Candidates, func(c Candidate) bool { return c.Text == "我" })
+		if idx < 0 {
+			t.Fatalf("previous-word candidate missing: %v", texts(wo))
+		}
+		if got := e.HandleKey(Key{Kind: KeyDigit, Rune: rune('1' + idx)}); got.Commit != "我" {
+			t.Fatalf("commit previous word: %+v", got)
+		}
 	}
-	if got := e.HandleKey(Key{Kind: KeyDigit, Rune: rune('1' + idx)}); got.Commit != "我" {
-		t.Fatalf("commit previous word: %+v", got)
-	}
+	commitWo()
 	typeLetters(e, "men")
 	withBigramCandidates := texts(e.View())
-	if !slices.Contains(withBigramCandidates, "我们") {
-		t.Fatalf("bigram candidate missing: %v", withBigramCandidates)
+	if !slices.Contains(withBigramCandidates, "门口") {
+		t.Fatalf("prefix bigram candidate missing: %v", withBigramCandidates)
 	}
-	if slices.Index(withBigramCandidates, "我们") > 2 {
+	if slices.Index(withBigramCandidates, "门口") > 2 {
 		t.Fatalf("bigram candidate did not surface early: %v", withBigramCandidates)
+	}
+	if slices.Contains(withBigramCandidates, "我们") {
+		t.Fatalf("suffix-only bigram candidate unexpectedly surfaced: %v", withBigramCandidates)
+	}
+
+	commitWo()
+	typeLetters(e, "xi")
+	if got := texts(e.View()); len(got) == 0 || got[0] != "喜欢" {
+		t.Fatalf("after 我 + xi expected 喜欢 first, got %v", got)
+	}
+	commitWo()
+	typeLetters(e, "huan")
+	if got := texts(e.View()); slices.Contains(got, "喜欢") {
+		t.Fatalf("after 我 + huan suffix-only bigram unexpectedly surfaced: %v", got)
 	}
 
 	cold := New(Options{CandidateCount: 7})
 	typeLetters(cold, "men")
 	want := texts(cold.View())
-	if slices.Contains(want, "我们") {
+	if slices.Contains(want, "门口") {
 		t.Fatalf("cold start unexpectedly contains learned bigram: %v", want)
 	}
 	withEmptyMirror := New(Options{CandidateCount: 7, UserFrequency: &mockUserFreq{}})
