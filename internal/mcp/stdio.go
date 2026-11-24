@@ -19,7 +19,8 @@ type Process interface {
 }
 
 // ProcessLauncher starts a process for a server. Implementations own process
-// creation policy; this package never invokes os/exec directly.
+// creation policy; StdioTransport never invokes os/exec directly. Callers may
+// inject ExecProcessLauncher or a custom ProcessLauncher.
 type ProcessLauncher interface {
 	Launch(context.Context, ProcessSpec) (Process, error)
 }
@@ -217,13 +218,15 @@ func (t *StdioTransport) failPending(err error) {
 
 func (t *StdioTransport) closeProcess(kill bool) error {
 	t.processCloseOnce.Do(func() {
+		// Close first so real process implementations can perform a graceful
+		// stdin-EOF shutdown before falling back to Kill.
+		if err := t.process.Close(); err != nil {
+			t.processCloseErr = err
+		}
 		if kill {
-			if err := t.process.Kill(); err != nil {
+			if err := t.process.Kill(); t.processCloseErr == nil && err != nil {
 				t.processCloseErr = err
 			}
-		}
-		if err := t.process.Close(); t.processCloseErr == nil {
-			t.processCloseErr = err
 		}
 	})
 	return t.processCloseErr
@@ -242,6 +245,9 @@ func (t *StdioTransport) Close() error {
 	}
 	t.mu.Unlock()
 	if alreadyClosed {
+		// Wait for any in-flight closeProcess initiated by readLoop/failPending
+		// so the process is guaranteed to be reaped before Close returns.
+		_ = t.closeProcess(false)
 		return nil
 	}
 	return t.closeProcess(true)

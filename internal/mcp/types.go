@@ -63,6 +63,7 @@ func ConfigFromSection(s ServerSection) (ServerConfig, error) {
 // process launcher. Environment is a copy and may be safely modified by a
 // launcher.
 type ProcessSpec struct {
+	ServerName  string
 	Command     string
 	Args        []string
 	Environment map[string]string
@@ -240,7 +241,7 @@ func (c ServerConfig) processSpec() (ProcessSpec, error) {
 	for k, v := range c.Environment {
 		env[k] = v
 	}
-	return ProcessSpec{Command: c.Command, Args: cloneStrings(c.Args), Environment: env, WorkingDir: c.WorkingDir}, nil
+	return ProcessSpec{ServerName: c.Name, Command: c.Command, Args: cloneStrings(c.Args), Environment: env, WorkingDir: c.WorkingDir}, nil
 }
 
 func (o ClientOptions) normalized() ClientOptions {

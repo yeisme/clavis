@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -101,9 +102,33 @@ type ActionGate interface {
 	Allow(ctx context.Context, pluginID string, permissions []string) error
 }
 
+// AllowAllGate permits all plugin action executions. Callers must inject it
+// explicitly (for example in trusted tests); nil gates never default to it.
 type AllowAllGate struct{}
 
 func (AllowAllGate) Allow(context.Context, string, []string) error { return nil }
+
+// DenyAllGate denies all plugin action executions. It is the fail-closed
+// default used whenever a caller omits an explicit ActionGate.
+type DenyAllGate struct{}
+
+func (DenyAllGate) Allow(context.Context, string, []string) error {
+	return fmt.Errorf("%w: no action gate configured", ErrPermissionDenied)
+}
+
+func resolveActionGate(gate ActionGate) ActionGate {
+	if gate == nil {
+		return DenyAllGate{}
+	}
+	return gate
+}
+
+func wrapPermissionDenied(err error) error {
+	if errors.Is(err, ErrPermissionDenied) {
+		return err
+	}
+	return fmt.Errorf("%w: %v", ErrPermissionDenied, err)
+}
 
 // AutomationActionRunner adapts action.run to the existing automation.Runner.
 type AutomationActionRunner struct {
@@ -119,9 +144,7 @@ type actionProvider struct {
 }
 
 func (p actionProvider) Invoke(ctx context.Context, invocation automation.ActionInvocation) (automation.ActionResult, error) {
-	if p.gate == nil {
-		p.gate = AllowAllGate{}
-	}
+	gate := resolveActionGate(p.gate)
 	r, err := p.supervisor.plugin(p.pluginID)
 	if err != nil {
 		return automation.ActionResult{}, err
@@ -130,8 +153,9 @@ func (p actionProvider) Invoke(ctx context.Context, invocation automation.Action
 	permissions := append([]string(nil), r.manifest.Permissions.Filesystem...)
 	permissions = append(permissions, r.manifest.Permissions.Network...)
 	r.mu.Unlock()
-	if err := p.gate.Allow(ctx, p.pluginID, permissions); err != nil {
-		return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultFailed, Error: ErrPermissionDenied.Error()}, nil
+	if err := gate.Allow(ctx, p.pluginID, permissions); err != nil {
+		denyErr := wrapPermissionDenied(err)
+		return automation.ActionResult{ActionID: invocation.ActionID, Status: automation.ResultFailed, Error: denyErr.Error()}, denyErr
 	}
 	params, err := json.Marshal(invocation.Input)
 	if err != nil {
@@ -155,9 +179,7 @@ func (s *Supervisor) RunAction(ctx context.Context, id string, runner *automatio
 	if runner == nil {
 		return automation.ExecutionResult{}, errors.New("plugin action runner is nil")
 	}
-	if gate == nil {
-		gate = AllowAllGate{}
-	}
+	gate = resolveActionGate(gate)
 	r, err := s.plugin(id)
 	if err != nil {
 		return automation.ExecutionResult{}, err
@@ -167,7 +189,7 @@ func (s *Supervisor) RunAction(ctx context.Context, id string, runner *automatio
 	permissions = append(permissions, r.manifest.Permissions.Network...)
 	r.mu.Unlock()
 	if err := gate.Allow(ctx, id, permissions); err != nil {
-		return automation.ExecutionResult{}, ErrPermissionDenied
+		return automation.ExecutionResult{}, wrapPermissionDenied(err)
 	}
 	clone := *runner
 	clone.Provider = actionProvider{supervisor: s, pluginID: id, gate: gate}
@@ -175,13 +197,12 @@ func (s *Supervisor) RunAction(ctx context.Context, id string, runner *automatio
 }
 
 // NewAutomationActionRunner returns an automation runner backed by action.run.
+// A nil gate defaults to fail-closed DenyAllGate.
 func (s *Supervisor) NewAutomationActionRunner(id string, gate ActionGate) (*automation.Runner, error) {
 	if _, err := s.plugin(id); err != nil {
 		return nil, err
 	}
-	if gate == nil {
-		gate = AllowAllGate{}
-	}
+	gate = resolveActionGate(gate)
 	return automation.NewRunner(actionProvider{supervisor: s, pluginID: id, gate: gate}), nil
 }
 

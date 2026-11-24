@@ -33,27 +33,33 @@ func (r *recordingRegistry) RegisterCapability(_ string, c Capability) error {
 }
 
 type fakeProcess struct {
-	stdinR  *io.PipeReader
-	stdinW  *io.PipeWriter
-	stdoutR *io.PipeReader
-	stdoutW *io.PipeWriter
-	stderrR *io.PipeReader
-	stderrW *io.PipeWriter
-	done    chan struct{}
-	start   func(*fakeProcess)
+	stdinR      *io.PipeReader
+	stdinW      *io.PipeWriter
+	stdoutR     *io.PipeReader
+	stdoutW     *io.PipeWriter
+	stderrR     *io.PipeReader
+	stderrW     *io.PipeWriter
+	done        chan struct{}
+	waitEntered chan struct{}
+	waitOnce    sync.Once
+	start       func(*fakeProcess)
 }
 
 func newFakeProcess(start func(*fakeProcess)) *fakeProcess {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	errR, errW := io.Pipe()
-	return &fakeProcess{stdinR: inR, stdinW: inW, stdoutR: outR, stdoutW: outW, stderrR: errR, stderrW: errW, done: make(chan struct{}), start: start}
+	return &fakeProcess{stdinR: inR, stdinW: inW, stdoutR: outR, stdoutW: outW, stderrR: errR, stderrW: errW, done: make(chan struct{}), waitEntered: make(chan struct{}), start: start}
 }
 func (p *fakeProcess) Stdin() (io.WriteCloser, error) { return p.stdinW, nil }
 func (p *fakeProcess) Stdout() (io.Reader, error)     { return p.stdoutR, nil }
 func (p *fakeProcess) Stderr() (io.Reader, error)     { return p.stderrR, nil }
 func (p *fakeProcess) Start() error                   { go p.start(p); return nil }
-func (p *fakeProcess) Wait() error                    { <-p.done; return nil }
+func (p *fakeProcess) Wait() error {
+	p.waitOnce.Do(func() { close(p.waitEntered) })
+	<-p.done
+	return nil
+}
 func (p *fakeProcess) Kill() error {
 	select {
 	case <-p.done:
@@ -165,6 +171,7 @@ func TestSupervisorTimeoutMarksPluginUnavailable(t *testing.T) {
 				return
 			}
 			if message.Request != nil && message.Request.Method == "initialize" {
+				<-p.waitEntered
 				writeResponse(encoder, message.Request.ID, map[string]bool{"ok": true})
 			} else if message.Request != nil && message.Request.Method == "list_capabilities" {
 				writeResponse(encoder, message.Request.ID, []Capability{{Name: "slow"}})

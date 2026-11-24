@@ -99,6 +99,10 @@ func (m *Manager) start(ctx context.Context, id string) error {
 		return nil
 	}
 	m.mu.Unlock()
+	cfg := spec.Config
+	if cfg.Name == "" {
+		cfg.Name = spec.ID
+	}
 	transport := spec.Transport
 	var err error
 	if transport == nil && spec.Factory != nil {
@@ -108,14 +112,14 @@ func (m *Manager) start(ctx context.Context, id string) error {
 		if spec.Launcher == nil {
 			err = errors.New("mcp: server transport or launcher is required")
 		} else {
-			transport, err = NewStdioTransport(ctx, spec.Config, spec.Launcher)
+			transport, err = NewStdioTransport(ctx, cfg, spec.Launcher)
 		}
 	}
 	if err != nil {
 		m.recordError(id, err)
 		return err
 	}
-	client := NewConfiguredClient(transport, spec.Config, m.opts.ClientOptions)
+	client := NewConfiguredClient(transport, cfg, m.opts.ClientOptions)
 	if spec.MaxConcurrency <= 0 {
 		spec.MaxConcurrency = 4
 	}
