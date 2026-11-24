@@ -277,6 +277,31 @@ func (v *Vault) Put(ref SecretRef, value string) (SecretRef, error) {
 	return ref, v.appendAudit(AuditEvent{At: ref.UpdatedAt, Action: "stored", SecretRefID: ref.ID, State: ref.State})
 }
 
+// RestoreRef loads a previously persisted metadata-only SecretRef without writing
+// or reading the underlying secret value store.
+func (v *Vault) RestoreRef(ref SecretRef) error {
+	if err := validateSecretRef(ref); err != nil {
+		return err
+	}
+	if ref.Backend == "" {
+		ref.Backend = SecretBackendLayered
+	}
+	if ref.State == "" {
+		ref.State = SecretStateStored
+	}
+	v.mu.Lock()
+	v.refs[ref.ID] = ref
+	v.mu.Unlock()
+	return nil
+}
+
+// SnapshotEvents returns a copy of buffered MemoryAuditSink events safely.
+func (s *MemoryAuditSink) SnapshotEvents() []AuditEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]AuditEvent(nil), s.Events...)
+}
+
 func (v *Vault) Metadata(id string) (SecretRef, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()

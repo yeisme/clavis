@@ -120,7 +120,9 @@ const (
 	TriggerCapsuleToggle TriggerKind = "capsule_toggle"
 	// TriggerClipboardToggle opens (or closes) Capsule directly on the Clipboard History tab.
 	TriggerClipboardToggle TriggerKind = "clipboard_toggle"
-	TriggerSnippetKey      TriggerKind = "snippet_key"
+	// TriggerScreenshotAnnotate captures an interactive region and opens the vector annotator.
+	TriggerScreenshotAnnotate TriggerKind = "screenshot_annotate"
+	TriggerSnippetKey         TriggerKind = "snippet_key"
 	TriggerSnippetBack     TriggerKind = "snippet_backspace"
 	TriggerSnippetReset    TriggerKind = "snippet_reset"
 	// TriggerSelectionQuickBar opens the floating selection action bar.
