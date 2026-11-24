@@ -10,7 +10,11 @@ import (
 	"github.com/egoist/mygo/plugins/sqlite"
 )
 
-const sqliteCompactionTimeout = 5 * time.Second
+const (
+	sqliteCompactionTimeout   = 5 * time.Second
+	DefaultBridgeHealCooldown = 15 * time.Second
+	DefaultBridgeHealTimeout  = 5 * time.Second
+)
 
 // NewSQLiteCompactionHook returns a CompactionHook that runs a passive WAL
 // checkpoint and PRAGMA optimize against db. If db is nil, it returns a no-op hook.
@@ -58,24 +62,89 @@ func NewCacheTrimHook(invalidators ...func()) CompactionHook {
 type BridgeLivenessInput struct {
 	IsRunning        func() bool
 	TapRecoveryCount func() int64
+	// Heal, when non-nil, is invoked with a bounded timeout whenever IsRunning
+	// reports false, rate-limited by HealCooldown (defaults to DefaultBridgeHealCooldown).
+	Heal         func(context.Context) error
+	HealCooldown time.Duration
+	HealTimeout  time.Duration
+	// Now optionally overrides time.Now for deterministic cooldown testing.
+	Now func() time.Time
+}
+
+// NewBridgeWatchdogProbeWithHeal constructs a bridge watchdog probe that actively
+// invokes healFn (bounded by DefaultBridgeHealTimeout and throttled by cooldown)
+// whenever IsRunning reports false.
+func NewBridgeWatchdogProbeWithHeal(
+	in BridgeLivenessInput,
+	healFn func(context.Context) error,
+	cooldown time.Duration,
+) WatchdogProbe {
+	in.Heal = healFn
+	if cooldown > 0 {
+		in.HealCooldown = cooldown
+	}
+	return NewBridgeWatchdogProbe(in)
 }
 
 // NewBridgeWatchdogProbe returns a WatchdogProbe that checks bridge running state
-// and TapRecoveryCount progression. When the bridge is not running or a new hook/tap
-// recovery occurred since the previous probe, it returns false so the supervisor
-// records trouble and increments SelfHealCount upon subsequent steady recovery.
+// and TapRecoveryCount progression. When the bridge is not running (triggering an
+// optional bounded Heal callback if configured and not in cooldown) or a new
+// hook/tap recovery occurred since the previous probe, it returns false so the
+// supervisor records trouble and increments SelfHealCount upon subsequent steady recovery.
 func NewBridgeWatchdogProbe(in BridgeLivenessInput) WatchdogProbe {
 	var mu sync.Mutex
 	var lastRecovery int64
+	var lastHealAttempt time.Time
+	var healing bool
 	if in.TapRecoveryCount != nil {
 		lastRecovery = in.TapRecoveryCount()
 	}
+	cooldown := in.HealCooldown
+	if cooldown <= 0 {
+		cooldown = DefaultBridgeHealCooldown
+	}
+	healTimeout := in.HealTimeout
+	if healTimeout <= 0 {
+		healTimeout = DefaultBridgeHealTimeout
+	}
+	nowFn := in.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
 	return func(ctx context.Context) (bool, error) {
-		if ctx != nil && ctx.Err() != nil {
-			return false, ctx.Err()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := ctx.Err(); err != nil {
+			return false, err
 		}
 		if in.IsRunning != nil && !in.IsRunning() {
-			return false, nil
+			if in.Heal == nil {
+				return false, nil
+			}
+			now := nowFn()
+			mu.Lock()
+			canHeal := !healing && (lastHealAttempt.IsZero() || now.Sub(lastHealAttempt) >= cooldown)
+			if canHeal {
+				healing = true
+				lastHealAttempt = now
+			}
+			mu.Unlock()
+			if !canHeal {
+				return false, nil
+			}
+			healCtx, cancel := context.WithTimeout(ctx, healTimeout)
+			healErr := in.Heal(healCtx)
+			cancel()
+			mu.Lock()
+			healing = false
+			if in.TapRecoveryCount != nil {
+				if cur := in.TapRecoveryCount(); cur >= 0 {
+					lastRecovery = cur
+				}
+			}
+			mu.Unlock()
+			return false, healErr
 		}
 		if in.TapRecoveryCount != nil {
 			cur := in.TapRecoveryCount()

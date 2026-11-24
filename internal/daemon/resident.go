@@ -11,6 +11,13 @@ import (
 	"github.com/yeisme/clavis/pkg/core/config"
 )
 
+const (
+	HealthStatusHealthy      = "healthy"
+	HealthStatusDegraded     = "degraded"
+	HealthStatusInitializing = "initializing"
+	HealthStatusStopped      = "stopped"
+)
+
 type CompactionHook func(context.Context) error
 type WatchdogProbe func(context.Context) (bool, error)
 type HealthSnapshot struct {
@@ -26,6 +33,8 @@ type HealthSnapshot struct {
 	P99LatencyUs          float64
 	CompactionRuns        uint64
 	SelfHealCount         uint64
+	Healthy               bool
+	HealthStatus          string
 }
 type telemetryEvent struct {
 	at      time.Time
@@ -43,6 +52,8 @@ type ResidentSupervisor struct {
 	hooks             []CompactionHook
 	probes            []WatchdogProbe
 	probeHealthy      []bool
+	probeObserved     []bool
+	onHealthCheck     func(HealthSnapshot)
 	idleCompacted     bool
 	lastMemoryCompact atomic.Int64
 	compactions       atomic.Uint64
@@ -59,7 +70,8 @@ func NewResidentSupervisor(cfg config.DaemonConfig) *ResidentSupervisor {
 	return s
 }
 
-func watchdogInterval(cfg config.DaemonConfig) time.Duration {
+// WatchdogInterval returns the effective watchdog polling interval for cfg.
+func WatchdogInterval(cfg config.DaemonConfig) time.Duration {
 	interval := time.Duration(cfg.WatchdogIntervalMs) * time.Millisecond
 	if interval <= 0 {
 		return time.Second
@@ -73,9 +85,9 @@ func (s *ResidentSupervisor) UpdateConfig(cfg config.DaemonConfig) {
 		return
 	}
 	s.mu.Lock()
-	oldInterval := watchdogInterval(s.cfg)
+	oldInterval := WatchdogInterval(s.cfg)
 	s.cfg = cfg
-	newInterval := watchdogInterval(cfg)
+	newInterval := WatchdogInterval(cfg)
 	resetCh := s.intervalReset
 	s.mu.Unlock()
 	if resetCh != nil && newInterval != oldInterval {
@@ -105,6 +117,19 @@ func (s *ResidentSupervisor) RegisterWatchdogProbe(p WatchdogProbe) {
 	s.mu.Lock()
 	s.probes = append(s.probes, p)
 	s.probeHealthy = append(s.probeHealthy, false)
+	s.probeObserved = append(s.probeObserved, false)
+	s.mu.Unlock()
+}
+
+// SetOnHealthCheck registers a callback invoked with a fresh HealthSnapshot at the end of
+// each watchdog cycle. The callback runs on the watchdog goroutine and must not block on
+// the UI main thread.
+func (s *ResidentSupervisor) SetOnHealthCheck(fn func(HealthSnapshot)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.onHealthCheck = fn
 	s.mu.Unlock()
 }
 func (s *ResidentSupervisor) RecordInteraction() {
@@ -157,7 +182,7 @@ func (s *ResidentSupervisor) Start(ctx context.Context) {
 	s.cancel = cancel
 	s.done = done
 	s.intervalReset = resetCh
-	interval := watchdogInterval(s.cfg)
+	interval := WatchdogInterval(s.cfg)
 	s.mu.Unlock()
 
 	go func() {
@@ -231,6 +256,9 @@ func (s *ResidentSupervisor) watchdog(ctx context.Context) {
 		if i < len(s.probeHealthy) {
 			s.probeHealthy[i] = ok
 		}
+		if i < len(s.probeObserved) {
+			s.probeObserved[i] = true
+		}
 		s.mu.Unlock()
 	}
 	if ctx.Err() != nil {
@@ -246,6 +274,15 @@ func (s *ResidentSupervisor) watchdog(ctx context.Context) {
 			runtime.GC()
 		}
 	}
+	if ctx.Err() != nil {
+		return
+	}
+	s.mu.Lock()
+	cb := s.onHealthCheck
+	s.mu.Unlock()
+	if cb != nil {
+		cb(s.Snapshot())
+	}
 }
 func (s *ResidentSupervisor) compact(ctx context.Context) {
 	s.compactions.Add(1)
@@ -256,9 +293,32 @@ func (s *ResidentSupervisor) compact(ctx context.Context) {
 		_ = h(ctx)
 	}
 }
+func (s *ResidentSupervisor) healthLocked() (bool, string) {
+	if len(s.probes) == 0 {
+		return true, HealthStatusHealthy
+	}
+	anyObserved := false
+	allHealthy := true
+	for i := range s.probes {
+		observed := i < len(s.probeObserved) && s.probeObserved[i]
+		ok := i < len(s.probeHealthy) && s.probeHealthy[i]
+		if observed {
+			anyObserved = true
+			if !ok {
+				return false, HealthStatusDegraded
+			}
+		} else {
+			allHealthy = false
+		}
+	}
+	if !anyObserved || !allHealthy {
+		return false, HealthStatusInitializing
+	}
+	return true, HealthStatusHealthy
+}
 func (s *ResidentSupervisor) Snapshot() HealthSnapshot {
 	if s == nil {
-		return HealthSnapshot{}
+		return HealthSnapshot{Healthy: false, HealthStatus: HealthStatusStopped}
 	}
 	now := time.Now()
 	var m runtime.MemStats
@@ -266,6 +326,7 @@ func (s *ResidentSupervisor) Snapshot() HealthSnapshot {
 	s.mu.Lock()
 	s.trimLocked(now)
 	ev := append([]telemetryEvent(nil), s.events...)
+	healthy, status := s.healthLocked()
 	s.mu.Unlock()
 	var runes int
 	lat := make([]int64, 0, len(ev))
@@ -284,5 +345,5 @@ func (s *ResidentSupervisor) Snapshot() HealthSnapshot {
 	// a burst at startup is still measured over the defined rolling window.
 	cpm := float64(runes)
 	wpm := cpm / 5
-	return HealthSnapshot{AllocMB: float64(m.HeapAlloc) / 1024 / 1024, SysMB: float64(m.Sys) / 1024 / 1024, NumGoroutine: runtime.NumGoroutine(), Uptime: now.Sub(s.started), CurrentWPM: wpm, CurrentCharsPerMinute: cpm, CurrentWordsPerMinute: wpm, P50LatencyUs: p50, TotalKeystrokes: s.total.Load(), P99LatencyUs: p99, CompactionRuns: s.compactions.Load(), SelfHealCount: s.heals.Load()}
+	return HealthSnapshot{AllocMB: float64(m.HeapAlloc) / 1024 / 1024, SysMB: float64(m.Sys) / 1024 / 1024, NumGoroutine: runtime.NumGoroutine(), Uptime: now.Sub(s.started), CurrentWPM: wpm, CurrentCharsPerMinute: cpm, CurrentWordsPerMinute: wpm, P50LatencyUs: p50, TotalKeystrokes: s.total.Load(), P99LatencyUs: p99, CompactionRuns: s.compactions.Load(), SelfHealCount: s.heals.Load(), Healthy: healthy, HealthStatus: status}
 }
