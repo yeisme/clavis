@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/pkg/core/agentsession"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/config"
@@ -610,6 +611,26 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, m
 	} {
 		f.ctrl.setSettingsSection(sec.index)
 		shoot(sec.name, f.ctrl.SettingsView, 960, 900, 1.5, nil)
+	}
+
+	// Password / Security Vault UI snapshots: metadata-only list plus locked, missing, denied states.
+	if _, err := f.ctrl.VaultPutSecret("snap-vault-1", "clavis.prod.db", "Production DB", secrets.SecretKindPassword, "snap-secret-never-rendered"); err == nil {
+		f.ctrl.setSettingsSection(settingsSectionSecurity)
+		shoot("22-settings-security", f.ctrl.SettingsView, 960, 900, 1.5, nil)
+		st := vaultUIState(f.ctrl)
+		st.mu.Lock()
+		st.setStatusLocked(vaultStatusLocked, secrets.CopyErrorKeychainLocked, pickLang(i18n.IsChinese(), "钥匙串已锁定；解锁后请重试 TTL 复制。", "Keychain is locked; unlock and retry TTL Copy."))
+		st.mu.Unlock()
+		shoot("22b-settings-security-locked", f.ctrl.SettingsView, 960, 900, 1.5, nil)
+		st.mu.Lock()
+		st.setStatusLocked(vaultStatusMissing, secrets.CopyErrorRefNotFound, pickLang(i18n.IsChinese(), "未找到 SecretRef 或底层凭据，请重新写入。", "Missing SecretRef or backing credential; re-add reference."))
+		st.mu.Unlock()
+		shoot("22c-settings-security-missing", f.ctrl.SettingsView, 960, 900, 1.5, nil)
+		_, _ = f.ctrl.VaultAgentCopyAttempt("snap-vault-1")
+		shoot("22d-settings-security-denied", f.ctrl.SettingsView, 960, 900, 1.5, nil)
+		st.mu.Lock()
+		st.clearStatusLocked()
+		st.mu.Unlock()
 	}
 
 	// The two other floating dialogs: the prompt composer (header, slots,
