@@ -940,3 +940,63 @@ func TestStrictPayloadAndPreviewPrivacy(t *testing.T) {
 		}
 	}
 }
+
+func TestMergeBaselinesMergesLearningViaMergeLearning(t *testing.T) {
+	cases := []struct {
+		name                           string
+		sourceRevision, targetRevision uint64
+		wantRevision                   uint64
+	}{
+		{"equal-revisions", 2, 2, 3},
+		{"source-newer", 5, 2, 5},
+		{"target-newer", 2, 5, 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			source, target := baseline(), baseline()
+			source.FieldRevisions["learning"] = tc.sourceRevision
+			target.FieldRevisions["learning"] = tc.targetRevision
+			source.Learning = LearningData{
+				Enabled:     true,
+				SummaryOnly: true,
+				Words: []LearningEntry{
+					{KeyDigest: Digest("shared"), WordDigest: Digest("共享"), Frequency: 4, Pinned: true, LastUsedNS: 100},
+					{KeyDigest: Digest("fromsrc"), WordDigest: Digest("来源"), Frequency: 2, LastUsedNS: 50},
+				},
+				Bigrams: []BigramEntry{
+					{PreviousDigest: Digest("我"), WordDigest: Digest("们"), Frequency: 3, LastUsedNS: 80},
+				},
+			}
+			target.Learning = LearningData{
+				Enabled:     true,
+				SummaryOnly: true,
+				Words: []LearningEntry{
+					{KeyDigest: Digest("shared"), WordDigest: Digest("共享"), Frequency: 6, Pinned: false, LastUsedNS: 200},
+					{KeyDigest: Digest("fromtgt"), WordDigest: Digest("目标"), Frequency: 5, LastUsedNS: 90},
+				},
+				Bigrams: []BigramEntry{
+					{PreviousDigest: Digest("我"), WordDigest: Digest("们"), Frequency: 2, LastUsedNS: 120},
+					{PreviousDigest: Digest("你"), WordDigest: Digest("好"), Frequency: 1, LastUsedNS: 60},
+				},
+			}
+
+			merged, _, err := MergeBaselines(source, target)
+			if err != nil {
+				t.Fatalf("MergeBaselines: %v", err)
+			}
+			if merged.FieldRevisions["learning"] != tc.wantRevision {
+				t.Fatalf("learning revision = %d, want %d", merged.FieldRevisions["learning"], tc.wantRevision)
+			}
+			wantLearning := MergeLearning(source.Learning, target.Learning)
+			if !bytesEqualLearning(merged.Learning, wantLearning) {
+				t.Fatalf("MergeBaselines did not merge learning via MergeLearning:\n got=%+v\nwant=%+v", merged.Learning, wantLearning)
+			}
+			if !merged.Learning.SummaryOnly || len(merged.Learning.Words) != 3 || len(merged.Learning.Bigrams) != 2 {
+				t.Fatalf("unexpected merged learning: %+v", merged.Learning)
+			}
+			if err := merged.Validate(); err != nil {
+				t.Fatalf("merged baseline invalid: %v", err)
+			}
+		})
+	}
+}

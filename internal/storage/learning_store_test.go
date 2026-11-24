@@ -446,6 +446,16 @@ func TestLearningReadMergeKeepsPerDeviceFiles(t *testing.T) {
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("merged=%+v pending=%v err=%v", merged, pending, err)
 	}
+	if !merged.SummaryOnly {
+		t.Fatal("ReadMergedLearning must set SummaryOnly=true to satisfy PersonalBaseline.Validate")
+	}
+	baselineCheck := inputmigration.NewPersonalBaseline("acct")
+	baselineCheck.Scheme = "quanpin"
+	baselineCheck.CandidateCount = 7
+	baselineCheck.Learning = merged
+	if err := baselineCheck.Validate(); err != nil {
+		t.Fatalf("merged learning failed PersonalBaseline.Validate: %v", err)
+	}
 	want := inputmigration.MergeLearning(snapshotForTest(store), snapshotForTest(other))
 	if !reflect.DeepEqual(merged, want) {
 		t.Fatalf("merged learning differs from MergeLearning:\n got=%+v\nwant=%+v", merged, want)
@@ -453,6 +463,142 @@ func TestLearningReadMergeKeepsPerDeviceFiles(t *testing.T) {
 	result, err := ReadMergedLearningSnapshots(snapshotDir, []string{"mini"}, nil)
 	if err != nil || len(result.PendingDevices) != 1 || result.PendingDevices[0] != "windows" || len(result.Diagnostics) != 1 {
 		t.Fatalf("unknown device result=%+v err=%v", result, err)
+	}
+	if !result.Learning.SummaryOnly {
+		t.Fatal("single-device ReadMergedLearningSnapshots must set SummaryOnly=true")
+	}
+
+	// Missing directory must also declare SummaryOnly=true cleanly.
+	missing, err := ReadMergedLearningSnapshots(filepath.Join(t.TempDir(), "does-not-exist"), []string{"mini"}, nil)
+	if err != nil || !missing.Learning.SummaryOnly {
+		t.Fatalf("missing dir result=%+v err=%v", missing, err)
+	}
+}
+
+func TestHydrateMergedLearningIdempotentAndPreservesPinned(t *testing.T) {
+	ctx := context.Background()
+	snapshotDir := t.TempDir()
+
+	// Device 1 ("mini"): pinned word + shared unigram/bigram.
+	db1, err := sqlite.Open(ctx, ":memory:", sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db1.Close()
+	mini, err := NewLearningStore(db1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := mini.RecordIMECommit(ctx, "nihao", "你好", "", true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mini.RecordIMECommit(ctx, "shijie", "世界", "你好", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := mini.WriteDeviceLearningSnapshot(snapshotDir, "mini"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Device 2 ("windows"): unpinned same word, shared bigram, and a unique word.
+	db2, err := sqlite.Open(ctx, ":memory:", sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	win, err := NewLearningStore(db2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if err := win.RecordIMECommit(ctx, "nihao", "你好", "", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		if err := win.RecordIMECommit(ctx, "shijie", "世界", "你好", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := win.RecordIMECommit(ctx, "zaijian", "再见", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := win.WriteDeviceLearningSnapshot(snapshotDir, "windows"); err != nil {
+		t.Fatal(err)
+	}
+
+	read, err := ReadMergedLearningSnapshots(snapshotDir, []string{"mini", "windows"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !read.Learning.SummaryOnly {
+		t.Fatal("expected SummaryOnly=true on merged learning summary")
+	}
+	if len(read.Portable.Words) != 3 || len(read.Portable.Bigrams) != 1 {
+		t.Fatalf("unexpected portable snapshot: %+v", read.Portable)
+	}
+
+	// Hydrate into a third device's store, where "zaijian" already has a higher local frequency (10).
+	targetPath := filepath.Join(t.TempDir(), "target.db")
+	db3, err := sqlite.Open(ctx, targetPath, sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := NewLearningStore(db3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 10 {
+		if err := target.RecordIMECommit(ctx, "zaijian", "再见", "", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := target.HydrateMergedLearning(ctx, read.Portable); err != nil {
+		t.Fatalf("first HydrateMergedLearning: %v", err)
+	}
+	// Re-hydrating the same snapshot must be 100% idempotent (no double-counting).
+	if err := HydrateMergedLearning(ctx, target, read.Portable); err != nil {
+		t.Fatalf("second HydrateMergedLearning: %v", err)
+	}
+
+	// "nihao" -> "你好": freq = 2 + 3 = 5, pinned = true (100 boost) => 105.
+	if got := target.LookupBoost("nihao", "你好", ""); got != 105 {
+		t.Fatalf("hydrated pinned word boost = %d, want 105", got)
+	}
+	// "shijie" -> "世界" after "你好": word freq = 1 + 2 = 3, bigram = 1 + 2 = 3 => 3 + 3*2 = 9.
+	if got := target.LookupBoost("shijie", "世界", "你好"); got != 9 {
+		t.Fatalf("hydrated bigram word boost = %d, want 9", got)
+	}
+	// Local higher frequency for "zaijian" (10 > 1) must be preserved.
+	if got := target.LookupBoost("zaijian", "再见", ""); got != 10 {
+		t.Fatalf("local higher frequency not preserved: boost=%d, want 10", got)
+	}
+	// BigramWordsForPrefix works immediately after hydration.
+	if cands := target.BigramWordsForPrefix("你好", "shi"); len(cands) != 1 || cands[0].Word != "世界" || cands[0].Frequency != 3 {
+		t.Fatalf("BigramWordsForPrefix after hydrate = %+v", cands)
+	}
+
+	// Reopening from disk confirms SQLite persisted exact idempotent counts and pinned state.
+	_ = db3.Close()
+	db4, err := sqlite.Open(ctx, targetPath, sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db4.Close()
+	reopened, err := NewLearningStore(db4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.LookupBoost("nihao", "你好", ""); got != 105 {
+		t.Fatalf("reopened pinned boost = %d, want 105", got)
+	}
+	if got := reopened.LookupBoost("shijie", "世界", "你好"); got != 9 {
+		t.Fatalf("reopened bigram boost = %d, want 9", got)
+	}
+	if got := reopened.LookupBoost("zaijian", "再见", ""); got != 10 {
+		t.Fatalf("reopened local boost = %d, want 10", got)
 	}
 }
 
@@ -473,7 +619,7 @@ func snapshotForTest(s *LearningStore) inputmigration.LearningData {
 		entry.LastUsedNS = value.lastUsed
 		bigrams = append(bigrams, entry)
 	}
-	return inputmigration.LearningData{Enabled: len(words) > 0 || len(bigrams) > 0, Words: words, Bigrams: bigrams}
+	return inputmigration.LearningData{Enabled: len(words) > 0 || len(bigrams) > 0, SummaryOnly: true, Words: words, Bigrams: bigrams}
 }
 
 func BenchmarkLearningStoreLookupBoost(b *testing.B) {

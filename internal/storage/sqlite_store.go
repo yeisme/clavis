@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,7 +52,7 @@ func NewSQLiteClipboardStore(ctx context.Context, dbPath string, filter clipboar
 		db:     db,
 		filter: filter,
 	}
-	if err := store.initSchema(ctx, dbPath != ":memory:"); err != nil {
+	if err := store.initSchema(ctx, dbPath); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -141,51 +140,25 @@ func (s *SQLiteClipboardStore) Close() error {
 	return s.db.Close()
 }
 
-func (s *SQLiteClipboardStore) initSchema(ctx context.Context, enableWAL bool) error {
-	if enableWAL {
-		// PRAGMA journal_mode=WAL is single-statement and safe outside transactions.
+func (s *SQLiteClipboardStore) initSchema(ctx context.Context, dbPath string) error {
+	if _, err := Migrate(ctx, s.db, DBKindApp, MigrationOptions{
+		DBPath:      dbPath,
+		AllowCreate: true,
+	}); err != nil {
+		return fmt.Errorf("init clipboard schema: %w", err)
+	}
+	if dbPath != ":memory:" {
+		// PRAGMA journal_mode=WAL is single-statement and safe outside transactions;
+		// only enable after Migrate confirms the schema is not schema_too_new.
 		if _, err := s.db.Execute(ctx, `PRAGMA journal_mode=WAL`); err != nil {
 			return fmt.Errorf("enable WAL mode: %w", err)
 		}
 	}
-
-	// Execute each DDL statement individually (plugins/sqlite executes one statement per Execute call
-	// and enforces authorizer restrictions on transaction control / ATTACH).
-	ddl := []string{
-		`CREATE TABLE IF NOT EXISTS clipboard_items (
-			id TEXT PRIMARY KEY,
-			content TEXT NOT NULL,
-			content_hash TEXT NOT NULL UNIQUE,
-			source_bundle_id TEXT NOT NULL DEFAULT '',
-			source_app_name TEXT NOT NULL DEFAULT '',
-			created_at_ns INTEGER NOT NULL,
-			updated_at_ns INTEGER NOT NULL,
-			is_pinned INTEGER NOT NULL DEFAULT 0
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_clipboard_items_order ON clipboard_items(is_pinned DESC, updated_at_ns DESC, id ASC)`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS clipboard_fts USING fts5(
-			content,
-			source_app_name,
-			content='clipboard_items',
-			content_rowid='rowid'
-		)`,
-		`CREATE TRIGGER IF NOT EXISTS clipboard_items_ai AFTER INSERT ON clipboard_items BEGIN
-			INSERT INTO clipboard_fts(rowid, content, source_app_name)
-			VALUES (new.rowid, new.content, new.source_app_name);
-		END`,
-		`CREATE TRIGGER IF NOT EXISTS clipboard_items_ad AFTER DELETE ON clipboard_items BEGIN
-			INSERT INTO clipboard_fts(clipboard_fts, rowid, content, source_app_name)
-			VALUES ('delete', old.rowid, old.content, old.source_app_name);
-		END`,
-		clipboardFTSUpdateTrigger,
+	if _, err := s.db.Execute(ctx, clipboardFTSInsertTrigger); err != nil {
+		return fmt.Errorf("ensure clipboard FTS insert trigger: %w", err)
 	}
-	for _, stmt := range ddl {
-		if _, err := s.db.Execute(ctx, stmt); err != nil {
-			return fmt.Errorf("init clipboard schema: %w", err)
-		}
-	}
-	if err := s.migrateMediaColumns(ctx); err != nil {
-		return err
+	if _, err := s.db.Execute(ctx, clipboardFTSDeleteTrigger); err != nil {
+		return fmt.Errorf("ensure clipboard FTS delete trigger: %w", err)
 	}
 	return s.backfillClipboardMetadata(ctx)
 }
@@ -219,13 +192,23 @@ var mediaColumns = [][2]string{
 	{"duration_ms", "INTEGER NOT NULL DEFAULT 0"},
 }
 
-const clipboardFTSUpdateTrigger = `CREATE TRIGGER IF NOT EXISTS clipboard_items_au
+const (
+	clipboardFTSInsertTrigger = `CREATE TRIGGER IF NOT EXISTS clipboard_items_ai AFTER INSERT ON clipboard_items BEGIN
+		INSERT INTO clipboard_fts(rowid, content, source_app_name)
+		VALUES (new.rowid, new.content, new.source_app_name);
+	END`
+	clipboardFTSDeleteTrigger = `CREATE TRIGGER IF NOT EXISTS clipboard_items_ad AFTER DELETE ON clipboard_items BEGIN
+		INSERT INTO clipboard_fts(clipboard_fts, rowid, content, source_app_name)
+		VALUES ('delete', old.rowid, old.content, old.source_app_name);
+	END`
+	clipboardFTSUpdateTrigger = `CREATE TRIGGER IF NOT EXISTS clipboard_items_au
 	AFTER UPDATE OF content, source_app_name ON clipboard_items BEGIN
 		INSERT INTO clipboard_fts(clipboard_fts, rowid, content, source_app_name)
 		VALUES ('delete', old.rowid, old.content, old.source_app_name);
 		INSERT INTO clipboard_fts(rowid, content, source_app_name)
 		VALUES (new.rowid, new.content, new.source_app_name);
 	END`
+)
 
 // Backfill byte counts and repair the external-content index in one transaction.
 // Legacy rows may predate the FTS triggers, so deleting their old index entries
@@ -248,38 +231,6 @@ func (s *SQLiteClipboardStore) backfillClipboardMetadata(ctx context.Context) er
 		{SQL: `INSERT INTO clipboard_fts(clipboard_fts) VALUES ('rebuild')`},
 	}); err != nil {
 		return fmt.Errorf("backfill clipboard metadata and FTS index: %w", err)
-	}
-	return nil
-}
-
-func (s *SQLiteClipboardStore) migrateMediaColumns(ctx context.Context) error {
-	rows, err := s.db.Query(ctx, `PRAGMA table_info(clipboard_items)`)
-	if err != nil {
-		return fmt.Errorf("inspect clipboard schema: %w", err)
-	}
-	nameIdx := slices.Index(rows.Columns, "name")
-	have := map[string]bool{}
-	for _, r := range rows.Values {
-		if nameIdx >= 0 && nameIdx < len(r) {
-			if n, ok := r[nameIdx].(string); ok {
-				have[n] = true
-			}
-		}
-	}
-	statements := make([]sqlite.Statement, 0, len(mediaColumns))
-	for _, col := range mediaColumns {
-		if have[col[0]] {
-			continue
-		}
-		statements = append(statements, sqlite.Statement{
-			SQL: `ALTER TABLE clipboard_items ADD COLUMN ` + col[0] + ` ` + col[1],
-		})
-	}
-	if len(statements) == 0 {
-		return nil
-	}
-	if _, err := s.db.Transaction(ctx, statements); err != nil {
-		return fmt.Errorf("migrate clipboard media columns: %w", err)
 	}
 	return nil
 }
