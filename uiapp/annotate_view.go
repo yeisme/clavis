@@ -2,12 +2,14 @@ package uiapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -15,23 +17,138 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
+	"github.com/yeisme/clavis/internal/bridge"
 	"github.com/yeisme/clavis/pkg/core/annotate"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/i18n"
+	runtimecoord "github.com/yeisme/clavis/pkg/core/runtime"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/goregular"
 	"golang.org/x/image/font/opentype"
+	"golang.org/x/image/font/sfnt"
 	"golang.org/x/image/math/fixed"
 )
 
+const runtimeKindCapture runtimecoord.Kind = "screen_capture"
+
 var (
-	annotateOTFOnce sync.Once
-	annotateOTFFont *opentype.Font
+	annotateOTFOnce      sync.Once
+	annotateOTFFont      *opentype.Font
+	annotateFallbackFont *opentype.Font
 )
 
 func init() {
 	annotate.TextRenderer = renderAnnotateOTFText
+}
+
+func annotateCJKFontCandidates(goos string) []string {
+	switch goos {
+	case "darwin":
+		return []string{
+			"/System/Library/Fonts/PingFang.ttc",
+			"/System/Library/Fonts/STHeiti Medium.ttc",
+			"/System/Library/Fonts/STHeiti Light.ttc",
+			"/System/Library/Fonts/Hiragino Sans GB.ttc",
+			"/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+			"/Library/Fonts/Arial Unicode.ttf",
+		}
+	case "windows":
+		return []string{
+			`C:\Windows\Fonts\msyh.ttc`,
+			`C:\Windows\Fonts\msyh.ttf`,
+			`C:\Windows\Fonts\simhei.ttf`,
+			`C:\Windows\Fonts\simsun.ttc`,
+		}
+	default:
+		return []string{
+			"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+			"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+			"/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+			"/usr/share/fonts/opentype/noto/NotoSansSC-Regular.otf",
+			"/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+			"/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+		}
+	}
+}
+
+func parseAnnotateFontData(data []byte) (*opentype.Font, error) {
+	if col, err := opentype.ParseCollection(data); err == nil && col.NumFonts() > 0 {
+		if f, ferr := col.Font(0); ferr == nil {
+			return f, nil
+		}
+	}
+	return opentype.Parse(data)
+}
+
+func fontSupportsAnnotateCJK(f *opentype.Font) bool {
+	if f == nil {
+		return false
+	}
+	var buf sfnt.Buffer
+	idx, err := f.GlyphIndex(&buf, '中')
+	if err != nil || idx == 0 {
+		return false
+	}
+	face, err := opentype.NewFace(f, &opentype.FaceOptions{
+		Size:    16,
+		DPI:     72,
+		Hinting: font.HintingFull,
+	})
+	if err != nil {
+		return false
+	}
+	_ = face.Close()
+	return true
+}
+
+func loadSystemAnnotateCJKFont(paths []string) *opentype.Font {
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		f, err := parseAnnotateFontData(data)
+		if err != nil {
+			continue
+		}
+		if fontSupportsAnnotateCJK(f) {
+			return f
+		}
+	}
+	return nil
+}
+
+func ensureAnnotateFonts() (*opentype.Font, *opentype.Font) {
+	annotateOTFOnce.Do(func() {
+		if f, err := opentype.Parse(goregular.TTF); err == nil {
+			annotateFallbackFont = f
+		}
+		if cjk := loadSystemAnnotateCJKFont(annotateCJKFontCandidates(runtime.GOOS)); cjk != nil {
+			annotateOTFFont = cjk
+		} else {
+			annotateOTFFont = annotateFallbackFont
+		}
+	})
+	return annotateOTFFont, annotateFallbackFont
+}
+
+func drawAnnotateTextWithFallback(dst *image.RGBA, src image.Image, primaryFont *opentype.Font, primaryFace, fallbackFace font.Face, start fixed.Point26_6, txt string) {
+	if fallbackFace == nil || fallbackFace == primaryFace || primaryFont == nil {
+		d := font.Drawer{Dst: dst, Src: src, Face: primaryFace, Dot: start}
+		d.DrawString(txt)
+		return
+	}
+	var buf sfnt.Buffer
+	d := font.Drawer{Dst: dst, Src: src, Face: primaryFace, Dot: start}
+	for _, r := range txt {
+		face := primaryFace
+		if idx, err := primaryFont.GlyphIndex(&buf, r); err != nil || idx == 0 {
+			face = fallbackFace
+		}
+		d.Face = face
+		d.DrawString(string(r))
+	}
 }
 
 func renderAnnotateOTFText(dst *image.RGBA, pos annotate.Point, txt string, fontSize float64, c annotate.ColorRGBA) {
@@ -42,41 +159,33 @@ func renderAnnotateOTFText(dst *image.RGBA, pos annotate.Point, txt string, font
 	if fontSize <= 0 {
 		fontSize = 20
 	}
-	annotateOTFOnce.Do(func() {
-		if f, err := opentype.Parse(goregular.TTF); err == nil {
-			annotateOTFFont = f
-		}
-	})
-	if annotateOTFFont == nil {
+	primaryFont, fallbackFont := ensureAnnotateFonts()
+	if primaryFont == nil {
 		return
 	}
-	face, err := opentype.NewFace(annotateOTFFont, &opentype.FaceOptions{
+	opts := &opentype.FaceOptions{
 		Size:    fontSize,
 		DPI:     72,
 		Hinting: font.HintingFull,
-	})
+	}
+	primaryFace, err := opentype.NewFace(primaryFont, opts)
 	if err != nil {
 		return
 	}
-	defer face.Close()
+	defer primaryFace.Close()
+
+	var fallbackFace font.Face
+	if fallbackFont != nil && fallbackFont != primaryFont {
+		if ff, ferr := opentype.NewFace(fallbackFont, opts); ferr == nil {
+			fallbackFace = ff
+			defer ff.Close()
+		}
+	}
 
 	x := int(math.Round(pos.X))
 	y := int(math.Round(pos.Y + fontSize))
-	shadow := font.Drawer{
-		Dst:  dst,
-		Src:  image.NewUniform(color.RGBA{R: 0, G: 0, B: 0, A: 140}),
-		Face: face,
-		Dot:  fixed.P(x+1, y+1),
-	}
-	shadow.DrawString(txt)
-
-	drawer := font.Drawer{
-		Dst:  dst,
-		Src:  image.NewUniform(color.RGBA{R: c.R, G: c.G, B: c.B, A: c.A}),
-		Face: face,
-		Dot:  fixed.P(x, y),
-	}
-	drawer.DrawString(txt)
+	drawAnnotateTextWithFallback(dst, image.NewUniform(color.RGBA{R: 0, G: 0, B: 0, A: 140}), primaryFont, primaryFace, fallbackFace, fixed.P(x+1, y+1), txt)
+	drawAnnotateTextWithFallback(dst, image.NewUniform(color.RGBA{R: c.R, G: c.G, B: c.B, A: c.A}), primaryFont, primaryFace, fallbackFace, fixed.P(x, y), txt)
 }
 
 type annotateControllerState struct {
@@ -89,9 +198,10 @@ type annotateControllerState struct {
 	dragging    bool
 	dragStart   annotate.Point
 	dragCur     annotate.Point
-	textEditing bool
-	textAnchor  annotate.Point
-	textDraft   string
+	textEditing   bool
+	textComposing bool
+	textAnchor    annotate.Point
+	textDraft     string
 	canvasW     float32
 	canvasH     float32
 	canvasHdl   ui.Handle
@@ -137,11 +247,15 @@ func (c *AppController) CaptureAndAnnotate() {
 	if c == nil || c.capturer == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	regCtx, done := c.ensureRuntime().Begin(runtimeKindCapture, "Screen capture")
+	defer done()
+	ctx, cancel := context.WithTimeout(regCtx, 45*time.Second)
 	defer cancel()
 	res, err := c.capturer.CaptureInteractive(ctx)
 	if err != nil {
-		c.ShowToastOrHUD(err.Error())
+		if !errors.Is(err, context.Canceled) {
+			c.ShowToastOrHUD(err.Error())
+		}
 		return
 	}
 	if res.Cancelled || len(res.PNG) == 0 {
@@ -157,11 +271,15 @@ func (c *AppController) CaptureAndOCR() {
 	if c == nil || c.capturer == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	regCtx, done := c.ensureRuntime().Begin(runtimeKindCapture, "Screen OCR capture")
+	defer done()
+	ctx, cancel := context.WithTimeout(regCtx, 45*time.Second)
 	defer cancel()
 	res, err := c.capturer.CaptureInteractive(ctx)
 	if err != nil {
-		c.ShowToastOrHUD(err.Error())
+		if !errors.Is(err, context.Canceled) {
+			c.ShowToastOrHUD(err.Error())
+		}
 		return
 	}
 	if res.Cancelled || len(res.PNG) == 0 {
@@ -170,12 +288,6 @@ func (c *AppController) CaptureAndOCR() {
 	if err := c.StartImageOCR(res.PNG, "image/png", ""); err != nil {
 		c.ShowToastOrHUD(err.Error())
 		return
-	}
-	c.mu.Lock()
-	present := c.OnPresentPhase
-	c.mu.Unlock()
-	if present != nil {
-		present(engine.PhaseAIStreaming)
 	}
 }
 
@@ -345,13 +457,55 @@ func (c *AppController) FlattenAnnotatePNG() ([]byte, error) {
 	return outPNG, err
 }
 
+func annotateMediaDir(cfgDir string) string {
+	if mygo.App.IsReady() {
+		if userDataDir, err := mygo.App.Path(mygo.PathUserData); err == nil && strings.TrimSpace(userDataDir) != "" {
+			return filepath.Join(userDataDir, "clipboard-media")
+		}
+	}
+	if strings.TrimSpace(cfgDir) != "" {
+		return filepath.Join(cfgDir, "clipboard-media")
+	}
+	return ""
+}
+
+func (c *AppController) ignoreSelfClipboardWrite(write func() error) error {
+	c.mu.Lock()
+	br := c.Bridge
+	c.mu.Unlock()
+
+	var ignorer interface{ IgnoreSelfPasteboardChange(int64) }
+	if br != nil {
+		if ig, ok := any(br).(interface{ IgnoreSelfPasteboardChange(int64) }); ok {
+			ignorer = ig
+		}
+	}
+	seqr, hasSeq := any(br).(bridge.ClipboardSequencer)
+	var prevSeq int64
+	if ignorer != nil {
+		if hasSeq {
+			prevSeq = seqr.ClipboardSequence()
+			ignorer.IgnoreSelfPasteboardChange(prevSeq + 1)
+		} else {
+			ignorer.IgnoreSelfPasteboardChange(0)
+		}
+	}
+	err := write()
+	if err == nil && ignorer != nil && hasSeq {
+		if afterSeq := seqr.ClipboardSequence(); afterSeq > prevSeq {
+			ignorer.IgnoreSelfPasteboardChange(afterSeq)
+		}
+	}
+	return err
+}
+
 func (c *AppController) recordPNGToMediaAndClipboard(pngBytes []byte) error {
 	cfgDir := ""
 	if c.ConfigStore != nil {
 		cfgDir = c.ConfigStore.Directory()
 	}
-	if cfgDir != "" && c.ClipboardStore != nil {
-		ms := clipboard.NewMediaStore(filepath.Join(cfgDir, "media"))
+	if mediaDir := annotateMediaDir(cfgDir); mediaDir != "" && c.ClipboardStore != nil {
+		ms := clipboard.NewMediaStore(mediaDir)
 		if media, err := ms.SaveImage(pngBytes); err == nil {
 			_, _, _ = c.ClipboardStore.Record(context.Background(), clipboard.CaptureCandidate{
 				Content:       fmt.Sprintf("Screenshot %dx%d", media.Width, media.Height),
@@ -363,10 +517,14 @@ func (c *AppController) recordPNGToMediaAndClipboard(pngBytes []byte) error {
 		}
 	}
 	if c.AnnotateCopyWriter != nil {
-		return c.AnnotateCopyWriter(pngBytes)
+		return c.ignoreSelfClipboardWrite(func() error {
+			return c.AnnotateCopyWriter(pngBytes)
+		})
 	}
 	if mygo.App.IsReady() {
-		return mygo.Clipboard.Write(transfer.New(transfer.NewItem(transfer.Bytes(transfer.PNG, pngBytes))))
+		return c.ignoreSelfClipboardWrite(func() error {
+			return mygo.Clipboard.Write(transfer.New(transfer.NewItem(transfer.Bytes(transfer.PNG, pngBytes))))
+		})
 	}
 	return nil
 }
@@ -424,12 +582,6 @@ func (c *AppController) SendAnnotateToAI(prompt string) error {
 		c.ShowToastOrHUD(err.Error())
 		return err
 	}
-	c.mu.Lock()
-	present := c.OnPresentPhase
-	c.mu.Unlock()
-	if present != nil {
-		present(engine.PhaseAIStreaming)
-	}
 	return nil
 }
 
@@ -471,11 +623,41 @@ func (a *AppController) AnnotateView(c *ui.Context) {
 	}
 
 	c.OnWindowShortcut(0, ui.KeyEscape, func() {
+		if textEditing {
+			st.mu.Lock()
+			st.textEditing = false
+			st.textDraft = ""
+			st.mu.Unlock()
+			return
+		}
 		a.CloseAnnotateWindow()
 	})
-	c.OnWindowShortcut(primaryMod(), ui.KeyZ, func() {
-		a.AnnotateUndo()
-	})
+	if !textEditing {
+		c.OnWindowShortcut(primaryMod(), ui.KeyZ, func() {
+			a.AnnotateUndo()
+		})
+		c.OnWindowShortcut(primaryMod()|ui.Shift, ui.KeyZ, func() {
+			a.AnnotateRedo()
+		})
+		if doc != nil {
+			c.OnWindowShortcut(primaryMod(), ui.KeyC, func() {
+				if err := a.CopyAnnotatePNG(); err != nil {
+					st.mu.Lock()
+					st.statusMsg = err.Error()
+					st.mu.Unlock()
+				}
+			})
+		}
+	}
+	if doc != nil {
+		c.OnWindowShortcut(primaryMod(), ui.KeyS, func() {
+			if _, err := a.SaveAnnotatePNG(); err != nil {
+				st.mu.Lock()
+				st.statusMsg = err.Error()
+				st.mu.Unlock()
+			}
+		})
+	}
 
 	applyTextLocale(ui.Column(c).Fill().Background(theme.Background).Padding(space10, space12).Gap(space8)).Children(func() {
 		// Top Toolbar: 4 tools, color swatches, stroke sizes, Undo/Redo.
@@ -570,28 +752,73 @@ func (a *AppController) AnnotateView(c *ui.Context) {
 			kitCard(c, theme, cardInset, func() {
 				ui.Row(c).FillWidth().Padding(space4, space8).Gap(space6).AlignItems(ui.Center).Children(func() {
 					ui.Text(c, pickLang(zh, "添加标注文字：", "Text:")).FontSize(typeMeta).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
-					tin := ui.TextInput(c.Key("ann-text-input"), &textDraft).
-						Placeholder(pickLang(zh, "输入文字并点击确定", "Type annotation text")).Grow(1)
-					if tin.Changed() {
-						st.mu.Lock()
-						st.textDraft = textDraft
-						st.mu.Unlock()
-					}
-					commitLbl := pickLang(zh, "确定", "Add")
-					if ui.Button(c, commitLbl).Key("ann-text-commit").Label(commitLbl).Padding(space2, space8).Clicked() {
-						if strings.TrimSpace(textDraft) != "" {
+					commitText := func(draft string) {
+						if strings.TrimSpace(draft) != "" {
 							a.AddAnnotateShape(annotate.Shape{
 								Tool:     annotate.ToolText,
 								P1:       textAnchor,
 								Color:    curColorRGBA,
 								FontSize: math.Max(16, curStroke*5),
-								Text:     textDraft,
+								Text:     draft,
 							})
 						}
 						st.mu.Lock()
 						st.textEditing = false
+						st.textComposing = false
 						st.textDraft = ""
 						st.mu.Unlock()
+					}
+					tin := ui.TextInput(c.Key("ann-text-input"), &textDraft).
+						AutoFocus().
+						Placeholder(pickLang(zh, "输入文字并按回车确定", "Type annotation text and press Enter")).Grow(1)
+					tin.ObserveInput(func(ev ui.InputEvent) {
+						st.mu.Lock()
+						switch ev.Kind {
+						case ui.InputCompose:
+							st.textComposing = ev.Text != ""
+						case ui.InputText, ui.InputCommand:
+							st.textComposing = false
+						}
+						st.mu.Unlock()
+					})
+					composingNow := tin.Focused() && tin.Composing()
+					st.mu.Lock()
+					st.textComposing = composingNow
+					st.mu.Unlock()
+					if tin.Changed() {
+						st.mu.Lock()
+						st.textDraft = textDraft
+						st.mu.Unlock()
+					}
+					tin.OnTextKey(func(k ui.TextKey) bool {
+						st.mu.Lock()
+						composing := st.textComposing
+						st.mu.Unlock()
+						if composing {
+							switch k.Key {
+							case ui.KeyEnter, ui.KeyEscape:
+								return true
+							default:
+								return false
+							}
+						}
+						switch {
+						case k.Key == ui.KeyEnter && k.Mods == 0:
+							commitText(k.Text())
+							return true
+						case k.Key == ui.KeyEscape && k.Mods == 0:
+							st.mu.Lock()
+							st.textEditing = false
+							st.textComposing = false
+							st.textDraft = ""
+							st.mu.Unlock()
+							return true
+						}
+						return false
+					})
+					commitLbl := pickLang(zh, "确定", "Add")
+					if ui.Button(c, commitLbl).Key("ann-text-commit").Label(commitLbl).Padding(space2, space8).Clicked() {
+						commitText(textDraft)
 					}
 				})
 			})

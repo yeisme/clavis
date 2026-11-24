@@ -3,11 +3,14 @@ package uiapp
 import (
 	"math"
 	"sync/atomic"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/shader"
 	"github.com/yeisme/clavis/pkg/core/config"
 )
+
+var shaderEpoch = time.Now()
 
 // The shaders are package values rather than compiled during a view build. This
 // keeps compilation one-time and makes them usable by every surface in the UI.
@@ -102,7 +105,7 @@ func DrawAIStageGlow(c *ui.Context, p *ui.Painter, r ui.Rect, intensity float32,
 	shaderDrawCount.Add(1)
 	if ShadersActive(c, p, cfg) {
 		AIStageGlowShader.Draw(p, r, shader.Options{Radius: 16, Uniforms: map[string]any{
-			"Time": float32(p.Now().UnixNano()) / 1e9, "Intensity": intensity, "Accent": accent,
+			"Time": float32(p.Now().Sub(shaderEpoch).Seconds()), "Intensity": intensity, "Accent": accent,
 		}})
 		p.AnimationFrame()
 		return
@@ -124,12 +127,12 @@ func RenderLiquidOrb(c *ui.Context, size float32, active bool, cfg config.Appear
 		}
 		if active && ShadersActive(c, p, cfg) {
 			LiquidOrbShader.Draw(p, r, shader.Options{Radius: size / 2, Uniforms: map[string]any{
-				"Time": float32(p.Now().UnixNano()) / 1e9, "Speed": 0.8, "Accent": accent,
+				"Time": float32(p.Now().Sub(shaderEpoch).Seconds()), "Speed": 0.8, "Accent": accent,
 			}})
 			p.AnimationFrame()
 			return
 		}
-		p.Fill(r, accent.Alpha(210), size/2)
+		p.Fill(r, accent.Alpha(210.0/255.0), size/2)
 		p.Fill(ui.Rect{X: r.X + r.W*.2, Y: r.Y + r.H*.14, W: r.W * .3, H: r.H * .22}, ui.RGBA(255, 255, 255, 58.0/255), size/4)
 	})
 }

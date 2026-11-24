@@ -3,9 +3,12 @@ package uiapp
 import (
 	"image"
 	"image/color"
+	"strings"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
 // These two tests cover the guarantees the Settings rework promised but did not
@@ -104,4 +107,93 @@ func distinctShades(img *image.RGBA) int {
 		}
 	}
 	return len(seen)
+}
+
+func TestSettingsSidebarSearchPerSectionAccuracy(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
+	i18n.SetLanguage(i18n.English)
+	ctrl, _, _, _ := newTestController(t, nil)
+	cfg := ctrl.Config()
+	sections := settingsNavigationSections()
+
+	matchingKeys := func(q string) []string {
+		var out []string
+		for _, meta := range sections {
+			if settingsSectionMatches(meta, q, cfg) {
+				out = append(out, meta.Key)
+			}
+		}
+		return out
+	}
+
+	// Previously fmt.Sprintf("%+v", cfg) made every query match all 13 sections.
+	if got := matchingKeys("maxhistoryitems"); len(got) != 1 || got[0] != "clipboard" {
+		t.Fatalf("query 'maxhistoryitems' matched %v, want only [clipboard]", got)
+	}
+	if got := matchingKeys("screenshot_shortcut"); len(got) != 1 || got[0] != "triggers" {
+		t.Fatalf("query 'screenshot_shortcut' matched %v, want only [triggers]", got)
+	}
+	if got := matchingKeys("截图快捷键"); len(got) != 1 || got[0] != "triggers" {
+		t.Fatalf("query '截图快捷键' matched %v, want only [triggers]", got)
+	}
+	if got := matchingKeys("quickjump"); len(got) != 1 || got[0] != "configs" {
+		t.Fatalf("query 'quickjump' matched %v, want only [configs]", got)
+	}
+	if got := matchingKeys("vault"); len(got) != 1 || got[0] != "security" {
+		t.Fatalf("query 'vault' matched %v, want only [security]", got)
+	}
+	if got := matchingKeys("同步"); len(got) != 1 || got[0] != "about" {
+		t.Fatalf("query '同步' matched %v, want only [about]", got)
+	}
+}
+
+func TestSettingsScreenshotShortcutQuickJumpAndAllSectionsRender(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
+	i18n.SetLanguage(i18n.English)
+	ctrl, _, _, _ := newTestController(t, nil)
+	tt := ui.NewTester(ctrl.SettingsView, 960, 640)
+	tt.Frame()
+
+	// General & Triggers renders the screenshot_shortcut field and persists edits.
+	if !tt.HasText("Screenshot Shortcut") || !tt.HasText("screenshot_shortcut") {
+		t.Fatalf("expected Screenshot Shortcut editor on General & Triggers, got %v", tt.Texts())
+	}
+	if err := tt.Click("Screenshot Shortcut"); err != nil {
+		t.Fatalf("click Screenshot Shortcut label: %v", err)
+	}
+	tt.Frame()
+	tt.Type("option+shift+s")
+	tt.Frame()
+	if got := ctrl.Config().Main.Trigger.ScreenshotShortcut; got != "option+shift+s" {
+		t.Fatalf("Trigger.ScreenshotShortcut = %q, want option+shift+s", got)
+	}
+	if body := readConfigFile(t, ctrl, config.FileMain); !strings.Contains(body, `screenshot_shortcut = "option+shift+s"`) {
+		t.Fatalf("config.toml missing screenshot_shortcut:\n%s", body)
+	}
+
+	// QuickJump config file has bilingual non-empty descriptions.
+	i18n.SetLanguage(i18n.English)
+	if desc := configFileDescription(config.FileQuickJump); strings.TrimSpace(desc) == "" {
+		t.Fatal("expected non-empty EN description for FileQuickJump")
+	}
+	i18n.SetLanguage(i18n.Chinese)
+	if desc := configFileDescription(config.FileQuickJump); strings.TrimSpace(desc) == "" {
+		t.Fatal("expected non-empty ZH description for FileQuickJump")
+	}
+	i18n.SetLanguage(i18n.English)
+
+	// All 13 navigation sections (including Security & About) render cleanly at MinHeight (500) and default (640).
+	for _, size := range [][2]int{{760, 500}, {960, 640}} {
+		for _, meta := range settingsNavigationSections() {
+			ctrl.setSettingsSection(meta.Index)
+			st := ui.NewTester(ctrl.SettingsView, size[0], size[1])
+			st.Frame()
+			st.Frame()
+			if !st.HasText(meta.Hint) {
+				t.Fatalf("section %q lost pane header at %dx%d", meta.Key, size[0], size[1])
+			}
+		}
+	}
 }
