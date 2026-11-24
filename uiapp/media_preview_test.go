@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/engine"
@@ -52,6 +53,15 @@ func renderMediaFallbackAfterFailure(t *testing.T, thumbPath string, removeOrigi
 	tt := ui.NewTester(func(c *ui.Context) {
 		ctrl.renderClipboardMediaCanvas(c, ui.LightTheme(), m)
 	}, 320, 180)
+	if thumbPath != "" {
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if bmp, ok := ctrl.cachedThumbBitmap(thumbPath); ok && bmp != nil {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
 	tt.Frame()
 	return tt
 }

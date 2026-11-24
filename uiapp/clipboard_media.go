@@ -320,7 +320,9 @@ func firstCallback(callbacks []func()) func() {
 	return callbacks[0]
 }
 
-// ThumbBitmap decodes (and caches) a clipboard thumbnail; nil when missing or undecodable.
+// ThumbBitmap returns a cached clipboard thumbnail and schedules a background
+// decode on a cache miss. Rendering must never perform file I/O or bitmap
+// decoding synchronously because list and preview frames call this repeatedly.
 func (c *AppController) ThumbBitmap(path string) *ui.Bitmap {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -334,10 +336,28 @@ func (c *AppController) ThumbBitmap(path string) *ui.Bitmap {
 		c.mu.Unlock()
 		return bmp
 	}
+	if c.thumbLoading == nil {
+		c.thumbLoading = map[string]bool{}
+	}
+	if c.thumbLoading[path] {
+		c.mu.Unlock()
+		return nil
+	}
+	c.thumbLoading[path] = true
 	c.mu.Unlock()
 
+	go c.loadThumbBitmap(path)
+	return nil
+}
+
+func (c *AppController) loadThumbBitmap(path string) {
+	c.mu.Lock()
+	decoder := c.thumbDecoder
+	c.mu.Unlock()
 	var bmp *ui.Bitmap
-	if data, err := os.ReadFile(path); err == nil && len(data) <= clipboard.MaxImageBytes {
+	if decoder != nil {
+		bmp = decoder(path)
+	} else if data, err := os.ReadFile(path); err == nil && len(data) <= clipboard.MaxImageBytes {
 		if _, _, err := clipboard.CheckImage(data); err == nil {
 			if b, err := ui.DecodeBitmap(data); err == nil {
 				bmp = b
@@ -345,12 +365,35 @@ func (c *AppController) ThumbBitmap(path string) *ui.Bitmap {
 		}
 	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if len(c.thumbCache) >= 128 {
 		clear(c.thumbCache)
 	}
-	c.thumbCache[path] = bmp // cache misses too: a GC'd path stays nil until restart
+	c.thumbCache[path] = bmp // cache misses too: a bad path stays nil until restart
+	delete(c.thumbLoading, path)
+	if c.thumbRepaintPending {
+		return
+	}
+	c.thumbRepaintPending = true
+	go c.repaintAfterThumbBatch()
+}
+
+func (c *AppController) cachedThumbBitmap(path string) (*ui.Bitmap, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	bmp, ok := c.thumbCache[strings.TrimSpace(path)]
+	return bmp, ok
+}
+
+func (c *AppController) repaintAfterThumbBatch() {
+	time.Sleep(16 * time.Millisecond)
+	c.mu.Lock()
+	c.thumbRepaintPending = false
+	onRepaint := c.OnRepaint
 	c.mu.Unlock()
-	return bmp
+	if onRepaint != nil {
+		onRepaint()
+	}
 }
 
 // OriginalBitmap lazily decodes a selected image blob for the split preview.
@@ -417,6 +460,14 @@ func (c *AppController) scheduleOriginalBitmap(path string) {
 		return
 	}
 	c.mu.Lock()
+	if c.originalTimer != nil && c.originalPath == path {
+		c.mu.Unlock()
+		return
+	}
+	if c.originalLoading != nil && c.originalLoading[path] {
+		c.mu.Unlock()
+		return
+	}
 	if c.originalTimer != nil {
 		c.originalTimer.Stop()
 		c.originalTimer = nil
@@ -427,6 +478,9 @@ func (c *AppController) scheduleOriginalBitmap(path string) {
 	c.originalTimer = time.AfterFunc(originalPreviewDwell, func() {
 		c.mu.Lock()
 		stale := c.originalGen != gen
+		if !stale && c.originalPath == path {
+			c.originalTimer = nil
+		}
 		c.mu.Unlock()
 		if stale {
 			return

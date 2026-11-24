@@ -136,6 +136,14 @@ func mediaPreviewFixture(t *testing.T) (*interactionFixture, int, int) {
 			break
 		}
 	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if bmp, ok := f.ctrl.cachedThumbBitmap(mediaPath); ok && bmp != nil {
+			break
+		}
+		f.ctrl.ThumbBitmap(mediaPath)
+		time.Sleep(time.Millisecond)
+	}
 	w, h := PreferredCapsuleSizeForState(f.ctrl.State(), f.ctrl.Config().Main.Appearance)
 	return f, w, h
 }

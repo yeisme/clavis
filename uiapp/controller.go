@@ -412,11 +412,14 @@ type AppController struct {
 	OnWorkflowResult         func(workflowID string, result automation.ExecutionResult, err error)
 
 	// Decoded application icon bitmap cache
-	iconMu          sync.Mutex
-	appIconCache    map[string]*ui.Bitmap
-	thumbCache      map[string]*ui.Bitmap
-	originalCache   map[string]*ui.Bitmap
-	originalLoading map[string]bool
+	iconMu              sync.Mutex
+	appIconCache        map[string]*ui.Bitmap
+	thumbCache          map[string]*ui.Bitmap
+	thumbLoading        map[string]bool
+	thumbRepaintPending bool
+	thumbDecoder        func(string) *ui.Bitmap
+	originalCache       map[string]*ui.Bitmap
+	originalLoading     map[string]bool
 	// originalTimer coalesces original-image decoding while the pointer sweeps
 	// across rows: only the item it settles on is decoded.
 	originalTimer *time.Timer
@@ -625,6 +628,7 @@ func NewAppController(opts Options) *AppController {
 		MCPManager:               opts.MCPManager,
 		appIconCache:             make(map[string]*ui.Bitmap),
 		thumbCache:               make(map[string]*ui.Bitmap),
+		thumbLoading:             make(map[string]bool),
 		originalCache:            make(map[string]*ui.Bitmap),
 		originalLoading:          make(map[string]bool),
 		clipDone:                 make(chan struct{}),

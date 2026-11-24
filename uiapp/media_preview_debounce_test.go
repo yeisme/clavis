@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/egoist/mygo/ui"
 )
 
 func writePreviewPNG(t *testing.T, dir, name string) string {
@@ -72,4 +74,57 @@ func TestScheduleOriginalBitmapIgnoresEmptyPath(t *testing.T) {
 	if pending {
 		t.Fatal("blank path scheduled a decode")
 	}
+}
+
+func TestScheduleOriginalBitmapDoesNotRestartForSamePath(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	path := filepath.Join(t.TempDir(), "stable.png")
+	ctrl.scheduleOriginalBitmap(path)
+	ctrl.mu.Lock()
+	firstGen := ctrl.originalGen
+	firstTimer := ctrl.originalTimer
+	ctrl.mu.Unlock()
+	ctrl.scheduleOriginalBitmap(path)
+	ctrl.mu.Lock()
+	secondGen := ctrl.originalGen
+	secondTimer := ctrl.originalTimer
+	ctrl.mu.Unlock()
+	if secondGen != firstGen || secondTimer != firstTimer {
+		t.Fatalf("same-path render restarted dwell: gen %d -> %d timer %p -> %p", firstGen, secondGen, firstTimer, secondTimer)
+	}
+}
+
+func TestThumbBitmapDecodesOffRenderPath(t *testing.T) {
+	ctrl, _, _, _ := newTestController(t, nil)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ctrl.mu.Lock()
+	ctrl.thumbDecoder = func(string) *ui.Bitmap {
+		close(started)
+		<-release
+		return nil
+	}
+	ctrl.mu.Unlock()
+	path := filepath.Join(t.TempDir(), "thumb.png")
+	start := time.Now()
+	if got := ctrl.ThumbBitmap(path); got != nil {
+		t.Fatal("cache miss returned a bitmap before the background decoder completed")
+	}
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Fatalf("cache miss blocked render for %s", elapsed)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("background thumbnail decoder did not start")
+	}
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := ctrl.cachedThumbBitmap(path); ok {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("background thumbnail decode did not publish its cache result")
 }
