@@ -252,6 +252,10 @@ func (a *AppController) renderClipboardMediaToolbar(c *ui.Context, theme *ui.The
 		button(i18n.T("preview.media.fit"), p.mode == MediaZoomFit, 0, func() { a.setMediaZoom(MediaZoomFit, 1) })
 		button(i18n.T("preview.media.original"), p.mode == MediaZoomOriginal, 0, func() { a.setMediaZoom(MediaZoomOriginal, 1) })
 		ui.Spacer(c)
+		if m.Kind == "image" && strings.TrimSpace(m.Path) != "" {
+			button(pickLang(i18n.IsChinese(), "标注", "Annotate"), false, 0, func() { _ = a.OpenAnnotateMedia(m) })
+			button("OCR", false, 0, func() { _ = a.StartClipboardImageOCR(m) })
+		}
 	})
 }
 

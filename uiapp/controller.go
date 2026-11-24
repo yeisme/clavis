@@ -22,6 +22,7 @@ import (
 	"github.com/egoist/mygo/ui/markdown"
 	"github.com/yeisme/clavis/internal/apps"
 	"github.com/yeisme/clavis/internal/bridge"
+	"github.com/yeisme/clavis/internal/capture"
 	"github.com/yeisme/clavis/internal/secrets"
 	internalstorage "github.com/yeisme/clavis/internal/storage"
 	"github.com/yeisme/clavis/pkg/core/actions"
@@ -256,12 +257,21 @@ type Options struct {
 	ClipboardWriterWithError func(text string) error
 	BeforeInject             func(ctx context.Context)
 	OpenPath                 func(path string) error
+	OpenExternal             func(rawURL string) error
+	RevealPath               func(path string) error
+	HerdrExecutor            agentsession.CommandExecutor
+	Vault                    *secrets.Vault
+	Capturer                 capture.Capturer
 	OnRepaint                func()
 	OnPresentPhase           func(phase engine.CapsulePhase)
 	OnHide                   func()
 	OnOpenSettings           func(tab SettingsTab)
 	OnOpenPromptComposer     func()
 	OnClosePromptComposer    func()
+	OnShowAnnotateWindow     func()
+	OnCloseAnnotateWindow    func()
+	SaveCapturePath          func(pngBytes []byte) (string, error)
+	AnnotateCopyWriter       func(pngBytes []byte) error
 	OnShowIMEPill            func(label string, anchor *host.CursorAnchor)
 	// OnShowSelectionBar presents actions for the current focused-field selection.
 	// The callback is optional so headless and non-native shells remain supported.
@@ -304,6 +314,7 @@ type uiViewState struct {
 	followUpHandle         ui.Handle
 	listState              ui.ListState
 	mdOpts                 markdown.Options
+	mdThemeKey             markdownThemeKey
 	isComposing            bool
 	suppressNextLeaderText string
 	lastPhase              engine.CapsulePhase
@@ -396,12 +407,19 @@ type AppController struct {
 	ClipboardWriterWithError func(text string) error
 	BeforeInject             func(ctx context.Context)
 	OpenPath                 func(path string) error
+	OpenExternal             func(rawURL string) error
+	RevealPath               func(path string) error
 	OnRepaint                func()
 	OnPresentPhase           func(phase engine.CapsulePhase)
 	OnHide                   func()
 	OnOpenSettings           func(tab SettingsTab)
 	OnOpenPromptComposer     func()
 	OnClosePromptComposer    func()
+	OnShowAnnotateWindow     func()
+	OnCloseAnnotateWindow    func()
+	SaveCapturePath          func(pngBytes []byte) (string, error)
+	AnnotateCopyWriter       func(pngBytes []byte) error
+	capturer                 capture.Capturer
 	OnShowIMEPill            func(label string, anchor *host.CursorAnchor)
 	OnShowSelectionBar       func(SelectionBarPayload)
 	OnHideSelectionBar       func()
@@ -442,9 +460,16 @@ type AppController struct {
 
 	// AI cancellation & generation guard
 	agentMu             sync.RWMutex
+	herdrExecutor       agentsession.CommandExecutor
 	agentSessions       []agentsession.Session
+	agentWorkspaces     []agentsession.HerdrWorkspace
 	agentDiagnostics    []agentsession.Diagnostic
 	agentRefreshStarted bool
+
+	vaultMu       sync.Mutex
+	vault         *secrets.Vault
+	vaultAudit    *secrets.MemoryAuditSink
+	vaultMetaPath string
 
 	aiCancel      context.CancelFunc
 	aiDone        func()
@@ -591,6 +616,14 @@ func NewAppController(opts Options) *AppController {
 	if clipSearcher != nil {
 		sm.SetExternalClipboardSearch(true)
 	}
+	herdrExec := opts.HerdrExecutor
+	if herdrExec == nil {
+		herdrExec = agentsession.NewCommandExecutor()
+	}
+	capturer := opts.Capturer
+	if capturer == nil {
+		capturer = capture.NewCapturer()
+	}
 	clipBaseCtx, clipBaseCancel := context.WithCancel(context.Background())
 	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
 
@@ -610,12 +643,20 @@ func NewAppController(opts Options) *AppController {
 		ClipboardWriterWithError: opts.ClipboardWriterWithError,
 		BeforeInject:             opts.BeforeInject,
 		OpenPath:                 opts.OpenPath,
+		OpenExternal:             opts.OpenExternal,
+		RevealPath:               opts.RevealPath,
+		herdrExecutor:            herdrExec,
 		OnRepaint:                opts.OnRepaint,
 		OnPresentPhase:           opts.OnPresentPhase,
 		OnHide:                   opts.OnHide,
 		OnOpenSettings:           opts.OnOpenSettings,
 		OnOpenPromptComposer:     opts.OnOpenPromptComposer,
 		OnClosePromptComposer:    opts.OnClosePromptComposer,
+		OnShowAnnotateWindow:     opts.OnShowAnnotateWindow,
+		OnCloseAnnotateWindow:    opts.OnCloseAnnotateWindow,
+		SaveCapturePath:          opts.SaveCapturePath,
+		AnnotateCopyWriter:       opts.AnnotateCopyWriter,
+		capturer:                 capturer,
 		OnShowIMEPill:            opts.OnShowIMEPill,
 		OnShowSelectionBar:       opts.OnShowSelectionBar,
 		OnHideSelectionBar:       opts.OnHideSelectionBar,
@@ -644,6 +685,7 @@ func NewAppController(opts Options) *AppController {
 		},
 	}
 	c.aiUsageReader = opts.AIUsageDaily
+	c.initSecretVault(opts.Vault)
 	if c.aiUsageReader == nil {
 		c.aiUsageReader = defaultAIUsageDailyReader(clipStore)
 	}
@@ -954,6 +996,13 @@ func (a *AppController) hoverSelect(index int, positions ...ui.Point) {
 	a.uiState.hoverRow = index + 1
 	a.mu.Unlock()
 	a.Dispatch(engine.Event{Type: engine.EventHoverItem, Index: index})
+}
+
+func (a *AppController) notePointerPosition(pos ui.Point) {
+	a.mu.Lock()
+	a.uiState.lastPointerPos = pos
+	a.uiState.pointerPosKnown = true
+	a.mu.Unlock()
 }
 
 func manhattanPointerDistance(a, b ui.Point) float32 {
@@ -1310,6 +1359,15 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 		}
 
 	case engine.EffectStartAI:
+		if eff.Mode == "ocr" && eff.ClipboardMedia != nil && eff.ClipboardMedia.IsMedia() {
+			if err := c.stageClipboardMediaForOCR(*eff.ClipboardMedia); err != nil {
+				c.Dispatch(engine.Event{
+					Type:  engine.EventAIFailed,
+					Error: err.Error(),
+				})
+				return
+			}
+		}
 		c.startAIStream(eff)
 
 	case engine.EffectCancelAI:
@@ -1351,6 +1409,27 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 		}
 
 	case engine.EffectCopyText:
+		if eff.Sensitive {
+			label := strings.TrimSpace(eff.SecretLabel)
+			if label == "" {
+				label = "Clavis Generated Credential"
+			}
+			res, err := c.ExecuteClipboardAction(ClipboardCopyRequest{
+				Origin:      ClipboardCopyOriginUser,
+				Action:      config.ClipboardActionCopySensitive,
+				Item:        clipboard.ClipboardItem{Content: eff.Text},
+				Sensitive:   true,
+				SecretLabel: label,
+			})
+			if err != nil {
+				c.ShowToastOrHUD(err.Error())
+				return
+			}
+			if res.AutoClearTTL > 0 {
+				c.ShowToastOrHUD(fmt.Sprintf("%s (%ds TTL)", i18n.T("hud.copied"), int(res.AutoClearTTL.Seconds())))
+			}
+			return
+		}
 		if eff.ClipboardMedia != nil && eff.ClipboardMedia.IsMedia() {
 			if err := writeClipboardMedia(*eff.ClipboardMedia); err != nil {
 				c.ShowToastOrHUD(err.Error())
@@ -1411,6 +1490,66 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 
 	case engine.EffectBindAppIMERule:
 		c.bindAppIMERule(eff, state)
+
+	case engine.EffectRevealPath:
+		target := strings.TrimSpace(eff.Text)
+		if target == "" {
+			return
+		}
+		if c.RevealPath != nil {
+			if err := c.RevealPath(target); err != nil {
+				c.ShowToastOrHUD(err.Error())
+			}
+			return
+		}
+		if mygo.App.IsReady() {
+			mygo.Shell.ShowItemInFolder(target)
+			return
+		}
+		if c.OpenPath != nil {
+			_ = c.OpenPath(filepath.Dir(target))
+		}
+
+	case engine.EffectOpenPath:
+		target := strings.TrimSpace(eff.Text)
+		if target == "" {
+			return
+		}
+		if c.OpenPath != nil {
+			if err := c.OpenPath(target); err != nil {
+				c.ShowToastOrHUD(err.Error())
+			}
+			return
+		}
+		if mygo.App.IsReady() {
+			if err := mygo.Shell.OpenPath(target); err != nil {
+				c.ShowToastOrHUD(err.Error())
+			}
+		}
+
+	case engine.EffectOpenExternal:
+		target := strings.TrimSpace(eff.Text)
+		if target != "" {
+			c.openExternalURL(target)
+		}
+
+	case engine.EffectFocusHerdrTarget:
+		target := strings.TrimSpace(eff.Text)
+		if target == "" {
+			return
+		}
+		if eff.Mode == "workspace" {
+			go c.FocusHerdrWorkspace(target)
+			return
+		}
+		go func() {
+			hc := agentsession.NewHerdrController(c.currentHerdrExecutor())
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if res, err := hc.FocusPane(ctx, target); err != nil {
+				c.ShowToastOrHUD(nonEmptyOr(res.Message, err.Error()))
+			}
+		}()
 
 	case engine.EffectOpenPromptComposer:
 		if eff.PromptTemplate != nil {
@@ -2078,6 +2217,24 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 		})
 		return
 	}
+	var ocrImages []ai.ImageAttachment
+	if eff.Mode == "ocr" {
+		ocrImages = c.consumeOCRImages()
+		if !profile.Capabilities.Vision {
+			visProf, visErr := ai.ResolveVisionProfile(cfg.Main.AI)
+			if visErr != nil {
+				timeoutCancel()
+				done()
+				c.Dispatch(engine.Event{
+					Type:  engine.EventAIFailed,
+					Error: visErr.Error(),
+				})
+				return
+			}
+			profile = visProf
+		}
+	}
+
 	streamClient.Config = cfg.Main.AI
 	streamClient.APIKeyProvider = func(context.Context) (string, error) {
 		return secrets.ResolveProfileAPIKey(secStore, profile)
@@ -2092,6 +2249,15 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 		Context:    eff.Context,
 		History:    history,
 		Profile:    &profCopy,
+		Images:     ocrImages,
+	}
+	if eff.Mode == "translate" && len(history) == 0 {
+		dir := c.translateDirectionFor(eff.SourceText)
+		sysPrompt, instr := engine.BuildTranslatePrompt(eff.SourceText, dir)
+		req.SystemPromptOverride = sysPrompt
+		if strings.TrimSpace(req.Prompt) == "" {
+			req.Prompt = instr
+		}
 	}
 	c.mu.Lock()
 	transformMode := ""
@@ -3434,6 +3600,18 @@ func (c *AppController) runAction(act config.LeaderAction, actionCtx engine.Caps
 			c.handleInternalSettingCommand(act.Args)
 			return
 		}
+		if act.Command == "clavis-capture" {
+			mode := ""
+			if len(act.Args) > 0 {
+				mode = act.Args[0]
+			}
+			if mode == "ocr" {
+				go c.CaptureAndOCR()
+			} else {
+				go c.CaptureAndAnnotate()
+			}
+			return
+		}
 		cfg := c.ConfigStore.Current()
 		if !cfg.Main.CLI.Enabled {
 			c.ShowToastOrHUD("CLI execution is disabled")
@@ -3773,6 +3951,10 @@ func (c *AppController) HandleTriggerEvent(ev host.TriggerEvent) {
 
 	case host.TriggerInputEngineToggle:
 		c.toggleInlineIMEForced()
+		return
+
+	case host.TriggerScreenshotAnnotate:
+		go c.CaptureAndAnnotate()
 		return
 
 	case host.TriggerSnippetKey:

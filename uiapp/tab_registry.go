@@ -19,6 +19,7 @@ const (
 	HubSurfaceStats  CapsuleHubSurface = "stats"
 	HubSurfaceManage CapsuleHubSurface = "manage"
 	HubSurfaceMedia  CapsuleHubSurface = "media"
+	HubSurfaceAssets CapsuleHubSurface = HubSurfaceMedia
 )
 
 // MediaFilterEntry registers one keyboard-first media filter chip in the
@@ -89,6 +90,18 @@ var capsuleHubEntries = []capsuleHubEntry{
 				return "管理"
 			}
 			return "Manage"
+		},
+	},
+	{
+		Surface:  HubSurfaceAssets,
+		Key:      ui.Key9,
+		KeyDigit: "9",
+		Icon:     "photo",
+		LabelFunc: func() string {
+			if i18n.IsChinese() {
+				return "资产"
+			}
+			return "Assets"
 		},
 	},
 }
@@ -201,6 +214,8 @@ func (a *AppController) refreshActiveHubSources() {
 		a.retryClipboardStats()
 		a.retryLexiconHits()
 		a.AgentRefresh()
+	case HubSurfaceAssets:
+		a.retryClipboardStats()
 	}
 }
 

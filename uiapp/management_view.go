@@ -8,6 +8,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/agentsession"
+	"github.com/yeisme/clavis/pkg/core/ai"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/host"
@@ -145,13 +146,15 @@ func (a *AppController) renderManagementHubView(c *ui.Context, theme *ui.Theme, 
 			}
 		})
 
-		// 2x2 operational cards: Sync, Media/Clipboard, Terminal/Agent, Lexicon.
+		// 2x3 operational cards: Sync, Media/Clipboard, Terminal/Agent, Lexicon, AI/Vision, Vault & QuickJump.
 		ui.Scroll(c).FillWidth().Grow(1).MinHeight(0).Children(func() {
 			ui.Grid(c).Columns(2).Gap(space10).FillWidth().Children(func() {
 				a.renderManageSyncCard(c, theme, syncState)
 				a.renderManageMediaCard(c, theme, cfg, clipStats)
 				a.renderManageTerminalCard(c, theme, cfg, sessions, diagnostics)
 				a.renderManageLexiconCard(c, theme, cfg, lexDays, lexLoaded)
+				a.renderManageAICard(c, theme, cfg)
+				a.renderManageVaultQuickJumpCard(c, theme, cfg)
 			})
 		})
 	})
@@ -289,6 +292,65 @@ func (a *AppController) renderManageLexiconCard(c *ui.Context, theme *ui.Theme, 
 			if ui.Button(c, pickLang(zh, "我的词库", "User Words")).Key("manage-lex-ime").Clicked() {
 				a.setSettingsSection(settingsSectionIMEKeymap)
 				a.OpenSettings(SettingsTabIMEKeymap)
+			}
+		})
+	})
+}
+
+func (a *AppController) renderManageAICard(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
+	zh := i18n.IsChinese()
+	active := a.ActiveAIProfile()
+	visProf, visErr := ai.ResolveVisionProfile(cfg.Main.AI)
+	renderHubMetricCard(c, theme, "manage-card-ai", "sparkles", pickLang(zh, "AI 与 Vision", "AI & Vision"), pickLang(zh, "设置", "Settings"), func() {
+		a.setSettingsSection(settingsSectionAI)
+		a.OpenSettings(SettingsTabAI)
+	}, func() {
+		ui.Text(c, pickLang(zh, fmt.Sprintf("默认: %s (%s)", active.Name, active.Model), fmt.Sprintf("Active: %s (%s)", active.Name, active.Model))).
+			FontSize(typeMeta).FontWeight(600).TextColor(theme.Text).SingleLine()
+		if visErr == nil {
+			ui.Text(c, "Vision: "+visProf.Name+" · "+visProf.Model).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+		} else {
+			ui.Text(c, pickLang(zh, "Vision: 未配置支持图像的模型", "Vision: none configured")).FontSize(typeMicro).TextColor(kitStateWarningColor(theme)).SingleLine()
+		}
+		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
+			if ui.Button(c, pickLang(zh, "截图标注", "Capture")).Key("manage-ai-capture").Clicked() {
+				go a.CaptureAndAnnotate()
+			}
+			if ui.Button(c, pickLang(zh, "打开 AI", "Open AI")).Key("manage-ai-open").Clicked() {
+				a.CloseHubSurface()
+				a.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: config.TabAI})
+			}
+		})
+	})
+}
+
+func (a *AppController) renderManageVaultQuickJumpCard(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
+	zh := i18n.IsChinese()
+	snap := a.VaultSnapshot()
+	ttl := a.SensitiveClipboardState()
+	bookmarks := len(cfg.QuickJump.Bookmarks)
+	renderHubMetricCard(c, theme, "manage-card-vault-qj", "lock.rotation", pickLang(zh, "Vault 与快跳", "Vault & Quick Jump"), pickLang(zh, "打开资产", "Assets"), func() {
+		a.setAssetsSubTab(assetsSubVault)
+		a.SetHubSurface(HubSurfaceAssets)
+	}, func() {
+		ui.Text(c, pickLang(zh,
+			fmt.Sprintf("SecretRef %d 条 · 快跳书签 %d 个", len(snap.SecretRefs), bookmarks),
+			fmt.Sprintf("%d SecretRefs · %d QuickJump bookmarks", len(snap.SecretRefs), bookmarks),
+		)).FontSize(typeMeta).FontWeight(600).FontFeatures("tnum").TextColor(theme.Text).SingleLine()
+		if ttl.Active {
+			rem := max(1, int(ttl.Remaining.Seconds()+0.9))
+			kitStatusPill(c, theme, fmt.Sprintf("%s · %ds", nonEmptyOr(ttl.Label, "TTL"), rem), chipWarning)
+		} else {
+			ui.Text(c, pickLang(zh, "在动作框输入 # 进入统一快跳", "Type # in Actions for Quick Jump")).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+		}
+		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
+			if ui.Button(c, pickLang(zh, "统一快跳 (#)", "Quick Jump (#)")).Key("manage-open-qj").Clicked() {
+				a.CloseHubSurface()
+				a.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions, Query: "#"})
+			}
+			if ui.Button(c, pickLang(zh, "密钥库", "Vault")).Key("manage-open-vault").Clicked() {
+				a.setAssetsSubTab(assetsSubVault)
+				a.SetHubSurface(HubSurfaceAssets)
 			}
 		})
 	})

@@ -95,8 +95,12 @@ func TestOmniboxSelectionIsEdgeBarNotFlood(t *testing.T) {
 			waitUntil(t, 2*time.Second, func() bool { return len(f.ctrl.State().OmniboxItems) >= 3 }, "clipboard items")
 			tt := f.omniboxTester(t)
 			tt.SetDark(dark)
+			// Let the capsule enter transition settle before measuring the
+			// selection switch. The following frame must still move the bar
+			// immediately with the keyboard selection.
+			tt.Advance(300 * time.Millisecond)
+			tt.Frame()
 			tt.Key(0, ui.KeyDown) // newest first: "second entry" is chosen
-			tt.Advance(2 * time.Second)
 			tt.Frame()
 			img := tt.Image()
 

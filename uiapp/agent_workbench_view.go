@@ -233,6 +233,7 @@ func (a *AppController) renderAgentWorkbenchBand(c *ui.Context, theme *ui.Theme)
 			a.AgentRefresh()
 		}
 	})
+	a.renderAgentWorkspaceStrip(c, theme)
 }
 
 // renderAgentRowLeading renders a semantic status symbol + provider badge for
@@ -289,18 +290,27 @@ func (a *AppController) renderAgentPreviewBody(c *ui.Context, theme *ui.Theme, i
 	if session, ok := agentSessionForItem(item, sessions); ok {
 		lane := classifyAgentSessionLane(session)
 		statusText, statusTone := agentLaneSymbolAndLabel(session)
+		if session.HerdrManaged && session.PaneID != "" {
+			a.EnsureAgentOutput(session.PaneID)
+		}
 
-		// Header: title + provider + semantic state pill + relative time.
+		// Header: title + provider + semantic state pill + workspace/pane + relative time.
 		ui.Text(c, session.Title).FontSize(typeBody).FontWeight(700).TextColor(theme.Text).Wrap()
 		ui.Row(c).FillWidth().Wrap().Gap(space4).AlignItems(ui.Center).Children(func() {
 			if provider := agentProviderLabel(session.Provider); provider != "" {
 				previewBadge(c, theme, "person.crop.circle", provider, false)
 			}
 			kitStatusPill(c, theme, statusText, statusTone)
+			if ws := safeAgentWorkspaceLabel(session); ws != "" {
+				previewBadge(c, theme, "folder", ws, false)
+			}
+			if pane := strings.TrimSpace(session.PaneID); pane != "" {
+				previewBadge(c, theme, "terminal", pane, false)
+			}
 			previewBadge(c, theme, "", agentRelativeTime(session.LastActivityAt, time.Now()), false)
 		})
 
-		// One-line conclusion / current action — always visible without opening drawer.
+		// One-line conclusion / live Herdr terminal Markdown output card.
 		conclusionTitle := "Latest outcome"
 		if lane == agentLaneRunning {
 			conclusionTitle = "Current action"
@@ -317,10 +327,60 @@ func (a *AppController) renderAgentPreviewBody(c *ui.Context, theme *ui.Theme, i
 				conclusionTitle = "一句结论"
 			}
 		}
+
+		var liveOut agentOutputSnapshot
+		if session.HerdrManaged && session.PaneID != "" {
+			liveOut = a.cachedAgentOutput(session.PaneID)
+		}
+		hasLiveOutput := strings.TrimSpace(liveOut.Content) != ""
+		if hasLiveOutput {
+			conclusionTitle = pickLang(zh, "实时终端输出（已脱敏）", "Live Output (Redacted)")
+		}
+
 		ui.Column(c).Key("agent-conclusion-card").FillWidth().Padding(space8, space10).Gap(space4).
 			Radius(radius8).Background(tileFill(theme)).Border(space1, hairline(theme)).Children(func() {
-			ui.Text(c, conclusionTitle).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
-			ui.Text(c, agentOneLineConclusion(session)).FontSize(typeLabel).FontWeight(500).TextColor(theme.Text).Wrap()
+			ui.Row(c).FillWidth().Gap(space4).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, conclusionTitle).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine().Grow(1)
+				if session.HerdrManaged && session.PaneID != "" {
+					if liveOut.Loading {
+						kitStatusDot(c, kitStateLoadingColor(theme), true)
+					}
+					if hasLiveOutput {
+						copyOutLbl := pickLang(zh, "复制", "Copy")
+						copyOutBtn := ui.ButtonBase(c).Key("agent-output-copy").Label(copyOutLbl).
+							Padding(space1, space6).Radius(radius4).Background(theme.Surface).Border(space1, hairline(theme)).FocusRing(false)
+						copyOutBtn.Children(func() {
+							ui.Text(c, copyOutLbl).FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
+						})
+						if copyOutBtn.Clicked() {
+							if err := a.writeClipboardText(liveOut.Content); err != nil {
+								a.ShowToastOrHUD(agentsession.SanitizeDiagnosticText(err.Error()))
+							} else {
+								a.ShowToastOrHUD(i18n.T("hud.copied"))
+							}
+						}
+					}
+					refOutLbl := pickLang(zh, "刷新输出", "Pull")
+					refOutBtn := ui.ButtonBase(c).Key("agent-output-refresh").Label(refOutLbl).
+						Padding(space1, space6).Radius(radius4).Background(theme.Surface).Border(space1, hairline(theme)).FocusRing(false)
+					refOutBtn.Children(func() {
+						ui.Text(c, refOutLbl).FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
+					})
+					if refOutBtn.Clicked() {
+						a.ForceRefreshAgentOutput(session.PaneID)
+					}
+				}
+			})
+			if hasLiveOutput {
+				a.renderClavisMarkdown(c, theme, liveOut.Content, false)
+			} else {
+				conclusion := agentOneLineConclusion(session)
+				if detectPreviewContentKind(conclusion, "") == previewKindMarkdown {
+					a.renderClavisMarkdown(c, theme, conclusion, false)
+				} else {
+					ui.Text(c, conclusion).FontSize(typeLabel).FontWeight(500).TextColor(theme.Text).Wrap()
+				}
+			}
 		})
 
 		// State-specific action zone: Blocking approval gate vs Done vs Running/Waiting.
@@ -346,6 +406,8 @@ func (a *AppController) renderAgentPreviewBody(c *ui.Context, theme *ui.Theme, i
 		if id := strings.TrimSpace(session.ID); id != "" {
 			ui.Text(c, "ID: "+id).Font("monospace").FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 		}
+
+		a.renderAgentManageControls(c, theme, session)
 
 		// Collapsible log & technical details drawer (collapsed by default).
 		a.renderAgentLogDrawer(c, theme, session, diagnostics)

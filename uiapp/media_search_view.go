@@ -400,8 +400,16 @@ func (a *AppController) renderMediaReadyPreviewBody(
 		} else if len(snap.TextExcerptLines) > 0 {
 			ui.Text(c, pickLang(zh, "文档真实片段预览", "Verified Document Excerpt")).
 				FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+			joined := strings.Join(snap.TextExcerptLines, "\n")
 			ui.Box(c).FillWidth().Padding(space8, space10).Radius(radiusChip).
 				Background(theme.Surface).Border(space1, hairline(theme)).Children(func() {
+				if kind := detectPreviewContentKind(joined, snap.Extension); kind != previewKindPlain {
+					src, _, _ := formatMarkdownPreviewSource(joined, kind, snap.Extension, defaultMarkdownMaxBytes, 64)
+					ui.Column(c).FillWidth().Children(func() {
+						a.renderClavisMarkdown(c, theme, src, false)
+					})
+					return
+				}
 				ui.Column(c).FillWidth().Gap(space2).Children(func() {
 					for _, line := range snap.TextExcerptLines {
 						display := line

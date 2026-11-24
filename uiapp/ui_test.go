@@ -377,6 +377,13 @@ func waitUntil(t *testing.T, timeout time.Duration, cond func() bool, msg string
 	t.Fatalf("timed out waiting for: %s", msg)
 }
 
+type disabledHerdrExecutor struct{}
+
+func (disabledHerdrExecutor) LookPath(string) (string, error) { return "", os.ErrNotExist }
+func (disabledHerdrExecutor) Output(context.Context, string, ...string) ([]byte, error) {
+	return nil, os.ErrNotExist
+}
+
 func newTestController(t *testing.T, doer ai.HTTPDoer) (*AppController, *mockBridge, *clipboard.MemoryStore, *secrets.MemoryAPIKeyStore) {
 	t.Helper()
 	t.Setenv("DEEPSEEK_API_KEY", "")
@@ -400,6 +407,7 @@ func newTestController(t *testing.T, doer ai.HTTPDoer) (*AppController, *mockBri
 		SecretStore:     secStore,
 		Bridge:          br,
 		HTTPDoer:        doer,
+		HerdrExecutor:   disabledHerdrExecutor{},
 		ClipboardWriter: func(string) {},
 	})
 	t.Cleanup(ctrl.Close)

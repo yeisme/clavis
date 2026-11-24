@@ -212,6 +212,7 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 					a.renderLeaderWorkbenches(c, theme, state)
 					a.renderLeaderSystemStatus(c, theme)
 					a.renderLeaderRecentActivity(c, theme, state)
+					a.renderLeaderQuickTools(c, theme)
 				})
 			})
 		} else {
@@ -317,6 +318,34 @@ func (a *AppController) renderLeaderSystemStatus(c *ui.Context, theme *ui.Theme)
 			ui.Text(c, agentSummary).FontSize(typeMicro).FontWeight(600).FontFeatures("tnum").TextColor(secondaryInk(theme)).SingleLine()
 		})
 		ui.Text(c, imeLabel).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine().Shrink(0)
+	})
+}
+
+func (a *AppController) renderLeaderQuickTools(c *ui.Context, theme *ui.Theme) {
+	zh := i18n.IsChinese()
+	ui.Column(c).Key("leader-quick-tools").FillWidth().Gap(space4).Children(func() {
+		ui.Text(c, pickLang(zh, "快捷工具", "Quick Tools")).FontSize(typeMicro).FontWeight(700).TextColor(theme.TextMuted).SingleLine()
+		ui.Row(c).FillWidth().Gap(space4).AlignItems(ui.Center).Children(func() {
+			tool := func(key, label string, fn func()) {
+				b := ui.ButtonBase(c).Key(key).Label(label).Grow(1).Padding(space4, space6).Radius(radiusChip).
+					Background(tileFill(theme)).Border(space1, hairline(theme)).FocusRing(false)
+				b.Children(func() {
+					ui.Text(c, label).FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
+				})
+				if b.Clicked() {
+					fn()
+				}
+			}
+			tool("leader-tool-capture", pickLang(zh, "截图", "Capture"), func() { go a.CaptureAndAnnotate() })
+			tool("leader-tool-ocr", "OCR", func() { go a.CaptureAndOCR() })
+			tool("leader-tool-translate", pickLang(zh, "翻译", "Translate"), func() {
+				a.StartTranslation(a.State().Context.SelectedText, "")
+			})
+			tool("leader-tool-assets", pickLang(zh, "资产", "Assets"), func() {
+				a.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions})
+				a.SetHubSurface(HubSurfaceAssets)
+			})
+		})
 	})
 }
 

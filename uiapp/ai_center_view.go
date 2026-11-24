@@ -6,7 +6,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/egoist/mygo/ui/markdown"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/i18n"
@@ -411,6 +410,7 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 
 	ui.Column(c).FillWidth().Grow(1).Padding(space10, space14).Gap(space8).Children(func() {
 		a.renderAICenterTopStrip(c, theme, cfg, activeProf)
+		a.renderOCRTranslateBar(c, theme, cfg, state)
 		a.renderAICenterPromptAndContext(c, theme, state, phase)
 
 		// Process visibility discipline:
@@ -469,7 +469,7 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 						modelHint := activeProf.Model
 						kitStateView(c, theme, kitStateLoading, "arrow.clockwise", i18n.T("ai.generating"), modelHint, nil)
 					} else {
-						markdown.View(c, state.AIOutput, &a.uiState.mdOpts)
+						a.renderClavisMarkdown(c, theme, state.AIOutput, true)
 						// Pulsing caret while the answer streams in (900ms loop).
 						caret := ui.Box(c).Width(7).Height(15).Radius(radius4)
 						caret.Background(theme.Accent.Alpha(cursorOpacity(caret, profile)))
@@ -478,10 +478,10 @@ func (a *AppController) renderAIStreamingView(c *ui.Context, theme *ui.Theme, cf
 					if a.aiReviewShowsChanges(review) {
 						renderAIReviewChanges(c, theme, review)
 					} else {
-						markdown.View(c, state.AIOutput, &a.uiState.mdOpts)
+						a.renderClavisMarkdown(c, theme, state.AIOutput, false)
 					}
 				default:
-					markdown.View(c, state.AIOutput, &a.uiState.mdOpts)
+					a.renderClavisMarkdown(c, theme, state.AIOutput, false)
 				}
 			})
 

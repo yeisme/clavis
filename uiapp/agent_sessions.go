@@ -32,6 +32,131 @@ var agentCommands = []agentCommand{
 	{ID: "test", Label: "运行测试并回报证据", Detail: "请求测试结果和关键输出"},
 }
 
+type agentOutputSnapshot struct {
+	Target    string
+	Content   string
+	Loading   bool
+	ErrText   string
+	FetchedAt time.Time
+}
+
+var agentOutputStore = struct {
+	mu       sync.Mutex
+	byCtl    map[*AppController]map[string]agentOutputSnapshot
+	inFlight map[*AppController]map[string]bool
+}{
+	byCtl:    make(map[*AppController]map[string]agentOutputSnapshot),
+	inFlight: make(map[*AppController]map[string]bool),
+}
+
+func (c *AppController) currentHerdrExecutor() agentsession.CommandExecutor {
+	c.agentMu.RLock()
+	exec := c.herdrExecutor
+	c.agentMu.RUnlock()
+	if exec == nil {
+		return agentsession.NewCommandExecutor()
+	}
+	return exec
+}
+
+func (c *AppController) cachedAgentWorkspaces() []agentsession.HerdrWorkspace {
+	c.agentMu.RLock()
+	defer c.agentMu.RUnlock()
+	return append([]agentsession.HerdrWorkspace(nil), c.agentWorkspaces...)
+}
+
+func (c *AppController) cachedAgentOutput(target string) agentOutputSnapshot {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return agentOutputSnapshot{}
+	}
+	agentOutputStore.mu.Lock()
+	defer agentOutputStore.mu.Unlock()
+	m := agentOutputStore.byCtl[c]
+	if m == nil {
+		return agentOutputSnapshot{Target: target}
+	}
+	return m[target]
+}
+
+// EnsureAgentOutput triggers an asynchronous read of recent terminal output for
+// a Herdr pane/agent target when missing or stale (> 3s), never blocking UI frames.
+func (c *AppController) EnsureAgentOutput(target string) {
+	c.fetchAgentOutput(target, false)
+}
+
+// ForceRefreshAgentOutput bypasses the 3s freshness window and pulls fresh output.
+func (c *AppController) ForceRefreshAgentOutput(target string) {
+	c.fetchAgentOutput(target, true)
+}
+
+func (c *AppController) fetchAgentOutput(target string, force bool) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return
+	}
+	agentOutputStore.mu.Lock()
+	m := agentOutputStore.byCtl[c]
+	if m == nil {
+		m = make(map[string]agentOutputSnapshot)
+		agentOutputStore.byCtl[c] = m
+	}
+	inflight := agentOutputStore.inFlight[c]
+	if inflight == nil {
+		inflight = make(map[string]bool)
+		agentOutputStore.inFlight[c] = inflight
+	}
+	if inflight[target] {
+		agentOutputStore.mu.Unlock()
+		return
+	}
+	existing := m[target]
+	if !force && existing.ErrText == "" && !existing.FetchedAt.IsZero() && time.Since(existing.FetchedAt) < 3*time.Second {
+		agentOutputStore.mu.Unlock()
+		return
+	}
+	inflight[target] = true
+	existing.Target = target
+	existing.Loading = true
+	m[target] = existing
+	agentOutputStore.mu.Unlock()
+
+	exec := c.currentHerdrExecutor()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		defer cancel()
+		text, _, err := agentsession.NewHerdrClientWithExecutor(exec).ReadOutput(ctx, target, 80)
+
+		agentOutputStore.mu.Lock()
+		if cm := agentOutputStore.byCtl[c]; cm != nil {
+			snap := agentOutputSnapshot{
+				Target:    target,
+				Content:   text,
+				Loading:   false,
+				FetchedAt: time.Now(),
+			}
+			if err != nil {
+				snap.ErrText = agentsession.SanitizeDiagnosticText(err.Error())
+				if snap.Content == "" {
+					snap.Content = existing.Content
+				}
+			}
+			cm[target] = snap
+		}
+		if inf := agentOutputStore.inFlight[c]; inf != nil {
+			delete(inf, target)
+		}
+		agentOutputStore.mu.Unlock()
+
+		c.mu.Lock()
+		repaint := c.OnRepaint
+		c.mu.Unlock()
+		if repaint != nil {
+			repaint()
+		}
+	}()
+}
+
 type codexSQLiteReader struct{ path string }
 
 func (r codexSQLiteReader) Threads(ctx context.Context, limit int) ([]agentsession.CodexThread, error) {
@@ -70,17 +195,37 @@ func (c *AppController) refreshAgentSessions() {
 	home, _ := os.UserHomeDir()
 	db := filepath.Join(home, ".codex", "state_5.sqlite")
 	previousSessions, _ := c.cachedAgentData()
-	sessions, diagnostics := agentsession.Discover(context.Background(), agentsession.Options{CodexDB: db, CodexReader: codexSQLiteReader{path: db}})
+	herdrExec := c.currentHerdrExecutor()
+	sessions, diagnostics := agentsession.Discover(context.Background(), agentsession.Options{
+		CodexDB:       db,
+		CodexReader:   codexSQLiteReader{path: db},
+		HerdrExecutor: herdrExec,
+	})
+	var workspaces []agentsession.HerdrWorkspace
+	if herdrExec != nil {
+		wsCtx, wsCancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		if ws, wsErr := agentsession.NewHerdrClientWithExecutor(herdrExec).ListWorkspaces(wsCtx); wsErr == nil {
+			workspaces = ws
+		}
+		wsCancel()
+	}
 	result := agentOperationResult(sessions, diagnostics, len(previousSessions) > 0)
 	if result.State == host.StateUnknown {
 		diagnostics = append(diagnostics, agentsession.Diagnostic{Provider: "aggregate", Code: "unknown", Message: "状态未知"})
 	}
 	c.agentMu.Lock()
 	c.agentSessions = append([]agentsession.Session(nil), sessions...)
+	if len(workspaces) > 0 {
+		c.agentWorkspaces = workspaces
+	}
 	c.agentDiagnostics = append([]agentsession.Diagnostic(nil), diagnostics...)
 	c.agentRefreshStarted = false
 	setAgentOperationResult(c, result)
+	allWS := append([]agentsession.HerdrWorkspace(nil), c.agentWorkspaces...)
 	c.agentMu.Unlock()
+
+	c.syncAgentQuickJumpTargets(allWS, sessions)
+
 	c.mu.Lock()
 	repaint := c.OnRepaint
 	c.mu.Unlock()
@@ -234,6 +379,12 @@ func agentProviderLabel(p string) string {
 		return "Claude"
 	case "dsh":
 		return "DSH"
+	case "agy", "antigravity":
+		return "AGY"
+	case "pi":
+		return "Pi"
+	case "gemini":
+		return "Gemini"
 	default:
 		return p
 	}
@@ -265,23 +416,34 @@ func agentItemsForResult(sessions []agentsession.Session, diagnostics []agentses
 	// 用户只看到列表里孤零零一行「刷新中…」。有缓存会话时仍保留状态行，否则用户看不到刷新中的提示。
 	// 2026-11-22 实测 TestAgentTabShowsLoadingStateDuringRefresh 因此失败。
 	refreshingWithNothingToShow := result.State == host.StateRefreshing && len(sessions) == 0
-	if trimmed == "" && result.State != "" && result.State != host.StateReady && !refreshingWithNothingToShow {
+	showStatusRow := trimmed == "" && result.State != "" && result.State != host.StateReady && !refreshingWithNothingToShow
+	statusAtTop := showStatusRow && (len(sessions) == 0 || result.State == host.StateFailed || result.State == host.StateUnknown)
+	appendStatusRow := func() {
 		retryable := result.Retryable && result.State != host.StateUnknown
 		items = append(items, engine.OmniboxItem{ID: "agent-status:" + string(result.State), Title: agentStatusMessage(result), Subtitle: agentStatusSubtitle(result), Icon: "info.circle", Kind: engine.ItemUtility, UtilityValue: "agent-refresh-status", KeyHint: map[bool]string{true: "R", false: ""}[retryable]})
 	}
+	if statusAtTop {
+		appendStatusRow()
+	}
 	for _, session := range sessions {
-		searchable := strings.ToLower(strings.Join([]string{session.Title, session.LastMessage, session.Provider, session.Workspace, session.ID}, " "))
+		searchable := strings.ToLower(strings.Join([]string{session.Title, session.LastMessage, session.Provider, session.Workspace, session.WorkspaceLabel, session.PaneID, session.AgentName, session.ID}, " "))
 		if trimmed != "" && !strings.Contains(searchable, strings.ToLower(trimmed)) {
 			continue
 		}
 		subtitle := fmt.Sprintf("%s · %s", agentStatusLabel(session.Status), agentRelativeTime(session.LastActivityAt, time.Now()))
+		if ws := safeAgentWorkspaceLabel(session); ws != "" {
+			subtitle = ws + " · " + subtitle
+		}
 		if session.PendingReview {
 			subtitle += " · 待验收"
 		}
 		if session.LastMessage != "" {
 			subtitle += " · " + agentsession.SanitizeDiagnosticText(session.LastMessage)
 		}
-		items = append(items, engine.OmniboxItem{ID: "agent-session:" + session.Provider + ":" + session.ID, Title: session.Title, Subtitle: subtitle, Keywords: []string{session.Provider, session.Workspace, session.ID, session.LastMessage}, Icon: "person.crop.circle", Kind: engine.ItemUtility, UtilityValue: "agent-session:" + session.Provider + ":" + session.ID})
+		items = append(items, engine.OmniboxItem{ID: "agent-session:" + session.Provider + ":" + session.ID, Title: session.Title, Subtitle: subtitle, Keywords: []string{session.Provider, session.Workspace, session.WorkspaceLabel, session.PaneID, session.ID, session.LastMessage}, Icon: "person.crop.circle", Kind: engine.ItemUtility, UtilityValue: "agent-session:" + session.Provider + ":" + session.ID})
+	}
+	if showStatusRow && !statusAtTop {
+		appendStatusRow()
 	}
 	for _, diagnostic := range diagnostics {
 		items = append(items, engine.OmniboxItem{ID: "agent-diagnostic:" + diagnostic.Provider + ":" + diagnostic.Code, Title: agentProviderLabel(diagnostic.Provider), Subtitle: "诊断：" + agentsession.SanitizeDiagnosticText(diagnostic.Message), Icon: "info.circle", Kind: engine.ItemUtility, UtilityValue: "agent-diagnostic"})
@@ -298,6 +460,27 @@ func agentStatusSubtitle(result host.OperationResult) string {
 	}
 	return ""
 }
+func safeAgentWorkspaceLabel(session agentsession.Session) string {
+	ws := strings.TrimSpace(session.WorkspaceLabel)
+	if ws == "" {
+		ws = strings.TrimSpace(session.Workspace)
+	}
+	if ws == "" {
+		return ""
+	}
+	if ws == "~" {
+		return ws
+	}
+	if strings.ContainsAny(ws, `/\`) {
+		base := filepath.Base(filepath.Clean(ws))
+		if base != "" && base != "." && base != string(filepath.Separator) {
+			return base
+		}
+		return ""
+	}
+	return agentsession.SanitizeDiagnosticText(ws)
+}
+
 func isAgentItem(item engine.OmniboxItem) bool { return strings.HasPrefix(item.ID, "agent-") }
 func currentAgentFocuser() agentsession.Focuser {
 	agentFocuserMu.RLock()
@@ -313,7 +496,7 @@ func setAgentFocuserForTest(f agentsession.Focuser) func() {
 	return func() { agentFocuserMu.Lock(); agentFocuser = previous; agentFocuserMu.Unlock() }
 }
 
-func (c *AppController) focusAgentSession(sessionID string) {
+func (c *AppController) focusAgentSession(session agentsession.Session) {
 	focuser := currentAgentFocuser()
 	if focuser == nil {
 		c.ShowToastOrHUD("已复制会话 ID（未检测到 herdr，无法直接跳转）")
@@ -328,7 +511,19 @@ func (c *AppController) focusAgentSession(sessionID string) {
 			c.openGhosttyForAgentFallback()
 			return
 		}
-		result, focusErr := focuser.Focus(ctx, sessionID)
+		var (
+			result   host.OperationResult
+			focusErr error
+		)
+		if session.PaneID != "" {
+			if pf, ok := focuser.(agentsession.PaneFocuser); ok {
+				result, focusErr = pf.FocusPane(ctx, session.PaneID)
+			} else {
+				result, focusErr = focuser.Focus(ctx, session.ID)
+			}
+		} else {
+			result, focusErr = focuser.Focus(ctx, session.ID)
+		}
 		if focusErr != nil || result.State == host.StateFailed {
 			message := agentsession.SanitizeDiagnosticText(result.Message)
 			if message == "" {
@@ -400,9 +595,49 @@ func (c *AppController) agentItemAction(item engine.OmniboxItem) bool {
 		c.ShowToastOrHUD(agentsession.SanitizeDiagnosticText(err.Error()))
 		return true
 	}
-	c.focusAgentSession(selected.ID)
+	c.focusAgentSession(selected)
 	return true
 }
+
+func (c *AppController) syncAgentQuickJumpTargets(workspaces []agentsession.HerdrWorkspace, sessions []agentsession.Session) {
+	var targets []engine.QuickJumpTarget
+	for _, ws := range workspaces {
+		id := strings.TrimSpace(ws.WorkspaceID)
+		if id == "" {
+			continue
+		}
+		lbl := strings.TrimSpace(ws.Label)
+		if lbl == "" {
+			lbl = id
+		}
+		targets = append(targets, engine.QuickJumpTarget{
+			ID:       "ws:" + id,
+			Title:    fmt.Sprintf("Workspace %s · %s", id, lbl),
+			Subtitle: fmt.Sprintf("herdr workspace · %s", strings.TrimSpace(ws.AgentStatus)),
+			Kind:     "workspace",
+			Target:   id,
+			Tags:     []string{id, lbl, "herdr"},
+		})
+	}
+	for _, s := range sessions {
+		if !s.HerdrManaged || strings.TrimSpace(s.PaneID) == "" {
+			continue
+		}
+		targets = append(targets, engine.QuickJumpTarget{
+			ID:       "pane:" + s.PaneID,
+			Title:    fmt.Sprintf("%s · %s", s.Title, s.PaneID),
+			Subtitle: fmt.Sprintf("%s · %s", agentProviderLabel(s.Provider), safeAgentWorkspaceLabel(s)),
+			Kind:     "agent",
+			Target:   s.PaneID,
+			Tags:     []string{s.PaneID, s.WorkspaceID, s.WorkspaceLabel, s.Provider, s.AgentName},
+		})
+	}
+	c.Dispatch(engine.Event{
+		Type:             engine.EventSetQuickJumpTargets,
+		QuickJumpTargets: targets,
+	})
+}
+
 func (c *AppController) AgentRefresh() { go c.refreshAgentSessions() }
 
 func (c *AppController) agentRefreshRetryable() bool {

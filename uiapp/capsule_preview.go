@@ -32,6 +32,7 @@ type capsuleEphemeralStore struct {
 	aiReviseOpen      map[*AppController]bool
 	agentLaneFilter   map[*AppController]string
 	agentDrawerOpen   map[*AppController]bool
+	previewRawMode    map[*AppController]bool
 }
 
 var capsuleUI = &capsuleEphemeralStore{
@@ -43,6 +44,7 @@ var capsuleUI = &capsuleEphemeralStore{
 	aiReviseOpen:      make(map[*AppController]bool),
 	agentLaneFilter:   make(map[*AppController]string),
 	agentDrawerOpen:   make(map[*AppController]bool),
+	previewRawMode:    make(map[*AppController]bool),
 }
 
 func (s *capsuleEphemeralStore) reset(ctrl *AppController) {
@@ -56,7 +58,26 @@ func (s *capsuleEphemeralStore) reset(ctrl *AppController) {
 	delete(s.aiReviseOpen, ctrl)
 	delete(s.agentLaneFilter, ctrl)
 	delete(s.agentDrawerOpen, ctrl)
+	delete(s.previewRawMode, ctrl)
 	resetComposerState(ctrl)
+}
+
+func (s *capsuleEphemeralStore) rawPreview(ctrl *AppController) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.previewRawMode[ctrl]
+}
+
+func (s *capsuleEphemeralStore) toggleRawPreview(ctrl *AppController) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := !s.previewRawMode[ctrl]
+	if next {
+		s.previewRawMode[ctrl] = true
+	} else {
+		delete(s.previewRawMode, ctrl)
+	}
+	return next
 }
 
 func (s *capsuleEphemeralStore) laneFilter(ctrl *AppController) string {
@@ -430,6 +451,31 @@ func (a *AppController) renderOmniboxPreviewCard(
 			renderSemanticIcon(c, previewIcon(item), typeLabel, secondaryInk(theme))
 			ui.Text(c, i18n.T("preview.title")).FontSize(typeMeta).FontWeight(700).TextColor(theme.Text).SingleLine()
 			ui.Spacer(c)
+			if item.Kind == engine.ItemClipboardEntry && (item.ClipboardMedia == nil || !item.ClipboardMedia.IsMedia()) {
+				txt := item.ClipboardContent
+				if txt == "" {
+					txt = item.Title
+				}
+				if kind := detectPreviewContentKind(txt, ""); kind != previewKindPlain {
+					rawMode := capsuleUI.rawPreview(a)
+					lbl := "MD"
+					if rawMode {
+						lbl = pickLang(i18n.IsChinese(), "原文", "Raw")
+					} else if kind == previewKindJSON {
+						lbl = "JSON"
+					} else if kind == previewKindCode {
+						lbl = pickLang(i18n.IsChinese(), "代码", "Code")
+					}
+					btn := ui.ButtonBase(c).Key("preview-md-toggle").Label(lbl).
+						Padding(space1, space6).Radius(radius4).Background(tileFill(theme)).Border(space1, hairline(theme)).FocusRing(false).Shrink(0)
+					btn.Children(func() {
+						ui.Text(c, lbl).FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
+					})
+					if btn.Clicked() {
+						capsuleUI.toggleRawPreview(a)
+					}
+				}
+			}
 			ui.Text(c, previewKindLabel(item)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 		})
 		kitDivider(c, theme)
@@ -440,6 +486,7 @@ func (a *AppController) renderOmniboxPreviewCard(
 		if m := item.ClipboardMedia; m != nil && m.IsMedia() {
 			ui.Column(c).FillWidth().Grow(1).MinHeight(0).Gap(space4).Children(func() {
 				a.renderOmniboxPreviewBody(c, theme, state, item)
+				a.renderPreviewQuickCopyBar(c, theme, item)
 				a.renderPreviewActionHints(c, theme, item)
 			})
 			return
@@ -447,6 +494,7 @@ func (a *AppController) renderOmniboxPreviewCard(
 		ui.Scroll(c).FillWidth().Grow(1).Children(func() {
 			ui.Column(c).FillWidth().Gap(space4).Children(func() {
 				a.renderOmniboxPreviewBody(c, theme, state, item)
+				a.renderPreviewQuickCopyBar(c, theme, item)
 				a.renderPreviewActionHints(c, theme, item)
 			})
 		})
@@ -497,6 +545,16 @@ func (a *AppController) renderOmniboxPreviewBody(
 			FontSize(typeMicro).
 			TextColor(theme.TextMuted).
 			SingleLine()
+		if !capsuleUI.rawPreview(a) {
+			if kind := detectPreviewContentKind(content, ""); kind != previewKindPlain {
+				src, truncated, omitted := formatMarkdownPreviewSource(content, kind, "", defaultMarkdownMaxBytes, 200)
+				a.renderClavisMarkdown(c, theme, src, false)
+				if truncated && omitted > 0 {
+					ui.Text(c, i18n.Tf("preview.more_lines", omitted)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+				}
+				return
+			}
+		}
 		renderPreviewLines(c, theme, content, 200)
 
 	case engine.ItemSnippet:
@@ -568,6 +626,13 @@ func (a *AppController) renderOmniboxPreviewBody(
 			a.renderAgentPreviewBody(c, theme, item)
 			return
 		}
+		if item.UtilitySensitive {
+			ui.Text(c, i18n.T("preview.value")).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+			renderPreviewLines(c, theme, strings.Repeat("•", 16), 2)
+			ui.Text(c, pickLang(i18n.IsChinese(), "仅用户可复制 · TTL 自动清理 · 不进普通历史", "User-Only TTL Copy · Plaintext hidden")).
+				FontSize(typeMicro).TextColor(theme.TextMuted).Wrap()
+			return
+		}
 		ui.Text(c, i18n.T("preview.value")).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
 		renderPreviewLines(c, theme, item.UtilityValue, 16)
 
@@ -624,6 +689,62 @@ func (a *AppController) renderOmniboxPreviewBody(
 	default:
 		renderPreviewLines(c, theme, item.Subtitle, 8)
 	}
+}
+
+// renderPreviewQuickCopyBar draws a compact neutral action micro-bar for the
+// selected preview item (Copy, Copy Markdown, Copy Path, Reveal, Meta, Translate).
+func (a *AppController) renderPreviewQuickCopyBar(c *ui.Context, theme *ui.Theme, item engine.OmniboxItem) {
+	if isAgentItem(item) || item.UtilitySensitive {
+		return
+	}
+	var actions []struct {
+		id    string
+		label string
+	}
+	zh := i18n.IsChinese()
+	switch item.Kind {
+	case engine.ItemClipboardEntry:
+		if item.ClipboardMedia != nil && item.ClipboardMedia.IsMedia() {
+			actions = append(actions,
+				struct{ id, label string }{"copy", pickLang(zh, "复制", "Copy")},
+				struct{ id, label string }{"copy_path", pickLang(zh, "复制路径", "Path")},
+				struct{ id, label string }{"reveal", pickLang(zh, "访达", "Reveal")},
+				struct{ id, label string }{"copy_meta", pickLang(zh, "元信息", "Meta")},
+			)
+		} else {
+			actions = append(actions,
+				struct{ id, label string }{"copy", pickLang(zh, "复制", "Copy")},
+				struct{ id, label string }{"copy_md", "MD"},
+				struct{ id, label string }{"translate", pickLang(zh, "翻译", "Translate")},
+			)
+		}
+	case engine.ItemSnippet:
+		actions = append(actions,
+			struct{ id, label string }{"copy", pickLang(zh, "复制", "Copy")},
+			struct{ id, label string }{"copy_md", "MD"},
+		)
+	case engine.ItemUtility:
+		actions = append(actions,
+			struct{ id, label string }{"copy", pickLang(zh, "复制", "Copy")},
+			struct{ id, label string }{"copy_md", "MD"},
+		)
+	}
+	if len(actions) == 0 {
+		return
+	}
+	ui.Row(c).Key("preview-copy-bar").FillWidth().Wrap().Gap(space4).AlignItems(ui.Center).Children(func() {
+		for _, act := range actions {
+			aCopy := act
+			b := ui.ButtonBase(c).Key("preview-copy-" + aCopy.id).Label(aCopy.label).
+				Padding(space2, space6).Radius(radius4).Background(tileFill(theme)).Border(space1, hairline(theme)).FocusRing(false)
+			b.Children(func() {
+				ui.Text(c, aCopy.label).FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
+			})
+			if b.Clicked() {
+				a.Dispatch(engine.Event{Type: engine.EventExecuteItemAction, ActionID: aCopy.id})
+			}
+		}
+	})
 }
 
 // renderPreviewActionHints lists the primary and secondary contextual actions

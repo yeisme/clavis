@@ -232,6 +232,55 @@ func (a *AppController) renderCapsuleHeader(
 		}
 
 		ui.Spacer(c)
+		if state.Phase == engine.PhaseOmnibox {
+			// Compact sensitive-TTL countdown pill (click to immediately wipe clipboard).
+			if sens := a.SensitiveClipboardState(); sens.Active {
+				remSec := int(sens.Remaining.Round(time.Second) / time.Second)
+				if remSec < 0 {
+					remSec = 0
+				}
+				ttlLbl := fmt.Sprintf("%ds", remSec)
+				ttlBtn := ui.ButtonBase(c).Key("header-sensitive-ttl").Label(ttlLbl).
+					Padding(space2, space6).Radius(radiusPill).Background(kitStateWarningColor(theme).Alpha(alphaSubtle)).
+					Border(space1, kitStateWarningColor(theme).Alpha(alphaHalf)).FocusRing(false).Shrink(0)
+				ttlBtn.Children(func() {
+					ui.Row(c).Gap(space4).AlignItems(ui.Center).Children(func() {
+						renderSemanticIcon(c, "lock.fill", typeMicro, readableOn(kitStateWarningColor(theme), theme.Text, surfaceBase(theme), minTextContrast))
+						ui.Text(c, ttlLbl).FontSize(typeMicro).FontWeight(600).FontFeatures("tnum").
+							TextColor(readableOn(kitStateWarningColor(theme), theme.Text, surfaceBase(theme), minTextContrast)).SingleLine()
+					})
+				})
+				if ttlBtn.Clicked() {
+					_ = a.ClearSensitiveClipboardNow()
+				}
+			}
+			// Compact neutral Herdr/Agent status micro-chip when browsing other tabs.
+			if state.OmniboxTab != config.TabAgent {
+				sessions, _ := a.cachedAgentData()
+				counts := countAgentLanes(sessions)
+				if counts.Approval > 0 || counts.Running > 0 {
+					dotColor := theme.Success
+					lbl := fmt.Sprintf("%d", counts.Running)
+					if counts.Approval > 0 {
+						dotColor = kitStateWarningColor(theme)
+						lbl = fmt.Sprintf("%d", counts.Approval)
+					}
+					agentBtn := ui.ButtonBase(c).Key("header-agent-pill").Label("Agent " + lbl).
+						Padding(space2, space6).Radius(radiusPill).Background(tileFill(theme)).
+						Border(space1, hairline(theme)).FocusRing(false).Shrink(0)
+					agentBtn.Children(func() {
+						ui.Row(c).Gap(space4).AlignItems(ui.Center).Children(func() {
+							kitStatusDot(c, dotColor, false)
+							ui.Text(c, lbl).FontSize(typeMicro).FontWeight(600).FontFeatures("tnum").TextColor(secondaryInk(theme)).SingleLine()
+						})
+					})
+					if agentBtn.Clicked() {
+						a.CloseHubSurface()
+						a.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: config.TabAgent})
+					}
+				}
+			}
+		}
 		items := make([]string, 0, 2)
 		if state.Context.AppName != "" {
 			items = append(items, state.Context.AppName)
@@ -326,6 +375,9 @@ func (a *AppController) renderOmniboxView(
 	state engine.State,
 ) {
 	profile := appMotionProfile(c, cfg.Main.Appearance)
+	if x, y, over := c.Root().PointerPosition(); over {
+		a.notePointerPosition(ui.Point{X: x, Y: y})
+	}
 	if state.OmniboxTab == config.TabAI {
 		a.ensureAIUsageRefresh()
 	}
@@ -343,6 +395,10 @@ func (a *AppController) renderOmniboxView(
 		if lane := agentLaneKind(capsuleUI.laneFilter(a)); lane != agentLaneAll {
 			sessions, _ := a.cachedAgentData()
 			items = filterAgentItemsByLane(items, sessions, lane)
+		}
+		if ws := a.agentWorkspaceFilter(); ws != "" {
+			sessions, _ := a.cachedAgentData()
+			items = FilterAgentItemsByWorkspace(items, sessions, ws)
 		}
 		a.mu.Lock()
 		selectedIdx = a.uiState.agentSelected
@@ -458,6 +514,7 @@ func (a *AppController) renderOmniboxView(
 		{ui.KeyP},
 		{ui.Key7},
 		{ui.Key8},
+		{ui.Key9},
 	} {
 		shortcut := shortcut
 		c.OnWindowShortcut(mods, shortcut.key, func() {
@@ -501,6 +558,8 @@ func (a *AppController) renderOmniboxView(
 				a.renderStatsHubView(c, theme, cfg)
 			case HubSurfaceManage:
 				a.renderManagementHubView(c, theme, cfg)
+			case HubSurfaceAssets:
+				a.renderAssetsHubView(c, theme, cfg)
 			}
 			ui.Divider(c)
 			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
@@ -720,7 +779,7 @@ func (a *AppController) renderOmniboxView(
 						item := items[i]
 						isSelected := i == selectedIdx
 						row := ui.Row(c).
-							Key("omnibox-row:"+item.ID).
+							Key(omniboxRowKey(item)).
 							FillWidth().
 							Padding(space6, space8).
 							Radius(radiusRow).
@@ -994,8 +1053,10 @@ func previewDividerAccent(alpha float32) ui.Color {
 
 func renderAgentRowBadge(c *ui.Context, theme *ui.Theme, item engine.OmniboxItem, sessions []agentsession.Session) {
 	label := ""
+	paneLabel := ""
 	if session, ok := agentSessionForItem(item, sessions); ok {
 		label = agentProviderLabel(session.Provider)
+		paneLabel = strings.TrimSpace(session.PaneID)
 	} else if strings.HasPrefix(item.UtilityValue, "agent-command:") {
 		label = "命令"
 	} else if strings.HasPrefix(item.UtilityValue, "agent-diagnostic") {
@@ -1007,6 +1068,11 @@ func renderAgentRowBadge(c *ui.Context, theme *ui.Theme, item engine.OmniboxItem
 	ui.Box(c).Padding(space1, space4).Radius(radius4).Background(tileFill(theme)).Border(space1, hairline(theme)).Shrink(0).Children(func() {
 		ui.Text(c, label).FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
 	})
+	if paneLabel != "" {
+		ui.Box(c).Padding(space1, space4).Radius(radius4).Background(tileFill(theme)).Border(space1, hairline(theme)).Shrink(0).Children(func() {
+			ui.Text(c, paneLabel).Font("monospace").FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+		})
+	}
 }
 
 // renderOmniboxFooterHints names what the keys do to the chosen row rather
@@ -1107,6 +1173,8 @@ func omniboxRouteMode(query string) (icon, label string, ok bool) {
 		return "calculator", i18n.T("omnibox.mode.calc"), true
 	case '/':
 		return "wand.and.stars", i18n.T("omnibox.mode.prompts"), true
+	case '#':
+		return "bolt", pickLang(i18n.IsChinese(), "快速跳转", "Quick Jump"), true
 	}
 	return "", "", false
 }
@@ -1179,6 +1247,10 @@ func (a *AppController) renderOmniboxRowLeadingIcon(c *ui.Context, theme *ui.The
 		iconName := fallbackActionIcon(item.Icon, item.Title, item.Subtitle)
 		slot(func() { iconTile(c, theme, iconName, false) })
 	}
+}
+
+func omniboxRowKey(item engine.OmniboxItem) string {
+	return "omnibox-row:" + item.ID
 }
 
 // rowSelectionTheme is the theme the Omnibox list builds with: the accent

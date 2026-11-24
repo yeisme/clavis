@@ -139,6 +139,20 @@ func TestOmniboxHoverRearmsAfterTwoPointPointerMove(t *testing.T) {
 	}
 }
 
+func TestOmniboxRowKeyUsesStableItemID(t *testing.T) {
+	first := engine.OmniboxItem{ID: "clipboard:first", Title: "same title"}
+	second := engine.OmniboxItem{ID: "clipboard:second", Title: "same title"}
+	if got := omniboxRowKey(first); got != "omnibox-row:clipboard:first" {
+		t.Fatalf("first row key = %q, want item ID based key", got)
+	}
+	if got := omniboxRowKey(second); got != "omnibox-row:clipboard:second" {
+		t.Fatalf("second row key = %q, want item ID based key", got)
+	}
+	if omniboxRowKey(first) == omniboxRowKey(second) {
+		t.Fatal("rows with distinct item IDs must not share a key")
+	}
+}
+
 // TestOmniboxClickConfirmsHoveredRow checks that the click path still confirms
 // only the row the pointer is on.
 func TestOmniboxClickConfirmsHoveredRow(t *testing.T) {
