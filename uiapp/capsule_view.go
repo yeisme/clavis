@@ -412,7 +412,7 @@ func (a *AppController) renderOmniboxView(
 			return ok
 		}
 		a.mu.Lock()
-		a.uiState.hoverSuppressed = a.uiState.hoverRow
+		a.uiState.armKeyboardSelection()
 		if state.OmniboxTab == config.TabAgent {
 			a.uiState.agentSelected = row
 		}
@@ -794,12 +794,13 @@ func (a *AppController) renderOmniboxView(
 						// mouse immediately; the row is confirmed only by a click,
 						// Enter or an explicit action.
 						if row.Hovered() {
+							x, y, _ := c.Root().PointerPosition()
 							if state.OmniboxTab == config.TabAgent {
 								a.mu.Lock()
 								a.uiState.agentSelected = i
 								a.mu.Unlock()
 							}
-							a.hoverSelect(itemIndex(i))
+							a.hoverSelect(itemIndex(i), ui.Point{X: x, Y: y})
 						}
 
 						if row.RowDoubleClicked() {

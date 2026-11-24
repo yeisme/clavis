@@ -346,12 +346,25 @@ type uiViewState struct {
 	previewDividerRun        uint64
 
 	// Pointer hover selection is tracked as index+1 (0 means none) so the zero
-	// value needs no initialisation. hoverSuppressed records the row a keyboard
-	// move stepped away from: the pointer resting there must not undo it until
-	// the pointer enters another row.
+	// value needs no initialisation. Keyboard navigation arms a pointer position
+	// and hover cannot take control again until the pointer moves at least two
+	// DIP, which prevents ScrollIntoView from turning a resting pointer into a
+	// synthetic hover event.
 	hoverRow        int
-	hoverSuppressed int
+	inputMode       selectionInputMode
+	pointerArmedPos ui.Point
+	lastPointerPos  ui.Point
+	pointerPosKnown bool
 }
+
+type selectionInputMode uint8
+
+const (
+	inputKeyboard selectionInputMode = iota
+	inputPointer
+)
+
+const pointerRearmDistance float32 = 2
 
 // AppController coordinates Clavis state, host integration, AI streaming,
 // clipboard persistence, and native MyGo UI views.
@@ -910,25 +923,51 @@ func (c *AppController) AppIconBitmap(appPath string) *ui.Bitmap {
 	return bmp
 }
 
-// Dispatch reduces an event on the CapsuleStateMachine and executes any emitted effects.
 // hoverSelect moves the selection to the row under the pointer. Hovering only
 // selects: it never confirms the item, so moving the pointer cannot copy, paste
-// or delete anything. A keyboard step away from the hovered row marks that row
-// suppressed so a resting pointer cannot undo arrow-key navigation; entering a
-// different row clears the suppression.
-func (a *AppController) hoverSelect(index int) {
+// or delete anything. After keyboard navigation, a resting pointer is ignored
+// until its real position moves by at least pointerRearmDistance DIP.
+func (a *AppController) hoverSelect(index int, positions ...ui.Point) {
 	if index < 0 {
 		return
 	}
 	a.mu.Lock()
-	if a.uiState.hoverSuppressed == index+1 || a.uiState.hoverRow == index+1 {
+	if len(positions) > 0 {
+		a.uiState.lastPointerPos = positions[0]
+		a.uiState.pointerPosKnown = true
+	}
+	if a.uiState.inputMode == inputKeyboard && a.uiState.pointerPosKnown {
+		if manhattanPointerDistance(a.uiState.lastPointerPos, a.uiState.pointerArmedPos) < pointerRearmDistance {
+			a.mu.Unlock()
+			return
+		}
+		a.uiState.inputMode = inputPointer
+	}
+	if a.uiState.hoverRow == index+1 {
 		a.mu.Unlock()
 		return
 	}
 	a.uiState.hoverRow = index + 1
-	a.uiState.hoverSuppressed = 0
 	a.mu.Unlock()
 	a.Dispatch(engine.Event{Type: engine.EventHoverItem, Index: index})
+}
+
+func manhattanPointerDistance(a, b ui.Point) float32 {
+	dx, dy := a.X-b.X, a.Y-b.Y
+	if dx < 0 {
+		dx = -dx
+	}
+	if dy < 0 {
+		dy = -dy
+	}
+	return dx + dy
+}
+
+func (s *uiViewState) armKeyboardSelection() {
+	s.inputMode = inputKeyboard
+	if s.pointerPosKnown {
+		s.pointerArmedPos = s.lastPointerPos
+	}
 }
 
 func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
@@ -936,13 +975,11 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 	// Keyboard navigation wins over a resting pointer: the row under the pointer
 	// must not pull the selection back until the pointer enters another row.
 	switch ev.Type {
-	case engine.EventSelectNext, engine.EventSelectPrevious:
-		if c.uiState.hoverRow != 0 {
-			c.uiState.hoverSuppressed = c.uiState.hoverRow
-		}
+	case engine.EventSelectNext, engine.EventSelectPrevious, engine.EventSelectIndex:
+		c.uiState.armKeyboardSelection()
 	case engine.EventOpenOmnibox, engine.EventSwitchTab, engine.EventUpdateQuery, engine.EventBackspace:
 		c.uiState.hoverRow = 0
-		c.uiState.hoverSuppressed = 0
+		c.uiState.armKeyboardSelection()
 		if ev.Type == engine.EventOpenOmnibox || ev.Type == engine.EventSwitchTab || ev.Type == engine.EventUpdateQuery || ev.Type == engine.EventBackspace {
 			if ev.Type != engine.EventOpenOmnibox || ev.Tab == config.TabAgent {
 				c.uiState.agentSelected = 0
