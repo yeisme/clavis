@@ -18,7 +18,44 @@ const (
 	HubSurfaceNone   CapsuleHubSurface = ""
 	HubSurfaceStats  CapsuleHubSurface = "stats"
 	HubSurfaceManage CapsuleHubSurface = "manage"
+	HubSurfaceMedia  CapsuleHubSurface = "media"
 )
+
+// MediaFilterEntry registers one keyboard-first media filter chip in the
+// Clipboard / Media search bar (⌘1–⌘7).
+type MediaFilterEntry struct {
+	Category      MediaCategory
+	Key           ui.Key
+	ShortcutDigit string
+	Icon          string
+	LabelFunc     func() string
+}
+
+var registeredMediaFilterEntries = []MediaFilterEntry{
+	{Category: MediaCategoryAll, Key: ui.Key1, ShortcutDigit: "1", Icon: "square.3.layers.3d", LabelFunc: func() string { return MediaCategoryLabel(MediaCategoryAll) }},
+	{Category: MediaCategoryImage, Key: ui.Key2, ShortcutDigit: "2", Icon: "photo", LabelFunc: func() string { return MediaCategoryLabel(MediaCategoryImage) }},
+	{Category: MediaCategoryVideo, Key: ui.Key3, ShortcutDigit: "3", Icon: "film", LabelFunc: func() string { return MediaCategoryLabel(MediaCategoryVideo) }},
+	{Category: MediaCategoryAudio, Key: ui.Key4, ShortcutDigit: "4", Icon: "clock", LabelFunc: func() string { return MediaCategoryLabel(MediaCategoryAudio) }},
+	{Category: MediaCategoryDocument, Key: ui.Key5, ShortcutDigit: "5", Icon: "doc.text", LabelFunc: func() string { return MediaCategoryLabel(MediaCategoryDocument) }},
+	{Category: MediaCategoryArchive, Key: ui.Key6, ShortcutDigit: "6", Icon: "doc.on.doc", LabelFunc: func() string { return MediaCategoryLabel(MediaCategoryArchive) }},
+	{Category: MediaCategoryFile, Key: ui.Key7, ShortcutDigit: "7", Icon: "folder", LabelFunc: func() string { return MediaCategoryLabel(MediaCategoryFile) }},
+}
+
+// RegisteredMediaFilters returns the ordered filter registry for the six media
+// categories plus "all".
+func RegisteredMediaFilters() []MediaFilterEntry {
+	return append([]MediaFilterEntry(nil), registeredMediaFilterEntries...)
+}
+
+// MediaFilterByKey resolves a ⌘1–⌘7 key press to its registered MediaCategory.
+func MediaFilterByKey(key ui.Key) (MediaCategory, bool) {
+	for _, entry := range registeredMediaFilterEntries {
+		if entry.Key == key {
+			return entry.Category, true
+		}
+	}
+	return MediaCategoryAll, false
+}
 
 // capsuleHubEntry describes a registered operational hub surface.
 type capsuleHubEntry struct {

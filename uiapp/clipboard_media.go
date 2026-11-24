@@ -31,7 +31,7 @@ func engineClipboardMedia(m clipboard.Media) engine.ClipboardMedia {
 		Kind: string(m.Kind), Path: m.MediaPath, Mime: m.MediaMime, ThumbPath: m.ThumbPath,
 		Width: m.Width, Height: m.Height, ByteSize: m.ByteSize, DurationMs: m.DurationMs,
 	}
-	if m.Kind == clipboard.KindFile || m.Kind == clipboard.KindVideo {
+	if m.Kind != clipboard.KindImage && strings.TrimSpace(m.MediaPath) != "" {
 		out.FilePaths = clipboard.SplitFilePaths(m.MediaPath)
 	}
 	return out
@@ -54,13 +54,179 @@ func pasteFormatFor(m engine.ClipboardMedia) pasteFormat {
 			return pasteNone
 		}
 		return pastePNG
-	case "file", "video":
+	case "file", "video", "audio", "document", "archive":
 		if len(m.FilePaths) == 0 {
 			return pasteNone
 		}
 		return pasteFiles
 	}
 	return pasteNone
+}
+
+// MediaCategory classifies a clipboard or search media entry into one of the
+// six supported media families (plus "all" for unfiltered browsing).
+type MediaCategory string
+
+const (
+	MediaCategoryAll      MediaCategory = "all"
+	MediaCategoryImage    MediaCategory = "image"
+	MediaCategoryVideo    MediaCategory = "video"
+	MediaCategoryAudio    MediaCategory = "audio"
+	MediaCategoryDocument MediaCategory = "document"
+	MediaCategoryArchive  MediaCategory = "archive"
+	MediaCategoryFile     MediaCategory = "file"
+)
+
+var (
+	imageMediaExts = map[string]bool{
+		".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true,
+		".bmp": true, ".tif": true, ".tiff": true, ".heic": true, ".heif": true,
+		".svg": true, ".ico": true, ".avif": true,
+	}
+	audioMediaExts = map[string]bool{
+		".mp3": true, ".wav": true, ".flac": true, ".aac": true, ".m4a": true,
+		".ogg": true, ".opus": true, ".wma": true, ".aiff": true, ".aif": true,
+		".mid": true, ".midi": true,
+	}
+	documentMediaExts = map[string]bool{
+		".pdf": true, ".md": true, ".markdown": true, ".txt": true, ".rtf": true,
+		".doc": true, ".docx": true, ".xls": true, ".xlsx": true, ".ppt": true, ".pptx": true,
+		".pages": true, ".numbers": true, ".key": true, ".odt": true, ".ods": true, ".odp": true,
+		".csv": true, ".tsv": true, ".json": true, ".yaml": true, ".yml": true,
+		".toml": true, ".xml": true, ".html": true, ".htm": true, ".log": true,
+	}
+	archiveMediaExts = map[string]bool{
+		".zip": true, ".tar": true, ".gz": true, ".tgz": true, ".bz2": true,
+		".xz": true, ".zst": true, ".7z": true, ".rar": true, ".dmg": true, ".iso": true,
+	}
+)
+
+// mediaPrimaryPath returns the primary filesystem path for a media descriptor.
+func mediaPrimaryPath(m engine.ClipboardMedia) string {
+	if len(m.FilePaths) > 0 {
+		if p := strings.TrimSpace(m.FilePaths[0]); p != "" {
+			return p
+		}
+	}
+	if p := strings.TrimSpace(m.Path); p != "" {
+		if parts := clipboard.SplitFilePaths(p); len(parts) > 0 {
+			return parts[0]
+		}
+		return p
+	}
+	return ""
+}
+
+func mediaPathExt(path string) string {
+	path = strings.TrimRight(strings.TrimSpace(path), `/\`)
+	if idx := strings.LastIndexAny(path, `/\`); idx >= 0 {
+		path = path[idx+1:]
+	}
+	lower := strings.ToLower(path)
+	if strings.HasSuffix(lower, ".tar.gz") {
+		return ".tgz"
+	}
+	if strings.HasSuffix(lower, ".tar.bz2") {
+		return ".bz2"
+	}
+	if strings.HasSuffix(lower, ".tar.xz") {
+		return ".xz"
+	}
+	if dot := strings.LastIndexByte(lower, '.'); dot >= 0 {
+		return lower[dot:]
+	}
+	return ""
+}
+
+// ClassifyClipboardMedia maps a ClipboardMedia entry into one of the six media
+// categories (image, video, audio, document, archive, file) using real kind,
+// MIME type, and file extension signals.
+func ClassifyClipboardMedia(m engine.ClipboardMedia) MediaCategory {
+	kind := strings.ToLower(strings.TrimSpace(m.Kind))
+	mime := strings.ToLower(strings.TrimSpace(m.Mime))
+	ext := mediaPathExt(mediaPrimaryPath(m))
+
+	switch kind {
+	case "image":
+		return MediaCategoryImage
+	case "video":
+		return MediaCategoryVideo
+	case "audio":
+		return MediaCategoryAudio
+	case "document":
+		return MediaCategoryDocument
+	case "archive":
+		return MediaCategoryArchive
+	}
+
+	switch {
+	case strings.HasPrefix(mime, "image/") || imageMediaExts[ext]:
+		return MediaCategoryImage
+	case strings.HasPrefix(mime, "video/") || clipboard.IsVideoPath(mediaPrimaryPath(m)):
+		return MediaCategoryVideo
+	case strings.HasPrefix(mime, "audio/") || audioMediaExts[ext]:
+		return MediaCategoryAudio
+	case mime == "application/zip" ||
+		mime == "application/x-tar" ||
+		mime == "application/gzip" ||
+		mime == "application/x-gzip" ||
+		mime == "application/x-7z-compressed" ||
+		mime == "application/vnd.rar" ||
+		archiveMediaExts[ext]:
+		return MediaCategoryArchive
+	case mime == "application/pdf" ||
+		strings.HasPrefix(mime, "text/") ||
+		mime == "application/json" ||
+		mime == "application/xml" ||
+		strings.Contains(mime, "wordprocessingml") ||
+		strings.Contains(mime, "spreadsheetml") ||
+		strings.Contains(mime, "presentationml") ||
+		documentMediaExts[ext]:
+		return MediaCategoryDocument
+	default:
+		return MediaCategoryFile
+	}
+}
+
+// MediaCategoryLabel returns the localized display name of a media category.
+func MediaCategoryLabel(cat MediaCategory) string {
+	zh := i18n.IsChinese()
+	switch cat {
+	case MediaCategoryAll:
+		return pickLang(zh, "全部", "All")
+	case MediaCategoryImage:
+		return pickLang(zh, "图片", "Image")
+	case MediaCategoryVideo:
+		return pickLang(zh, "视频", "Video")
+	case MediaCategoryAudio:
+		return pickLang(zh, "音频", "Audio")
+	case MediaCategoryDocument:
+		return pickLang(zh, "文档", "Document")
+	case MediaCategoryArchive:
+		return pickLang(zh, "压缩包", "Archive")
+	default:
+		return pickLang(zh, "文件", "File")
+	}
+}
+
+// MediaCategoryIcon returns a mapped semantic icon name from icons.go for cat.
+func MediaCategoryIcon(cat MediaCategory) string {
+	switch cat {
+	case MediaCategoryAll:
+		return "square.3.layers.3d"
+	case MediaCategoryImage:
+		return "photo"
+	case MediaCategoryVideo:
+		return "film"
+	case MediaCategoryAudio:
+		return "clock"
+	case MediaCategoryDocument:
+		return "doc.text"
+	case MediaCategoryArchive:
+		return "doc.on.doc"
+	default:
+		return "folder"
+	}
 }
 
 var errMediaMissing = errors.New("clipboard media is no longer available")
