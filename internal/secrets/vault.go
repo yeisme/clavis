@@ -55,6 +55,7 @@ const (
 	CopyErrorCleanupLost     = "cleanup_ownership_lost"
 	CopyErrorAuditFailed     = "audit_write_failed"
 	CopyErrorVersionConflict = "version_conflict"
+	CopyDestinationClipboard = "system_clipboard"
 )
 
 var (
@@ -228,11 +229,23 @@ func NewVault(store SecretValueStore, clipboard ClipboardAdapter, audit AuditSin
 }
 
 func (v *Vault) Put(ref SecretRef, value string) (SecretRef, error) {
+	if v.store == nil {
+		return SecretRef{}, errors.New("secrets: value store is required")
+	}
 	if err := validateSecretRef(ref); err != nil {
 		return SecretRef{}, err
 	}
 	if strings.TrimSpace(value) == "" {
 		return SecretRef{}, errors.New("secrets: value is required")
+	}
+	if ref.Backend == "" {
+		ref.Backend = SecretBackendLayered
+	}
+	if ref.Kind == "" {
+		ref.Kind = SecretKindPassword
+	}
+	if ref.Sensitivity == "" {
+		ref.Sensitivity = SecretSensitivity
 	}
 	if ref.Version == 0 {
 		ref.Version = 1
@@ -341,6 +354,9 @@ func (v *Vault) Copy(req UserCopyRequest) (CopyReceipt, error) {
 	if strings.TrimSpace(req.RequestID) == "" || strings.TrimSpace(req.SecretRefID) == "" || strings.TrimSpace(req.SessionID) == "" {
 		return v.failReceipt(req, key, now, CopyErrorUserAuth, true, errors.New(CopyErrorUserAuth))
 	}
+	if req.Destination != "" && req.Destination != CopyDestinationClipboard {
+		return v.failReceipt(req, key, now, "destination_not_supported", false, errors.New("destination_not_supported"))
+	}
 	if req.TTL == 0 {
 		req.TTL = DefaultSecretCopyTTL
 	}
@@ -391,22 +407,28 @@ func (v *Vault) Cleanup(requestID, refID, sessionID string) error {
 	key := requestID + "\x00" + refID + "\x00" + sessionID
 	v.mu.Lock()
 	receipt, ok := v.receipts[key]
-	v.mu.Unlock()
 	if !ok {
+		v.mu.Unlock()
 		return errors.New(CopyErrorRefNotFound)
+	}
+	if receipt.State == CopyStateExpired {
+		v.mu.Unlock()
+		return nil
+	}
+	if receipt.State == CopyStateOwnershipLost {
+		v.mu.Unlock()
+		return ErrOwnershipLost
 	}
 	err := v.clipboard.ClearIfOwned(receipt.cleanupToken)
 	now := v.now().UTC()
 	if err != nil {
 		receipt.State, receipt.ErrorCode, receipt.ObservedAt = CopyStateOwnershipLost, CopyErrorCleanupLost, now
-		v.mu.Lock()
 		v.receipts[key] = receipt
 		v.mu.Unlock()
 		_ = v.appendAudit(AuditEvent{At: now, Action: "cleanup", RequestID: requestID, SecretRefID: refID, State: receipt.State, ErrorCode: receipt.ErrorCode})
 		return ErrOwnershipLost
 	}
 	receipt.State, receipt.ObservedAt = CopyStateExpired, now
-	v.mu.Lock()
 	v.receipts[key] = receipt
 	v.mu.Unlock()
 	return v.appendAudit(AuditEvent{At: now, Action: "expired", RequestID: requestID, SecretRefID: refID, State: receipt.State})
@@ -453,8 +475,8 @@ func validateSecretRef(ref SecretRef) error {
 			return errors.New("secrets: label may not identify secret material")
 		}
 	}
-	if ref.Backend == "" {
-		ref.Backend = SecretBackendLayered
+	if ref.Backend != "" && ref.Backend != SecretBackendLayered && ref.Backend != SecretBackendKeychain && ref.Backend != SecretBackendEnv {
+		return errors.New("secrets: unsupported backend")
 	}
 	return nil
 }

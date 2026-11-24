@@ -192,3 +192,21 @@ func TestVaultRejectsInvalidTTLAndForbiddenLabel(t *testing.T) {
 		t.Fatalf("TTL error=%v, want ttl_invalid", err)
 	}
 }
+
+func TestVaultPutUsesDefaultsAndRejectsVersionConflict(t *testing.T) {
+	vault := NewVault(NewFakeSecretStore(), &fakeClipboard{}, nil)
+	ref, err := vault.Put(SecretRef{ID: "ref-version", RecordKey: "acct-version"}, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref.Backend != SecretBackendLayered || ref.Kind != SecretKindPassword || ref.Sensitivity != SecretSensitivity || ref.Version != 1 {
+		t.Fatalf("defaults = %+v", ref)
+	}
+	stale := ref
+	if _, err := vault.Put(stale, "second"); err != nil {
+		t.Fatalf("matching version update: %v", err)
+	}
+	if _, err := vault.Put(stale, "third"); err == nil || err.Error() != CopyErrorVersionConflict {
+		t.Fatalf("stale version accepted: %v", err)
+	}
+}
