@@ -268,10 +268,27 @@ func winFocusedSecureSignals(fg uintptr, processName string) secureFieldSignals 
 	return sig
 }
 
-// hookSecureInput reads the cached secure-field flag (stale → not secure).
+// hookSecureInput reads the cached secure-field flag on the LL hook path, failing
+// closed (stale or never observed -> treated as secure) so password fields are never
+// exposed when the observer hasn't polled recently.
 func (b *windowsBridge) hookSecureInput(now time.Time) bool {
-	v, fresh := b.health.secure.Load(now, secureFieldMaxAge)
-	return fresh && v
+	return b.health.secure.activeOrUnknown(now, secureFieldMaxAge)
+}
+
+// currentSecureInput checks the cached secure-field flag and refreshes it synchronously
+// when stale. Safe only off the LL hook thread (e.g. ProbeSelection, field capture/replace,
+// diagnostics); still fails closed if the foreground window cannot be inspected.
+func (b *windowsBridge) currentSecureInput(now time.Time) bool {
+	if v, fresh := b.health.secure.Load(now, secureFieldMaxAge); fresh {
+		return v
+	}
+	app, fg := winForegroundApp()
+	if fg == 0 || app.ProcessName == "" {
+		return true
+	}
+	secure := isSecureField(winFocusedSecureSignals(fg, app.ProcessName))
+	b.health.secure.Store(secure, now)
+	return secure
 }
 
 // Unknown conversion state keeps inline composition and snippets out until
@@ -284,7 +301,7 @@ func (b *windowsBridge) hookHealthDetails() map[string]string {
 	d := map[string]string{
 		"hookReinstalls": fmt.Sprintf("%d", b.health.reinstalls.Load()),
 		"mouseHook":      fmt.Sprintf("%v", b.health.mouseOK.Load()),
-		"secureInput":    fmt.Sprintf("%v", b.hookSecureInput(time.Now())),
+		"secureInput":    fmt.Sprintf("%v", b.currentSecureInput(time.Now())),
 	}
 	if e := b.health.errString(); e != "" {
 		d["hookError"] = e
