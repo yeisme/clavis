@@ -61,3 +61,38 @@ func TestTriggerRuntimeSelectionDisabled(t *testing.T) {
 		t.Fatal("disabled selection fired")
 	}
 }
+
+func TestBindingAppMatchesNormalizesWindowsExeSuffix(t *testing.T) {
+	cases := []struct {
+		name string
+		ids  []string
+		app  string
+		want bool
+	}{
+		{"empty ids matches any app", nil, "Code.exe", true},
+		{"wildcard matches process", []string{"*"}, "Code.exe", true},
+		{"bare name matches .exe", []string{"code"}, "Code.exe", true},
+		{".exe matches bare name", []string{"Code.exe"}, "code", true},
+		{"mixed case .EXE", []string{"WindowsTerminal.EXE"}, "windowsterminal.exe", true},
+		{"macOS bundle id exact match", []string{"com.apple.MobileSMS"}, "com.apple.MobileSMS", true},
+		{"empty foreground rejected when restricted", []string{"Code.exe"}, "", false},
+		{"unlisted app rejected", []string{"Code.exe"}, "notepad.exe", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bindingAppMatches(tc.ids, tc.app); got != tc.want {
+				t.Fatalf("bindingAppMatches(%v, %q) = %v, want %v", tc.ids, tc.app, got, tc.want)
+			}
+		})
+	}
+
+	r := newTriggerRuntime()
+	r.setKeyBindings([]config.KeyBinding{{
+		Keys:         []string{"ctrl+alt+o"},
+		Action:       "ai_optimize",
+		AppBundleIDs: []string{"Code"},
+	}})
+	if act, ok := r.bindingFor("o", []string{"control", "option"}, "Code.exe"); !ok || act != "ai_optimize" {
+		t.Fatalf("bindingFor with .exe process = (%q, %v), want (ai_optimize, true)", act, ok)
+	}
+}

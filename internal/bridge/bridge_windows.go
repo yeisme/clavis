@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -286,6 +287,7 @@ type windowsBridge struct {
 	hookDone        chan struct{}
 	imeDone         chan struct{}
 	triggerDone     chan struct{}
+	bgWG            sync.WaitGroup
 	triggerQueue    chan host.TriggerEvent
 	hookHandle      uintptr
 	hookThreadID    uint32
@@ -326,8 +328,8 @@ type windowsBridge struct {
 	inlineMu      sync.RWMutex
 	inlineHandler func(host.InlineKeyEvent) bool
 	inlineEnabled atomic.Bool
-	shiftDown     bool
-	shiftHadKey   bool
+	inlineForced  atomic.Bool
+	shiftTracker  winShiftTracker
 }
 
 func (b *windowsBridge) recordExternalIME(app AppIdentity, src host.InputSourceInfo) {
@@ -527,8 +529,15 @@ func (b *windowsBridge) Start(ctx context.Context, onTrigger func(host.TriggerEv
 	}
 
 	go b.runIMEObserver(runCtx)
-	go b.runHookWatchdog(runCtx)
-	go b.runMouseResetWorker(runCtx)
+	b.bgWG.Add(2)
+	go func() {
+		defer b.bgWG.Done()
+		b.runHookWatchdog(runCtx)
+	}()
+	go func() {
+		defer b.bgWG.Done()
+		b.runMouseResetWorker(runCtx)
+	}()
 	return nil
 }
 
@@ -563,6 +572,7 @@ func (b *windowsBridge) Stop() error {
 	if triggerDone != nil {
 		<-triggerDone
 	}
+	b.bgWG.Wait()
 	return nil
 }
 
@@ -669,6 +679,7 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 			}
 			if outcome.Consume {
 				if isDown {
+					b.shiftTracker.OnInterveningKey()
 					b.router.leaderDetector.Reset()
 					b.router.doubleTapDetector.Reset()
 				}
@@ -683,15 +694,20 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 		// Right shift is reserved for the input-mode toggle (see the darwin side); only
 		// left shift drives the double-shift selection bar, so one gesture never has to
 		// serve both purposes.
-		isShiftKey := vk == vkShift || vk == vkLShift || vk == vkRShift
+		isShiftKey := isWinShiftVK(vk)
 		isRightShift := vk == vkRShift || modName == "right_shift"
+		if !isShiftKey {
+			b.shiftTracker.OnNonShiftModifier()
+		}
 		// Double-tapping the right shift flips forced Chinese takeover — the same gesture as
 		// macOS, and the only entry point when the toggle hotkey is left empty.
 		if b.triggers != nil && isRightShift && b.triggers.rightShiftDouble(modName, isDown, winOtherModifiersDown(vk), nowMs) {
+			b.shiftTracker.Reset()
 			b.emitTriggerEvents([]host.TriggerEvent{{Kind: host.TriggerInputEngineToggle, TimestampMs: nowMs}})
 			return 1
 		}
 		if b.triggers != nil && isShiftKey && !isRightShift && b.triggers.doubleShift(modName, isDown, winOtherModifiersDown(vk), nowMs, b.hookIMEComposing(time.Now())) {
+			b.shiftTracker.Reset()
 			b.emitTriggerEvents([]host.TriggerEvent{selectionEvent(nowMs)})
 			return 1
 		}
@@ -706,6 +722,7 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 	}
 
 	if isDown {
+		b.shiftTracker.OnInterveningKey()
 		keyNameForTrigger := winVKToKeyName(vk)
 		if b.triggers != nil && keyNameForTrigger != "" {
 			if action, ok := b.triggers.bindingFor(keyNameForTrigger, winActiveModifiers(), b.cachedFrontmostProcessName()); ok {
@@ -733,9 +750,6 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 				return b.inputEngineHandleKey(vk, info.ScanCode, true, time.Now())
 			},
 			onFallback: func() {
-				if b.shiftDown {
-					b.shiftHadKey = true
-				}
 				keyName = winVKToKeyName(vk)
 				mods = winActiveModifiers()
 			},
@@ -768,9 +782,11 @@ func (b *windowsBridge) handleHookProc(nCode int32, wParam uintptr, lParam uintp
 }
 
 func (b *windowsBridge) emitWindowsSelectionTrigger() {
-	// Windows has no selection API in this bridge yet. Keep the probe off-hook;
-	// a future UIA provider can replace this without changing hook semantics.
-	// Do not fake a selection: only a provider-confirmed non-empty selection fires.
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+	if sel, err := b.ProbeSelection(ctx, winSelectionProbeBudget); err == nil && strings.TrimSpace(sel) != "" {
+		b.emitTriggerEvents([]host.TriggerEvent{selectionEvent(time.Now().UnixMilli())})
+	}
 }
 
 func (b *windowsBridge) emitTriggerEvents(events []host.TriggerEvent) {
@@ -839,13 +855,17 @@ func (b *windowsBridge) runIMEObserver(ctx context.Context) {
 			}
 			b.health.secure.Store(isSecureField(winFocusedSecureSignals(fg, app.ProcessName)), time.Now())
 
-			// A foreground app change moves the insertion point: never let a snippet buffer
-			// typed in the previous app match inside the newly focused one.
-			if havePrevApp && appIdentityChanged(prevApp, app) && !isSelfClavisApp(app) {
-				b.emitTriggerEvents([]host.TriggerEvent{{
-					Kind:        host.TriggerSnippetReset,
-					TimestampMs: time.Now().UnixMilli(),
-				}})
+			// A foreground app change moves the insertion point: drop any open own-IME
+			// composition and never let a snippet buffer typed in the previous app match
+			// inside the newly focused one.
+			if havePrevApp && appIdentityChanged(prevApp, app) {
+				b.resetInputEngine()
+				if !isSelfClavisApp(app) {
+					b.emitTriggerEvents([]host.TriggerEvent{{
+						Kind:        host.TriggerSnippetReset,
+						TimestampMs: time.Now().UnixMilli(),
+					}})
+				}
 			}
 			prevApp = app
 			havePrevApp = true
@@ -1200,12 +1220,11 @@ func (b *windowsBridge) InjectText(ctx context.Context, text string, deleteCount
 
 	var writtenSeq int64
 	if text != "" {
-		seq, err := writeWinClipboardUnicodeText(text)
+		seq, err := b.writeClipboardUnicodeText(text)
 		if err != nil {
 			return err
 		}
 		writtenSeq = seq
-		b.IgnoreSelfPasteboardChange(writtenSeq)
 		sendWinCombo(vkControl, 'V')
 		time.Sleep(45 * time.Millisecond)
 	}
@@ -1365,23 +1384,40 @@ func winKeyNameToVK(name string) (uint16, bool) {
 }
 
 func (b *windowsBridge) OpenApp(ctx context.Context, target string) error {
-	if err := ctx.Err(); err != nil {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	cleaned, err := validateWinOpenAppTarget(target)
+	if err != nil {
 		return err
 	}
-	trimmed := strings.TrimSpace(target)
-	if trimmed == "" {
-		return errors.New("windows: empty app target")
-	}
 	verb, _ := windows.UTF16PtrFromString("open")
-	filePtr, err := windows.UTF16PtrFromString(trimmed)
+	filePtr, err := windows.UTF16PtrFromString(cleaned)
 	if err != nil {
 		return err
 	}
 	r, _, _ := procShellExecuteW.Call(0, uintptr(unsafe.Pointer(verb)), uintptr(unsafe.Pointer(filePtr)), 0, 0, 1)
-	if r <= 32 {
-		return exec.CommandContext(ctx, "cmd", "/C", "start", "", trimmed).Run()
+	if r > 32 {
+		return nil
 	}
-	return nil
+	// Safe direct-executable fallback without invoking cmd.exe / shell parsing.
+	for _, cand := range winOpenAppExecCandidates(cleaned) {
+		resolved, lookErr := exec.LookPath(cand)
+		if lookErr != nil || !isWinDirectExecutablePath(resolved) {
+			continue
+		}
+		info, statErr := os.Stat(resolved)
+		if statErr != nil || info.IsDir() {
+			continue
+		}
+		cmd := exec.CommandContext(ctx, resolved)
+		if startErr := cmd.Start(); startErr == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("windows: failed to open %q (ShellExecuteW code %d)", cleaned, r)
 }
 
 func (b *windowsBridge) InputSources(ctx context.Context) ([]host.InputSourceInfo, error) {
@@ -1656,10 +1692,37 @@ func winClipboardSequenceNumber() int64 {
 	return int64(uint32(r))
 }
 
+func openWinClipboard() error {
+	var lastErr error
+	for attempt := 0; attempt < 6; attempt++ {
+		if r, _, err := procOpenClipboard.Call(0); r != 0 {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if attempt < 5 {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	return fmt.Errorf("windows: OpenClipboard failed: %w", lastErr)
+}
+
+func winClipboardFormatName(fmtID uint32) string {
+	if fmtID < 0xC000 {
+		return ""
+	}
+	var buf [128]uint16
+	n, _, _ := procGetClipboardFormatNameW.Call(uintptr(fmtID), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	if n == 0 {
+		return ""
+	}
+	return windows.UTF16ToString(buf[:n])
+}
+
 func readWinClipboardUnicodeText() (string, []string, error) {
 	initWinClipboardFormats()
-	if r, _, _ := procOpenClipboard.Call(0); r == 0 {
-		return "", nil, errors.New("windows: OpenClipboard failed")
+	if err := openWinClipboard(); err != nil {
+		return "", nil, err
 	}
 	defer procCloseClipboard.Call()
 
@@ -1706,7 +1769,15 @@ func readWinClipboardUnicodeText() (string, []string, error) {
 	return windows.UTF16ToString(u16), types, nil
 }
 
+func (b *windowsBridge) writeClipboardUnicodeText(text string) (int64, error) {
+	return writeWinClipboardUnicodeTextWithIgnore(text, b.IgnoreSelfPasteboardChange)
+}
+
 func writeWinClipboardUnicodeText(text string) (int64, error) {
+	return writeWinClipboardUnicodeTextWithIgnore(text, nil)
+}
+
+func writeWinClipboardUnicodeTextWithIgnore(text string, ignore func(int64)) (int64, error) {
 	u16 := utf16.Encode([]rune(text))
 	u16 = append(u16, 0)
 	byteLen := len(u16) * 2
@@ -1724,18 +1795,43 @@ func writeWinClipboardUnicodeText(text string) (int64, error) {
 	copy(dst, u16)
 	procGlobalUnlock.Call(hMem)
 
-	if r, _, openErr := procOpenClipboard.Call(0); r == 0 {
+	if openErr := openWinClipboard(); openErr != nil {
 		procGlobalFree.Call(hMem)
-		return 0, fmt.Errorf("windows: OpenClipboard failed: %w", openErr)
+		return 0, openErr
 	}
-	defer procCloseClipboard.Call()
+	closed := false
+	defer func() {
+		if !closed {
+			procCloseClipboard.Call()
+		}
+	}()
 
+	if ignore != nil {
+		ignore(winClipboardSequenceNumber() + 1)
+	}
 	procEmptyClipboard.Call()
+	if ignore != nil {
+		seq := winClipboardSequenceNumber()
+		ignore(seq)
+		ignore(seq + 1)
+	}
 	if res, _, setErr := procSetClipboardData.Call(cfUnicodeText, hMem); res == 0 {
 		procGlobalFree.Call(hMem)
 		return 0, fmt.Errorf("windows: SetClipboardData failed: %w", setErr)
 	}
-	return winClipboardSequenceNumber(), nil
+	seq := winClipboardSequenceNumber()
+	if ignore != nil {
+		ignore(seq)
+	}
+	closed = true
+	procCloseClipboard.Call()
+	if postSeq := winClipboardSequenceNumber(); postSeq != seq {
+		seq = postSeq
+		if ignore != nil {
+			ignore(seq)
+		}
+	}
+	return seq, nil
 }
 
 type windowsPasteboardBackend struct {
@@ -1747,8 +1843,8 @@ func (p *windowsPasteboardBackend) ChangeCount() int64 {
 }
 
 func (p *windowsPasteboardBackend) Capture() (PasteboardSnapshot, error) {
-	if r, _, err := procOpenClipboard.Call(0); r == 0 {
-		return PasteboardSnapshot{}, fmt.Errorf("windows: OpenClipboard failed: %w", err)
+	if err := openWinClipboard(); err != nil {
+		return PasteboardSnapshot{}, err
 	}
 	defer procCloseClipboard.Call()
 
@@ -1761,6 +1857,11 @@ func (p *windowsPasteboardBackend) Capture() (PasteboardSnapshot, error) {
 			break
 		}
 		fmtID = nextFmt
+		// Skip non-HGLOBAL formats (GDI bitmaps/palettes/metafiles, owner-display,
+		// display formats, and private/GDI handle ranges) before GlobalLock/GlobalSize.
+		if !isWinHGlobalClipboardFormat(uint32(fmtID)) {
+			continue
+		}
 		h, _, _ := procGetClipboardData.Call(fmtID)
 		if h == 0 {
 			continue
@@ -1776,8 +1877,12 @@ func (p *windowsPasteboardBackend) Capture() (PasteboardSnapshot, error) {
 		}
 		procGlobalUnlock.Call(h)
 
+		repType := strconv.FormatUint(uint64(fmtID), 10)
+		if winClipboardFormatName(uint32(fmtID)) == "vscode-editor-data" {
+			repType = "vscode-editor-data"
+		}
 		item.Representations = append(item.Representations, PasteboardRepresentation{
-			Type: strconv.FormatUint(uint64(fmtID), 10),
+			Type: repType,
 			Data: raw,
 		})
 	}
@@ -1787,17 +1892,51 @@ func (p *windowsPasteboardBackend) Capture() (PasteboardSnapshot, error) {
 	return snap, nil
 }
 
-func (p *windowsPasteboardBackend) Restore(snap PasteboardSnapshot) error {
-	if r, _, err := procOpenClipboard.Call(0); r == 0 {
-		return fmt.Errorf("windows: OpenClipboard failed: %w", err)
+func resolveWinRestoreFormatID(repType string) (uint32, bool) {
+	if fmtID, err := strconv.ParseUint(repType, 10, 32); err == nil {
+		id := uint32(fmtID)
+		return id, isWinHGlobalClipboardFormat(id)
 	}
-	defer procCloseClipboard.Call()
+	if repType == "" {
+		return 0, false
+	}
+	ptr, err := windows.UTF16PtrFromString(repType)
+	if err != nil {
+		return 0, false
+	}
+	r, _, _ := procRegisterClipboardFormatW.Call(uintptr(unsafe.Pointer(ptr)))
+	id := uint32(r)
+	return id, isWinHGlobalClipboardFormat(id)
+}
 
+func (p *windowsPasteboardBackend) Restore(snap PasteboardSnapshot) error {
+	if err := openWinClipboard(); err != nil {
+		return err
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			procCloseClipboard.Call()
+		}
+	}()
+
+	ignore := func(seq int64) {
+		if p != nil && p.bridge != nil {
+			p.bridge.IgnoreSelfPasteboardChange(seq)
+		}
+	}
+
+	// Pre-register the sequence increment BEFORE EmptyClipboard and every
+	// SetClipboardData so a concurrent clipboard poller never treats our restore
+	// as a fresh user copy.
+	ignore(winClipboardSequenceNumber() + 1)
 	procEmptyClipboard.Call()
+	ignore(winClipboardSequenceNumber())
+
 	for _, item := range snap.Items {
 		for _, rep := range item.Representations {
-			fmtID, err := strconv.ParseUint(rep.Type, 10, 32)
-			if err != nil {
+			fmtID, ok := resolveWinRestoreFormatID(rep.Type)
+			if !ok {
 				continue
 			}
 			allocSize := max(1, len(rep.Data))
@@ -1814,12 +1953,18 @@ func (p *windowsPasteboardBackend) Restore(snap PasteboardSnapshot) error {
 				copy(unsafe.Slice((*byte)(nativePtr(ptr)), len(rep.Data)), rep.Data)
 			}
 			procGlobalUnlock.Call(hMem)
+			ignore(winClipboardSequenceNumber() + 1)
 			if res, _, _ := procSetClipboardData.Call(uintptr(fmtID), hMem); res == 0 {
 				procGlobalFree.Call(hMem)
+			} else {
+				ignore(winClipboardSequenceNumber())
 			}
 		}
 	}
-	p.bridge.IgnoreSelfPasteboardChange(winClipboardSequenceNumber())
+	ignore(winClipboardSequenceNumber())
+	closed = true
+	procCloseClipboard.Call()
+	ignore(winClipboardSequenceNumber())
 	return nil
 }
 
@@ -1857,6 +2002,9 @@ func winOtherModifiersDown(targetVK uint16) bool {
 	checks := []uint16{vkLShift, vkRShift, vkLControl, vkRControl, vkLMenu, vkRMenu, vkLWin, vkRWin}
 	for _, vk := range checks {
 		if vk == targetVK {
+			continue
+		}
+		if targetVK == vkShift && (vk == vkLShift || vk == vkRShift) {
 			continue
 		}
 		if winVKDown(vk) {
@@ -1908,6 +2056,8 @@ func rawWinVKToUnicode(vk uint16, scanCode uint32) string {
 	}
 	hkl, _, _ := procGetKeyboardLayout.Call(tid)
 
+	// Windows 10 1607+ flag 0x4 tells ToUnicodeEx not to mutate keyboard/dead-key state.
+	const toUnicodeNoStateChange = 0x4
 	var buf [8]uint16
 	r, _, _ := procToUnicodeEx.Call(
 		uintptr(vk),
@@ -1915,7 +2065,7 @@ func rawWinVKToUnicode(vk uint16, scanCode uint32) string {
 		uintptr(unsafe.Pointer(&keyState[0])),
 		uintptr(unsafe.Pointer(&buf[0])),
 		uintptr(len(buf)),
-		0,
+		toUnicodeNoStateChange,
 		hkl,
 	)
 	n := int32(r)

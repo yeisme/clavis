@@ -29,10 +29,12 @@ func (b *windowsBridge) UpdateInputEngineBlockedWords(words []string) { b.ime.se
 
 // ConfigureInputEngine implements InputEngineHost.
 func (b *windowsBridge) ConfigureInputEngine(cfg config.InputEngineConfig) {
+	b.SetInlineIMEForced(cfg.ForceTakeover)
 	b.configureInputEngine(cfg, false)
 }
 
 func (b *windowsBridge) ReloadInputEngine(cfg config.InputEngineConfig) {
+	b.SetInlineIMEForced(cfg.ForceTakeover)
 	b.configureInputEngine(cfg, true)
 }
 
@@ -69,11 +71,21 @@ func (b *windowsBridge) SetInputEngineAICandidates(raw string, words []string) {
 }
 
 func (b *windowsBridge) resetInputEngine() {
+	b.shiftTracker.Reset()
 	if b.ime.reset() {
 		b.notifyInputEngineView()
 	}
 }
 func (b *windowsBridge) notifyInputEngineView() { b.ime.notifyView() }
+
+func (b *windowsBridge) inputEngineEligibleAt(now time.Time, app AppIdentity) bool {
+	return winInputEngineEligible(
+		b.inlineForced.Load(),
+		b.hookIMEComposing(now),
+		b.hookSecureInput(now),
+		isSelfClavisApp(app),
+	)
+}
 
 // inputEngineHandleKey runs inside the LL hook. Returns consume=true to swallow the key.
 // Any panic resets the engine and passes the key through (never eat keys on a bug).
@@ -84,37 +96,52 @@ func (b *windowsBridge) inputEngineHandleKey(vk uint16, scan uint32, isDown bool
 	}
 	defer func() {
 		if r := recover(); r != nil {
+			b.shiftTracker.Reset()
 			b.ime.commits.resetPrev()
 			eng.Reset()
 			consume = false
 		}
 	}()
 
-	if vk == vkShift || vk == vkLShift || vk == vkRShift {
-		kind := inputengine.KeyShiftUp
-		if isDown {
-			kind = inputengine.KeyShiftDown
+	isShift := isWinShiftVK(vk)
+	if !isShift {
+		if _, isMod := winVKToModifier(vk); isMod {
+			b.shiftTracker.OnNonShiftModifier()
+			return false
 		}
-		if res := b.ime.commits.handleKey(eng, inputengine.Key{Kind: kind}, b.ime.userLearning.Load()); res.Changed || res.Commit != "" {
-			sendWinUnicodeText(res.Commit)
-			b.notifyInputEngineView()
+		if !isDown {
+			return false
 		}
-		return false // Shift always reaches the router (leader / double-tap unaffected)
-	}
-	if !isDown {
-		return false
-	}
-	if _, isMod := winVKToModifier(vk); isMod {
-		return false
+		b.shiftTracker.OnInterveningKey()
 	}
 
 	app := AppIdentity{ProcessName: b.cachedFrontmostProcessName()}
-	if !inputEngineEligible(b.hookIMEComposing(now), b.hookSecureInput(now), isSelfClavisApp(app)) {
+	if !b.inputEngineEligibleAt(now, app) {
+		b.shiftTracker.Reset()
 		b.ime.commits.resetPrev()
 		if eng.Reset() {
 			b.notifyInputEngineView()
 		}
 		return false
+	}
+
+	if isShift {
+		otherDown := winOtherModifiersDown(vk)
+		if isDown {
+			b.shiftTracker.OnShiftDown(vk, otherDown)
+			return false
+		}
+		if !b.shiftTracker.OnShiftUp(vk, otherDown) {
+			return false
+		}
+		b.ime.commits.handleKey(eng, inputengine.Key{Kind: inputengine.KeyShiftDown}, b.ime.userLearning.Load())
+		if res := b.ime.commits.handleKey(eng, inputengine.Key{Kind: inputengine.KeyShiftUp}, b.ime.userLearning.Load()); res.Changed || res.Commit != "" {
+			if res.Commit != "" {
+				sendWinUnicodeText(res.Commit)
+			}
+			b.notifyInputEngineView()
+		}
+		return false // Shift always reaches the router (leader / double-tap unaffected)
 	}
 
 	chord := winVKDown(vkLControl) || winVKDown(vkRControl) || winVKDown(vkLMenu) || winVKDown(vkRMenu) ||

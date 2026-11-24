@@ -103,8 +103,16 @@ func bindingAppMatches(ids []string, appBundleID string) bool {
 		return true
 	}
 	app := strings.TrimSpace(appBundleID)
+	if app == "" {
+		return false
+	}
+	normApp := normalizeProcessName(app)
 	for _, id := range ids {
-		if strings.EqualFold(strings.TrimSpace(id), app) {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			continue
+		}
+		if trimmed == "*" || strings.EqualFold(trimmed, app) || (normApp != "" && normalizeProcessName(trimmed) == normApp) {
 			return true
 		}
 	}
