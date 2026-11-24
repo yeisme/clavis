@@ -19,6 +19,7 @@ type TriggerConfig struct {
 	// InputEngineToggleShortcut flips the own input engine between forced Chinese
 	// takeover and auto mode. Empty disables the hotkey.
 	InputEngineToggleShortcut string `json:"inputEngineToggleShortcut"`
+	ScreenshotShortcut        string `json:"screenshotShortcut,omitempty"`
 	SnippetExpansionEnabled   bool   `json:"snippetExpansionEnabled"`
 	// SnippetBackspaceUndo reverts an expansion when Backspace is the very
 	// next key, restoring the typed trigger (as espanso's undo_backspace).
@@ -88,6 +89,11 @@ func decodeTriggerConfig(tbl *toml.Table, path string) (TriggerConfig, error) {
 	} else if ok {
 		cfg.InputEngineToggleShortcut = s
 	}
+	if s, ok, err := optionalString(tbl, "screenshot_shortcut", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.ScreenshotShortcut = s
+	}
 	if b, ok, err := optionalBool(tbl, "snippet_expansion_enabled", path); err != nil {
 		return cfg, err
 	} else if ok {
@@ -115,6 +121,9 @@ func (c TriggerConfig) toTOML() *toml.Table {
 	t.Set("clipboard_shortcut", toml.StringVal(c.ClipboardShortcut))
 	if c.InputEngineToggleShortcut != "" {
 		t.Set("input_engine_toggle_shortcut", toml.StringVal(c.InputEngineToggleShortcut))
+	}
+	if c.ScreenshotShortcut != "" {
+		t.Set("screenshot_shortcut", toml.StringVal(c.ScreenshotShortcut))
 	}
 	t.Set("snippet_expansion_enabled", toml.BoolVal(c.SnippetExpansionEnabled))
 	t.Set("snippet_backspace_undo", toml.BoolVal(c.SnippetBackspaceUndo))
@@ -379,6 +388,11 @@ func DefaultAIProfiles() []AIProfile {
 			SystemPrompt:    defaultAISystemPrompt,
 			KeychainAccount: "clavis.ai.anthropic",
 			APIKeyEnvVar:    "ANTHROPIC_API_KEY",
+			Capabilities: ModelCapabilities{
+				ToolCalling: true,
+				Vision:      true,
+				Streaming:   true,
+			},
 		},
 		{
 			ID:              "gemini",
@@ -392,6 +406,12 @@ func DefaultAIProfiles() []AIProfile {
 			SystemPrompt:    defaultAISystemPrompt,
 			KeychainAccount: "clavis.ai.gemini",
 			APIKeyEnvVar:    "GEMINI_API_KEY",
+			Capabilities: ModelCapabilities{
+				StructuredOutput: true,
+				ToolCalling:      true,
+				Vision:           true,
+				Streaming:        true,
+			},
 		},
 	}
 }
@@ -400,6 +420,7 @@ func DefaultAIProfiles() []AIProfile {
 // and flat fallback fields for backward compatibility.
 type AIConfig struct {
 	ActiveProfileID string      `json:"activeProfileId"`
+	VisionProfileID string      `json:"visionProfileId,omitempty"`
 	Provider        string      `json:"provider"`
 	Protocol        AIProtocol  `json:"protocol"`
 	BaseURL         string      `json:"baseUrl"`
@@ -674,12 +695,24 @@ func (p AIProfile) toTOML() *toml.Table {
 	}
 	if p.Capabilities != (ModelCapabilities{}) {
 		caps := toml.NewTable()
-		caps.Set("structured_output", toml.BoolVal(p.Capabilities.StructuredOutput))
-		caps.Set("tool_calling", toml.BoolVal(p.Capabilities.ToolCalling))
-		caps.Set("vision", toml.BoolVal(p.Capabilities.Vision))
-		caps.Set("reasoning_effort", toml.BoolVal(p.Capabilities.ReasoningEffort))
-		caps.Set("context_window", toml.IntVal(p.Capabilities.ContextWindow))
-		caps.Set("streaming", toml.BoolVal(p.Capabilities.Streaming))
+		if p.Capabilities.StructuredOutput {
+			caps.Set("structured_output", toml.BoolVal(true))
+		}
+		if p.Capabilities.ToolCalling {
+			caps.Set("tool_calling", toml.BoolVal(true))
+		}
+		if p.Capabilities.Vision {
+			caps.Set("vision", toml.BoolVal(true))
+		}
+		if p.Capabilities.ReasoningEffort {
+			caps.Set("reasoning_effort", toml.BoolVal(true))
+		}
+		if p.Capabilities.ContextWindow > 0 {
+			caps.Set("context_window", toml.IntVal(p.Capabilities.ContextWindow))
+		}
+		if p.Capabilities.Streaming {
+			caps.Set("streaming", toml.BoolVal(true))
+		}
 		t.Set("capabilities", toml.TableVal(caps))
 	}
 	return t
@@ -702,6 +735,11 @@ func decodeAIConfig(tbl *toml.Table, path string) (AIConfig, error) {
 	} else if ok {
 		cfg.ActiveProfileID = s
 		hasActiveID = true
+	}
+	if s, ok, err := optionalString(tbl, "vision_profile_id", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.VisionProfileID = s
 	}
 	if s, ok, err := optionalString(tbl, "provider", path); err != nil {
 		return cfg, err
@@ -856,6 +894,9 @@ func decodeAIConfig(tbl *toml.Table, path string) (AIConfig, error) {
 func (c AIConfig) toTOML() *toml.Table {
 	t := toml.NewTable()
 	t.Set("active_profile_id", toml.StringVal(c.ActiveProfileID))
+	if strings.TrimSpace(c.VisionProfileID) != "" {
+		t.Set("vision_profile_id", toml.StringVal(c.VisionProfileID))
+	}
 	t.Set("provider", toml.StringVal(c.Provider))
 	proto := c.Protocol
 	if proto == "" {

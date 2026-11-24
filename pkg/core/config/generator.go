@@ -74,6 +74,8 @@ default_input_source_id = "`+WindowsDefaultInputSourceID+`"`, 1)
 		return DefaultComponentsConfig().Encode()
 	case FileWorkflows:
 		return DefaultWorkflowsConfig().Encode()
+	case FileQuickJump:
+		return DefaultQuickJumpConfig().Encode()
 	default:
 		return ""
 	}
@@ -167,6 +169,8 @@ oblique_rows = true
 [ai]
 # API keys are never stored in config.toml; store them in OS Keychain / Credential Manager under keychain_account
 active_profile_id = "deepseek"
+# Optional dedicated vision profile for OCR & screenshot understanding (e.g. "gemini" or "claude")
+# vision_profile_id = "gemini"
 provider = "deepseek"
 protocol = "openai_compatible"
 base_url = "https://api.deepseek.com/v1"
@@ -215,6 +219,10 @@ timeout_seconds = 30.0
 system_prompt = "You are a concise macOS writing and productivity assistant. Return only the requested output unless asked otherwise."
 keychain_account = "clavis.ai.anthropic"
 api_key_env_var = "ANTHROPIC_API_KEY"
+[ai.profiles.capabilities]
+tool_calling = true
+vision = true
+streaming = true
 
 [[ai.profiles]]
 id = "gemini"
@@ -228,6 +236,11 @@ timeout_seconds = 30.0
 system_prompt = "You are a concise macOS writing and productivity assistant. Return only the requested output unless asked otherwise."
 keychain_account = "clavis.ai.gemini"
 api_key_env_var = "GEMINI_API_KEY"
+[ai.profiles.capabilities]
+structured_output = true
+tool_calling = true
+vision = true
+streaming = true
 
 [clipboard]
 enabled = true

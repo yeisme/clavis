@@ -46,6 +46,8 @@ type CompletionRequest struct {
 	StructuredOutput bool
 	// SystemPromptOverride is used by transient workflows such as prompt optimization.
 	SystemPromptOverride string
+	// Images carries binary image attachments for multimodal Vision profiles.
+	Images []ImageAttachment
 }
 
 // ClientError categorizes AI client failures.
@@ -218,6 +220,9 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 	if err := validateStructuredOutputRequest(profile, req); err != nil {
 		return nil, err
 	}
+	if err := validateVisionRequest(profile, req.Images); err != nil {
+		return nil, err
+	}
 
 	var contextText string
 	// An explicit policy owns every ambient field. The legacy concatenation is
@@ -277,7 +282,7 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 		if err != nil {
 			return nil, err
 		}
-		messages := make([]map[string]string, 0, len(req.History)+1)
+		messages := make([]map[string]any, 0, len(req.History)+1)
 		for _, turn := range req.History {
 			role := strings.ToLower(strings.TrimSpace(turn.Role))
 			if role == "system" || strings.TrimSpace(turn.Content) == "" {
@@ -286,14 +291,14 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 			if role != "assistant" {
 				role = "user"
 			}
-			messages = append(messages, map[string]string{
+			messages = append(messages, map[string]any{
 				"role":    role,
 				"content": turn.Content,
 			})
 		}
-		messages = append(messages, map[string]string{
+		messages = append(messages, map[string]any{
 			"role":    "user",
-			"content": userPrompt,
+			"content": encodeAnthropicUserContent(userPrompt, req.Images),
 		})
 		if strings.TrimSpace(req.DeveloperPrompt) != "" {
 			systemPrompt = strings.TrimSpace(systemPrompt + "\n\n" + req.DeveloperPrompt)
@@ -347,7 +352,7 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 		}
 		contents = append(contents, map[string]any{
 			"role":  "user",
-			"parts": []map[string]string{{"text": userPrompt}},
+			"parts": encodeGeminiUserParts(userPrompt, req.Images),
 		})
 		payload := map[string]any{
 			"contents": contents,
@@ -387,13 +392,13 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 		if err != nil {
 			return nil, err
 		}
-		messages := make([]map[string]string, 0, len(req.History)+3)
-		messages = append(messages, map[string]string{
+		messages := make([]map[string]any, 0, len(req.History)+3)
+		messages = append(messages, map[string]any{
 			"role":    "system",
 			"content": systemPrompt,
 		})
 		if strings.TrimSpace(req.DeveloperPrompt) != "" {
-			messages = append(messages, map[string]string{"role": "developer", "content": req.DeveloperPrompt})
+			messages = append(messages, map[string]any{"role": "developer", "content": req.DeveloperPrompt})
 		}
 		for _, turn := range req.History {
 			if strings.TrimSpace(turn.Content) == "" {
@@ -403,14 +408,14 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 			if role != "assistant" && role != "system" {
 				role = "user"
 			}
-			messages = append(messages, map[string]string{
+			messages = append(messages, map[string]any{
 				"role":    role,
 				"content": turn.Content,
 			})
 		}
-		messages = append(messages, map[string]string{
+		messages = append(messages, map[string]any{
 			"role":    "user",
-			"content": userPrompt,
+			"content": encodeOpenAIUserContent(userPrompt, req.Images),
 		})
 		payload := map[string]any{
 			"model":          profile.Model,

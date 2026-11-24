@@ -784,3 +784,54 @@ func TestValidatorDiagnosticsLocalizeToChinese(t *testing.T) {
 		t.Fatalf("expected theme warning from store, got %+v", store.LastWarnings())
 	}
 }
+
+func TestAIConfigVisionProfileAndCapabilitiesRoundTrip(t *testing.T) {
+	defs := config.DefaultAIProfiles()
+	var sawClaude, sawGemini bool
+	for _, p := range defs {
+		switch p.ID {
+		case "claude":
+			sawClaude = p.Capabilities.Vision && p.Capabilities.Streaming
+		case "gemini":
+			sawGemini = p.Capabilities.Vision && p.Capabilities.Streaming
+		}
+	}
+	if !sawClaude || !sawGemini {
+		t.Fatalf("expected default claude and gemini profiles to enable Vision+Streaming, got %+v", defs)
+	}
+
+	rawTOML := `
+[ai]
+active_profile_id = "deepseek"
+vision_profile_id = "gemini"
+`
+	cfg, err := config.DecodeMainConfig(rawTOML)
+	if err != nil {
+		t.Fatalf("DecodeMainConfig: %v", err)
+	}
+	if cfg.AI.VisionProfileID != "gemini" {
+		t.Fatalf("VisionProfileID = %q, want gemini", cfg.AI.VisionProfileID)
+	}
+	store := config.NewConfigStore(t.TempDir())
+	if err := store.SaveMain(cfg); err != nil {
+		t.Fatalf("SaveMain: %v", err)
+	}
+	reloaded, err := store.LoadOrInitialize()
+	if err != nil {
+		t.Fatalf("LoadOrInitialize: %v", err)
+	}
+	if reloaded.Main.AI.VisionProfileID != "gemini" {
+		t.Fatalf("reloaded VisionProfileID = %q, want gemini", reloaded.Main.AI.VisionProfileID)
+	}
+	cfg.AI.VisionProfileID = "nonexistent"
+	issues := config.ValidateMain(cfg)
+	hasVisionIssue := false
+	for _, iss := range issues {
+		if iss.KeyPath == "ai.vision_profile_id" {
+			hasVisionIssue = true
+		}
+	}
+	if !hasVisionIssue {
+		t.Fatalf("expected ai.vision_profile_id validation issue, got %+v", issues)
+	}
+}

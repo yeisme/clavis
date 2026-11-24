@@ -21,6 +21,7 @@ const (
 	FilePrompts    ConfigFileKind = "prompts.toml"
 	FileComponents ConfigFileKind = "components.toml"
 	FileWorkflows  ConfigFileKind = "workflows.toml"
+	FileQuickJump  ConfigFileKind = "quickjump.toml"
 )
 
 // AllConfigFileKinds returns all config file kinds in deterministic order.
@@ -60,6 +61,7 @@ type ClavisConfig struct {
 	Prompts    PromptsConfig    `json:"prompts"`
 	Components ComponentsConfig `json:"components"`
 	Workflows  WorkflowsConfig  `json:"workflows"`
+	QuickJump  QuickJumpConfig  `json:"quickJump"`
 }
 
 // DefaultConfig returns the complete default ClavisConfig.
@@ -73,6 +75,7 @@ func DefaultConfig() ClavisConfig {
 		Prompts:    DefaultPromptsConfig(),
 		Components: DefaultComponentsConfig(),
 		Workflows:  DefaultWorkflowsConfig(),
+		QuickJump:  DefaultQuickJumpConfig(),
 	}
 }
 

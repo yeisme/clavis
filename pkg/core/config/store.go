@@ -369,6 +369,27 @@ func (s *ConfigStore) SaveWorkflows(workflowsCfg WorkflowsConfig) error {
 	return nil
 }
 
+// SaveQuickJump validates quickJumpCfg, atomically writes quickjump.toml, and updates Current().QuickJump.
+func (s *ConfigStore) SaveQuickJump(quickJumpCfg QuickJumpConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := firstErrorIssue(ValidateQuickJump(quickJumpCfg)); err != nil {
+		return err
+	}
+	encoded := quickJumpCfg.Encode()
+	if err := atomicWriteConfigFile(s.dir, FileQuickJump, encoded); err != nil {
+		return err
+	}
+	sum := sha256.Sum256([]byte(encoded))
+	s.ensureSavedDigestsLocked()
+	s.current.QuickJump = quickJumpCfg
+	s.lastErrors = nil
+	s.lastWarnings = collectWarningIssues(Validate(s.current))
+	s.savedDigests[string(FileQuickJump)] = sum
+	return nil
+}
+
 func (s *ConfigStore) SaveIMERules(imeRulesCfg IMERulesConfig) error {
 	if err := firstErrorIssue(ValidateIMERules(imeRulesCfg)); err != nil {
 		return err
@@ -558,6 +579,13 @@ func (s *ConfigStore) Reload() bool {
 	} else if !os.IsNotExist(err) {
 		_, ok8 = loadConfigFile(s.dir, FileWorkflows, DecodeWorkflowsConfig, &errs)
 	}
+	quickJumpCfg := DefaultQuickJumpConfig()
+	ok9 := true
+	if _, err := os.Stat(filepath.Join(s.dir, string(FileQuickJump))); err == nil {
+		quickJumpCfg, ok9 = loadConfigFile(s.dir, FileQuickJump, DecodeQuickJumpConfig, &errs)
+	} else if !os.IsNotExist(err) {
+		_, ok9 = loadConfigFile(s.dir, FileQuickJump, DecodeQuickJumpConfig, &errs)
+	}
 	if ok6 {
 		var mergeErr error
 		promptsCfg, mergeErr = mergePromptMarkdown(promptsCfg, s.dir)
@@ -573,7 +601,7 @@ func (s *ConfigStore) Reload() bool {
 		}
 	}
 
-	if len(errs) > 0 || !ok || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 || !ok7 || !ok8 {
+	if len(errs) > 0 || !ok || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 || !ok7 || !ok8 || !ok9 {
 		s.lastErrors = errs
 		return false
 	}
@@ -587,6 +615,7 @@ func (s *ConfigStore) Reload() bool {
 		Prompts:    promptsCfg,
 		Components: componentsCfg,
 		Workflows:  workflowsCfg,
+		QuickJump:  quickJumpCfg,
 	}
 
 	// Speak the language of the config being validated so its diagnostics

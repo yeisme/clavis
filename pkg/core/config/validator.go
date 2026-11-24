@@ -49,6 +49,7 @@ func Validate(cfg ClavisConfig) []ValidationIssue {
 	issues = append(issues, ValidatePrompts(cfg.Prompts)...)
 	issues = append(issues, ValidateComponents(cfg.Components)...)
 	issues = append(issues, ValidateWorkflows(cfg.Workflows)...)
+	issues = append(issues, ValidateQuickJump(cfg.QuickJump)...)
 	return issues
 }
 
@@ -306,6 +307,14 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 				issues = append(issues, ValidationIssue{
 					File: file, KeyPath: "ai.active_profile_id", Severity: SeverityError,
 					Message: i18n.Tf("diag.ai.profile.active_missing", main.AI.ActiveProfileID),
+				})
+			}
+		}
+		if strings.TrimSpace(main.AI.VisionProfileID) != "" {
+			if _, ok := main.AI.ProfileByID(main.AI.VisionProfileID); !ok {
+				issues = append(issues, ValidationIssue{
+					File: file, KeyPath: "ai.vision_profile_id", Severity: SeverityError,
+					Message: i18n.Tf("diag.ai.profile.active_missing", main.AI.VisionProfileID),
 				})
 			}
 		}
