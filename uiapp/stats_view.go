@@ -47,19 +47,18 @@ func (a *AppController) renderStatsHubView(c *ui.Context, theme *ui.Theme, cfg c
 	sessions, diagnostics := a.cachedAgentData()
 	agentRes := a.agentRecordedOperationResult()
 	agentRefreshing := a.agentRefreshing()
-	zh := i18n.IsChinese()
 
 	sources := []dataSourceHealth{
-		classifyAIHealth(zh, aiDays, aiErr, aiLoaded, aiRefreshing),
-		classifyClipboardHealth(zh, clipStats),
-		classifyLexiconHealth(zh, lexDays, lexErr, lexLoaded, len(cfg.Glossary.Terms)),
-		classifyAgentHealth(zh, sessions, diagnostics, agentRes, agentRefreshing),
+		classifyAIHealth(aiDays, aiErr, aiLoaded, aiRefreshing),
+		classifyClipboardHealth(clipStats),
+		classifyLexiconHealth(lexDays, lexErr, lexLoaded, len(cfg.Glossary.Terms)),
+		classifyAgentHealth(sessions, diagnostics, agentRes, agentRefreshing),
 	}
 
 	ui.Column(c).Key("stats-hub-view").Label("stats-hub-view").FillWidth().Grow(1).MinHeight(0).Gap(space8).Children(func() {
 		// Header strip: title + back + Refresh All.
 		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
-			backLbl := pickLang(zh, "返回", "Back")
+			backLbl := i18n.T("stats.action.back")
 			backBtn := ui.ButtonBase(c).Key("stats-back").Label(backLbl).
 				Padding(space2, space8).Radius(radiusChip).Background(tileFill(theme)).Border(space1, hairline(theme)).FocusRing(false)
 			backBtn.Children(func() {
@@ -73,10 +72,10 @@ func (a *AppController) renderStatsHubView(c *ui.Context, theme *ui.Theme, cfg c
 			}
 
 			renderSemanticIcon(c, "square.3.layers.3d", IconSize16, secondaryInk(theme))
-			ui.Text(c, pickLang(zh, "统计总览", "Stats Overview")).FontSize(typeBody).FontWeight(700).TextColor(theme.Text).SingleLine()
+			ui.Text(c, i18n.T("stats.title")).FontSize(typeBody).FontWeight(700).TextColor(theme.Text).SingleLine()
 			ui.Spacer(c)
 
-			refLbl := pickLang(zh, "刷新全部", "Refresh All")
+			refLbl := i18n.T("stats.action.refresh_all")
 			refBtn := ui.ButtonBase(c).Key("stats-refresh-all").Label(refLbl).
 				Padding(space2, space8).Radius(radiusChip).Background(tileFill(theme)).Border(space1, hairline(theme)).FocusRing(false)
 			refBtn.Children(func() {
@@ -109,62 +108,62 @@ func (a *AppController) renderStatsHubView(c *ui.Context, theme *ui.Theme, cfg c
 	})
 }
 
-func classifyAIHealth(zh bool, days []AIUsageDay, err error, loaded, refreshing bool) dataSourceHealth {
-	label := pickLang(zh, "AI 用量", "AI Usage")
+func classifyAIHealth(days []AIUsageDay, err error, loaded, refreshing bool) dataSourceHealth {
+	label := i18n.T("stats.source.ai")
 	switch {
 	case err != nil:
-		return dataSourceHealth{Key: "ai", Label: label, Status: pickLang(zh, "不可用", "Unavailable"), Kind: sourceHealthError}
+		return dataSourceHealth{Key: "ai", Label: label, Status: i18n.T("stats.status.unavailable"), Kind: sourceHealthError}
 	case !loaded || refreshing:
-		return dataSourceHealth{Key: "ai", Label: label, Status: pickLang(zh, "加载中", "Loading"), Kind: sourceHealthLoading}
+		return dataSourceHealth{Key: "ai", Label: label, Status: i18n.T("stats.status.loading"), Kind: sourceHealthLoading}
 	case aiUsageTotalRequests(days) == 0:
-		return dataSourceHealth{Key: "ai", Label: label, Status: pickLang(zh, "无记录", "No records"), Kind: sourceHealthEmpty}
+		return dataSourceHealth{Key: "ai", Label: label, Status: i18n.T("stats.status.no_records"), Kind: sourceHealthEmpty}
 	default:
-		return dataSourceHealth{Key: "ai", Label: label, Status: pickLang(zh, "正常", "Ready"), Kind: sourceHealthReady}
+		return dataSourceHealth{Key: "ai", Label: label, Status: i18n.T("stats.status.ready"), Kind: sourceHealthReady}
 	}
 }
 
-func classifyClipboardHealth(zh bool, st clipboardStatsState) dataSourceHealth {
-	label := pickLang(zh, "剪贴板", "Clipboard")
+func classifyClipboardHealth(st clipboardStatsState) dataSourceHealth {
+	label := i18n.T("stats.source.clipboard")
 	count, _ := clipboardStatsTotals(st.kinds)
 	switch {
 	case st.err != nil:
-		return dataSourceHealth{Key: "clipboard", Label: label, Status: pickLang(zh, "不可用", "Unavailable"), Kind: sourceHealthError}
+		return dataSourceHealth{Key: "clipboard", Label: label, Status: i18n.T("stats.status.unavailable"), Kind: sourceHealthError}
 	case !st.loaded || st.loading:
-		return dataSourceHealth{Key: "clipboard", Label: label, Status: pickLang(zh, "加载中", "Loading"), Kind: sourceHealthLoading}
+		return dataSourceHealth{Key: "clipboard", Label: label, Status: i18n.T("stats.status.loading"), Kind: sourceHealthLoading}
 	case count == 0:
-		return dataSourceHealth{Key: "clipboard", Label: label, Status: pickLang(zh, "空", "Empty"), Kind: sourceHealthEmpty}
+		return dataSourceHealth{Key: "clipboard", Label: label, Status: i18n.T("stats.status.empty"), Kind: sourceHealthEmpty}
 	default:
-		return dataSourceHealth{Key: "clipboard", Label: label, Status: pickLang(zh, "正常", "Ready"), Kind: sourceHealthReady}
+		return dataSourceHealth{Key: "clipboard", Label: label, Status: i18n.T("stats.status.ready"), Kind: sourceHealthReady}
 	}
 }
 
-func classifyLexiconHealth(zh bool, days []LexiconHitDay, err error, loaded bool, catalogCount int) dataSourceHealth {
-	label := pickLang(zh, "词库", "Lexicon")
+func classifyLexiconHealth(days []LexiconHitDay, err error, loaded bool, catalogCount int) dataSourceHealth {
+	label := i18n.T("stats.source.lexicon")
 	switch {
 	case err != nil:
-		return dataSourceHealth{Key: "lexicon", Label: label, Status: pickLang(zh, "不可用", "Unavailable"), Kind: sourceHealthError}
+		return dataSourceHealth{Key: "lexicon", Label: label, Status: i18n.T("stats.status.unavailable"), Kind: sourceHealthError}
 	case !loaded:
-		return dataSourceHealth{Key: "lexicon", Label: label, Status: pickLang(zh, "加载中", "Loading"), Kind: sourceHealthLoading}
+		return dataSourceHealth{Key: "lexicon", Label: label, Status: i18n.T("stats.status.loading"), Kind: sourceHealthLoading}
 	case lexiconTotalEvents(days) == 0 && catalogCount == 0:
-		return dataSourceHealth{Key: "lexicon", Label: label, Status: pickLang(zh, "空", "Empty"), Kind: sourceHealthEmpty}
+		return dataSourceHealth{Key: "lexicon", Label: label, Status: i18n.T("stats.status.empty"), Kind: sourceHealthEmpty}
 	default:
-		return dataSourceHealth{Key: "lexicon", Label: label, Status: pickLang(zh, "正常", "Ready"), Kind: sourceHealthReady}
+		return dataSourceHealth{Key: "lexicon", Label: label, Status: i18n.T("stats.status.ready"), Kind: sourceHealthReady}
 	}
 }
 
-func classifyAgentHealth(zh bool, sessions []agentsession.Session, diagnostics []agentsession.Diagnostic, res host.OperationResult, refreshing bool) dataSourceHealth {
-	label := "Agent"
+func classifyAgentHealth(sessions []agentsession.Session, diagnostics []agentsession.Diagnostic, res host.OperationResult, refreshing bool) dataSourceHealth {
+	label := i18n.T("stats.source.agent")
 	switch {
 	case refreshing:
-		return dataSourceHealth{Key: "agent", Label: label, Status: pickLang(zh, "刷新中", "Refreshing"), Kind: sourceHealthLoading}
+		return dataSourceHealth{Key: "agent", Label: label, Status: i18n.T("stats.status.refreshing"), Kind: sourceHealthLoading}
 	case res.State == host.StateFailed:
-		return dataSourceHealth{Key: "agent", Label: label, Status: pickLang(zh, "失败", "Failed"), Kind: sourceHealthError}
+		return dataSourceHealth{Key: "agent", Label: label, Status: i18n.T("stats.status.failed"), Kind: sourceHealthError}
 	case res.State == host.StateDegraded || len(diagnostics) > 0:
-		return dataSourceHealth{Key: "agent", Label: label, Status: pickLang(zh, "部分降级", "Degraded"), Kind: sourceHealthDegraded}
+		return dataSourceHealth{Key: "agent", Label: label, Status: i18n.T("stats.status.degraded"), Kind: sourceHealthDegraded}
 	case len(sessions) == 0:
-		return dataSourceHealth{Key: "agent", Label: label, Status: pickLang(zh, "无会话", "No sessions"), Kind: sourceHealthEmpty}
+		return dataSourceHealth{Key: "agent", Label: label, Status: i18n.T("stats.status.no_sessions"), Kind: sourceHealthEmpty}
 	default:
-		return dataSourceHealth{Key: "agent", Label: label, Status: pickLang(zh, "正常", "Ready"), Kind: sourceHealthReady}
+		return dataSourceHealth{Key: "agent", Label: label, Status: i18n.T("stats.status.ready"), Kind: sourceHealthReady}
 	}
 }
 
@@ -195,7 +194,7 @@ func renderHubMetricCard(c *ui.Context, theme *ui.Theme, key, icon, title, actio
 			renderSemanticIcon(c, icon, typeLabel, secondaryInk(theme))
 			ui.Text(c, title).FontSize(typeLabel).FontWeight(700).TextColor(theme.Text).SingleLine().Grow(1).MinWidth(0)
 			if actionLabel != "" && onAction != nil {
-				btn := ui.ButtonBase(c).Key(key + "-action").Label(actionLabel).
+				btn := ui.ButtonBase(c).Key(key+"-action").Label(actionLabel).
 					Padding(space1, space6).Radius(radius4).Background(tileFill(theme)).Border(space1, hairline(theme)).FocusRing(false).Shrink(0)
 				btn.Children(func() {
 					ui.Text(c, actionLabel).FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
@@ -211,18 +210,17 @@ func renderHubMetricCard(c *ui.Context, theme *ui.Theme, key, icon, title, actio
 }
 
 func (a *AppController) renderStatsAICard(c *ui.Context, theme *ui.Theme, days []AIUsageDay, err error, loaded, refreshing bool) {
-	zh := i18n.IsChinese()
-	renderHubMetricCard(c, theme, "stats-card-ai", "sparkles", pickLang(zh, "AI 用量 · 近 7 日", "AI Usage · 7d"), pickLang(zh, "AI 工作台", "Open AI"), func() {
+	renderHubMetricCard(c, theme, "stats-card-ai", "sparkles", i18n.T("stats.card.ai.title"), i18n.T("stats.card.ai.action"), func() {
 		a.CloseHubSurface()
 		a.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: config.TabAI})
 	}, func() {
 		switch {
 		case err != nil:
-			kitInlineError(c, theme, "stats-ai-err", pickLang(zh, "AI 用量暂不可用", "AI usage unavailable"), a.retryAIUsage)
+			kitInlineError(c, theme, "stats-ai-err", i18n.T("stats.card.ai.unavailable"), a.retryAIUsage)
 		case !loaded || refreshing:
-			kitInlineLoading(c, theme, "stats-ai-loading", pickLang(zh, "正在加载 AI 用量…", "Loading AI usage…"))
+			kitInlineLoading(c, theme, "stats-ai-loading", i18n.T("stats.card.ai.loading"))
 		case aiUsageTotalRequests(days) == 0:
-			ui.Text(c, pickLang(zh, "近 7 日无 AI 调用记录", "No AI calls recorded in last 7 days")).
+			ui.Text(c, i18n.T("stats.card.ai.empty")).
 				FontSize(typeMeta).TextColor(theme.TextMuted).Wrap()
 		default:
 			totalTokens := aiUsageTotalTokens(days)
@@ -230,10 +228,7 @@ func (a *AppController) renderStatsAICard(c *ui.Context, theme *ui.Theme, days [
 			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 				ui.Column(c).Gap(space2).Grow(1).Children(func() {
 					ui.Text(c, aiUsageTodayLabel(days)).FontSize(typeKPI).FontWeight(700).FontFeatures("tnum").TextColor(theme.Text).SingleLine()
-					sub := fmt.Sprintf("7d: %s tok · %d calls", formatTokenCount(totalTokens), totalReqs)
-					if zh {
-						sub = fmt.Sprintf("7 日累计 %s tok · %d 次", formatTokenCount(totalTokens), totalReqs)
-					}
+					sub := i18n.Tf("stats.card.ai.summary", formatTokenCount(totalTokens), totalReqs)
 					ui.Text(c, sub).FontSize(typeMicro).FontFeatures("tnum").TextColor(theme.TextMuted).SingleLine()
 				})
 				renderAIUsageChart(c, theme, days)
@@ -243,8 +238,7 @@ func (a *AppController) renderStatsAICard(c *ui.Context, theme *ui.Theme, days [
 }
 
 func (a *AppController) renderStatsClipboardCard(c *ui.Context, theme *ui.Theme, st clipboardStatsState) {
-	zh := i18n.IsChinese()
-	renderHubMetricCard(c, theme, "stats-card-clipboard", "doc.on.clipboard", pickLang(zh, "剪贴板存储", "Clipboard Storage"), pickLang(zh, "剪贴板", "Open"), func() {
+	renderHubMetricCard(c, theme, "stats-card-clipboard", "doc.on.clipboard", i18n.T("stats.card.clipboard.title"), i18n.T("stats.card.clipboard.action"), func() {
 		a.CloseHubSurface()
 		a.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: config.TabClipboard})
 	}, func() {
@@ -256,7 +250,7 @@ func (a *AppController) renderStatsClipboardCard(c *ui.Context, theme *ui.Theme,
 		default:
 			count, bytes := clipboardStatsTotals(st.kinds)
 			if count == 0 {
-				ui.Text(c, pickLang(zh, "暂无剪贴板统计记录", "No clipboard entries recorded")).
+				ui.Text(c, i18n.T("stats.card.clipboard.empty")).
 					FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 				return
 			}
@@ -282,33 +276,26 @@ func (a *AppController) renderStatsClipboardCard(c *ui.Context, theme *ui.Theme,
 }
 
 func (a *AppController) renderStatsLexiconCard(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig, days []LexiconHitDay, err error, loaded bool, topWords []LexiconTopWord, topLoaded bool) {
-	zh := i18n.IsChinese()
-	renderHubMetricCard(c, theme, "stats-card-lexicon", "character.book.closed", pickLang(zh, "输入法与词库 · 14 日", "Lexicon · 14d"), pickLang(zh, "术语表", "Open"), func() {
+	renderHubMetricCard(c, theme, "stats-card-lexicon", "character.book.closed", i18n.T("stats.card.lexicon.title"), i18n.T("stats.card.lexicon.action"), func() {
 		a.CloseHubSurface()
 		a.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: config.TabGlossary})
 	}, func() {
 		switch {
 		case err != nil:
-			kitInlineError(c, theme, "stats-lex-err", pickLang(zh, "词库统计暂不可用", "Lexicon stats unavailable"), a.retryLexiconHits)
+			kitInlineError(c, theme, "stats-lex-err", i18n.T("stats.card.lexicon.unavailable"), a.retryLexiconHits)
 		case !loaded:
-			kitInlineLoading(c, theme, "stats-lex-loading", pickLang(zh, "正在加载词库统计…", "Loading lexicon stats…"))
+			kitInlineLoading(c, theme, "stats-lex-loading", i18n.T("stats.card.lexicon.loading"))
 		default:
 			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 				ui.Column(c).Gap(space2).Grow(1).Children(func() {
 					if rate, ok := lexiconOverallHitRate(days); ok {
-						kpi := fmt.Sprintf("Hit %d%%", rate)
-						if zh {
-							kpi = fmt.Sprintf("命中 %d%%", rate)
-						}
+						kpi := i18n.Tf("stats.card.lexicon.hit_rate", rate)
 						ui.Text(c, kpi).FontSize(typeKPI).FontWeight(700).FontFeatures("tnum").TextColor(theme.Text).SingleLine()
 					} else {
-						ui.Text(c, pickLang(zh, fmt.Sprintf("已收录 %d 词", len(cfg.Glossary.Terms)), fmt.Sprintf("%d terms", len(cfg.Glossary.Terms)))).
+						ui.Text(c, i18n.Tf("stats.card.lexicon.terms_count", len(cfg.Glossary.Terms))).
 							FontSize(typeBody).FontWeight(700).FontFeatures("tnum").TextColor(theme.Text).SingleLine()
 					}
-					sub := pickLang(zh,
-						fmt.Sprintf("术语 %d · 用户词 %d", len(cfg.Glossary.Terms), len(cfg.Main.InputEngine.UserWords)),
-						fmt.Sprintf("Glossary %d · User words %d", len(cfg.Glossary.Terms), len(cfg.Main.InputEngine.UserWords)),
-					)
+					sub := i18n.Tf("stats.card.lexicon.summary", len(cfg.Glossary.Terms), len(cfg.Main.InputEngine.UserWords))
 					ui.Text(c, sub).FontSize(typeMicro).FontFeatures("tnum").TextColor(theme.TextMuted).SingleLine()
 				})
 				if lexiconTotalEvents(days) > 0 {
@@ -327,7 +314,7 @@ func (a *AppController) renderStatsLexiconCard(c *ui.Context, theme *ui.Theme, c
 					}
 				}
 				if len(names) > 0 {
-					ui.Text(c, pickLang(zh, "高频词：", "Top: ")+strings.Join(names, " · ")).
+					ui.Text(c, i18n.Tf("stats.card.lexicon.top_words", strings.Join(names, " · "))).
 						FontSize(typeMicro).FontFeatures("tnum").TextColor(theme.TextMuted).SingleLine()
 				}
 			}
@@ -336,14 +323,13 @@ func (a *AppController) renderStatsLexiconCard(c *ui.Context, theme *ui.Theme, c
 }
 
 func (a *AppController) renderStatsAgentCard(c *ui.Context, theme *ui.Theme, sessions []agentsession.Session, diagnostics []agentsession.Diagnostic, res host.OperationResult, refreshing bool) {
-	zh := i18n.IsChinese()
 	counts := countAgentLanes(sessions)
-	renderHubMetricCard(c, theme, "stats-card-agent", "person.crop.circle", pickLang(zh, "Agent 并行轨道", "Agent Workbench"), "Agent", func() {
+	renderHubMetricCard(c, theme, "stats-card-agent", "person.crop.circle", i18n.T("stats.card.agent.title"), i18n.T("stats.source.agent"), func() {
 		a.CloseHubSurface()
 		a.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: config.TabAgent})
 	}, func() {
 		if refreshing && len(sessions) == 0 {
-			kitInlineLoading(c, theme, "stats-agent-loading", pickLang(zh, "正在发现本地 Agent 会话…", "Discovering local Agent sessions…"))
+			kitInlineLoading(c, theme, "stats-agent-loading", i18n.T("stats.card.agent.loading"))
 			return
 		}
 		if res.State == host.StateFailed && len(sessions) == 0 {
@@ -351,23 +337,17 @@ func (a *AppController) renderStatsAgentCard(c *ui.Context, theme *ui.Theme, ses
 			return
 		}
 		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
-			kpi := fmt.Sprintf("%d sessions", counts.Total)
-			if zh {
-				kpi = fmt.Sprintf("%d 个会话", counts.Total)
-			}
+			kpi := i18n.Tf("stats.card.agent.sessions", counts.Total)
 			ui.Text(c, kpi).FontSize(typeBody).FontWeight(700).FontFeatures("tnum").TextColor(theme.Text).SingleLine()
 			ui.Spacer(c)
 			if counts.Running > 0 {
-				kitStatusPill(c, theme, pickLang(zh, fmt.Sprintf("● %d 运行", counts.Running), fmt.Sprintf("● %d run", counts.Running)), chipAccent)
+				kitStatusPill(c, theme, i18n.Tf("stats.card.agent.running_pill", counts.Running), chipAccent)
 			}
 			if counts.Approval > 0 {
-				kitStatusPill(c, theme, pickLang(zh, fmt.Sprintf("▲ %d 待审", counts.Approval), fmt.Sprintf("▲ %d review", counts.Approval)), chipWarning)
+				kitStatusPill(c, theme, i18n.Tf("stats.card.agent.approval_pill", counts.Approval), chipWarning)
 			}
 		})
-		summary := pickLang(zh,
-			fmt.Sprintf("运行 %d · 待审批 %d · 已完成 %d", counts.Running, counts.Approval, counts.Done),
-			fmt.Sprintf("Running %d · Approval %d · Done %d", counts.Running, counts.Approval, counts.Done),
-		)
+		summary := i18n.Tf("stats.card.agent.summary", counts.Running, counts.Approval, counts.Done)
 		ui.Text(c, summary).FontSize(typeMicro).FontFeatures("tnum").TextColor(theme.TextMuted).SingleLine()
 		if len(diagnostics) > 0 {
 			diagText := agentsession.SanitizeDiagnosticText(agentDiagnosticSummary(diagnostics))

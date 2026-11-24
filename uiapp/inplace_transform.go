@@ -11,6 +11,7 @@ import (
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/host"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
 // SelectionBarPayload is the data a native shell needs to render the selection bar.
@@ -64,7 +65,7 @@ func (c *AppController) showSelectionQuickBar() {
 	}
 	snap, err := c.captureEditable()
 	if err != nil {
-		c.ShowToastOrHUD("Could not read the focused text field")
+		c.ShowToastOrHUD(i18n.T("inplace.read_field_failed"))
 		return
 	}
 	text := strings.TrimSpace(snap.SelectedText)
@@ -72,7 +73,7 @@ func (c *AppController) showSelectionQuickBar() {
 		text = fieldSelection(snap)
 	}
 	if text == "" {
-		c.ShowToastOrHUD("Select text first")
+		c.ShowToastOrHUD(i18n.T("inplace.select_text_first"))
 		return
 	}
 	anchor := host.CursorAnchor{}
@@ -116,7 +117,7 @@ func fieldSelection(s host.EditableFieldSnapshot) string {
 func (c *AppController) startInPlaceTransform(onlySelection bool, mode string) {
 	snap, err := c.captureEditable()
 	if err != nil {
-		c.ShowToastOrHUD("Could not read the focused text field")
+		c.ShowToastOrHUD(i18n.T("inplace.read_field_failed"))
 		return
 	}
 	if strings.TrimSpace(mode) == "" {
@@ -140,7 +141,7 @@ func (c *AppController) startInPlaceTransform(onlySelection bool, mode string) {
 	}
 	working = cappedRunes(working)
 	if working == "" {
-		c.ShowToastOrHUD("There is no text to transform")
+		c.ShowToastOrHUD(i18n.T("inplace.no_text"))
 		return
 	}
 	c.beginTransform(working, snap.Value, onlySelection, mode)
@@ -172,7 +173,7 @@ func (c *AppController) startSelectionAction(action, text string) {
 	switch strings.ToLower(strings.TrimSpace(action)) {
 	case "copy":
 		c.writeClipboardText(text)
-		c.ShowToastOrHUD("Copied")
+		c.ShowToastOrHUD(i18n.T("inplace.copied"))
 	case "optimize_prompt":
 		c.startInPlaceTransform(true, "optimize")
 	case "explain", "translate", "polish":
@@ -201,7 +202,7 @@ func (c *AppController) applyInPlaceResult(ts *inplaceSession, result string) {
 	c.mu.Unlock()
 	b := c.extendedBridge()
 	if b == nil {
-		c.ShowToastOrHUD("Focused text field is unavailable")
+		c.ShowToastOrHUD(i18n.T("inplace.field_unavailable"))
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), inplaceCaptureTimeout)
@@ -209,12 +210,12 @@ func (c *AppController) applyInPlaceResult(ts *inplaceSession, result string) {
 	cancel()
 	if err != nil {
 		c.writeClipboardText(result)
-		c.ShowToastOrHUD("Could not verify the field; result copied instead")
+		c.ShowToastOrHUD(i18n.T("inplace.verify_failed_copied"))
 		return
 	}
 	if current.Value != ts.original {
 		c.writeClipboardText(result)
-		c.ShowToastOrHUD("The field changed while transforming; result copied instead")
+		c.ShowToastOrHUD(i18n.T("inplace.field_changed_copied"))
 		return
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), inplaceCaptureTimeout)
@@ -222,7 +223,7 @@ func (c *AppController) applyInPlaceResult(ts *inplaceSession, result string) {
 	cancel()
 	if err != nil {
 		c.writeClipboardText(result)
-		c.ShowToastOrHUD("Could not replace the field; result copied instead")
+		c.ShowToastOrHUD(i18n.T("inplace.replace_failed_copied"))
 		return
 	}
 	c.recordPromptVersion("in_place_transform", "", ts.original, result, ts.mode)

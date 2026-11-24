@@ -23,7 +23,6 @@ func (a *AppController) MediaSearchView(c *ui.Context) {
 }
 
 func (a *AppController) renderMediaSearchSurface(c *ui.Context, theme *ui.Theme, allItems []engine.OmniboxItem) {
-	zh := i18n.IsChinese()
 	category := a.MediaSearchCategory()
 	query := a.MediaSearchQuery()
 	visible := FilterMediaItems(allItems, category, query)
@@ -50,8 +49,8 @@ func (a *AppController) renderMediaSearchSurface(c *ui.Context, theme *ui.Theme,
 			in := ui.TextInput(c.Key("media-search-input"), &q).
 				AutoFocus().
 				Search().
-				Placeholder(pickLang(zh, "搜索图片、视频、音频、文档、压缩包、文件路径…", "Search images, video, audio, docs, archives, file paths…")).
-				Label(pickLang(zh, "媒体搜索", "Media Search")).
+				Placeholder(i18n.T("media.search.placeholder")).
+				Label(i18n.T("media.search.label")).
 				FontSize(typeSearch).
 				Grow(1)
 
@@ -85,7 +84,7 @@ func (a *AppController) renderMediaSearchSurface(c *ui.Context, theme *ui.Theme,
 				active := category == e.Category
 				cnt := counts[e.Category]
 				pill := ui.ButtonBase(c).Key("media-filter:"+string(e.Category)).
-					Height(space24 + space2).Padding(space2, space8).Radius(radiusChip).FocusRing(false)
+					Height(space24+space2).Padding(space2, space8).Radius(radiusChip).FocusRing(false)
 				if active {
 					pill.Background(theme.Accent)
 				} else {
@@ -121,9 +120,9 @@ func (a *AppController) renderMediaSearchSurface(c *ui.Context, theme *ui.Theme,
 				if len(visible) == 0 {
 					kitCard(c, theme, cardInset, func() {
 						ui.Column(c).FillWidth().Gap(space6).Padding(space12, space8).Children(func() {
-							ui.Text(c, pickLang(zh, "当前筛选条件下没有匹配的媒体条目", "No media items match the active filter")).
+							ui.Text(c, i18n.T("media.search.empty_title")).
 								FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).Wrap()
-							ui.Text(c, pickLang(zh, "按 Esc 重置搜索或切换至「全部」查看全部六类媒体。", "Press Esc to reset search or switch to All.")).
+							ui.Text(c, i18n.T("media.search.empty_hint")).
 								FontSize(typeMeta).TextColor(theme.TextMuted).Wrap()
 						})
 					})
@@ -157,12 +156,12 @@ func (a *AppController) renderMediaSearchSurface(c *ui.Context, theme *ui.Theme,
 		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 			prefix := modPrefix()
 			renderFooterHints(c, theme, []footerHint{
-				{keys: "↑↓", caption: pickLang(zh, "选择", "Select")},
-				{keys: "Tab / " + prefix + "1–7", caption: pickLang(zh, "分类过滤", "Filter")},
-				{keys: "↵", caption: pickLang(zh, "粘贴", "Paste")},
-				{keys: prefix + "C", caption: pickLang(zh, "复制路径", "Copy Path")},
-				{keys: prefix + "R", caption: pickLang(zh, "重检", "Re-check")},
-				{keys: "esc", caption: pickLang(zh, "重置", "Reset")},
+				{keys: "↑↓", caption: i18n.T("media.footer.select")},
+				{keys: "Tab / " + prefix + "1–7", caption: i18n.T("media.footer.filter")},
+				{keys: "↵", caption: i18n.T("media.footer.paste")},
+				{keys: prefix + "C", caption: i18n.T("media.action.copy_path")},
+				{keys: prefix + "R", caption: i18n.T("media.action.recheck")},
+				{keys: "esc", caption: i18n.T("media.footer.reset")},
 			})
 			ui.Spacer(c)
 			if statusMsg != "" {
@@ -224,9 +223,9 @@ func (a *AppController) renderMediaSearchRow(
 				ui.Text(c, strings.Join(metaParts, " · ")).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 			})
 			if snap.Status == MediaProbeUnavailable {
-				kitStatusPill(c, theme, pickLang(i18n.IsChinese(), "不可用", "Unavailable"), chipWarning)
+				kitStatusPill(c, theme, i18n.T("media.status.unavailable"), chipWarning)
 			} else if snap.Status == MediaProbeLoading {
-				kitStatusPill(c, theme, pickLang(i18n.IsChinese(), "检测中", "Loading"), chipNeutral)
+				kitStatusPill(c, theme, i18n.T("media.status.loading"), chipNeutral)
 			}
 		})
 	})
@@ -237,10 +236,9 @@ func (a *AppController) renderMediaSearchRow(
 }
 
 func (a *AppController) renderMediaEmptyPreview(c *ui.Context, theme *ui.Theme) {
-	zh := i18n.IsChinese()
 	kitCard(c, theme, cardInset, func() {
 		ui.Column(c).FillWidth().Padding(space12, space10).Gap(space4).Children(func() {
-			ui.Text(c, pickLang(zh, "选择条目以异步加载预览", "Select an item for async preview")).
+			ui.Text(c, i18n.T("media.preview.empty_hint")).
 				FontSize(typeLabel).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
 		})
 	})
@@ -251,7 +249,6 @@ func (a *AppController) renderMediaAsyncPreviewPane(c *ui.Context, theme *ui.The
 		a.renderMediaEmptyPreview(c, theme)
 		return
 	}
-	zh := i18n.IsChinese()
 	m := *item.ClipboardMedia
 	cat := ClassifyClipboardMedia(m)
 	snap := a.MediaProbe(m)
@@ -270,10 +267,10 @@ func (a *AppController) renderMediaAsyncPreviewPane(c *ui.Context, theme *ui.The
 			ui.Text(c, MediaCategoryLabel(cat)+" · "+nonEmptyStr(snap.Mime, nonEmptyStr(strings.ToUpper(strings.TrimPrefix(snap.Extension, ".")), string(cat)))).
 				FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 		})
-		if ui.Button(c, pickLang(zh, "复制路径", "Copy Path")).Key("media-copy-path").Padding(space2, space8).Shrink(0).Clicked() {
+		if ui.Button(c, i18n.T("media.action.copy_path")).Key("media-copy-path").Padding(space2, space8).Shrink(0).Clicked() {
 			a.copySelectedMediaItem(item)
 		}
-		if ui.Button(c, pickLang(zh, "重检", "Re-check")).Key("media-recheck").Padding(space2, space8).Shrink(0).Clicked() {
+		if ui.Button(c, i18n.T("media.action.recheck")).Key("media-recheck").Padding(space2, space8).Shrink(0).Clicked() {
 			a.RetryMediaProbe(m)
 		}
 	})
@@ -295,7 +292,7 @@ func (a *AppController) renderMediaAsyncPreviewPane(c *ui.Context, theme *ui.The
 			case MediaProbeLoading:
 				ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Padding(space12, space4).Children(func() {
 					kitStatusDot(c, kitStateLoadingColor(theme), true)
-					ui.Text(c, pickLang(zh, "正在后台异步检测文件元数据与预览…", "Probing file metadata and preview asynchronously…")).
+					ui.Text(c, i18n.T("media.preview.probing")).
 						FontSize(typeLabel).TextColor(theme.TextMuted).Wrap().Grow(1)
 				})
 
@@ -311,7 +308,7 @@ func (a *AppController) renderMediaAsyncPreviewPane(c *ui.Context, theme *ui.The
 	// Real path readout at the bottom (never fabricated).
 	if path != "" {
 		ui.Column(c).FillWidth().Gap(space2).Children(func() {
-			ui.Text(c, pickLang(zh, "本地路径", "Local Path")).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+			ui.Text(c, i18n.T("media.preview.local_path")).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
 			ui.Text(c, path).FontSize(typeMeta).TextColor(theme.Text).Wrap()
 		})
 	}
@@ -323,27 +320,24 @@ func (a *AppController) renderMediaUnavailablePreviewBody(
 	m engine.ClipboardMedia,
 	snap MediaProbeSnapshot,
 ) {
-	zh := i18n.IsChinese()
 	ui.Box(c).FillWidth().Padding(space10, space12).Radius(radiusRow).
 		Background(theme.Warning.Alpha(alphaSubtle)).Border(space1, theme.Warning.Alpha(alphaHalf)).Children(func() {
 		ui.Column(c).FillWidth().Gap(space6).Children(func() {
 			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 				renderSemanticIcon(c, "exclamationmark.triangle", IconSize20, theme.Warning)
-				ui.Text(c, pickLang(zh, "媒体文件当前不可用", "Media preview unavailable")).
+				ui.Text(c, i18n.T("media.unavailable.title")).
 					FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Grow(1)
-				kitStatusPill(c, theme, pickLang(zh, "已失效", "Unavailable"), chipWarning)
+				kitStatusPill(c, theme, i18n.T("media.unavailable.badge"), chipWarning)
 			})
 			reason := strings.TrimSpace(snap.UnavailableReason)
 			if reason == "" {
 				reason = i18n.T("preview.media.unavailable")
 			}
-			ui.Text(c, pickLang(zh, "原因：", "Reason: ")+reason).FontSize(typeMeta).TextColor(theme.Text).Wrap()
-			ui.Text(c, pickLang(zh,
-				"Clavis 仅按路径引用原文件，不会伪造缺失内容。恢复原文件后可按 ⌘R 重新检测。",
-				"Clavis references files by path and never fabricates missing media. Restore the file and press ⌘R to re-check.")).
+			ui.Text(c, i18n.Tf("media.unavailable.reason", reason)).FontSize(typeMeta).TextColor(theme.Text).Wrap()
+			ui.Text(c, i18n.T("media.unavailable.hint")).
 				FontSize(typeMicro).TextColor(theme.TextMuted).Wrap()
 			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
-				if ui.Button(c, pickLang(zh, "立即重新检测", "Re-check File")).Key("media-unavailable-recheck").Padding(space2, space8).Clicked() {
+				if ui.Button(c, i18n.T("media.unavailable.recheck_btn")).Key("media-unavailable-recheck").Padding(space2, space8).Clicked() {
 					a.RetryMediaProbe(m)
 				}
 			})
@@ -357,8 +351,6 @@ func (a *AppController) renderMediaReadyPreviewBody(
 	m engine.ClipboardMedia,
 	snap MediaProbeSnapshot,
 ) {
-	zh := i18n.IsChinese()
-
 	switch snap.Category {
 	case MediaCategoryImage:
 		a.renderClipboardMediaToolbar(c, theme, m)
@@ -371,34 +363,32 @@ func (a *AppController) renderMediaReadyPreviewBody(
 			ui.Image(c, bmp).FillWidth().Height(mediaCanvasMinHeight).Fit(ui.Contain).Radius(radiusChip)
 		} else {
 			renderMediaContainerSummaryBox(c, theme, "film",
-				pickLang(zh, "视频容器已就绪（无缩略图缓存）", "Video file ready (no cached thumbnail)"),
-				pickLang(zh, "按 Enter 可将视频文件写入剪贴板粘贴，或按 ⌘C 复制路径。", "Press Enter to paste file reference or ⌘C to copy path."))
+				i18n.T("media.video.ready_title"),
+				i18n.T("media.video.ready_hint"))
 		}
 		renderMediaKeyValueGrid(c, theme, []mediaKV{
-			{pickLang(zh, "格式", "Container"), nonEmptyStr(strings.ToUpper(strings.TrimPrefix(snap.Extension, ".")), "VIDEO")},
-			{pickLang(zh, "时长", "Duration"), formatDurationOptional(snap.DurationMs, zh)},
-			{pickLang(zh, "分辨率", "Resolution"), formatDimensionsOptional(snap.Width, snap.Height, zh)},
-			{pickLang(zh, "大小", "Size"), humanBytes(snap.ByteSize)},
+			{i18n.T("media.meta.container"), nonEmptyStr(strings.ToUpper(strings.TrimPrefix(snap.Extension, ".")), "VIDEO")},
+			{i18n.T("media.meta.duration"), formatDurationOptional(snap.DurationMs)},
+			{i18n.T("media.meta.resolution"), formatDimensionsOptional(snap.Width, snap.Height)},
+			{i18n.T("media.meta.size"), humanBytes(snap.ByteSize)},
 		})
 
 	case MediaCategoryAudio:
 		renderMediaContainerSummaryBox(c, theme, "clock",
-			pickLang(zh, "音频文件已验证存在", "Audio file verified on disk"),
-			pickLang(zh, "仅展示真实文件与容器信息，不伪造波形或时长。", "Showing verified file metadata only; no synthetic waveform or duration."))
+			i18n.T("media.audio.ready_title"),
+			i18n.T("media.audio.ready_hint"))
 		renderMediaKeyValueGrid(c, theme, []mediaKV{
-			{pickLang(zh, "编码/扩展名", "Format"), nonEmptyStr(strings.ToUpper(strings.TrimPrefix(snap.Extension, ".")), "AUDIO")},
-			{pickLang(zh, "MIME", "MIME"), nonEmptyStr(snap.Mime, "audio/*")},
-			{pickLang(zh, "时长", "Duration"), formatDurationOptional(snap.DurationMs, zh)},
-			{pickLang(zh, "大小", "Size"), humanBytes(snap.ByteSize)},
+			{i18n.T("media.meta.format"), nonEmptyStr(strings.ToUpper(strings.TrimPrefix(snap.Extension, ".")), "AUDIO")},
+			{i18n.T("media.meta.mime"), nonEmptyStr(snap.Mime, "audio/*")},
+			{i18n.T("media.meta.duration"), formatDurationOptional(snap.DurationMs)},
+			{i18n.T("media.meta.size"), humanBytes(snap.ByteSize)},
 		})
 
 	case MediaCategoryDocument:
 		if snap.ExcerptRedacted {
-			kitWarningBanner(c, theme, pickLang(zh,
-				"检测到疑似密钥/凭据内容，文档预览已自动脱敏隐藏。",
-				"Possible credential/secret content detected; document text excerpt redacted."))
+			kitWarningBanner(c, theme, i18n.T("media.doc.redacted_warning"))
 		} else if len(snap.TextExcerptLines) > 0 {
-			ui.Text(c, pickLang(zh, "文档真实片段预览", "Verified Document Excerpt")).
+			ui.Text(c, i18n.T("media.doc.excerpt_title")).
 				FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
 			joined := strings.Join(snap.TextExcerptLines, "\n")
 			ui.Box(c).FillWidth().Padding(space8, space10).Radius(radiusChip).
@@ -422,21 +412,19 @@ func (a *AppController) renderMediaReadyPreviewBody(
 			})
 		} else {
 			renderMediaContainerSummaryBox(c, theme, "doc.text",
-				pickLang(zh, "二进制文档已验证存在", "Binary document verified on disk"),
-				pickLang(zh, "不伪造 PDF/Office 文本内容，可直接粘贴或复制路径。", "Binary PDF/Office content is never fabricated; paste or copy path directly."))
+				i18n.T("media.doc.binary_title"),
+				i18n.T("media.doc.binary_hint"))
 		}
 		renderMediaKeyValueGrid(c, theme, []mediaKV{
-			{pickLang(zh, "文档类型", "Type"), nonEmptyStr(strings.ToUpper(strings.TrimPrefix(snap.Extension, ".")), "DOC")},
-			{pickLang(zh, "大小", "Size"), humanBytes(snap.ByteSize)},
+			{i18n.T("media.meta.doc_type"), nonEmptyStr(strings.ToUpper(strings.TrimPrefix(snap.Extension, ".")), "DOC")},
+			{i18n.T("media.meta.size"), humanBytes(snap.ByteSize)},
 		})
 
 	case MediaCategoryArchive:
 		if snap.ArchiveEntryCount > 0 {
 			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 				renderSemanticIcon(c, "doc.on.doc", IconSize16, theme.Accent)
-				ui.Text(c, pickLang(zh,
-					fmt.Sprintf("压缩包目录清单（共 %d 项，解压约 %s，未解压磁盘）", snap.ArchiveEntryCount, humanBytes(snap.ArchiveTotalBytes)),
-					fmt.Sprintf("Archive contents (%d entries, %s uncompressed, read-only)", snap.ArchiveEntryCount, humanBytes(snap.ArchiveTotalBytes)))).
+				ui.Text(c, i18n.Tf("media.archive.contents_header", snap.ArchiveEntryCount, humanBytes(snap.ArchiveTotalBytes))).
 					FontSize(typeMeta).FontWeight(600).TextColor(theme.Text).Wrap().Grow(1)
 			})
 			ui.Box(c).FillWidth().Padding(space8, space10).Radius(radiusChip).
@@ -446,22 +434,20 @@ func (a *AppController) renderMediaReadyPreviewBody(
 						ui.Text(c, "• "+name).FontSize(typeMeta).TextColor(theme.Text).SingleLine()
 					}
 					if snap.ArchiveEntryCount > len(snap.ArchiveEntries) {
-						ui.Text(c, pickLang(zh,
-							fmt.Sprintf("… 另有 %d 个条目", snap.ArchiveEntryCount-len(snap.ArchiveEntries)),
-							fmt.Sprintf("… and %d more entries", snap.ArchiveEntryCount-len(snap.ArchiveEntries)))).
+						ui.Text(c, i18n.Tf("media.archive.more_entries", snap.ArchiveEntryCount-len(snap.ArchiveEntries))).
 							FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 					}
 				})
 			})
 		} else {
 			renderMediaContainerSummaryBox(c, theme, "doc.on.doc",
-				pickLang(zh, "压缩包文件已验证存在", "Archive container verified on disk"),
-				pickLang(zh, "仅检查容器元信息，不自动解压。", "Container metadata verified without extracting."))
+				i18n.T("media.archive.ready_title"),
+				i18n.T("media.archive.ready_hint"))
 		}
 
 	default:
 		if snap.IsDir && len(snap.DirEntries) > 0 {
-			ui.Text(c, pickLang(zh, "目录真实子项", "Directory Contents")).
+			ui.Text(c, i18n.T("media.dir.contents_title")).
 				FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
 			ui.Box(c).FillWidth().Padding(space8, space10).Radius(radiusChip).
 				Background(theme.Surface).Border(space1, hairline(theme)).Children(func() {
@@ -473,12 +459,12 @@ func (a *AppController) renderMediaReadyPreviewBody(
 			})
 		} else {
 			renderMediaContainerSummaryBox(c, theme, "folder",
-				pickLang(zh, "通用文件已验证存在", "Generic file verified on disk"),
-				pickLang(zh, "支持粘贴文件引用、复制路径或复制脱敏元数据。", "Ready to paste file reference, copy path, or inspect metadata."))
+				i18n.T("media.file.ready_title"),
+				i18n.T("media.file.ready_hint"))
 		}
 		renderMediaKeyValueGrid(c, theme, []mediaKV{
-			{pickLang(zh, "扩展名", "Extension"), nonEmptyStr(strings.ToUpper(strings.TrimPrefix(snap.Extension, ".")), pickLang(zh, "无", "none"))},
-			{pickLang(zh, "大小", "Size"), humanBytes(snap.ByteSize)},
+			{i18n.T("media.meta.extension"), nonEmptyStr(strings.ToUpper(strings.TrimPrefix(snap.Extension, ".")), i18n.T("media.meta.none"))},
+			{i18n.T("media.meta.size"), humanBytes(snap.ByteSize)},
 		})
 	}
 }
@@ -531,17 +517,17 @@ func buildMediaPreviewMetaChips(m engine.ClipboardMedia, snap MediaProbeSnapshot
 	return out
 }
 
-func formatDurationOptional(ms int64, zh bool) string {
+func formatDurationOptional(ms int64) string {
 	if ms <= 0 {
-		return pickLang(zh, "未知", "unknown")
+		return i18n.T("media.meta.unknown")
 	}
 	s := ms / 1000
 	return fmt.Sprintf("%d:%02d", s/60, s%60)
 }
 
-func formatDimensionsOptional(w, h int, zh bool) string {
+func formatDimensionsOptional(w, h int) string {
 	if w <= 0 || h <= 0 {
-		return pickLang(zh, "未知", "unknown")
+		return i18n.T("media.meta.unknown")
 	}
 	return fmt.Sprintf("%d×%d", w, h)
 }

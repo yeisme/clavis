@@ -178,7 +178,7 @@ func selectionBarView(
 			}
 		}
 		if len(p.Actions) == 0 {
-			ui.Text(c, "No actions").FontSize(typeLabel).TextColor(secondaryInk(theme)).SingleLine()
+			ui.Text(c, i18n.T("selection_bar.no_actions")).FontSize(typeLabel).TextColor(secondaryInk(theme)).SingleLine()
 		}
 	})
 }
