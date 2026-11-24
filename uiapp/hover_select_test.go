@@ -86,6 +86,59 @@ func TestOmniboxHoverDoesNotUndoArrowKeys(t *testing.T) {
 	}
 }
 
+func TestOmniboxKeyboardNavigationIgnoresRestingPointerAcrossScroll(t *testing.T) {
+	f := newInteractionFixture(t, nil)
+	for i := 0; i < 16; i++ {
+		f.record(t, "scroll-row-"+string(rune('a'+i)))
+	}
+	f.ctrl.OpenOmnibox(config.TabClipboard, "")
+	tt := f.omniboxTester(t)
+	items := f.ctrl.State().OmniboxItems
+	if len(items) < 13 {
+		t.Fatalf("expected enough rows to cross the viewport, got %d", len(items))
+	}
+	first, ok := tt.Find(items[0].Title)
+	if !ok {
+		t.Fatalf("first row %q not found", items[0].Title)
+	}
+	tt.Move(first.X+first.W/2, first.Y+first.H/2)
+	tt.Frame()
+	waitUntil(t, 2*time.Second, func() bool { return f.ctrl.State().SelectedIndex == 0 }, "hover selects first row")
+
+	for want := 1; want <= 12; want++ {
+		tt.Key(0, ui.KeyDown)
+		tt.Frame()
+		if got := f.ctrl.State().SelectedIndex; got != want {
+			t.Fatalf("step %d selected index = %d, want %d", want, got, want)
+		}
+	}
+	if got := f.ctrl.State().SelectedIndex; got != 12 {
+		t.Fatalf("resting pointer bounced selection to %d, want 12", got)
+	}
+}
+
+func TestOmniboxHoverRearmsAfterTwoPointPointerMove(t *testing.T) {
+	f := newInteractionFixture(t, nil)
+	f.record(t, "rearm-a", "rearm-b", "rearm-c")
+	f.ctrl.OpenOmnibox(config.TabClipboard, "")
+	f.ctrl.mu.Lock()
+	f.ctrl.uiState.lastPointerPos = ui.Point{X: 120, Y: 280}
+	f.ctrl.uiState.pointerPosKnown = true
+	f.ctrl.mu.Unlock()
+	f.ctrl.Dispatch(engine.Event{Type: engine.EventSelectNext})
+	if got := f.ctrl.State().SelectedIndex; got != 1 {
+		t.Fatalf("keyboard navigation selected index = %d, want 1", got)
+	}
+	f.ctrl.hoverSelect(0, ui.Point{X: 121, Y: 280})
+	if got := f.ctrl.State().SelectedIndex; got != 1 {
+		t.Fatalf("one-point pointer move reselected index %d, want 1", got)
+	}
+	f.ctrl.hoverSelect(2, ui.Point{X: 122, Y: 280})
+	if got := f.ctrl.State().SelectedIndex; got != 2 {
+		t.Fatalf("two-point pointer move selected index %d, want 2", got)
+	}
+}
+
 // TestOmniboxClickConfirmsHoveredRow checks that the click path still confirms
 // only the row the pointer is on.
 func TestOmniboxClickConfirmsHoveredRow(t *testing.T) {
