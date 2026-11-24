@@ -306,103 +306,8 @@ func (a *AppController) renderLeaderTitle(c *ui.Context, theme *ui.Theme, state 
 	})
 }
 
-func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state engine.State) {
-	container := ui.Column(c).
-		Key("leader-view").
-		Label("leader-view").
-		Bind(&a.uiState.leaderHandle).
-		Focusable().
-		AutoFocus().
-		FocusRing(false).
-		FillWidth().
-		Grow(1).
-		Padding(space0, space14).
-		Gap(space0)
+// renderLeaderView and handleLeaderInput live in leader_dashboard_view.go.
 
-	if a.uiState.lastPhase != engine.PhaseLeader || !a.uiState.leaderHandle.Focused(c) {
-		a.uiState.leaderHandle.RequestFocus(c)
-	}
-
-	container.HandleInput(func(ev ui.InputEvent) bool {
-		return a.handleLeaderInput(ev)
-	})
-
-	container.Children(func() {
-		ui.Scroll(c).FillWidth().Grow(1).Children(func() {
-			if len(state.LeaderNodes) == 0 {
-				ui.Box(c).FillWidth().Padding(space24).Center().Children(func() {
-					ui.Text(c, i18n.T("leader.empty")).TextColor(theme.TextMuted)
-				})
-				return
-			}
-			// One action per row, not a 2x2 card grid. Raycast, Linear, Notion and VS Code all
-			// present command entries as a scannable vertical list, and VS Code's own UX guide
-			// requires clear names with the shortcut shown as supporting information. A grid also
-			// forced four visual weights (keycap, icon, label, group count) into one row of a
-			// 180pt card. See docs/design/leader-panel-visual-research.md §最小改动清单 (1).
-			ui.Column(c).FillWidth().Padding(space6, space0).Gap(float32(leaderGridGap)).Children(func() {
-				for _, node := range state.LeaderNodes {
-					n := node
-					isGroup := n.Action.Type == config.ActionGroup
-					clicked := false
-					button := ui.ButtonBase(c).
-						Key("leader-row:"+n.Key).
-						Label("leader-row:"+n.Key).
-						FillWidth().
-						Height(float32(leaderCardHeight)).
-						Padding(space0, space12).
-						Radius(leaderRowRadius).
-						FocusRing(false)
-					if button.Hovered() {
-						button.Background(leaderSelectionFill(theme))
-						button.Draw(func(p *ui.Painter, r ui.Rect) {
-							p.Fill(ui.Rect{X: r.X, Y: r.Y, W: rowSelectionBarWidth, H: r.H}, leaderSelectionBar(), 0)
-						})
-					}
-					button.Children(func() {
-						ui.Row(c).FillWidth().Gap(space10).AlignItems(ui.Center).Children(func() {
-							leaderKeycap(c, theme, n.Key)
-							renderSemanticIcon(c, n.Icon, IconSize16, theme.TextMuted)
-							ui.Text(c, i18n.DisplayLabel(n.Label)).FontSize(typeBody).FontWeight(500).TextColor(theme.Text).SingleLine().Grow(1).Shrink(1)
-							if isGroup {
-								ui.Text(c, strconv.Itoa(len(n.Action.Children))).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
-								renderSemanticIcon(c, "chevron.right", 12, theme.TextMuted)
-							}
-						})
-					})
-					clicked = button.Clicked()
-
-					if clicked {
-						a.Dispatch(engine.Event{Type: engine.EventLeaderKeyPress, Key: n.Key})
-						a.uiState.leaderHandle.RequestFocus(c)
-					}
-				}
-			})
-		})
-
-		ui.Divider(c)
-		ui.Row(c).FillWidth().Height(float32(leaderFooterHeight)).Gap(space12).AlignItems(ui.Center).Children(func() {
-			keyHint(c, theme, "a–z", i18n.T("leader.hint.trigger"), keyToneNeutral)
-			keyHint(c, theme, "/", i18n.T("leader.hint.search"), keyToneNeutral)
-			// ⌫ goes up a level only inside a group; at the top it closes the
-			// panel like esc, so "Back" there promised something it did not do.
-			if len(state.LeaderPath) > 0 {
-				keyHint(c, theme, "⌫", i18n.T("leader.hint.back"), keyToneNeutral)
-			}
-			keyHint(c, theme, "esc", i18n.T("leader.hint.close"), keyToneNeutral)
-			ui.Spacer(c)
-			// While the Leader holds the temporary ASCII lock, say so: it is
-			// why the keys type letters even though a Chinese IME was active.
-			// A status, not an action: neutral, like the IME pill's layer state.
-			if a.asciiLockedForCapsule() {
-				chip(c, theme, "lock.fill", i18n.T("leader.ascii_locked"), chipNeutral)
-			}
-		})
-	})
-}
-
-// leaderKeycap is the Leader menu's mnemonic key: a larger accent keycap, the
-// one thing to press on each card.
 // leaderKeycap renders the letter that triggers a leader node. Neutral on purpose: a 24px
 // square carrying an accent fill, an accent border, an accent shadow and accent text stacked
 // four layers of the same hue, which read as "washed out blue" and out-shouted the label it was
@@ -410,44 +315,6 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 // matches kitKeycap's quiet tone, which is the established neutral keycap in the design kit.
 func leaderKeycap(c *ui.Context, theme *ui.Theme, key string) {
 	kitKeycap(c, theme, key, keyToneQuiet)
-}
-
-func (a *AppController) handleLeaderInput(ev ui.InputEvent) bool {
-	switch ev.Kind {
-	case ui.InputKeyDown:
-		if ev.Key == ui.KeyEscape && ev.Mods == 0 {
-			a.uiState.suppressNextLeaderText = ""
-			a.Dispatch(engine.Event{Type: engine.EventEscape})
-			return true
-		}
-		if ev.Key == ui.KeyBackspace && ev.Mods == 0 {
-			a.uiState.suppressNextLeaderText = ""
-			a.Dispatch(engine.Event{Type: engine.EventBackspace})
-			return true
-		}
-		if keyStr, ok := leaderKeyString(ev.Key, ev.Mods); ok {
-			a.uiState.suppressNextLeaderText = keyStr
-			a.Dispatch(engine.Event{Type: engine.EventLeaderKeyPress, Key: keyStr})
-			return true
-		}
-	case ui.InputKeyUp:
-		a.uiState.suppressNextLeaderText = ""
-	case ui.InputText:
-		if ev.Text == "" {
-			return false
-		}
-		if a.uiState.suppressNextLeaderText != "" && strings.EqualFold(ev.Text, a.uiState.suppressNextLeaderText) {
-			a.uiState.suppressNextLeaderText = ""
-			return true
-		}
-		a.uiState.suppressNextLeaderText = ""
-		r, _ := utf8.DecodeRuneInString(ev.Text)
-		if r != utf8.RuneError {
-			a.Dispatch(engine.Event{Type: engine.EventLeaderKeyPress, Key: string(r)})
-			return true
-		}
-	}
-	return false
 }
 
 func (a *AppController) renderOmniboxView(
@@ -1482,43 +1349,19 @@ func (a *AppController) renderHUDView(c *ui.Context, theme *ui.Theme, state engi
 }
 
 func omniboxTabLabel(tab config.CapsuleTab) string {
-	switch tab {
-	case config.TabActions:
-		return i18n.T("omnibox.tab.actions")
-	case config.TabClipboard:
-		return i18n.T("omnibox.tab.clipboard")
-	case config.TabSnippets:
-		return i18n.T("omnibox.tab.snippets")
-	case config.TabAI:
-		return i18n.T("omnibox.tab.ai")
-	case config.TabGlossary:
-		return i18n.T("omnibox.tab.glossary")
-	case config.TabAgent:
-		return "Agent"
-	default:
-		return string(tab)
+	if spec, ok := omniboxTabSpecFor(tab); ok {
+		return spec.LabelFunc()
 	}
+	return string(tab)
 }
 
 // omniboxTabIcon maps a tab to its semantic icon for tab bars, empty
 // states and switch items.
 func omniboxTabIcon(tab config.CapsuleTab) string {
-	switch tab {
-	case config.TabActions:
-		return "bolt"
-	case config.TabClipboard:
-		return "doc.on.clipboard"
-	case config.TabSnippets:
-		return "text.badge.plus"
-	case config.TabAI:
-		return "sparkles"
-	case config.TabGlossary:
-		return "character.book.closed"
-	case config.TabAgent:
-		return "person.crop.circle"
-	default:
-		return "command"
+	if spec, ok := omniboxTabSpecFor(tab); ok {
+		return spec.Icon
 	}
+	return "command"
 }
 
 func omniboxPlaceholder(tab config.CapsuleTab) string {

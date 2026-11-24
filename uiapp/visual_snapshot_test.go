@@ -115,7 +115,30 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, m
 		m.Appearance.Language = string(lang)
 	})
 	appearance := f.ctrl.Config().Main.Appearance
-	ctx := &engine.CapsuleContext{AppName: "Visual Studio Code", SelectedText: "func main() {}"}
+	ctx := &engine.CapsuleContext{
+		AppName:          "Visual Studio Code",
+		SelectedText:     "func main() {}",
+		ClipboardPreview: "go test ./uiapp/... -count=1",
+	}
+
+	// Seed deterministic real Agent session data on f.ctrl so 01-leader renders
+	// live System Status and Recent Activity across classic/liquid_glass/spatial_3d.
+	f.ctrl.agentMu.Lock()
+	f.ctrl.agentRefreshStarted = true
+	f.ctrl.agentSessions = []agentsession.Session{
+		{
+			ID:             "dsh-leader-01",
+			Provider:       "dsh",
+			Title:          "AI 交互中心五态改写验收",
+			Status:         agentsession.StatusWaiting,
+			PendingReview:  true,
+			LastActivityAt: snapNow.Add(-4 * time.Minute),
+			LastMessage:    "已完成 5 态渲染快照与 IME 回归测试，等待验收",
+		},
+	}
+	f.ctrl.agentDiagnostics = nil
+	setAgentOperationResult(f.ctrl, host.OperationResult{State: host.StateReady, ObservedAt: snapNow})
+	f.ctrl.agentMu.Unlock()
 
 	shoot := func(name string, view func(c *ui.Context), w, h int, scale float32, drive func(tt *ui.Tester)) {
 		t.Helper()
