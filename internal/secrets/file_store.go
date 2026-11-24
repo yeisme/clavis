@@ -53,62 +53,57 @@ func DefaultKeysPath(configDir string) string {
 	return filepath.Join(configDir, "ai-keys.toml")
 }
 
-// load reads and parses the file once. A missing file is not an error: it means no keys are
-// stored yet, which is the normal first-run state.
-func (s *FileStore) load() map[string]string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// loadLocked reads and parses the file once. Caller must hold s.mu.
+// A missing file is not an error: it means no keys are stored yet, which is the normal first-run state.
+func (s *FileStore) loadLocked() {
 	if s.cache != nil || s.readErr != nil {
-		return s.cache
+		return
 	}
 	s.cache = map[string]string{}
 	if strings.TrimSpace(s.Path) == "" {
 		s.readErr = errors.New("secrets: keys file path is empty")
-		return s.cache
+		return
 	}
 	info, err := os.Stat(s.Path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return s.cache
+			return
 		}
 		s.readErr = err
-		return s.cache
+		return
 	}
 	// Refuse a file other users can read. Failing loudly beats quietly leaking a key to the
 	// whole machine.
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		s.readErr = fmt.Errorf("secrets: %s is mode %04o, want 0600 (run: chmod 600 %s)",
 			s.Path, perm, s.Path)
-		return s.cache
+		return
 	}
 	raw, err := os.ReadFile(s.Path)
 	if err != nil {
 		s.readErr = err
-		return s.cache
+		return
 	}
 	tbl, err := toml.Parse(string(raw))
 	if err != nil {
 		s.readErr = fmt.Errorf("secrets: parse %s: %w", s.Path, err)
-		return s.cache
+		return
 	}
 	section, ok := tbl.Get("keys")
 	if !ok {
-		return s.cache
+		return
 	}
 	kv, ok := section.AsTable()
 	if !ok {
 		s.readErr = fmt.Errorf("secrets: %s: [keys] must be a table", s.Path)
-		return s.cache
+		return
 	}
 	s.collectKeys(kv, "")
-	return s.cache
 }
 
-// flush writes the cache back atomically with 0600 from the first byte, so the key is never
-// briefly world-readable.
-func (s *FileStore) flush() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// flushLocked writes the cache back atomically with 0600 from the first byte, so the key is never
+// briefly world-readable. Caller must hold s.mu.
+func (s *FileStore) flushLocked() error {
 	if strings.TrimSpace(s.Path) == "" {
 		return errors.New("secrets: keys file path is empty")
 	}
@@ -141,6 +136,10 @@ func (s *FileStore) flush() error {
 		return err
 	}
 	if _, err := tmp.WriteString(toml.Encode(tbl)); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -183,11 +182,13 @@ func (s *FileStore) ReadKey(account string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	keys := s.load()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
 	if s.readErr != nil {
 		return "", s.readErr
 	}
-	if v, ok := keys[acct]; ok && v != "" {
+	if v, ok := s.cache[acct]; ok && v != "" {
 		return v, nil
 	}
 	return "", ErrSecretNotFound
@@ -202,18 +203,26 @@ func (s *FileStore) SaveKey(account string, apiKey string) error {
 	if trimmed == "" {
 		return errors.New("secrets: API key cannot be empty")
 	}
-	s.load() // populate the cache before mutating it
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked() // populate the cache before mutating it
 	if s.readErr != nil {
 		return s.readErr
 	}
-	s.mu.Lock()
 	if s.cache == nil {
 		s.cache = map[string]string{}
 	}
+	prevVal, existed := s.cache[acct]
 	s.cache[acct] = trimmed
-	s.readErr = nil
-	s.mu.Unlock()
-	return s.flush()
+	if err := s.flushLocked(); err != nil {
+		if existed {
+			s.cache[acct] = prevVal
+		} else {
+			delete(s.cache, acct)
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *FileStore) DeleteKey(account string) error {
@@ -221,17 +230,24 @@ func (s *FileStore) DeleteKey(account string) error {
 	if err != nil {
 		return err
 	}
-	s.load()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
 	if s.readErr != nil {
 		return s.readErr
 	}
-	s.mu.Lock()
 	if s.cache == nil {
 		s.cache = map[string]string{}
 	}
+	prevVal, existed := s.cache[acct]
 	delete(s.cache, acct)
-	s.mu.Unlock()
-	return s.flush()
+	if err := s.flushLocked(); err != nil {
+		if existed {
+			s.cache[acct] = prevVal
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *FileStore) ResolveAPIKey(account string) (string, error) {
@@ -278,8 +294,8 @@ func (s *FileStore) ResolveAPIKeySourceWithEnv(account string, envVar string) (A
 
 // Err returns the load error, if the keys file exists but cannot be used.
 func (s *FileStore) Err() error {
-	s.load()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.loadLocked()
 	return s.readErr
 }

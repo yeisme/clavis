@@ -1940,6 +1940,49 @@ func writeDarwinPasteboardString(text string) (int64, bool) {
 	return cc, ok
 }
 
+// WriteConcealedClipboard writes text to the macOS general pasteboard tagged with
+// org.nspasteboard.ConcealedType and org.nspasteboard.TransientType markers so
+// clipboard managers (including Clavis's own poller) exclude the secret.
+func (b *darwinBridge) WriteConcealedClipboard(text string) (int64, error) {
+	if err := initDarwin(); err != nil {
+		return 0, err
+	}
+	prevCC := b.ClipboardSequence()
+	b.IgnoreSelfPasteboardChange(prevCC + 1)
+	writtenCC, ok := writeDarwinConcealedPasteboardString(text)
+	if !ok {
+		return 0, errors.New("darwin: failed to write concealed NSPasteboard string")
+	}
+	b.IgnoreSelfPasteboardChange(writtenCC)
+	return writtenCC, nil
+}
+
+func writeDarwinConcealedPasteboardString(text string) (int64, bool) {
+	var cc int64
+	var ok bool
+	withAutoreleasePool(func() {
+		pb := cls("NSPasteboard").Send(sel("generalPasteboard"))
+		if pb == 0 || nsPasteboardTypeString == 0 {
+			return
+		}
+		pb.Send(sel("clearContents"))
+		pbItem := cls("NSPasteboardItem").Send(sel("alloc")).Send(sel("init"))
+		if pbItem == 0 {
+			return
+		}
+		defer pbItem.Send(sel("release"))
+		pbItem.Send(sel("setString:forType:"), nsString(text), nsPasteboardTypeString)
+		emptyData := cls("NSData").Send(sel("data"))
+		pbItem.Send(sel("setData:forType:"), emptyData, nsString("org.nspasteboard.ConcealedType"))
+		pbItem.Send(sel("setData:forType:"), emptyData, nsString("org.nspasteboard.TransientType"))
+		arr := cls("NSMutableArray").Send(sel("arrayWithCapacity:"), uint(1))
+		arr.Send(sel("addObject:"), pbItem)
+		ok = objc.Send[bool](pb, sel("writeObjects:"), arr)
+		cc = int64(objc.Send[int](pb, sel("changeCount")))
+	})
+	return cc, ok
+}
+
 func (b *darwinBridge) OpenApp(ctx context.Context, target string) error {
 	if err := ctx.Err(); err != nil {
 		return err

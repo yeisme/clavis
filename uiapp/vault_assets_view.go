@@ -19,9 +19,24 @@ import (
 )
 
 type hostVaultClipboard struct {
-	ctrl  *AppController
-	mu    sync.Mutex
-	token string
+	ctrl         *AppController
+	mu           sync.Mutex
+	token        string
+	expectedHash string
+	expectedSeq  int64
+	hasSeq       bool
+}
+
+func (a *hostVaultClipboard) invalidate() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.token = ""
+	a.expectedHash = ""
+	a.expectedSeq = 0
+	a.hasSeq = false
+	a.mu.Unlock()
 }
 
 func (a *hostVaultClipboard) Write(value string) (string, error) {
@@ -42,16 +57,33 @@ func (a *hostVaultClipboard) Write(value string) (string, error) {
 	if st.recentSecretHashes == nil {
 		st.recentSecretHashes = make(map[string]time.Time)
 	}
-	st.recentSecretHashes[hash] = now.Add(secrets.MaxSecretCopyTTL + 5*time.Second)
+	st.recentSecretHashes[hash] = now.Add(secrets.MaxSecretCopyTTL + 15*time.Second)
 	st.mu.Unlock()
 
-	if err := a.ctrl.writeClipboardText(value); err != nil {
+	expectedSeq, hasSeq, err := a.ctrl.writeSensitiveClipboard(value)
+	if err != nil {
 		return "", err
 	}
 
 	a.mu.Lock()
 	a.token = token
+	a.expectedHash = hash
+	a.expectedSeq = expectedSeq
+	a.hasSeq = hasSeq
 	a.mu.Unlock()
+
+	st.mu.Lock()
+	if st.sensitiveTimer != nil {
+		st.sensitiveTimer.Stop()
+		st.sensitiveTimer = nil
+	}
+	st.sensitiveGen++
+	st.sensitiveHash = hash
+	st.sensitiveSeq = expectedSeq
+	st.sensitiveHasSeq = hasSeq
+	st.sensitiveVaultToken = token
+	st.mu.Unlock()
+
 	return token, nil
 }
 
@@ -61,22 +93,57 @@ func (a *hostVaultClipboard) ClearIfOwned(token string) error {
 	}
 	a.mu.Lock()
 	owned := a.token != "" && a.token == token
+	expectedHash := a.expectedHash
+	expectedSeq := a.expectedSeq
+	hasSeq := a.hasSeq
 	if owned {
 		a.token = ""
+		a.expectedHash = ""
+		a.expectedSeq = 0
+		a.hasSeq = false
 	}
 	a.mu.Unlock()
 	if !owned {
 		return secrets.ErrOwnershipLost
 	}
 
+	stillOwned := a.ctrl.clipboardStillOwned(expectedHash, expectedSeq, hasSeq)
+
 	st := a.ctrl.clipboardKeyManager()
 	st.mu.Lock()
 	hook := st.clearHook
-	st.mu.Unlock()
-	if hook != nil {
-		return hook()
+	if st.sensitiveVaultToken == token {
+		st.sensitiveActive = false
+		st.sensitiveHash = ""
+		st.sensitiveSeq = 0
+		st.sensitiveHasSeq = false
+		st.sensitiveLabel = ""
+		st.sensitiveExpiresAt = time.Time{}
+		st.sensitiveVaultToken = ""
+		st.sensitiveVaultClean = nil
 	}
-	return a.ctrl.writeClipboardText("")
+	st.mu.Unlock()
+
+	if !stillOwned {
+		skippedMsg := pickLang(i18n.IsChinese(), "剪贴板已被其他内容替换，已跳过自动清除", "Clipboard changed; skipped auto-clear")
+		a.ctrl.setClipboardActionStatus(skippedMsg, "")
+		a.ctrl.notifyClipboardKeyManagerRepaint()
+		return secrets.ErrOwnershipLost
+	}
+
+	var err error
+	if hook != nil {
+		err = hook()
+	} else {
+		err = a.ctrl.clearClipboardTextSafe()
+	}
+	if err != nil {
+		return err
+	}
+	clearedMsg := pickLang(i18n.IsChinese(), "已自动清除敏感剪贴板内容", "Auto-cleared sensitive clipboard content")
+	a.ctrl.setClipboardActionStatus(clearedMsg, "")
+	a.ctrl.notifyClipboardKeyManagerRepaint()
+	return nil
 }
 
 func (c *AppController) initSecretVault(custom *secrets.Vault) {
@@ -87,21 +154,40 @@ func (c *AppController) initSecretVault(custom *secrets.Vault) {
 	defer c.vaultMu.Unlock()
 
 	c.vaultAudit = &secrets.MemoryAuditSink{}
+	var cfgDir string
 	if c.ConfigStore != nil && strings.TrimSpace(c.ConfigStore.Directory()) != "" {
-		c.vaultMetaPath = filepath.Join(c.ConfigStore.Directory(), "vault_refs.json")
+		cfgDir = strings.TrimSpace(c.ConfigStore.Directory())
+		c.vaultMetaPath = filepath.Join(cfgDir, "vault_refs.json")
 	}
+	st := c.clipboardKeyManager()
 	if custom != nil {
 		c.vault = custom
+		st.mu.Lock()
+		st.vaultClipboard = nil
+		st.mu.Unlock()
 	} else {
-		store := c.SecretStore
-		if store == nil {
-			store = secrets.NewMemoryAPIKeyStore()
+		var valueStore secrets.SecretValueStore
+		useEncrypted := false
+		if cfgDir != "" {
+			switch c.SecretStore.(type) {
+			case nil, *secrets.LayeredStore, *secrets.FileStore:
+				useEncrypted = true
+			}
 		}
-		c.vault = secrets.NewVault(
-			secrets.NewLayeredSecretStore(store),
-			&hostVaultClipboard{ctrl: c},
-			c.vaultAudit,
-		)
+		if useEncrypted {
+			valueStore = secrets.NewEncryptedVaultStore(cfgDir, nil)
+		} else {
+			store := c.SecretStore
+			if store == nil {
+				store = secrets.NewMemoryAPIKeyStore()
+			}
+			valueStore = secrets.NewLayeredSecretStore(store)
+		}
+		vc := &hostVaultClipboard{ctrl: c}
+		st.mu.Lock()
+		st.vaultClipboard = vc
+		st.mu.Unlock()
+		c.vault = secrets.NewVault(valueStore, vc, c.vaultAudit)
 	}
 	c.loadVaultMetadataLocked()
 }
@@ -187,6 +273,7 @@ func (c *AppController) persistVaultMetadata() {
 func (c *AppController) VaultPutSecret(id, recordKey, label, kind, value string) (secrets.SecretRef, error) {
 	v := c.SecretVault()
 	ref := secrets.NewSecretRef(strings.TrimSpace(id), strings.TrimSpace(recordKey), strings.TrimSpace(label))
+	ref.Backend = "" // let Vault resolve backend based on active SecretValueStore
 	if strings.TrimSpace(kind) != "" {
 		ref.Kind = strings.TrimSpace(kind)
 	}
@@ -252,7 +339,9 @@ func (c *AppController) VaultCopyAs(actor, sessionID, secretRefID string) (secre
 		return receipt, err
 	}
 
-	meta, _ := v.Metadata(secretRefID)
+	trimmedRefID := strings.TrimSpace(secretRefID)
+	trimmedSession := strings.TrimSpace(sessionID)
+	meta, _ := v.Metadata(trimmedRefID)
 	label := strings.TrimSpace(meta.Label)
 	if label == "" {
 		label = strings.TrimSpace(meta.RecordKey)
@@ -261,20 +350,27 @@ func (c *AppController) VaultCopyAs(actor, sessionID, secretRefID string) (secre
 		label = "Vault Reference"
 	}
 
+	// Vault.Copy already owns the single TTL expiry timer; do NOT arm a second
+	// timer here. Sync Header TTL state while the receipt is still active.
+	curReceipt, rerr := v.Receipt(reqID, trimmedRefID, trimmedSession)
+	stillActive := rerr != nil || (curReceipt.State == secrets.CopyStateCopied || curReceipt.State == secrets.CopyStateDegraded)
+
 	st.mu.Lock()
 	if st.sensitiveTimer != nil {
 		st.sensitiveTimer.Stop()
+		st.sensitiveTimer = nil
 	}
-	st.sensitiveGen++
-	gen := st.sensitiveGen
-	st.sensitiveActive = true
-	st.sensitiveLabel = label
-	st.sensitiveTTL = ttl
-	st.sensitiveExpiresAt = receipt.ExpiresAt
-	st.sensitiveTimer = time.AfterFunc(ttl, func() {
-		_ = v.Cleanup(reqID, secretRefID, strings.TrimSpace(sessionID))
-		c.clearSensitiveClipboardForGen(gen)
-	})
+	// If hostVaultClipboard already ran ClearIfOwned before we took st.mu, its
+	// token was cleared and we must not reactivate the expired banner.
+	if stillActive && (st.vaultClipboard == nil || st.sensitiveVaultToken != "") {
+		st.sensitiveActive = true
+		st.sensitiveLabel = label
+		st.sensitiveTTL = ttl
+		st.sensitiveExpiresAt = receipt.ExpiresAt
+		st.sensitiveVaultClean = func() error {
+			return v.Cleanup(reqID, trimmedRefID, trimmedSession)
+		}
+	}
 	st.mu.Unlock()
 
 	okMsg := fmt.Sprintf("%s (%ds TTL)", i18n.T("hud.copied"), int(ttl.Seconds()))
@@ -291,7 +387,7 @@ func (c *AppController) VaultCopyAs(actor, sessionID, secretRefID string) (secre
 func (c *AppController) VaultRevoke(secretRefID string) error {
 	if err := c.SecretVault().Revoke(secretRefID); err != nil {
 		uiSt := vaultUIState(c)
-		kind, code, detail := classifyVaultFailure(secrets.CopyReceipt{ErrorCode: secrets.CopyErrorRefNotFound}, err, i18n.IsChinese())
+		kind, code, detail := classifyVaultFailure(secrets.CopyReceipt{Retryable: true}, err, i18n.IsChinese())
 		uiSt.mu.Lock()
 		uiSt.setStatusLocked(kind, code, detail)
 		uiSt.mu.Unlock()

@@ -1,9 +1,11 @@
 package secrets
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -216,5 +218,54 @@ func TestFileStoreReadsLegacyNestedDottedKeys(t *testing.T) {
 	got, err := fs.ReadKey("clavis.ai.magpie")
 	if err != nil || got != "v1" {
 		t.Fatalf("legacy nested read = %q, %v", got, err)
+	}
+}
+
+func TestFileStoreConcurrentReadSaveDeleteRace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ai-keys.toml")
+	fs := NewFileStore(path)
+	if err := fs.SaveKey("seed.key", "initial-value"); err != nil {
+		t.Fatalf("seed save: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	const workers = 12
+	const iters = 25
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			acct := fmt.Sprintf("clavis.ai.worker_%d", id%4)
+			for i := 0; i < iters; i++ {
+				switch (id + i) % 4 {
+				case 0:
+					if err := fs.SaveKey(acct, fmt.Sprintf("val-%d-%d", id, i)); err != nil {
+						t.Errorf("SaveKey(%s): %v", acct, err)
+					}
+				case 1:
+					if _, err := fs.ReadKey(acct); err != nil && err != ErrSecretNotFound {
+						t.Errorf("ReadKey(%s): %v", acct, err)
+					}
+				case 2:
+					if err := fs.DeleteKey(acct); err != nil {
+						t.Errorf("DeleteKey(%s): %v", acct, err)
+					}
+				case 3:
+					if _, err := fs.ReadKey("seed.key"); err != nil {
+						t.Errorf("ReadKey(seed.key): %v", err)
+					}
+					if err := fs.Err(); err != nil {
+						t.Errorf("Err(): %v", err)
+					}
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	fresh := NewFileStore(path)
+	if got, err := fresh.ReadKey("seed.key"); err != nil || got != "initial-value" {
+		t.Fatalf("post-race reload seed.key = %q, %v", got, err)
 	}
 }
