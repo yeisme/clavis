@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -47,6 +48,12 @@ const (
 	imePillOffsetX            = 8.0
 	imePillOffsetY            = 6.0
 	defaultPromptHistoryLimit = 500
+)
+
+var (
+	bgShutdownWaitTimeout      = 2 * time.Second
+	daemonTelemetryLogInterval = 5 * time.Minute
+	lookupUserFullNameFn       = lookupCurrentUserFullName
 )
 
 func main() {
@@ -180,33 +187,42 @@ type desktopApp struct {
 	annotateWin          *mygo.Window
 	selectionBar         *mygo.Window
 	selectionBarPayload  uiapp.SelectionBarPayload
-	tray                 *mygo.Tray
-	permMenuItem         *mygo.MenuItem
-	loginMenuItem        *mygo.MenuItem
-	trayLabelItems       map[string]*mygo.MenuItem
-	permKnown            bool
-	permStatus           host.PermissionStatus
-	permErr              error
-	permCaps             host.Capabilities
-	bridgeRunning        bool
-	shuttingDown         bool
-	bgWG                 sync.WaitGroup
-	fallbackAccelerators map[string]host.TriggerKind
-	sessionAnchor        *host.CursorAnchor
+	tray                     *mygo.Tray
+	permMenuItem             *mygo.MenuItem
+	healthMenuItem           *mygo.MenuItem
+	loginMenuItem            *mygo.MenuItem
+	trayLabelItems           map[string]*mygo.MenuItem
+	permKnown                bool
+	permStatus               host.PermissionStatus
+	permErr                  error
+	permCaps                 host.Capabilities
+	bridgeRunning            bool
+	shuttingDown             bool
+	bgCtx                    context.Context
+	bgCancel                 context.CancelFunc
+	bgWG                     sync.WaitGroup
+	fallbackAccelerators     map[string]host.TriggerKind
+	sessionAnchor            *host.CursorAnchor
 	// capsuleRevealed is set once the capsule is visibly on screen for the
 	// current session (after a Leader's reveal delay), and cleared when the
 	// window actually hides.
-	capsuleRevealed        bool
-	imePillLabel           string
-	imePillTimer           *time.Timer
-	imePillGen             atomic.Uint64
-	frecencyGen            atomic.Uint64
-	presentSeq             atomic.Uint64
-	hideSeq                atomic.Uint64
-	presentTransitionUntil atomic.Int64
-	lastPanelHideNano      atomic.Int64
-	shutdownOnce           sync.Once
-	quitting               atomic.Bool
+	capsuleRevealed          bool
+	imePillLabel             string
+	imePillTimer             *time.Timer
+	capsuleRevealTimer       *time.Timer
+	capsuleHideTimer         *time.Timer
+	imePillGen               atomic.Uint64
+	frecencyGen              atomic.Uint64
+	presentSeq               atomic.Uint64
+	hideSeq                  atomic.Uint64
+	presentTransitionUntil   atomic.Int64
+	lastPanelHideNano        atomic.Int64
+	lastTelemetryStatus      string
+	lastTelemetryCompactions uint64
+	lastTelemetrySelfHeals   uint64
+	lastTelemetryLogAt       time.Time
+	shutdownOnce             sync.Once
+	quitting                 atomic.Bool
 
 	// The first-run guide (onboarding.go) and the per-machine data
 	// directory that records it was done.
@@ -281,6 +297,49 @@ func newDesktopApp() *desktopApp {
 	return &desktopApp{}
 }
 
+// resolveCurrentUserFullName resolves the OS user's display name without spawning
+// macOS-only subprocesses on Linux or Windows. On darwin it tries `id -F` first
+// and falls back to os/user.Current().Name; on other platforms it uses
+// os/user.Current().Name directly.
+func resolveCurrentUserFullName(
+	ctx context.Context,
+	goos string,
+	runDarwinID func(context.Context) (string, error),
+	lookupCurrentUser func() (*user.User, error),
+) string {
+	if goos == "darwin" && runDarwinID != nil {
+		if out, err := runDarwinID(ctx); err == nil {
+			if name := strings.TrimSpace(out); name != "" {
+				return name
+			}
+		}
+	}
+	if lookupCurrentUser != nil {
+		if u, err := lookupCurrentUser(); err == nil && u != nil {
+			name := strings.TrimSpace(u.Name)
+			if comma := strings.IndexByte(name, ','); comma >= 0 {
+				name = strings.TrimSpace(name[:comma])
+			}
+			if name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+func lookupCurrentUserFullName(ctx context.Context) string {
+	return resolveCurrentUserFullName(
+		ctx,
+		runtime.GOOS,
+		func(c context.Context) (string, error) {
+			out, err := exec.CommandContext(c, "id", "-F").Output()
+			return string(out), err
+		},
+		user.Current,
+	)
+}
+
 // seedConfiguredUserWords loads pinned configured words once the learning store is ready.
 // The full-name lookup is best effort and never delays startup beyond its short timeout.
 func seedConfiguredUserWords(ctx context.Context, cfgStore *config.ConfigStore, cfg config.ClavisConfig, store *storage.LearningStore) bool {
@@ -293,25 +352,24 @@ func seedConfiguredUserWords(ctx context.Context, cfgStore *config.ConfigStore, 
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	name, err := exec.CommandContext(lookupCtx, "id", "-F").Output()
-	name = []byte(strings.TrimSpace(string(name)))
-	if err != nil || !storage.HasHanzi(string(name)) {
+	name := strings.TrimSpace(lookupUserFullNameFn(lookupCtx))
+	if !storage.HasHanzi(name) {
 		return false
 	}
-	if len(storage.InjectUserWords(lookupCtx, store, []string{string(name)})) > 0 {
+	if len(storage.InjectUserWords(lookupCtx, store, []string{name})) > 0 {
 		return false
 	}
 	updated := cfg.Main
 	updated.InputEngine.SeededFullName = true
 	seen := false
 	for _, word := range updated.InputEngine.UserWords {
-		if strings.TrimSpace(word) == string(name) {
+		if strings.TrimSpace(word) == name {
 			seen = true
 			break
 		}
 	}
 	if !seen {
-		updated.InputEngine.UserWords = append(updated.InputEngine.UserWords, string(name))
+		updated.InputEngine.UserWords = append(updated.InputEngine.UserWords, name)
 	}
 	if cfgStore != nil {
 		if err := cfgStore.SaveMain(updated); err != nil {
@@ -665,7 +723,7 @@ func (a *desktopApp) start() {
 			return err
 		})
 	}
-	sup.RegisterWatchdogProbe(daemon.NewBridgeWatchdogProbe(daemon.BridgeLivenessInput{
+	sup.RegisterWatchdogProbe(daemon.NewBridgeWatchdogProbeWithHeal(daemon.BridgeLivenessInput{
 		IsRunning: func() bool {
 			a.mu.Lock()
 			running := a.bridgeRunning
@@ -673,11 +731,15 @@ func (a *desktopApp) start() {
 			return running
 		},
 		TapRecoveryCount: hostBridge.TapRecoveryCount,
-	}))
+	}, a.healBridge, daemon.DefaultBridgeHealCooldown))
+	sup.SetOnHealthCheck(a.handleDaemonHealthSnapshot)
 
+	bgCtx, bgCancel := context.WithCancel(ctx)
 	a.mu.Lock()
 	a.ctx = ctx
 	a.cancel = cancel
+	a.bgCtx = bgCtx
+	a.bgCancel = bgCancel
 	a.cfgStore = cfgStore
 	a.sqliteStore = sqliteStore
 	a.learningStore = learningStore
@@ -740,7 +802,7 @@ func (a *desktopApp) start() {
 	a.goBG(func(bgCtx context.Context) { a.syncFrecency(bgCtx) })
 	a.goBG(func(bgCtx context.Context) { a.runClipboardPoller(bgCtx) })
 	a.goBG(a.watchPermissions)
-	go a.refreshPermissionsAsync()
+	a.goTrack(func(context.Context) { a.refreshPermissionsAsync() })
 	// The guide is also the permission flow. A machine that finished the guide without
 	// granting Accessibility/Input Monitoring would otherwise never be asked again: the
 	// marker says done, so every later launch is silent and the keyboard features stay
@@ -821,10 +883,18 @@ func (a *desktopApp) hasVisibleSurface(isVisible func(*mygo.Window) bool) bool {
 // Never do this while another Clavis surface is visible, because App.Hide
 // would hide that surface as a side effect.
 func (a *desktopApp) restorePreviousAppFocus() {
+	a.mu.Lock()
+	shuttingDown := a.shuttingDown
+	a.mu.Unlock()
+	if shuttingDown || a.quitting.Load() {
+		return
+	}
 	if a.hasVisibleSurface((*mygo.Window).IsVisible) {
 		return
 	}
-	mygo.App.Hide()
+	if mygo.App.IsReady() {
+		mygo.App.Hide()
+	}
 }
 
 func (a *desktopApp) finishOnboardingAndRestore() {
@@ -847,6 +917,11 @@ func (a *desktopApp) setupTray() {
 			a.openSettings(uiapp.SettingsTabPermissions)
 		},
 	}
+	telemetrySummary := a.daemonTelemetrySummary()
+	healthItem := &mygo.MenuItem{
+		Label:    "Daemon: " + telemetrySummary,
+		Disabled: true,
+	}
 	loginItem := &mygo.MenuItem{
 		Label:   i18n.T("tray.open_at_login"),
 		Type:    mygo.MenuItemCheckbox,
@@ -861,6 +936,7 @@ func (a *desktopApp) setupTray() {
 
 	menu := mygo.NewMenu([]*mygo.MenuItem{
 		permItem,
+		healthItem,
 		mygo.Separator(),
 		{
 			Label: i18n.T("tray.open_capsule"),
@@ -943,7 +1019,7 @@ func (a *desktopApp) setupTray() {
 		ID:             "clavis-tray",
 		Icon:           uiapp.GenerateTrayIconPNG(32),
 		IconIsTemplate: true,
-		ToolTip:        "Clavis",
+		ToolTip:        "Clavis · " + telemetrySummary,
 		Menu:           menu,
 	})
 	if err != nil {
@@ -953,8 +1029,160 @@ func (a *desktopApp) setupTray() {
 	a.mu.Lock()
 	a.tray = tray
 	a.permMenuItem = permItem
+	a.healthMenuItem = healthItem
 	a.loginMenuItem = loginItem
 	a.mu.Unlock()
+}
+
+func formatDaemonTelemetrySummary(snap daemon.HealthSnapshot) string {
+	status := snap.HealthStatus
+	if status == "" {
+		if snap.Healthy {
+			status = daemon.HealthStatusHealthy
+		} else {
+			status = daemon.HealthStatusStopped
+		}
+	}
+	return fmt.Sprintf(
+		"status=%s wpm=%.1f cpm=%.0f p50=%.0fus p99=%.0fus compactions=%d self_heals=%d mem=%.1fMB goroutines=%d",
+		status,
+		snap.CurrentWPM,
+		snap.CurrentCharsPerMinute,
+		snap.P50LatencyUs,
+		snap.P99LatencyUs,
+		snap.CompactionRuns,
+		snap.SelfHealCount,
+		snap.AllocMB,
+		snap.NumGoroutine,
+	)
+}
+
+func (a *desktopApp) daemonTelemetrySummary() string {
+	a.mu.Lock()
+	sup := a.supervisor
+	a.mu.Unlock()
+	if sup == nil {
+		return formatDaemonTelemetrySummary(daemon.HealthSnapshot{HealthStatus: daemon.HealthStatusStopped})
+	}
+	return formatDaemonTelemetrySummary(sup.Snapshot())
+}
+
+func (a *desktopApp) handleDaemonHealthSnapshot(snap daemon.HealthSnapshot) {
+	summary := formatDaemonTelemetrySummary(snap)
+	now := time.Now()
+
+	a.mu.Lock()
+	if a.shuttingDown {
+		a.mu.Unlock()
+		return
+	}
+	shouldLog := a.lastTelemetryLogAt.IsZero() ||
+		snap.HealthStatus != a.lastTelemetryStatus ||
+		snap.CompactionRuns != a.lastTelemetryCompactions ||
+		snap.SelfHealCount != a.lastTelemetrySelfHeals ||
+		now.Sub(a.lastTelemetryLogAt) >= daemonTelemetryLogInterval
+	if shouldLog {
+		a.lastTelemetryStatus = snap.HealthStatus
+		a.lastTelemetryCompactions = snap.CompactionRuns
+		a.lastTelemetrySelfHeals = snap.SelfHealCount
+		a.lastTelemetryLogAt = now
+	}
+	hasTray := a.tray != nil || a.healthMenuItem != nil
+	a.mu.Unlock()
+
+	if shouldLog {
+		fmt.Fprintf(os.Stderr, "Clavis daemon health: %s\n", summary)
+	}
+	if !hasTray || !mygo.App.IsReady() {
+		return
+	}
+	a.goTrack(func(ctx context.Context) {
+		if ctx.Err() != nil || !mygo.App.IsReady() {
+			return
+		}
+		mygo.RunOnMain(func() {
+			a.mu.Lock()
+			tray := a.tray
+			item := a.healthMenuItem
+			shuttingDown := a.shuttingDown
+			a.mu.Unlock()
+			if shuttingDown {
+				return
+			}
+			if tray != nil {
+				tray.SetToolTip("Clavis · " + summary)
+			}
+			if item != nil {
+				item.SetLabel("Daemon: " + summary)
+			}
+		})
+	})
+}
+
+// healBridge attempts a bounded restart of the host bridge when the watchdog
+// observes bridgeRunning == false. It passes the long-lived appCtx to ctrl.Start
+// so the restarted bridge is not canceled when healCtx's short deadline expires.
+func (a *desktopApp) healBridge(healCtx context.Context) error {
+	if healCtx != nil && healCtx.Err() != nil {
+		return healCtx.Err()
+	}
+	a.mu.Lock()
+	shuttingDown := a.shuttingDown
+	ctrl := a.controller
+	appCtx := a.ctx
+	running := a.bridgeRunning
+	a.mu.Unlock()
+	if shuttingDown || ctrl == nil || appCtx == nil || appCtx.Err() != nil {
+		return context.Canceled
+	}
+	if running {
+		return nil
+	}
+	if !a.bridgeStarting.CompareAndSwap(false, true) {
+		return nil
+	}
+	defer a.bridgeStarting.Store(false)
+
+	a.mu.Lock()
+	shuttingDown = a.shuttingDown
+	running = a.bridgeRunning
+	a.mu.Unlock()
+	if shuttingDown {
+		return context.Canceled
+	}
+	if running {
+		return nil
+	}
+
+	_ = ctrl.Stop()
+	if err := ctrl.Start(appCtx); err != nil {
+		fmt.Fprintf(os.Stderr, "Clavis watchdog bridge self-heal failed: %v\n", err)
+		return err
+	}
+	a.mu.Lock()
+	if a.shuttingDown {
+		a.mu.Unlock()
+		_ = ctrl.Stop()
+		return context.Canceled
+	}
+	a.bridgeRunning = true
+	a.mu.Unlock()
+
+	trigger := ctrl.Config().Main.Trigger
+	if mygo.App.IsReady() {
+		a.goTrack(func(ctx context.Context) {
+			if ctx.Err() != nil || !mygo.App.IsReady() {
+				return
+			}
+			mygo.RunOnMain(func() {
+				a.syncFallbackShortcuts(trigger)
+			})
+		})
+	} else {
+		a.syncFallbackShortcuts(trigger)
+	}
+	fmt.Fprintf(os.Stderr, "Clavis watchdog bridge self-heal succeeded\n")
+	return nil
 }
 
 func (a *desktopApp) startBridgeAndFallbackShortcut(trigger config.TriggerConfig) {
@@ -1099,9 +1327,11 @@ func (a *desktopApp) openLeader() {
 	if ctrl == nil {
 		return
 	}
-	go ctrl.HandleTriggerEvent(host.TriggerEvent{
-		Kind:        host.TriggerLeaderKey,
-		TimestampMs: time.Now().UnixMilli(),
+	a.goTrack(func(context.Context) {
+		ctrl.HandleTriggerEvent(host.TriggerEvent{
+			Kind:        host.TriggerLeaderKey,
+			TimestampMs: time.Now().UnixMilli(),
+		})
 	})
 }
 
@@ -1116,7 +1346,9 @@ func (a *desktopApp) openOmnibox(tab config.CapsuleTab) {
 	if ctrl == nil {
 		return
 	}
-	go ctrl.OpenOmnibox(tab, "")
+	a.goTrack(func(context.Context) {
+		ctrl.OpenOmnibox(tab, "")
+	})
 }
 
 // fireTrigger routes a fallback-shortcut press through the same path as bridge hotkeys.
@@ -1131,9 +1363,11 @@ func (a *desktopApp) fireTrigger(kind host.TriggerKind) {
 	if ctrl == nil {
 		return
 	}
-	go ctrl.HandleTriggerEvent(host.TriggerEvent{
-		Kind:        kind,
-		TimestampMs: time.Now().UnixMilli(),
+	a.goTrack(func(context.Context) {
+		ctrl.HandleTriggerEvent(host.TriggerEvent{
+			Kind:        kind,
+			TimestampMs: time.Now().UnixMilli(),
+		})
 	})
 }
 
@@ -1203,7 +1437,7 @@ func (a *desktopApp) applyConfigReload() {
 	}
 	// A language change on disk takes effect on the next reload.
 	a.syncLanguageFromConfig(cfg)
-	go a.refreshPermissionsAsync()
+	a.goTrack(func(context.Context) { a.refreshPermissionsAsync() })
 }
 
 // applyRuntimeConfig hands cfg to what runs outside the controller: the
@@ -1374,21 +1608,29 @@ func (a *desktopApp) refreshPermissionsAsync() {
 	ctrl := a.controller
 	ctx := a.ctx
 	br := a.hostBridge
+	shuttingDown := a.shuttingDown
 	a.mu.Unlock()
-	if ctrl == nil || ctx == nil {
+	if shuttingDown || ctrl == nil || ctx == nil || ctx.Err() != nil {
 		return
 	}
 	status, err := ctrl.RefreshPermissions(ctx)
+	if ctx.Err() != nil {
+		return
+	}
 	var caps host.Capabilities
 	if br != nil {
 		caps = br.Capabilities()
 	}
 	a.mu.Lock()
+	shuttingDown = a.shuttingDown
 	a.permKnown = true
 	a.permStatus = status
 	a.permErr = err
 	a.permCaps = caps
 	a.mu.Unlock()
+	if shuttingDown {
+		return
+	}
 	label := formatPermissionsMenuLabel(status, err, caps)
 	if !mygo.App.IsReady() {
 		return // no tray yet (or tests): RunOnMain would wait for a loop
@@ -1504,19 +1746,117 @@ func promptHistoryRetentionLimit(cfg config.ClipboardConfig) int {
 	return defaultPromptHistoryLimit
 }
 
-func (a *desktopApp) goBG(fn func(context.Context)) {
-	a.mu.Lock()
-	if a.shuttingDown || a.ctx == nil || a.ctx.Err() != nil {
-		a.mu.Unlock()
-		return
+// ensureBGContextLocked returns the shutdown-canceled background context,
+// initializing it lazily from a.ctx (or context.Background()) when needed.
+// Caller must hold a.mu.
+func (a *desktopApp) ensureBGContextLocked() context.Context {
+	if a.bgCtx == nil {
+		parent := a.ctx
+		if parent == nil {
+			parent = context.Background()
+		}
+		a.bgCtx, a.bgCancel = context.WithCancel(parent)
 	}
-	ctx := a.ctx
+	return a.bgCtx
+}
+
+// goTrack launches fn on a tracked background goroutine bound to the app's
+// shutdown-canceled context and bgWG. Returns false when shutdown has begun.
+func (a *desktopApp) goTrack(fn func(context.Context)) bool {
+	if fn == nil {
+		return false
+	}
+	a.mu.Lock()
+	if a.shuttingDown {
+		a.mu.Unlock()
+		return false
+	}
+	if a.ctx != nil && a.ctx.Err() != nil {
+		a.mu.Unlock()
+		return false
+	}
+	bgCtx := a.ensureBGContextLocked()
+	if bgCtx.Err() != nil {
+		a.mu.Unlock()
+		return false
+	}
 	a.bgWG.Add(1)
 	a.mu.Unlock()
 	go func() {
 		defer a.bgWG.Done()
-		fn(ctx)
+		fn(bgCtx)
 	}()
+	return true
+}
+
+func (a *desktopApp) goBG(fn func(context.Context)) {
+	a.goTrack(fn)
+}
+
+// stopTimerLocked stops and clears a tracked timer slot. Caller must hold a.mu.
+func (a *desktopApp) stopTimerLocked(slot **time.Timer) {
+	if slot != nil && *slot != nil {
+		(*slot).Stop()
+		*slot = nil
+	}
+}
+
+// scheduleTrackedTimerLocked replaces *slot with a cancellable timer that runs
+// fn inside a.goTrack when delay elapses. Caller must hold a.mu.
+func (a *desktopApp) scheduleTrackedTimerLocked(slot **time.Timer, delay time.Duration, fn func(context.Context)) bool {
+	if slot == nil || fn == nil {
+		return false
+	}
+	a.stopTimerLocked(slot)
+	if a.shuttingDown {
+		return false
+	}
+	if a.ctx != nil && a.ctx.Err() != nil {
+		return false
+	}
+	bgCtx := a.ensureBGContextLocked()
+	if bgCtx.Err() != nil {
+		return false
+	}
+	var t *time.Timer
+	t = time.AfterFunc(delay, func() {
+		a.mu.Lock()
+		if *slot == t {
+			*slot = nil
+		}
+		a.mu.Unlock()
+		a.goTrack(fn)
+	})
+	*slot = t
+	return true
+}
+
+func (a *desktopApp) scheduleTrackedTimer(slot **time.Timer, delay time.Duration, fn func(context.Context)) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.scheduleTrackedTimerLocked(slot, delay, fn)
+}
+
+// waitBG waits for all tracked background goroutines up to timeout.
+// Returns true if every goroutine finished before the deadline.
+func (a *desktopApp) waitBG(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		a.bgWG.Wait()
+		close(done)
+	}()
+	if timeout <= 0 {
+		<-done
+		return true
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 func (a *desktopApp) handleRecordItemUse(itemID string) {
@@ -1645,7 +1985,12 @@ func (a *desktopApp) dispatchFrecencyScores(scores map[string]int) {
 		})
 	}
 	if mygo.App.IsReady() {
-		go mygo.RunOnMain(run)
+		a.goTrack(func(ctx context.Context) {
+			if ctx.Err() != nil || !mygo.App.IsReady() {
+				return
+			}
+			mygo.RunOnMain(run)
+		})
 		return
 	}
 	run()
@@ -1653,6 +1998,10 @@ func (a *desktopApp) dispatchFrecencyScores(scores map[string]int) {
 
 func (a *desktopApp) handleRepaint() {
 	a.mu.Lock()
+	if a.shuttingDown {
+		a.mu.Unlock()
+		return
+	}
 	capWin := a.capsulePanel
 	promptWin := a.promptPanel
 	setWin := a.settingsWin
@@ -1722,10 +2071,7 @@ func (a *desktopApp) currentIMEPillLabel() string {
 
 func (a *desktopApp) stopIMEPillTimer() {
 	a.mu.Lock()
-	if a.imePillTimer != nil {
-		a.imePillTimer.Stop()
-		a.imePillTimer = nil
-	}
+	a.stopTimerLocked(&a.imePillTimer)
 	a.mu.Unlock()
 }
 
@@ -1738,17 +2084,15 @@ func (a *desktopApp) handleShowIMEPill(label string, anchor *host.CursorAnchor) 
 
 	a.mu.Lock()
 	a.imePillLabel = trimmed
-	if a.imePillTimer != nil {
-		a.imePillTimer.Stop()
-		a.imePillTimer = nil
-	}
+	a.stopTimerLocked(&a.imePillTimer)
 	br := a.hostBridge
-	ctx := a.ctx
 	prevAnchor := a.sessionAnchor
 	a.mu.Unlock()
 
 	anchorCopy := cloneValidAnchor(anchor, prevAnchor)
-	go a.presentIMEPillAsync(ctx, gen, br, anchorCopy)
+	a.goTrack(func(bgCtx context.Context) {
+		a.presentIMEPillAsync(bgCtx, gen, br, anchorCopy)
+	})
 }
 
 func cloneValidAnchor(primary, fallback *host.CursorAnchor) *host.CursorAnchor {
@@ -1764,6 +2108,9 @@ func cloneValidAnchor(primary, fallback *host.CursorAnchor) *host.CursorAnchor {
 }
 
 func (a *desktopApp) presentIMEPillAsync(ctx context.Context, gen uint64, br bridge.HostService, resolvedAnchor *host.CursorAnchor) {
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
 	if resolvedAnchor == nil && br != nil && ctx != nil {
 		snapCtx, cancel := context.WithTimeout(ctx, 80*time.Millisecond)
 		snap, err := br.SnapshotContext(snapCtx)
@@ -1772,6 +2119,9 @@ func (a *desktopApp) presentIMEPillAsync(ctx context.Context, gen uint64, br bri
 			copied := *snap.CursorAnchor
 			resolvedAnchor = &copied
 		}
+	}
+	if (ctx != nil && ctx.Err() != nil) || a.imePillGen.Load() != gen || !mygo.App.IsReady() {
+		return
 	}
 
 	mygo.RunOnMain(func() {
@@ -1807,24 +2157,31 @@ func (a *desktopApp) scheduleIMEPillAutoHide(gen uint64) {
 	if a.imePillGen.Load() != gen {
 		return
 	}
-	if a.imePillTimer != nil {
-		a.imePillTimer.Stop()
-	}
 	// A mode badge is glanceable; sentences and failures stay longer.
 	hold := uiapp.PillDisplayDuration(a.imePillLabel)
-	a.imePillTimer = time.AfterFunc(hold, func() {
+	a.scheduleTrackedTimerLocked(&a.imePillTimer, hold, func(ctx context.Context) {
 		if a.imePillGen.Load() != gen {
 			return
 		}
-		a.fadeOutIMEPill(gen)
+		a.runFadeOutIMEPill(ctx, gen)
 	})
 }
 
 // fadeOutIMEPill fades the pill window out over imePillFadeOut and hides it,
-// instead of letting it vanish mid-glance. A newer pill (gen changed) stops
-// the fade; presentIMEPillAsync restores full opacity before showing it.
-// With [appearance].animations = "off" the pill hides at once.
+// instead of letting it vanish mid-glance. A newer pill (gen changed) or
+// shutdown context cancellation stops the fade; presentIMEPillAsync restores
+// full opacity before showing it. With [appearance].animations = "off" the pill
+// hides at once.
 func (a *desktopApp) fadeOutIMEPill(gen uint64) {
+	a.goTrack(func(ctx context.Context) {
+		a.runFadeOutIMEPill(ctx, gen)
+	})
+}
+
+func (a *desktopApp) runFadeOutIMEPill(ctx context.Context, gen uint64) {
+	if ctx.Err() != nil || a.imePillGen.Load() != gen {
+		return
+	}
 	const steps = 8
 	animate := true
 	a.mu.Lock()
@@ -1834,6 +2191,9 @@ func (a *desktopApp) fadeOutIMEPill(gen uint64) {
 	a.mu.Unlock()
 
 	hide := func() {
+		if ctx.Err() != nil || a.imePillGen.Load() != gen || !mygo.App.IsReady() {
+			return
+		}
 		mygo.RunOnMain(func() {
 			if a.imePillGen.Load() != gen {
 				return
@@ -1851,30 +2211,39 @@ func (a *desktopApp) fadeOutIMEPill(gen uint64) {
 		hide()
 		return
 	}
-	go func() {
-		ticker := time.NewTicker(imePillFadeOut / steps)
-		defer ticker.Stop()
-		for i := 1; i < steps; i++ {
-			<-ticker.C
+	ticker := time.NewTicker(imePillFadeOut / steps)
+	defer ticker.Stop()
+	for i := 1; i < steps; i++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if a.imePillGen.Load() != gen {
+			return
+		}
+		opacity := 1 - float64(i)/steps
+		if !mygo.App.IsReady() {
+			return
+		}
+		mygo.RunOnMain(func() {
 			if a.imePillGen.Load() != gen {
 				return
 			}
-			opacity := 1 - float64(i)/steps
-			mygo.RunOnMain(func() {
-				if a.imePillGen.Load() != gen {
-					return
-				}
-				a.mu.Lock()
-				p := a.imePillPanel
-				a.mu.Unlock()
-				if p != nil {
-					p.SetOpacity(opacity)
-				}
-			})
-		}
-		<-ticker.C
-		hide()
-	}()
+			a.mu.Lock()
+			p := a.imePillPanel
+			a.mu.Unlock()
+			if p != nil {
+				p.SetOpacity(opacity)
+			}
+		})
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case <-ticker.C:
+	}
+	hide()
 }
 
 func (a *desktopApp) handlePresentPhase(phase engine.CapsulePhase) {
@@ -1883,22 +2252,19 @@ func (a *desktopApp) handlePresentPhase(phase engine.CapsulePhase) {
 	a.markPresentTransition(350 * time.Millisecond)
 
 	a.mu.Lock()
+	a.stopTimerLocked(&a.capsuleRevealTimer)
+	a.stopTimerLocked(&a.capsuleHideTimer)
 	br := a.hostBridge
-	ctx := a.ctx
 	prevAnchor := a.sessionAnchor
 	a.mu.Unlock()
 
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	go func() {
+	a.goTrack(func(bgCtx context.Context) {
 		var anchor *host.CursorAnchor
 		if prevAnchor != nil && prevAnchor.Valid {
 			copied := *prevAnchor
 			anchor = &copied
 		} else if br != nil {
-			snapCtx, cancel := context.WithTimeout(ctx, 120*time.Millisecond)
+			snapCtx, cancel := context.WithTimeout(bgCtx, 120*time.Millisecond)
 			snap, err := br.SnapshotContext(snapCtx)
 			cancel()
 			if err == nil && snap.CursorAnchor != nil && snap.CursorAnchor.Valid {
@@ -1906,6 +2272,9 @@ func (a *desktopApp) handlePresentPhase(phase engine.CapsulePhase) {
 				anchor = &copied
 				a.setSessionAnchor(anchor)
 			}
+		}
+		if bgCtx.Err() != nil || a.presentSeq.Load() != seq || !mygo.App.IsReady() {
+			return
 		}
 
 		mygo.RunOnMain(func() {
@@ -1964,7 +2333,7 @@ func (a *desktopApp) handlePresentPhase(phase engine.CapsulePhase) {
 			}
 			panel.Invalidate()
 		})
-	}()
+	})
 }
 
 // capsuleRevealFade is the Leader menu's fade-in once its delay elapses.
@@ -1984,10 +2353,11 @@ func capsuleRevealDelay(phase engine.CapsulePhase, revealed bool, trigger config
 }
 
 // scheduleCapsuleReveal fades the capsule in after delay unless the session
-// moved on (presentSeq changed: a newer present, an executed key or a hide).
+// moved on (presentSeq changed: a newer present, an executed key or a hide)
+// or shutdown canceled the tracked timer/context.
 func (a *desktopApp) scheduleCapsuleReveal(seq uint64, delay time.Duration, fade bool) {
-	time.AfterFunc(delay, func() {
-		if a.presentSeq.Load() != seq {
+	a.scheduleTrackedTimer(&a.capsuleRevealTimer, delay, func(ctx context.Context) {
+		if ctx.Err() != nil || a.presentSeq.Load() != seq {
 			return
 		}
 		a.mu.Lock()
@@ -1998,6 +2368,9 @@ func (a *desktopApp) scheduleCapsuleReveal(seq uint64, delay time.Duration, fade
 			return
 		}
 		setOpacity := func(v float64) {
+			if ctx.Err() != nil || a.presentSeq.Load() != seq || !mygo.App.IsReady() {
+				return
+			}
 			mygo.RunOnMain(func() {
 				if a.presentSeq.Load() == seq {
 					panel.SetOpacity(v)
@@ -2012,7 +2385,11 @@ func (a *desktopApp) scheduleCapsuleReveal(seq uint64, delay time.Duration, fade
 		ticker := time.NewTicker(capsuleRevealFade / steps)
 		defer ticker.Stop()
 		for i := 1; i <= steps; i++ {
-			<-ticker.C
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
 			if a.presentSeq.Load() != seq {
 				return
 			}
@@ -2028,6 +2405,9 @@ func (a *desktopApp) handleHide() {
 	if ctrl != nil && ctrl.State().Phase != engine.PhaseHidden {
 		return
 	}
+	a.mu.Lock()
+	a.stopTimerLocked(&a.capsuleRevealTimer)
+	a.mu.Unlock()
 	a.presentSeq.Add(1)
 	a.setSessionAnchor(nil)
 
@@ -2039,8 +2419,11 @@ func (a *desktopApp) handleHide() {
 	if ctrl != nil {
 		delay = ctrl.ExitHideDelay()
 	}
-	hide := func() {
-		if a.hideSeq.Load() != seq {
+	hide := func(ctx context.Context) {
+		if ctx != nil && ctx.Err() != nil {
+			return
+		}
+		if a.hideSeq.Load() != seq || !mygo.App.IsReady() {
 			return
 		}
 		mygo.RunOnMain(func() {
@@ -2066,10 +2449,13 @@ func (a *desktopApp) handleHide() {
 		})
 	}
 	if delay <= 0 {
-		hide()
+		a.mu.Lock()
+		a.stopTimerLocked(&a.capsuleHideTimer)
+		a.mu.Unlock()
+		hide(nil)
 		return
 	}
-	time.AfterFunc(delay, hide)
+	a.scheduleTrackedTimer(&a.capsuleHideTimer, delay, hide)
 }
 
 func (a *desktopApp) beforeInject(ctx context.Context) {
@@ -2123,100 +2509,133 @@ func (a *desktopApp) handleOpenPromptComposer() {
 		anchorCopy = &c
 	}
 
-	go mygo.RunOnMain(func() {
-		a.mu.Lock()
-		win := a.promptPanel
-		ctrl := a.controller
-		a.mu.Unlock()
-		if win == nil || ctrl == nil || !ctrl.PromptComposerOpen() {
+	a.goTrack(func(ctx context.Context) {
+		if ctx.Err() != nil || !mygo.App.IsReady() {
 			return
 		}
-		a.markPresentTransition(180 * time.Millisecond)
-		w, h := uiapp.PreferredPromptComposerPanelSize(ctrl.PromptComposerSlotCount())
-		bounds := computeCapsuleBounds(anchorCopy, mygo.Screen.CursorScreenPoint(), bridge.Size{
-			Width:  float64(w),
-			Height: float64(h),
-		}, mygo.Screen.Displays())
-		win.SetBounds(bounds)
-		win.Show()
-		win.Focus()
-		win.Invalidate()
+		mygo.RunOnMain(func() {
+			a.mu.Lock()
+			win := a.promptPanel
+			ctrl := a.controller
+			a.mu.Unlock()
+			if win == nil || ctrl == nil || !ctrl.PromptComposerOpen() {
+				return
+			}
+			a.markPresentTransition(180 * time.Millisecond)
+			w, h := uiapp.PreferredPromptComposerPanelSize(ctrl.PromptComposerSlotCount())
+			bounds := computeCapsuleBounds(anchorCopy, mygo.Screen.CursorScreenPoint(), bridge.Size{
+				Width:  float64(w),
+				Height: float64(h),
+			}, mygo.Screen.Displays())
+			win.SetBounds(bounds)
+			win.Show()
+			win.Focus()
+			win.Invalidate()
+		})
 	})
 }
 
 func (a *desktopApp) handleClosePromptComposer() {
-	go mygo.RunOnMain(func() {
-		a.mu.Lock()
-		win := a.promptPanel
-		a.mu.Unlock()
-		if win == nil {
+	a.goTrack(func(ctx context.Context) {
+		if ctx.Err() != nil || !mygo.App.IsReady() {
 			return
 		}
-		if win.IsVisible() {
-			win.Hide()
-			a.lastPanelHideNano.Store(time.Now().UnixNano())
-		}
+		mygo.RunOnMain(func() {
+			a.mu.Lock()
+			win := a.promptPanel
+			a.mu.Unlock()
+			if win == nil {
+				return
+			}
+			if win.IsVisible() {
+				win.Hide()
+				a.lastPanelHideNano.Store(time.Now().UnixNano())
+			}
+		})
 	})
 }
 
 func (a *desktopApp) handleShowAnnotateWindow() {
-	go mygo.RunOnMain(func() {
-		a.mu.Lock()
-		win := a.annotateWin
-		ctrl := a.controller
-		a.mu.Unlock()
-		if ctrl == nil {
+	a.goTrack(func(ctx context.Context) {
+		if ctx.Err() != nil || !mygo.App.IsReady() {
 			return
 		}
-		if win == nil {
-			spec := uiapp.FloatingSurfaceSpecWithElevation(ctrl.Config().Main.Appearance, 660, uiapp.SurfaceElevationFlat, mygo.VibrancyNone, uiapp.DismissExplicit, uiapp.FocusPreviousApp)
-			spec.Radius = uiapp.SurfaceRadius{Kind: uiapp.SurfaceRadiusSystem}
-			win = mygo.NewWindow(uiapp.FloatingSurface(mygo.WindowOptions{
-				Title:     "Clavis Annotate",
-				Width:     920,
-				Height:    660,
-				MinWidth:  640,
-				MinHeight: 460,
-				Hidden:    true,
-				StateKey:  "annotate",
-				Content:   ui.View(ctrl.AnnotateView),
-			}, spec))
-			uiapp.BindFloatingSurface(win, spec, uiapp.SurfaceHooks{
-				Dismiss: ctrl.CloseAnnotateWindow, RestoreFocus: a.restorePreviousAppFocus, Quitting: a.quitting.Load,
-			})
+		mygo.RunOnMain(func() {
 			a.mu.Lock()
-			a.annotateWin = win
+			win := a.annotateWin
+			ctrl := a.controller
 			a.mu.Unlock()
-		}
-		win.Show()
-		win.Focus()
-		win.Invalidate()
+			if ctrl == nil {
+				return
+			}
+			if win == nil {
+				spec := uiapp.FloatingSurfaceSpecWithElevation(ctrl.Config().Main.Appearance, 660, uiapp.SurfaceElevationFlat, mygo.VibrancyNone, uiapp.DismissExplicit, uiapp.FocusPreviousApp)
+				spec.Radius = uiapp.SurfaceRadius{Kind: uiapp.SurfaceRadiusSystem}
+				win = mygo.NewWindow(uiapp.FloatingSurface(mygo.WindowOptions{
+					Title:     "Clavis Annotate",
+					Width:     920,
+					Height:    660,
+					MinWidth:  640,
+					MinHeight: 460,
+					Hidden:    true,
+					StateKey:  "annotate",
+					Content:   ui.View(ctrl.AnnotateView),
+				}, spec))
+				uiapp.BindFloatingSurface(win, spec, uiapp.SurfaceHooks{
+					Dismiss: func() {
+						if win.IsVisible() {
+							win.Hide()
+						}
+						ctrl.CloseAnnotateWindow()
+					},
+					RestoreFocus: a.restorePreviousAppFocus,
+					Quitting:     a.quitting.Load,
+				})
+				a.mu.Lock()
+				a.annotateWin = win
+				a.mu.Unlock()
+			}
+			win.Show()
+			win.Focus()
+			win.Invalidate()
+		})
 	})
 }
 
 func (a *desktopApp) handleCloseAnnotateWindow() {
-	go mygo.RunOnMain(func() {
-		a.mu.Lock()
-		win := a.annotateWin
-		a.mu.Unlock()
-		if win != nil && win.IsVisible() {
-			win.Hide()
+	a.goTrack(func(ctx context.Context) {
+		if ctx.Err() != nil || !mygo.App.IsReady() {
+			return
 		}
+		mygo.RunOnMain(func() {
+			a.mu.Lock()
+			win := a.annotateWin
+			a.mu.Unlock()
+			if win != nil && win.IsVisible() {
+				win.Hide()
+				a.restorePreviousAppFocus()
+			}
+		})
 	})
 }
 
 func (a *desktopApp) handleOpenSettings(_ uiapp.SettingsTab) {
-	go mygo.RunOnMain(func() {
-		a.mu.Lock()
-		win := a.settingsWin
-		a.mu.Unlock()
-		if win == nil {
+	a.goTrack(func(ctx context.Context) {
+		if ctx.Err() != nil || !mygo.App.IsReady() {
 			return
 		}
-		mygo.App.Show()
-		win.Show()
-		win.Focus()
-		win.Invalidate()
+		mygo.RunOnMain(func() {
+			a.mu.Lock()
+			win := a.settingsWin
+			a.mu.Unlock()
+			if win == nil {
+				return
+			}
+			mygo.App.Show()
+			win.Show()
+			win.Focus()
+			win.Invalidate()
+		})
 	})
 }
 
@@ -2252,10 +2671,15 @@ func (a *desktopApp) shutdown() {
 	a.shutdownOnce.Do(func() {
 		a.unregisterFallbackShortcuts()
 		a.imePillGen.Add(1)
-		a.stopIMEPillTimer()
+		a.presentSeq.Add(1)
+		a.hideSeq.Add(1)
 
 		a.mu.Lock()
 		a.shuttingDown = true
+		a.stopTimerLocked(&a.imePillTimer)
+		a.stopTimerLocked(&a.capsuleRevealTimer)
+		a.stopTimerLocked(&a.capsuleHideTimer)
+		bgCancel := a.bgCancel
 		cancel := a.cancel
 		cw := a.configWatcher
 		dw := a.dictionaryWatcher
@@ -2269,6 +2693,9 @@ func (a *desktopApp) shutdown() {
 		a.bridgeRunning = false
 		a.mu.Unlock()
 
+		if bgCancel != nil {
+			bgCancel()
+		}
 		if cancel != nil {
 			cancel()
 		}
@@ -2288,7 +2715,9 @@ func (a *desktopApp) shutdown() {
 			_ = ctrl.Stop()
 			ctrl.Close()
 		}
-		a.bgWG.Wait()
+		if !a.waitBG(bgShutdownWaitTimeout) {
+			fmt.Fprintf(os.Stderr, "Clavis shutdown: timed out waiting for background tasks after %s\n", bgShutdownWaitTimeout)
+		}
 		if learningWriter != nil {
 			// The app context is cancelled by now: flush on a fresh one.
 			flushCtx, cancelFlush := context.WithTimeout(context.Background(), 2*time.Second)
@@ -2323,22 +2752,27 @@ func (a *desktopApp) handleShowSelectionBar(p uiapp.SelectionBarPayload) {
 	if win == nil || len(p.Actions) == 0 {
 		return
 	}
-	go mygo.RunOnMain(func() {
-		w, h := uiapp.SelectionBarSize(p)
-		displays := mygo.Screen.Displays()
-		cursorPt := mygo.Screen.CursorScreenPoint()
-		anchor := p.Anchor
-		var anchorPtr *host.CursorAnchor
-		if anchor.Valid {
-			anchorPtr = &anchor
+	a.goTrack(func(ctx context.Context) {
+		if ctx.Err() != nil || !mygo.App.IsReady() {
+			return
 		}
-		bounds := computeIMEPillBounds(anchorPtr, cursorPt, bridge.Size{
-			Width:  float64(w),
-			Height: float64(h),
-		}, displays)
-		win.SetBounds(bounds)
-		win.Invalidate()
-		win.ShowInactive()
+		mygo.RunOnMain(func() {
+			w, h := uiapp.SelectionBarSize(p)
+			displays := mygo.Screen.Displays()
+			cursorPt := mygo.Screen.CursorScreenPoint()
+			anchor := p.Anchor
+			var anchorPtr *host.CursorAnchor
+			if anchor.Valid {
+				anchorPtr = &anchor
+			}
+			bounds := computeIMEPillBounds(anchorPtr, cursorPt, bridge.Size{
+				Width:  float64(w),
+				Height: float64(h),
+			}, displays)
+			win.SetBounds(bounds)
+			win.Invalidate()
+			win.ShowInactive()
+		})
 	})
 }
 
@@ -2350,10 +2784,15 @@ func (a *desktopApp) handleHideSelectionBar() {
 	if win == nil {
 		return
 	}
-	go mygo.RunOnMain(func() {
-		if win.IsVisible() {
-			win.Hide()
+	a.goTrack(func(ctx context.Context) {
+		if ctx.Err() != nil || !mygo.App.IsReady() {
+			return
 		}
+		mygo.RunOnMain(func() {
+			if win.IsVisible() {
+				win.Hide()
+			}
+		})
 	})
 }
 

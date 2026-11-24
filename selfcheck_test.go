@@ -25,6 +25,12 @@ func TestRunSelfCheckReadOnlyOnMissingAndEmptyConfigDir(t *testing.T) {
 		if !strings.Contains(text, "config: defaults") || !strings.Contains(text, "self-check ok") {
 			t.Fatalf("unexpected self-check output:\n%s", text)
 		}
+		if !strings.Contains(text, "daemon runtime: status=") || !strings.Contains(text, "heal_cooldown=") {
+			t.Fatalf("expected daemon runtime health line in self-check output:\n%s", text)
+		}
+		if !strings.Contains(text, "input method mode: inline-hook (second-IME") {
+			t.Fatalf("expected second-IME inline-hook mode line in self-check output:\n%s", text)
+		}
 		cfgDir := filepath.Join(fakeHome, ".config", "clavis")
 		if _, err := os.Stat(cfgDir); !os.IsNotExist(err) {
 			t.Fatalf("self-check must not create missing config dir %s, stat err=%v", cfgDir, err)
@@ -48,6 +54,12 @@ func TestRunSelfCheckReadOnlyOnMissingAndEmptyConfigDir(t *testing.T) {
 		text := out.String()
 		if !strings.Contains(text, "config: defaults") || !strings.Contains(text, "self-check ok") {
 			t.Fatalf("unexpected self-check output:\n%s", text)
+		}
+		if !strings.Contains(text, "daemon runtime: status=") || !strings.Contains(text, "heal_cooldown=") {
+			t.Fatalf("expected daemon runtime health line in self-check output:\n%s", text)
+		}
+		if !strings.Contains(text, "input method mode: inline-hook (second-IME") {
+			t.Fatalf("expected second-IME inline-hook mode line in self-check output:\n%s", text)
 		}
 		entries, err := os.ReadDir(cfgDir)
 		if err != nil {

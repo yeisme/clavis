@@ -3,14 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image/color"
 	"image/png"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1005,5 +1008,304 @@ func TestBlocklistAndLexiconHitWiring(t *testing.T) {
 	}
 	if days[0].Hits != 2 || days[0].Misses != 1 {
 		t.Fatalf("today lexicon hits/misses = (%d, %d), want (2, 1)", days[0].Hits, days[0].Misses)
+	}
+}
+
+func TestDesktopAppGoTrackAndTimersShutdownClean(t *testing.T) {
+	app := newDesktopApp()
+
+	const workers = 8
+	started := make(chan struct{}, workers)
+	exited := atomic.Int32{}
+	for i := 0; i < workers; i++ {
+		if !app.goTrack(func(ctx context.Context) {
+			started <- struct{}{}
+			<-ctx.Done()
+			exited.Add(1)
+		}) {
+			t.Fatalf("goTrack worker %d returned false before shutdown", i)
+		}
+	}
+	for i := 0; i < workers; i++ {
+		<-started
+	}
+
+	// Schedule all three tracked timer slots plus an in-flight fade loop.
+	var timerFired atomic.Int32
+	if !app.scheduleTrackedTimer(&app.imePillTimer, 200*time.Millisecond, func(context.Context) {
+		timerFired.Add(1)
+	}) {
+		t.Fatal("scheduleTrackedTimer(imePillTimer) returned false")
+	}
+	if !app.scheduleTrackedTimer(&app.capsuleRevealTimer, 200*time.Millisecond, func(context.Context) {
+		timerFired.Add(1)
+	}) {
+		t.Fatal("scheduleTrackedTimer(capsuleRevealTimer) returned false")
+	}
+	if !app.scheduleTrackedTimer(&app.capsuleHideTimer, 200*time.Millisecond, func(context.Context) {
+		timerFired.Add(1)
+	}) {
+		t.Fatal("scheduleTrackedTimer(capsuleHideTimer) returned false")
+	}
+	gen := app.imePillGen.Add(1)
+	app.fadeOutIMEPill(gen)
+
+	// Concurrently fire goTrack calls while shutdown begins to exercise WaitGroup race safety.
+	var raceWG sync.WaitGroup
+	raceWG.Add(1)
+	go func() {
+		defer raceWG.Done()
+		for i := 0; i < 32; i++ {
+			app.goTrack(func(ctx context.Context) {
+				<-ctx.Done()
+			})
+		}
+	}()
+
+	app.shutdown()
+	raceWG.Wait()
+
+	if got := exited.Load(); got != workers {
+		t.Fatalf("exited workers after shutdown = %d, want %d", got, workers)
+	}
+	if app.goTrack(func(context.Context) { timerFired.Add(1) }) {
+		t.Fatal("goTrack must reject new work after shutdown")
+	}
+	if app.scheduleTrackedTimer(&app.capsuleHideTimer, time.Millisecond, func(context.Context) { timerFired.Add(1) }) {
+		t.Fatal("scheduleTrackedTimer must reject new timers after shutdown")
+	}
+
+	time.Sleep(250 * time.Millisecond)
+	if fired := timerFired.Load(); fired != 0 {
+		t.Fatalf("canceled timers fired %d times after shutdown", fired)
+	}
+}
+
+func TestDesktopAppShutdownBoundedWait(t *testing.T) {
+	origTimeout := bgShutdownWaitTimeout
+	bgShutdownWaitTimeout = 40 * time.Millisecond
+	defer func() { bgShutdownWaitTimeout = origTimeout }()
+
+	app := newDesktopApp()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+
+	if !app.goTrack(func(context.Context) {
+		close(started)
+		<-release
+	}) {
+		t.Fatal("goTrack returned false")
+	}
+	<-started
+
+	start := time.Now()
+	app.shutdown()
+	elapsed := time.Since(start)
+	if elapsed < 30*time.Millisecond || elapsed > 500*time.Millisecond {
+		t.Fatalf("bounded shutdown took %v, expected ~40ms (<500ms)", elapsed)
+	}
+}
+
+func TestResolveCurrentUserFullNameCrossPlatform(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("linux skips id -F and uses os/user fallback", func(t *testing.T) {
+		darwinCalled := false
+		got := resolveCurrentUserFullName(
+			ctx,
+			"linux",
+			func(context.Context) (string, error) {
+				darwinCalled = true
+				return "不应调用", nil
+			},
+			func() (*user.User, error) {
+				return &user.User{Name: "李明,101,555-1234,"}, nil
+			},
+		)
+		if darwinCalled {
+			t.Fatal("id -F must not be invoked on linux")
+		}
+		if got != "李明" {
+			t.Fatalf("got %q, want %q", got, "李明")
+		}
+	})
+
+	t.Run("windows skips id -F and uses os/user fallback", func(t *testing.T) {
+		darwinCalled := false
+		got := resolveCurrentUserFullName(
+			ctx,
+			"windows",
+			func(context.Context) (string, error) {
+				darwinCalled = true
+				return "不应调用", nil
+			},
+			func() (*user.User, error) {
+				return &user.User{Name: "王芳"}, nil
+			},
+		)
+		if darwinCalled {
+			t.Fatal("id -F must not be invoked on windows")
+		}
+		if got != "王芳" {
+			t.Fatalf("got %q, want %q", got, "王芳")
+		}
+	})
+
+	t.Run("darwin prefers id -F and falls back to os/user on failure", func(t *testing.T) {
+		got := resolveCurrentUserFullName(
+			ctx,
+			"darwin",
+			func(context.Context) (string, error) { return "张伟\n", nil },
+			func() (*user.User, error) { return &user.User{Name: "备选名"}, nil },
+		)
+		if got != "张伟" {
+			t.Fatalf("darwin id -F got %q, want %q", got, "张伟")
+		}
+
+		fallback := resolveCurrentUserFullName(
+			ctx,
+			"darwin",
+			func(context.Context) (string, error) { return "", errors.New("exec failed") },
+			func() (*user.User, error) { return &user.User{Name: "备选名"}, nil },
+		)
+		if fallback != "备选名" {
+			t.Fatalf("darwin fallback got %q, want %q", fallback, "备选名")
+		}
+	})
+
+	t.Run("seedConfiguredUserWords persists resolved Hanzi full name", func(t *testing.T) {
+		origLookup := lookupUserFullNameFn
+		lookupUserFullNameFn = func(context.Context) string { return "陈思远" }
+		defer func() { lookupUserFullNameFn = origLookup }()
+
+		cfgStore := config.NewConfigStore(t.TempDir())
+		cfg, err := cfgStore.LoadOrInitialize()
+		if err != nil {
+			t.Fatalf("LoadOrInitialize: %v", err)
+		}
+		cfg.Main.InputEngine.AutoSeedFullName = true
+		cfg.Main.InputEngine.SeededFullName = false
+
+		dbPath := filepath.Join(t.TempDir(), "seed_words.db")
+		sqliteStore, err := storage.NewSQLiteClipboardStoreFromConfig(ctx, dbPath, cfg.Main.Clipboard)
+		if err != nil {
+			t.Fatalf("NewSQLiteClipboardStoreFromConfig: %v", err)
+		}
+		defer sqliteStore.Close()
+		learningStore, err := storage.NewLearningStore(sqliteStore.DB())
+		if err != nil {
+			t.Fatalf("NewLearningStore: %v", err)
+		}
+
+		if !seedConfiguredUserWords(ctx, cfgStore, cfg, learningStore) {
+			t.Fatal("expected seedConfiguredUserWords to return true")
+		}
+		reloaded := cfgStore.Current()
+		if !reloaded.Main.InputEngine.SeededFullName {
+			t.Fatal("expected SeededFullName=true after seeding")
+		}
+		if !slices.Contains(reloaded.Main.InputEngine.UserWords, "陈思远") {
+			t.Fatalf("expected UserWords to contain 陈思远, got %v", reloaded.Main.InputEngine.UserWords)
+		}
+	})
+}
+
+type restartableMockBridge struct {
+	bridge.HostService
+	startCalls atomic.Int32
+	stopCalls  atomic.Int32
+	failNext   atomic.Bool
+}
+
+func (m *restartableMockBridge) Start(_ context.Context, _ func(host.TriggerEvent)) error {
+	m.startCalls.Add(1)
+	if m.failNext.Swap(false) {
+		return errors.New("transient bridge failure")
+	}
+	return nil
+}
+
+func (m *restartableMockBridge) Stop() error {
+	m.stopCalls.Add(1)
+	return nil
+}
+
+func TestDaemonTelemetrySummaryAndBridgeSelfHeal(t *testing.T) {
+	app := newDesktopApp()
+	if got := app.daemonTelemetrySummary(); !strings.Contains(got, "status=stopped") {
+		t.Fatalf("nil supervisor summary = %q, want status=stopped", got)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cfgStore := config.NewConfigStore(t.TempDir())
+	cfg, err := cfgStore.LoadOrInitialize()
+	if err != nil {
+		t.Fatalf("LoadOrInitialize: %v", err)
+	}
+	clipStore := clipboard.NewMemoryStore(clipboard.NewPrivacyFilterFromConfig(cfg.Main.Clipboard))
+	br := &restartableMockBridge{HostService: bridge.NewHostService()}
+	ctrl := uiapp.NewAppController(uiapp.Options{
+		ConfigStore:     cfgStore,
+		ClipboardStore:  clipStore,
+		SecretStore:     secrets.NewMemoryAPIKeyStore(),
+		Bridge:          br,
+		ClipboardWriter: func(string) {},
+	})
+
+	supCfg := cfg.Main.Daemon
+	supCfg.WatchdogIntervalMs = 15
+	supCfg.IdleCompactSeconds = 0
+	supCfg.MaxMemoryMB = 0
+	sup := daemon.NewResidentSupervisor(supCfg)
+	sup.RegisterWatchdogProbe(daemon.NewBridgeWatchdogProbeWithHeal(daemon.BridgeLivenessInput{
+		IsRunning: func() bool {
+			app.mu.Lock()
+			running := app.bridgeRunning
+			app.mu.Unlock()
+			return running
+		},
+		TapRecoveryCount: br.TapRecoveryCount,
+	}, app.healBridge, 25*time.Millisecond))
+	sup.SetOnHealthCheck(app.handleDaemonHealthSnapshot)
+	sup.RecordKeystroke(150_000, 15)
+
+	app.mu.Lock()
+	app.ctx = ctx
+	app.cancel = cancel
+	app.cfgStore = cfgStore
+	app.clipStore = clipStore
+	app.hostBridge = br
+	app.controller = ctrl
+	app.supervisor = sup
+	app.bridgeRunning = false // simulate bridge down at startup
+	app.mu.Unlock()
+	defer app.shutdown()
+
+	sup.Start(ctx)
+
+	deadline := time.Now().Add(800 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		app.mu.Lock()
+		running := app.bridgeRunning
+		app.mu.Unlock()
+		if running && sup.Snapshot().Healthy && sup.Snapshot().SelfHealCount >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	app.mu.Lock()
+	running := app.bridgeRunning
+	app.mu.Unlock()
+	if !running || br.startCalls.Load() < 1 {
+		t.Fatalf("expected watchdog healBridge to restart bridge, running=%v startCalls=%d", running, br.startCalls.Load())
+	}
+
+	summary := app.daemonTelemetrySummary()
+	for _, want := range []string{"status=healthy", "wpm=", "cpm=", "p50=", "p99=", "compactions=", "self_heals="} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("daemonTelemetrySummary() = %q, missing %q", summary, want)
+		}
 	}
 }

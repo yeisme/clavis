@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/yeisme/clavis/internal/bridge"
+	"github.com/yeisme/clavis/internal/daemon"
 	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/ime"
@@ -31,7 +32,7 @@ func hasSelfCheckFlag(args []string) bool {
 
 // runSelfCheck prints a human-readable diagnostic of everything that silently
 // fails on a real machine: config parsing, the own input engine's dictionary
-// and composition, permissions, and the macOS native input-method bundle.
+// and composition, permissions, daemon runtime health, and inline-hook mode.
 //
 // It is read-only: no config writes, no engine installation, no persistence.
 // mustLaunchAgentPath returns the keep-alive plist path, or "" when it cannot be resolved.
@@ -143,13 +144,17 @@ func runSelfCheck(w io.Writer) error {
 		fmt.Fprintf(w, "ai key source: none (%s missing)\n", keysPath)
 	}
 
-	// --- macOS native input method ------------------------------------------
+	// --- daemon runtime health (read-only) ----------------------------------
+	writeDaemonSelfCheck(w, cfg.Main.Daemon)
+
+	// --- input method integration -------------------------------------------
+	// Clavis operates as a second-IME inline-hook engine alongside the OS IME
+	// rather than replacing it with a system InputMethodKit bundle.
 	if runtime.GOOS == "darwin" {
 		st := bridge.IMKInstallStatus()
-		fmt.Fprintf(w, "native input method: installed=%v path=%q\n", st.Installed, st.Path)
-		if !st.Installed {
-			fmt.Fprintln(w, "native input method: not installed (inline hook mode still works)")
-		}
+		fmt.Fprintf(w, "input method mode: inline-hook (second-IME; optional legacy IMK bundle installed=%v path=%q)\n", st.Installed, st.Path)
+	} else {
+		fmt.Fprintln(w, "input method mode: inline-hook (second-IME)")
 	}
 
 	// --- features that are easy to misconfigure -----------------------------
@@ -350,4 +355,23 @@ func probeInputEngine(w io.Writer, ie config.InputEngineConfig, dict inputengine
 		names = append(names, c.Text)
 	}
 	fmt.Fprintf(w, "input engine probe: typing %q -> %s\n", seq, strings.Join(names, " / "))
+}
+
+// writeDaemonSelfCheck prints a read-only snapshot of resident supervisor
+// configuration defaults and process telemetry without mutating disk or
+// starting background goroutines.
+func writeDaemonSelfCheck(w io.Writer, dcfg config.DaemonConfig) {
+	sup := daemon.NewResidentSupervisor(dcfg)
+	snap := sup.Snapshot()
+	fmt.Fprintf(
+		w,
+		"daemon runtime: status=%s watchdog=%s idle_compact=%ds max_mem=%dMB heal_cooldown=%s alloc=%.1fMB goroutines=%d\n",
+		snap.HealthStatus,
+		daemon.WatchdogInterval(dcfg),
+		dcfg.IdleCompactSeconds,
+		dcfg.MaxMemoryMB,
+		daemon.DefaultBridgeHealCooldown,
+		snap.AllocMB,
+		snap.NumGoroutine,
+	)
 }
