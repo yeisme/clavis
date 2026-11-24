@@ -277,3 +277,84 @@ func (blockingCodexReader) Threads(ctx context.Context, _ int) ([]CodexThread, e
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
+
+type fakeHerdrCLI struct {
+	agentsJSON     string
+	workspacesJSON string
+	readText       string
+	readErr        error
+	listErr        error
+}
+
+func (f fakeHerdrCLI) LookPath(string) (string, error) { return "/fake/herdr", nil }
+func (f fakeHerdrCLI) Output(_ context.Context, _ string, args ...string) ([]byte, error) {
+	if len(args) >= 2 && args[0] == "agent" && args[1] == "list" {
+		if f.listErr != nil {
+			return nil, f.listErr
+		}
+		return []byte(f.agentsJSON), nil
+	}
+	if len(args) >= 2 && args[0] == "workspace" && args[1] == "list" {
+		return []byte(f.workspacesJSON), nil
+	}
+	if len(args) >= 2 && args[0] == "agent" && args[1] == "read" {
+		if f.readErr != nil {
+			return nil, f.readErr
+		}
+		return []byte(f.readText), nil
+	}
+	return []byte("{}"), nil
+}
+
+func TestDiscoverHerdrMergesAndSanitizesMultilineOutput(t *testing.T) {
+	now := time.Date(2026, 11, 24, 14, 0, 0, 0, time.UTC)
+	root := t.TempDir()
+	claudeDir := filepath.Join(root, "claude", "clavis")
+	if err := os.MkdirAll(claudeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "2026_sess-pi-1.jsonl"), []byte(`{"id":"sess-pi-1","title":"Rich Local Title","status":"waiting","timestamp":"2026-11-24T13:59:00Z","content":"Updated draft"}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := fakeHerdrCLI{
+		workspacesJSON: `{"id":"cli:workspace:list","result":{"workspaces":[{"workspace_id":"w4","label":"clavis","number":4,"agent_status":"working","focused":true}]}}`,
+		agentsJSON: `{"id":"cli:agent:list","result":{"agents":[` +
+			`{"agent":"pi","agent_session":{"value":"/Users/bob/.pi/sessions/2026_sess-pi-1.jsonl"},"agent_status":"working","cwd":"/Users/bob/workspace/clavis","name":"clavis-be","pane_id":"w4:p2","tab_id":"w4:t1","workspace_id":"w4","focused":true},` +
+			`{"agent":"codex","agent_status":"blocked","cwd":"/Users/bob/workspace/novels","display_agent":"codex · Review","pane_id":"w3:p1","tab_id":"w3:t1","workspace_id":"w3"}` +
+			`]}}`,
+		readText: "\x1b[32m## Summary\x1b[0m\n- Built `herdr` adapter\n- token=sk-secretkey123456\n```go\nfunc ok() {}\n",
+	}
+
+	sessions, diags := Discover(context.Background(), Options{
+		DSHDir:        filepath.Join(root, "dsh"),
+		DSHThreadsDir: filepath.Join(root, "threads"),
+		ClaudeDir:     filepath.Dir(claudeDir),
+		CodexReader:   fakeCodexReader{},
+		HerdrExecutor: fake,
+		Now:           func() time.Time { return now },
+	})
+	if len(sessions) != 2 {
+		t.Fatalf("expected 2 merged sessions, got %+v (diags=%+v)", sessions, diags)
+	}
+	// Blocked / PendingReview must sort before Running.
+	if !sessions[0].PendingReview || sessions[0].PaneID != "w3:p1" {
+		t.Fatalf("expected blocked session first, got %+v", sessions[0])
+	}
+	// Merged Herdr + Claude session retains Herdr live PaneID/WorkspaceLabel AND local LastMessage.
+	merged := sessions[1]
+	if !merged.HerdrManaged || merged.PaneID != "w4:p2" || merged.WorkspaceLabel != "clavis" || merged.LastMessage != "Updated draft" {
+		t.Fatalf("merged session=%+v", merged)
+	}
+
+	out, res, err := NewHerdrClientWithExecutor(fake).ReadOutput(context.Background(), "w4:p2", 40)
+	if err != nil || res.State != "ready" {
+		t.Fatalf("ReadOutput err=%v res=%+v", err, res)
+	}
+	if strings.Contains(out, "\x1b[") || strings.Contains(out, "sk-secretkey123456") {
+		t.Fatalf("output leaked ANSI or secret: %q", out)
+	}
+	if !strings.Contains(out, "## Summary") || strings.Count(out, "```")%2 != 0 {
+		t.Fatalf("markdown structure lost or fence unclosed: %q", out)
+	}
+}

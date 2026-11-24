@@ -20,20 +20,29 @@ const (
 )
 
 type Session struct {
-	ID             string    `json:"id"`
-	Provider       string    `json:"provider"`
-	Title          string    `json:"title"`
-	Status         Status    `json:"status"`
-	LastActivityAt time.Time `json:"lastActivityAt"`
-	LastMessage    string    `json:"lastMessage,omitempty"`
-	PendingReview  bool      `json:"pendingReview"`
-	CurrentAction  string    `json:"currentAction,omitempty"`
-	ResultLine     string    `json:"resultLine,omitempty"`
-	AwaitingHuman  bool      `json:"awaitingHuman"`
-	Workspace      string    `json:"workspace,omitempty"`
-	TargetRef      string    `json:"targetRef,omitempty"`
-	Source         string    `json:"source,omitempty"`
-	ObservedAt     time.Time `json:"observedAt"`
+	ID               string    `json:"id"`
+	Provider         string    `json:"provider"`
+	Title            string    `json:"title"`
+	Status           Status    `json:"status"`
+	LastActivityAt   time.Time `json:"lastActivityAt"`
+	LastMessage      string    `json:"lastMessage,omitempty"`
+	PendingReview    bool      `json:"pendingReview"`
+	CurrentAction    string    `json:"currentAction,omitempty"`
+	ResultLine       string    `json:"resultLine,omitempty"`
+	AwaitingHuman    bool      `json:"awaitingHuman"`
+	Workspace        string    `json:"workspace,omitempty"`
+	WorkspaceID      string    `json:"workspaceId,omitempty"`
+	WorkspaceLabel   string    `json:"workspaceLabel,omitempty"`
+	PaneID           string    `json:"paneId,omitempty"`
+	TabID            string    `json:"tabId,omitempty"`
+	AgentName        string    `json:"agentName,omitempty"`
+	DisplayAgent     string    `json:"displayAgent,omitempty"`
+	InteractiveReady bool      `json:"interactiveReady,omitempty"`
+	Focused          bool      `json:"focused,omitempty"`
+	HerdrManaged     bool      `json:"herdrManaged,omitempty"`
+	TargetRef        string    `json:"targetRef,omitempty"`
+	Source           string    `json:"source,omitempty"`
+	ObservedAt       time.Time `json:"observedAt"`
 }
 
 type Diagnostic struct {
@@ -145,6 +154,7 @@ type Options struct {
 	CodexDB         string
 	CodexReader     CodexThreadsReader
 	ClaudeDir       string
+	HerdrExecutor   CommandExecutor
 	ProviderTimeout time.Duration
 	Now             func() time.Time
 }
@@ -192,6 +202,12 @@ func Discover(ctx context.Context, opts Options) ([]Session, []Diagnostic) {
 		{"codex", func(c context.Context) result { s, d := discoverCodex(c, opts); return result{s, d} }},
 		{"claude", func(c context.Context) result { s, d := discoverClaude(c, opts); return result{s, d} }},
 	}
+	if shouldDiscoverHerdr(opts) {
+		jobs = append(jobs, struct {
+			name string
+			fn   func(context.Context) result
+		}{"herdr", func(c context.Context) result { s, d := discoverHerdr(c, opts); return result{s, d} }})
+	}
 	ch := make(chan struct {
 		name string
 		result
@@ -217,10 +233,10 @@ func Discover(ctx context.Context, opts Options) ([]Session, []Diagnostic) {
 			all = append(all, item.result.sessions...)
 			diagnostics = append(diagnostics, item.result.diagnostics...)
 		case <-ctx.Done():
-			return sortSessions(all), append(diagnostics, Diagnostic{Provider: "aggregate", Code: "cancelled", Message: ctx.Err().Error()})
+			return sortSessions(mergeSessions(all)), append(diagnostics, Diagnostic{Provider: "aggregate", Code: "cancelled", Message: ctx.Err().Error()})
 		}
 	}
-	return sortSessions(all), diagnostics
+	return sortSessions(mergeSessions(all)), diagnostics
 }
 
 // Small wrappers keep path construction testable without exposing filesystem policy.

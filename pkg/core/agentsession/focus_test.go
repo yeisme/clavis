@@ -102,3 +102,31 @@ func TestHerdrFocuserFocusTimeoutIsObservable(t *testing.T) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
+
+func TestHerdrFocuserParsesWrappedResultEnvelopeAndFocusPane(t *testing.T) {
+	wrapped := `{"id":"cli:agent:list","result":{"agents":[{"agent":"agy","agent_session":{"agent":"agy","kind":"id","source":"herdr:antigravity_cli","value":"ff81383b-733e-49bd-95e2-37a5a0bdecfd"},"agent_status":"idle","cwd":"/Users/yeshugen/workspace/clavis","display_agent":"agy","focused":true,"name":"clavis-main","pane_id":"w4:pB","tab_id":"w4:t2","workspace_id":"w4"}]},"type":"agent_list"}`
+	fake := &fakeFocusExecutor{list: []byte(wrapped)}
+	h := NewHerdrFocuserWithExecutor(fake)
+
+	available, err := h.Available(context.Background())
+	if err != nil || !available {
+		t.Fatalf("available=%v err=%v", available, err)
+	}
+	result, err := h.Focus(context.Background(), "ff81383b-733e-49bd-95e2-37a5a0bdecfd")
+	if err != nil || result.State != host.StateReady {
+		t.Fatalf("Focus wrapped envelope result=%+v err=%v", result, err)
+	}
+	if got := fake.calls[len(fake.calls)-1]; got != "agent focus w4:pB" {
+		t.Fatalf("focus call=%q", got)
+	}
+
+	// Direct FocusPane skips `agent list` and jumps straight to the pane.
+	beforeCalls := len(fake.calls)
+	res2, err := h.FocusPane(context.Background(), "w4:pB")
+	if err != nil || res2.State != host.StateReady {
+		t.Fatalf("FocusPane result=%+v err=%v", res2, err)
+	}
+	if len(fake.calls)-beforeCalls != 2 || fake.calls[len(fake.calls)-1] != "agent focus w4:pB" {
+		t.Fatalf("FocusPane calls=%v", fake.calls[beforeCalls:])
+	}
+}
