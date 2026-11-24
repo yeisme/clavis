@@ -617,6 +617,7 @@ func (a *AppController) renderOmniboxView(
 			if icon, label, ok := omniboxRouteMode(state.OmniboxQuery); ok {
 				chip(c, theme, icon, label, chipAccent)
 			}
+			a.renderOmniboxHubToggles(c, theme)
 		})
 
 		renderClipboardStats := func() {
@@ -889,12 +890,11 @@ func (a *AppController) renderOmniboxView(
 		}
 
 		ui.Divider(c)
-		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).FillWidth().Gap(space12).AlignItems(ui.Center).Children(func() {
 			prefix := modPrefix()
 			a.renderOmniboxFooterHints(c, theme, cfg, state, items, selectedIdx)
 			ui.Spacer(c)
 
-			a.renderOmniboxHubToggles(c, theme)
 			a.renderOmniboxFooterFrameToggle(c, theme, "eye", prefix+i18n.T("omnibox.footer.preview"),
 				a.previewPaneVisible(cfg), func() {
 					capsuleUI.togglePreview(a, cfg.Main.Appearance.ShowPreviewPane)
