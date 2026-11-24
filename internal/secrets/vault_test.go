@@ -103,8 +103,40 @@ func TestVaultUserOnlyCopyTTLAndIdempotency(t *testing.T) {
 	if current != "" {
 		t.Fatalf("TTL cleanup left clipboard value %q", current)
 	}
+	for time.Now().Before(deadline) && len(audit.Snapshot()) < 3 {
+		time.Sleep(time.Millisecond)
+	}
 	if len(audit.Snapshot()) < 3 {
 		t.Fatalf("audit events=%d, want store/copy/expired", len(audit.Snapshot()))
+	}
+}
+
+func TestVaultConcurrentRetryWritesClipboardOnce(t *testing.T) {
+	store := NewFakeSecretStore()
+	clipboard := &fakeClipboard{}
+	vault := NewVault(store, clipboard, nil)
+	ref, err := vault.Put(NewSecretRef("ref-concurrent", "acct-concurrent", "personal"), "top-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := UserCopyRequest{RequestID: "req-concurrent", SecretRefID: ref.ID, Actor: ActorUserSession, SessionID: "session-1", TTL: MaxSecretCopyTTL}
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			receipt, copyErr := vault.Copy(req)
+			if copyErr != nil || receipt.State != CopyStateCopied {
+				t.Errorf("copy = %+v, %v", receipt, copyErr)
+			}
+		}()
+	}
+	wg.Wait()
+	clipboard.mu.Lock()
+	writes := clipboard.writes
+	clipboard.mu.Unlock()
+	if writes != 1 {
+		t.Fatalf("concurrent retries wrote clipboard %d times", writes)
 	}
 }
 
