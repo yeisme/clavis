@@ -1,7 +1,6 @@
 package inputmigration
 
 import (
-	"math"
 	"sort"
 )
 
@@ -27,17 +26,23 @@ type bigramKey struct {
 // (PreviousDigest, WordDigest). Pinned is merged with logical OR. The result
 // contains no duplicate key and is sorted by its stable digest key.
 //
-// Unpinned frequencies are compressed after summing the input frequencies.
-// Pinned frequencies retain their checked sum and are never removed by the
-// capacity trim. Metadata is merged independently of the entry collections.
+// Unpinned frequencies use a non-inflating, commutative, associative capped sum
+// bounded by maxMergedFrequency (compress(1) == 1). Pinned frequencies retain
+// their checked sum and are never removed by the capacity trim. SummaryOnly is
+// always true when any digest entry is present so merged summaries satisfy
+// PersonalBaseline.Validate.
 func MergeLearning(a, b LearningData) LearningData {
+	words := mergeLearningEntries(a.Words, b.Words)
+	bigrams := mergeBigramEntries(a.Bigrams, b.Bigrams)
+	aggregates := mergeLearningEntries(a.Aggregates, b.Aggregates)
+	hasEntries := len(words) > 0 || len(bigrams) > 0 || len(aggregates) > 0
 	out := LearningData{
 		Enabled:           a.Enabled || b.Enabled,
-		SummaryOnly:       a.SummaryOnly && b.SummaryOnly,
+		SummaryOnly:       a.SummaryOnly || b.SummaryOnly || hasEntries,
 		RecoveryObjectRef: sharedRecoveryObjectRef(a.RecoveryObjectRef, b.RecoveryObjectRef),
-		Words:             mergeLearningEntries(a.Words, b.Words),
-		Bigrams:           mergeBigramEntries(a.Bigrams, b.Bigrams),
-		Aggregates:        mergeLearningEntries(a.Aggregates, b.Aggregates),
+		Words:             words,
+		Bigrams:           bigrams,
+		Aggregates:        aggregates,
 	}
 	return out
 }
@@ -185,16 +190,13 @@ func addFrequency(a, b uint64) uint64 {
 	return a + b
 }
 
+// compressFrequency bounds unpinned merged frequencies without inflation.
+// Capping at maxMergedFrequency preserves exact counts for small values
+// (compressFrequency(1) == 1) and guarantees commutativity and associativity
+// across 3+ device merges: min(min(a+b, M)+c, M) == min(a+min(b+c, M), M).
 func compressFrequency(n uint64) uint64 {
-	if n == 0 {
-		return 0
-	}
-	if n > uint64(math.MaxInt64) {
+	if n > maxMergedFrequency {
 		return maxMergedFrequency
 	}
-	compressed := math.Round(1024 * math.Log1p(float64(n)))
-	if compressed >= float64(maxMergedFrequency) {
-		return maxMergedFrequency
-	}
-	return uint64(compressed)
+	return n
 }

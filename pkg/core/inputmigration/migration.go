@@ -1183,7 +1183,17 @@ func MergeBaselines(source, target PersonalBaseline) (PersonalBaseline, []FieldC
 	choose("shiftToggleASCII", source.ShiftToggleASCII != target.ShiftToggleASCII, func() { out.ShiftToggleASCII = target.ShiftToggleASCII })
 	choose("fuzzyPinyin", !sameStringSet(source.FuzzyPinyin, target.FuzzyPinyin), func() { out.FuzzyPinyin = append([]string(nil), target.FuzzyPinyin...) })
 	choose("dictionaries", !sameJSON(source.Dictionaries, target.Dictionaries), func() { out.Dictionaries = mergeDictionaries(source, target, &conflicts) })
-	choose("learning", !sameLearning(source.Learning, target.Learning), func() { out.Learning = cloneLearning(target.Learning) })
+	if !sameLearning(source.Learning, target.Learning) {
+		out.Learning = MergeLearning(source.Learning, target.Learning)
+		sr, tr := source.FieldRevisions["learning"], target.FieldRevisions["learning"]
+		if sr == tr {
+			out.FieldRevisions["learning"] = max(sr, tr) + 1
+		} else {
+			out.FieldRevisions["learning"] = max(sr, tr)
+		}
+	} else {
+		out.FieldRevisions["learning"] = max(source.FieldRevisions["learning"], target.FieldRevisions["learning"])
+	}
 	choose("shortcuts", !sameJSON(source.Shortcuts, target.Shortcuts), func() { out.Shortcuts = cloneShortcuts(target.Shortcuts) })
 	choose("appRules", !sameJSON(source.AppRules, target.AppRules), func() { out.AppRules = cloneAppRules(target.AppRules) })
 	return out, conflicts, out.Validate()

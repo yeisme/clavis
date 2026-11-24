@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -95,27 +96,60 @@ type useValue struct {
 	count    int64
 }
 
-// LearningStore owns the learning, frecency, and prompt-history tables on a shared SQLite DB.
-type LearningStore struct {
-	db           *sqlite.DB
-	mu           sync.RWMutex
-	lex          map[lexKey]lexValue
-	lexByInitial map[byte]map[lexKey]struct{}
-	bigrams      map[[2]string]lexValue
-	readings     map[string]map[string]struct{}
-	uses         map[string]useValue
+// LearningStoreOptions configures optional cold-start snapshot and migration behavior.
+type LearningStoreOptions struct {
+	// BigramSnapshotPath optionally points to bigram-snapshot-v1.bin for fast
+	// cold-start bigram loading and flush/close persistence.
+	BigramSnapshotPath string
+	// DBPath optionally hints the backing SQLite file path for migration locking/backups.
+	DBPath string
 }
 
-// NewLearningStore creates learning tables and loads their bounded hot mirror.
+// LearningStore owns the learning, frecency, and prompt-history tables on a shared SQLite DB.
+type LearningStore struct {
+	db                       *sqlite.DB
+	mu                       sync.RWMutex
+	lex                      map[lexKey]lexValue
+	lexByInitial             map[byte]map[lexKey]struct{}
+	bigrams                  map[[2]string]lexValue
+	readings                 map[string]map[string]struct{}
+	uses                     map[string]useValue
+	bigramSnapshotPath       string
+	bigramGen                atomic.Uint64
+	flushWatermark           atomic.Uint64
+	loadedBigramFromSnapshot atomic.Bool
+	lastSnapshotErr          atomic.Value // string
+}
+
+// NewLearningStore runs the unified app schema migration and loads the bounded hot mirror.
 func NewLearningStore(db *sqlite.DB) (*LearningStore, error) {
+	return NewLearningStoreWithOptions(context.Background(), db, LearningStoreOptions{})
+}
+
+// NewLearningStoreWithOptions migrates db (if needed) and loads bounded hot mirrors,
+// using opts.BigramSnapshotPath as a validated cold-start cache when available.
+func NewLearningStoreWithOptions(ctx context.Context, db *sqlite.DB, opts LearningStoreOptions) (*LearningStore, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if db == nil {
 		return nil, fmt.Errorf("nil sqlite database")
 	}
-	s := &LearningStore{db: db, lex: make(map[lexKey]lexValue), bigrams: make(map[[2]string]lexValue), readings: make(map[string]map[string]struct{}), uses: make(map[string]useValue)}
-	if err := s.initSchema(context.Background()); err != nil {
+	s := &LearningStore{
+		db:                 db,
+		lex:                make(map[lexKey]lexValue),
+		bigrams:            make(map[[2]string]lexValue),
+		readings:           make(map[string]map[string]struct{}),
+		uses:               make(map[string]useValue),
+		bigramSnapshotPath: strings.TrimSpace(opts.BigramSnapshotPath),
+	}
+	if err := s.initSchema(ctx, opts.DBPath); err != nil {
 		return nil, err
 	}
-	if err := s.load(context.Background()); err != nil {
+	if err := s.load(ctx); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -184,34 +218,49 @@ func (s *LearningStore) AIUsageDaily(ctx context.Context, n int) ([]AIUsageDay, 
 	return out, nil
 }
 
-func (s *LearningStore) initSchema(ctx context.Context) error {
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS ime_user_lexicon (pinyin_key TEXT NOT NULL, word TEXT NOT NULL, frequency INTEGER NOT NULL DEFAULT 0, last_used_ns INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (pinyin_key, word))`,
-		`CREATE TABLE IF NOT EXISTS ime_bigrams (prev_word TEXT NOT NULL, word TEXT NOT NULL, transition_count INTEGER NOT NULL DEFAULT 0, last_used_ns INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (prev_word, word))`,
-		`CREATE INDEX IF NOT EXISTS idx_ime_lexicon_prefix ON ime_user_lexicon(pinyin_key)`,
-		`CREATE TABLE IF NOT EXISTS usage_frecency (item_id TEXT PRIMARY KEY, use_count INTEGER NOT NULL DEFAULT 0, last_used_ns INTEGER NOT NULL DEFAULT 0)`,
-		`CREATE TABLE IF NOT EXISTS prompt_history (id INTEGER PRIMARY KEY AUTOINCREMENT, prompt_id TEXT NOT NULL, trigger TEXT NOT NULL, raw_draft TEXT NOT NULL, final_output TEXT NOT NULL, preset TEXT NOT NULL, created_at_ns INTEGER NOT NULL)`,
-		`CREATE INDEX IF NOT EXISTS idx_prompt_history_recent ON prompt_history(prompt_id, created_at_ns DESC, id DESC)`,
-		`CREATE TABLE IF NOT EXISTS lexicon_hits_daily (day TEXT NOT NULL, hits INTEGER NOT NULL DEFAULT 0, misses INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day))`,
-		`CREATE TABLE IF NOT EXISTS ai_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, at_ns INTEGER NOT NULL, profile TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, action TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cached_tokens INTEGER NOT NULL, reported INTEGER NOT NULL, latency_ms INTEGER NOT NULL)`,
-		`CREATE INDEX IF NOT EXISTS ai_usage_at ON ai_usage(at_ns)`,
-	}
-	for _, stmt := range stmts {
-		if _, err := s.db.Execute(ctx, stmt); err != nil {
-			return fmt.Errorf("init learning schema: %w", err)
-		}
+func (s *LearningStore) initSchema(ctx context.Context, dbPath string) error {
+	if _, err := Migrate(ctx, s.db, DBKindApp, MigrationOptions{
+		DBPath:      dbPath,
+		AllowCreate: true,
+	}); err != nil {
+		return fmt.Errorf("init learning schema: %w", err)
 	}
 	return nil
 }
 
 func (s *LearningStore) load(ctx context.Context) error {
-	rows, err := s.db.Query(ctx, `SELECT pinyin_key, word, frequency, last_used_ns, pinned FROM ime_user_lexicon ORDER BY pinned DESC, frequency DESC, last_used_ns DESC LIMIT ?`, MaxLexMirrorEntries)
+	lexRows, err := s.db.Query(ctx, `SELECT pinyin_key, word, frequency, last_used_ns, pinned FROM ime_user_lexicon ORDER BY pinned DESC, frequency DESC, last_used_ns DESC LIMIT ?`, MaxLexMirrorEntries)
 	if err != nil {
 		return err
 	}
+
+	var (
+		snapBigrams   []BigramSnapshotEntry
+		usedSnapshot  bool
+		bigramSQLRows sqlite.Rows
+	)
+	snapPath := s.BigramSnapshotPath()
+	if snapPath != "" {
+		if snap, ok := s.tryLoadValidatedBigramSnapshot(ctx, snapPath); ok {
+			snapBigrams = snap.Entries
+			usedSnapshot = true
+		}
+	}
+	if !usedSnapshot {
+		bigramSQLRows, err = s.db.Query(ctx, `SELECT prev_word, word, transition_count, last_used_ns FROM ime_bigrams ORDER BY transition_count DESC, last_used_ns DESC LIMIT ?`, MaxBigramMirrorEntries)
+		if err != nil {
+			return err
+		}
+	}
+
+	useRows, err := s.db.Query(ctx, `SELECT item_id, use_count, last_used_ns FROM usage_frecency ORDER BY last_used_ns DESC, use_count DESC LIMIT ?`, MaxUsesMirrorEntries)
+	if err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, r := range rows.Values {
+	for _, r := range lexRows.Values {
 		if len(r) >= 5 {
 			py := truncateUTF8(str(r, 0), MaxMirrorKeyBytes)
 			w := truncateUTF8(str(r, 1), MaxMirrorKeyBytes)
@@ -221,24 +270,41 @@ func (s *LearningStore) load(ctx context.Context) error {
 			}
 		}
 	}
-	rows, err = s.db.Query(ctx, `SELECT prev_word, word, transition_count, last_used_ns FROM ime_bigrams ORDER BY transition_count DESC, last_used_ns DESC LIMIT ?`, MaxBigramMirrorEntries)
-	if err != nil {
-		return err
-	}
-	for _, r := range rows.Values {
-		if len(r) >= 4 {
-			pw := truncateUTF8(str(r, 0), MaxMirrorKeyBytes)
-			w := truncateUTF8(str(r, 1), MaxMirrorKeyBytes)
-			if pw != "" && w != "" {
-				s.bigrams[[2]string{pw, w}] = lexValue{frequency: int64val(r, 2), lastUsed: int64val(r, 3)}
+	if usedSnapshot {
+		for _, e := range snapBigrams {
+			pw := truncateUTF8(e.PrevWord, MaxMirrorKeyBytes)
+			w := truncateUTF8(e.Word, MaxMirrorKeyBytes)
+			if pw == "" || w == "" {
+				continue
+			}
+			s.bigrams[[2]string{pw, w}] = lexValue{
+				frequency: clampUint64ToInt64(e.Frequency),
+				lastUsed:  e.LastUsedNS,
+			}
+			if e.Reading != "" && len(s.lex) == 0 {
+				if s.readings == nil {
+					s.readings = make(map[string]map[string]struct{})
+				}
+				if s.readings[w] == nil {
+					s.readings[w] = make(map[string]struct{})
+				}
+				s.readings[w][truncateUTF8(e.Reading, MaxMirrorKeyBytes)] = struct{}{}
 			}
 		}
+		s.loadedBigramFromSnapshot.Store(true)
+	} else {
+		for _, r := range bigramSQLRows.Values {
+			if len(r) >= 4 {
+				pw := truncateUTF8(str(r, 0), MaxMirrorKeyBytes)
+				w := truncateUTF8(str(r, 1), MaxMirrorKeyBytes)
+				if pw != "" && w != "" {
+					s.bigrams[[2]string{pw, w}] = lexValue{frequency: int64val(r, 2), lastUsed: int64val(r, 3)}
+				}
+			}
+		}
+		s.loadedBigramFromSnapshot.Store(false)
 	}
-	rows, err = s.db.Query(ctx, `SELECT item_id, use_count, last_used_ns FROM usage_frecency ORDER BY last_used_ns DESC, use_count DESC LIMIT ?`, MaxUsesMirrorEntries)
-	if err != nil {
-		return err
-	}
-	for _, r := range rows.Values {
+	for _, r := range useRows.Values {
 		if len(r) >= 3 {
 			n := int64val(r, 1)
 			id := truncateUTF8(str(r, 0), MaxMirrorItemIDBytes)
@@ -248,6 +314,283 @@ func (s *LearningStore) load(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *LearningStore) tryLoadValidatedBigramSnapshot(ctx context.Context, path string) (BigramSnapshot, bool) {
+	snap, err := ReadBigramSnapshot(path)
+	if err != nil {
+		s.lastSnapshotErr.Store(err.Error())
+		return BigramSnapshot{}, false
+	}
+	if snap.SourceSchema != AppSchemaVersion {
+		s.lastSnapshotErr.Store(fmt.Sprintf("%v: snapshot schema %d != %d", ErrBigramSnapshotStale, snap.SourceSchema, AppSchemaVersion))
+		return BigramSnapshot{}, false
+	}
+	dbGen, err := dbBigramGeneration(ctx, s.db, AppSchemaVersion)
+	if err != nil {
+		s.lastSnapshotErr.Store(err.Error())
+		return BigramSnapshot{}, false
+	}
+	if snap.Generation != dbGen {
+		s.lastSnapshotErr.Store(fmt.Sprintf("%v: snapshot generation %d != db %d", ErrBigramSnapshotStale, snap.Generation, dbGen))
+		return BigramSnapshot{}, false
+	}
+	s.lastSnapshotErr.Store("")
+	return snap, true
+}
+
+// SetBigramSnapshotPath configures or clears the binary cold-start bigram snapshot path.
+func (s *LearningStore) SetBigramSnapshotPath(path string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.bigramSnapshotPath = strings.TrimSpace(path)
+	s.mu.Unlock()
+}
+
+// BigramSnapshotPath returns the configured binary cold-start bigram snapshot path.
+func (s *LearningStore) BigramSnapshotPath() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	p := s.bigramSnapshotPath
+	s.mu.RUnlock()
+	return p
+}
+
+// LoadedBigramFromSnapshot reports whether the initial bigram mirror was populated
+// from a validated matching binary snapshot rather than scanning SQLite ime_bigrams.
+func (s *LearningStore) LoadedBigramFromSnapshot() bool {
+	if s == nil {
+		return false
+	}
+	return s.loadedBigramFromSnapshot.Load()
+}
+
+// LastBigramSnapshotError returns the most recent snapshot fallback diagnostic, if any.
+func (s *LearningStore) LastBigramSnapshotError() string {
+	if s == nil {
+		return ""
+	}
+	if msg, ok := s.lastSnapshotErr.Load().(string); ok {
+		return msg
+	}
+	return ""
+}
+
+// BigramGeneration returns a monotonically increasing generation counter for in-memory
+// bigram/lexicon mutations so stale background snapshot loads cannot clobber online learning.
+func (s *LearningStore) BigramGeneration() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.bigramGen.Load()
+}
+
+// FlushWatermark returns the store's durable write watermark for snapshot tagging.
+func (s *LearningStore) FlushWatermark() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.flushWatermark.Load()
+}
+
+// BuildBigramSnapshot constructs a canonical, bounded BigramSnapshot from SQLite
+// (the sole source of truth) enriched with primary reading hints from the lexicon mirror.
+func (s *LearningStore) BuildBigramSnapshot(ctx context.Context, flushWatermark uint64) (BigramSnapshot, error) {
+	if s == nil {
+		return BigramSnapshot{}, fmt.Errorf("nil learning store")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return BigramSnapshot{}, err
+	}
+	if flushWatermark == 0 {
+		flushWatermark = s.flushWatermark.Load()
+	}
+
+	// Capture deterministic best reading per word and optional usage count under RLock.
+	bestReading := make(map[string]string)
+	bestReadingFreq := make(map[string]int64)
+	useCounts := make(map[string]uint64)
+	var entries []BigramSnapshotEntry
+	var gen uint64
+
+	s.mu.RLock()
+	for k, v := range s.lex {
+		if k.prev != "" || k.word == "" || k.pinyin == "" {
+			continue
+		}
+		cur, exists := bestReading[k.word]
+		if !exists || v.frequency > bestReadingFreq[k.word] || (v.frequency == bestReadingFreq[k.word] && k.pinyin < cur) {
+			bestReading[k.word] = k.pinyin
+			bestReadingFreq[k.word] = v.frequency
+		}
+	}
+	for id, u := range s.uses {
+		if u.count > 0 {
+			useCounts[id] = uint64(u.count)
+		}
+	}
+	if s.db == nil {
+		gen = s.bigramGen.Load()
+		for k, v := range s.bigrams {
+			if k[0] == "" || k[1] == "" || v.frequency <= 0 {
+				continue
+			}
+			entries = append(entries, BigramSnapshotEntry{
+				PrevWord:   k[0],
+				Word:       k[1],
+				Reading:    bestReading[k[1]],
+				Frequency:  uint64(v.frequency),
+				LastUsedNS: v.lastUsed,
+				UsageCount: useCounts[k[1]],
+			})
+		}
+	}
+	s.mu.RUnlock()
+
+	if s.db != nil {
+		var err error
+		gen, err = dbBigramGeneration(ctx, s.db, AppSchemaVersion)
+		if err != nil {
+			return BigramSnapshot{}, err
+		}
+		rows, err := s.db.Query(ctx, `SELECT prev_word, word, transition_count, last_used_ns FROM ime_bigrams WHERE transition_count > 0 ORDER BY transition_count DESC, last_used_ns DESC, prev_word ASC, word ASC LIMIT ?`, MaxBigramSnapshotEntries)
+		if err != nil {
+			return BigramSnapshot{}, err
+		}
+		entries = make([]BigramSnapshotEntry, 0, len(rows.Values))
+		for _, r := range rows.Values {
+			if len(r) < 4 {
+				continue
+			}
+			pw := truncateUTF8(str(r, 0), MaxMirrorKeyBytes)
+			w := truncateUTF8(str(r, 1), MaxMirrorKeyBytes)
+			freq := int64val(r, 2)
+			if pw == "" || w == "" || freq <= 0 {
+				continue
+			}
+			entries = append(entries, BigramSnapshotEntry{
+				PrevWord:   pw,
+				Word:       w,
+				Reading:    bestReading[w],
+				Frequency:  uint64(freq),
+				LastUsedNS: int64val(r, 3),
+				UsageCount: useCounts[w],
+			})
+		}
+	}
+
+	snap := normalizeBigramSnapshot(BigramSnapshot{
+		FormatVersion:  BigramSnapshotFormatVersion,
+		CreatedAt:      time.Now().UTC(),
+		SourceSchema:   AppSchemaVersion,
+		Generation:     gen,
+		FlushWatermark: flushWatermark,
+		Entries:        entries,
+	})
+	snap.SourceDigest = computeBigramSourceDigest(snap.SourceSchema, snap.Generation, snap.FlushWatermark, snap.Entries)
+	return snap, nil
+}
+
+// SaveBigramSnapshot builds and atomically persists bigram-snapshot-v1.bin when a path is configured.
+func (s *LearningStore) SaveBigramSnapshot(ctx context.Context, flushWatermark uint64) error {
+	if s == nil {
+		return nil
+	}
+	path := s.BigramSnapshotPath()
+	if path == "" {
+		return nil
+	}
+	snap, err := s.BuildBigramSnapshot(ctx, flushWatermark)
+	if err != nil {
+		s.lastSnapshotErr.Store(err.Error())
+		return err
+	}
+	if err := WriteBigramSnapshot(path, snap); err != nil {
+		s.lastSnapshotErr.Store(err.Error())
+		return err
+	}
+	s.lastSnapshotErr.Store("")
+	return nil
+}
+
+// FlushBigramSnapshot persists the current bigram snapshot using the store's latest flush watermark.
+func (s *LearningStore) FlushBigramSnapshot(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	return s.SaveBigramSnapshot(ctx, s.flushWatermark.Load())
+}
+
+// ApplyBigramSnapshotIfCurrent publishes snap into the in-memory bigram mirror only if
+// no online learning mutation has occurred since expectedGen was observed.
+func (s *LearningStore) ApplyBigramSnapshotIfCurrent(snap BigramSnapshot, expectedGen uint64) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.bigramGen.Load() != expectedGen {
+		return false
+	}
+	next := make(map[[2]string]lexValue, min(len(snap.Entries), MaxBigramMirrorEntries))
+	for _, e := range snap.Entries {
+		if len(next) >= MaxBigramMirrorEntries {
+			break
+		}
+		pw := truncateUTF8(e.PrevWord, MaxMirrorKeyBytes)
+		w := truncateUTF8(e.Word, MaxMirrorKeyBytes)
+		if pw == "" || w == "" || e.Frequency == 0 {
+			continue
+		}
+		next[[2]string{pw, w}] = lexValue{
+			frequency: clampUint64ToInt64(e.Frequency),
+			lastUsed:  e.LastUsedNS,
+		}
+		if e.Reading != "" && len(s.lex) == 0 {
+			if s.readings == nil {
+				s.readings = make(map[string]map[string]struct{})
+			}
+			if s.readings[w] == nil {
+				s.readings[w] = make(map[string]struct{})
+			}
+			s.readings[w][truncateUTF8(e.Reading, MaxMirrorKeyBytes)] = struct{}{}
+		}
+	}
+	s.bigrams = next
+	s.bigramGen.Add(1)
+	return true
+}
+
+// Close persists the cold-start bigram snapshot if a snapshot path is configured.
+// Because LearningStore borrows a shared *sqlite.DB, Close does not close the DB handle.
+func (s *LearningStore) Close(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.BigramSnapshotPath() == "" {
+		return nil
+	}
+	return s.FlushBigramSnapshot(ctx)
+}
+
+func clampUint64ToInt64(v uint64) int64 {
+	if v > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(v)
 }
 
 func (s *LearningStore) RecordIMECommit(ctx context.Context, pinyinKey, word, prevWord string, pinned bool) error {
@@ -282,6 +625,8 @@ func (s *LearningStore) RecordIMECommit(ctx context.Context, pinyinKey, word, pr
 	// Update the write-through mirror only after persistence succeeds, so a
 	// cancelled or failed write cannot make the hot path observe phantom data.
 	s.mirrorIMECommit(pinyinKey, word, prevWord, pinned, now)
+	s.bigramGen.Add(1)
+	s.flushWatermark.Add(1)
 	return nil
 }
 
@@ -477,6 +822,7 @@ func (s *LearningStore) DeleteLearnedWord(ctx context.Context, pinyinKey, word s
 	s.mu.Lock()
 	s.deleteLexKeyLocked(lexKey{pinyinKey, word, ""})
 	s.mu.Unlock()
+	s.bigramGen.Add(1)
 	return nil
 }
 
