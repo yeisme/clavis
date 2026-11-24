@@ -1,5 +1,7 @@
 # 未合并分支清单（2026-11-22 盘点）
 
+> **Status: Superseded / Updated as of 2026-11-25** — 本文件为 2026-11-22 历史分支盘点；权威路线见 [`docs/ROADMAP.md`](../ROADMAP.md)（基线 HEAD `79d325b`）。原列三项冲突分支中：IMK 清理已于 `CLV-P2-4` 直接在 `main` 上删除 `cmd/clavis-imk/` 与 `internal/bridge/imk_ipc.go`（决策 D2），剪贴板热路径已由 Clipboard Jank v4 及 `CLV-P1-4`（`79d325b`）取代，模板库 T5 统一纳入 `CLV-P3-3`。下文保留作历史审计记录。
+
 盘点方法：`git cherry main <branch>` 判 patch 是否已在 main（`-` = 已在，`+` = 真未合并），
 再用 `git merge-tree --write-tree` 做无侵入冲突检测。
 

@@ -1,6 +1,6 @@
 # Clavis
 
-Clavis is a keyboard-first, non-activating floating **Capsule** launcher and productivity assistant built with **Go + MyGo v0.9.0** (`mygo/ui`, `plugins/glass`, `plugins/sfsymbols`, `plugins/sqlite`, and `plugins/permissionflow`). It combines a mnemonic Leader key tree, fuzzy Omnibox search, multi-protocol AI profiles with multi-turn follow-up, smart context-aware IME switching with a cursor-side floating pill, tap-hold keymap remapping with a Vim-style navigation layer, inline snippet expansion, domain-glossary normalization, local SQLite FTS5 clipboard history, and window management.
+Clavis is a keyboard-first, non-activating floating **Capsule** launcher and productivity assistant built with **Go + MyGo v0.9.0** (`mygo/ui`, `plugins/glass`, `plugins/sfsymbols`, `plugins/sqlite`, and `plugins/permissionflow`). It unifies a mnemonic Leader key tree, fuzzy 6-tab Omnibox search + 3 operational Hub overlays, a multi-protocol AI Workbench with Vision OCR, bilingual translation & inline continuation, region capture & Retina vector annotation, an AES-256-GCM Security Vault, a Herdr Agent control plane, a local second-IME Chinese input engine, context-aware IME switching, tap-hold keymap remapping, inline snippet expansion, domain-glossary normalization, SQLite FTS5 media clipboard history, and window management.
 
 ## 输入法定位（第二输入法）
 
@@ -11,43 +11,46 @@ Clavis 输入法工作在「系统输入法为英文」的前提下。中文由 
 | Area | Capabilities |
 | --- | --- |
 | **Leader Key Tree** | Modifier double-tap activation (`right_option` / `right_command`), recursive mnemonic key groups, `/` instant jump to clean Omnibox search, smart temporary ASCII IME lock (`lock_ascii_on_leader`) with immediate IME restoration on exit or Omnibox downgrade |
-| **Omnibox Launcher, Pinyin & Prefix Routing** | Tabbed search across **Actions**, **Clipboard**, **Snippets**, **AI**, and **Glossary** (`⌘1`–`⌘5` / `Ctrl+1`–`Ctrl+5`, `Tab` / `Shift+Tab`), zero-dependency **Mandarin Pinyin & initialism search** (`weixin` / `wx` / polyphones / `lv`→`绿`) with exact Hanzi highlighting, full-width operator/prefix normalization (`＝（２＋３）×４`, `：huojian`), prefix quick-routing (`>`, `;`, `@` / `cb `, `?`, `:`, `=`), direct row execution (`⌥1`–`⌥9` / `Alt+1`–`Alt+9`), primary (`↵`) & secondary (`⌘↵` / `Ctrl+↵`) dual actions, `⌘K` / `Ctrl+K` contextual Action Menu, toggleable **Split Preview Pane** (`⌘I` / `Ctrl+I`), and one-click **"Bind / Unbind Current App IME Rule"** |
-| **Multi-Protocol AI & Follow-Up** | Built-in `[[ai.profiles]]` supporting `openai_compatible` (**DeepSeek** `deepseek-chat` default, **Ollama** `qwen2.5:7b` local keyless), `anthropic` (**Claude** `claude-3-7-sonnet-latest` Messages SSE), and `gemini` (**Gemini** `gemini-2.5-flash` `streamGenerateContent` SSE); header profile switcher (`⌘⇧M` / `Ctrl+Shift+M`) + IME-composition-safe multi-turn `Tab` follow-up prompt inside `PhaseAIStreaming`; automatic `<glossary>` prompt injection; per-profile OS credential storage & environment variable fallback |
-| **Smart IME & Floating Pill** | Context-aware input source switching (`ime-rules.toml`) matching by `url_pattern` (`github.com`, `*.docs.rs`), regex `title_pattern`, `bundle_id`, or `process_name` with anti-race `switch_delay_ms` re-verification and optional mode-only (`preferred_mode = "ascii" \| "native"`) switching without hardcoding OS source IDs; non-activating, session-preserving cursor-side `"中 / EN / LAYER"` floating micro-pill (`IMEPillView`) |
+| **6-Tab Omnibox & 3 Hub Overlays** | Tabbed search across **Actions**, **Clipboard**, **Snippets**, **AI**, **Glossary**, and **Agent** (`⌘1`–`⌘6` / `Ctrl+1`–`Ctrl+6`, `Tab` / `Shift+Tab`), plus 3 non-disruptive operational Hub overlays: **`⌘7` Stats** (AI usage, clipboard metrics, lexicon hits/top words, agent health), **`⌘8` Manage** (Sync, Media/Clipboard, Terminal/Agent, Lexicon, AI/Vision, Vault & QuickJump status), and **`⌘9` Assets** (6-category Media search, Pinned & Templates, Security Vault). Zero-dependency **Mandarin Pinyin & initialism search** (`weixin` / `wx` / polyphones / `lv`→`绿`), full-width prefix normalization, quick-routing (`>`, `;`, `@` / `cb `, `?`, `:`, `=`, `/`, `#`), direct row execution (`⌥1`–`⌥9`), primary (`↵`) & secondary (`⌘↵`) dual actions, `⌘K` contextual Action Menu, and toggleable **Split Preview Pane** (`⌘I`) |
+| **AI Workbench, OCR, Translate & Continuation** | 5-state AI Interaction Center (`pending` / `running` / `awaiting_human` / `done` / `failed`) with truthful 3-step log, blocking diff-approval gate, and multi-line `@context` / `/command` Input Composer (IME-composition-safe, 30-entry history). Multi-protocol `[[ai.profiles]]` (`openai_compatible` DeepSeek/Ollama, `anthropic` Claude, `gemini` Gemini) with `⌘⇧M` profile switching, multimodal Vision OCR (`PrepareOCRImage` 2048px scaling, Plain Text / Markdown Table), bilingual Translate (`tr` / `fy` / `翻译` with auto script detection + `ZH → EN` / `EN → ZH` bar), explicit AI Continuation (rune-safe 200-char tail, 5s Backspace undo), floating Selection Bar, Secure Input blocking, auto-attached secret scrubbing, and asynchronous SQLite token usage telemetry (`ai_usage`) |
+| **Region Capture & Vector Annotate** | Interactive region & full-screen capture (`screencapture` on macOS, `grim+slurp` / `scrot` / `import` on Linux, zero-CGo GDI on Windows) paired with a standalone Retina vector annotator (**Rect**, **Arrow**, **Mosaic**, **Text** with system CJK + `goregular` fallback, 5 swatches, S/M/L stroke, Undo/Redo). Flattens lossless PNGs to clipboard + content-addressed `MediaStore` with self-write dedup, saves to `~/Pictures/Clavis`, or hands off directly to **AI OCR** / **Ask AI** |
+| **Security Vault (`vault_secrets.enc`)** | AES-256-GCM encrypted secret store isolated from `ai-keys.toml` (32-byte master key in OS Keychain with `0600` `vault.key` fallback), metadata-only `SecretRef` / `CopyReceipt` contracts, agent-forbidden plaintext read boundary, user-only TTL clipboard copy with pasteboard ownership verification on expiry, and revoke-time ciphertext deletion |
+| **Herdr Agent Control Plane & QuickJump** | Local multi-source discovery across **DSH** JSON/JSONL, **Codex** `state_5.sqlite` (strictly `mode=ro`, preserving WAL visibility), **Claude** JSONL, and live **Herdr** workspaces/panes; ANSI-stripped, secret-redacted terminal output preview; per-session isolated gated controls (workspace/pane focus, rename, 6-CLI allowlist start `claude`/`codex`/`pi`/`agy`/`gemini`/`opencode`, two-step confirmed `SendPrompt` with unified secret & option-injection blocking, non-retryable `StateUnknown` contract, idle completion watch); `#` QuickJump bookmarks (`quickjump.toml`) and `pkg/core/terminal` Resolver fallback |
+| **Clipboard History & Media Store** | SQLite + FTS5 persistence (`plugins/sqlite`) with COW capsule state & 120Hz-budget row/preview caching, 6-category media search, content-addressed `MediaStore` blobs + 256px thumbnails with 512 MiB quota GC, privacy filters (concealed types, password-manager processes, excluded bundle IDs), pin (`⌘P`) and delete (`⌘⌫`) |
+| **Own Input Engine, Smart IME & Floating Pill** | Built-in Pinyin/Shuangpin second-IME engine with embedded + hot-reloaded user `.clvdict` dictionaries, bigram prefix matching, user lexicon learning & blocklist; context-aware `ime-rules.toml` switching (`url_pattern`, `title_pattern`, `bundle_id`, `process_name`) with `switch_delay_ms` anti-race re-verification and cursor-side `"中 / EN / LAYER"` floating micro-pill (`IMEPillView`) |
 | **Keymap Tap-Hold & Nav Layer** | Configurable `[[keymap.remaps]]` tap-vs-hold engine (e.g., tap `caps_lock` → `escape`, hold `caps_lock` → `nav` or `hyper`) with Vim-style `h/j/k/l` → Arrow keys, `u/d` → PageUp/PageDown, `0/4` → Home/End, live hold-layer floating pill feedback, and runtime hot-reload |
-| **Visual Configuration Center** | Native `ui.Sidebar` Settings Center covering **General & Triggers** (live shortcut recorder), **IME & Keymap** (native input source & installed-app pickers + custom remaps CRUD), **Leader Tree** (recursive visual editor), **Snippets** (master-detail CRUD + placeholder chips + live preview), **Glossary & Clipboard**, **AI & Keychain** (multi-profile CRUD + connection test), **Permissions & Diagnostics**, and **Configs** — backed by atomic TOML persistence (`ConfigStore.Save*`) with SHA-256 self-write loop suppression |
-| **First-Run Guide / 首次使用引导** | One welcome page on a machine's first launch, and from the tray's *Welcome Guide…*: live Accessibility / Input Monitoring status with a System Settings drag-in guide (`plugins/permissionflow`), a press-your-Leader-key check, and the configured shortcuts. The keyboard monitor starts as soon as the permissions allow it, or the guide offers a restart when macOS wants one. Completion is recorded per machine (`onboarding.json` in the user data directory), not in the synced TOML; installs with existing data skip it / 首次启动的欢迎页：权限实时状态与系统设置拖拽引导、Leader 键试按检测、快捷键速查；授权后自动启动键盘监听，需要时提示重启 |
-| **Glossary Normalization** | Local longest-first alias normalization (`normalize_glossary`) on selected text (in-place replacement) or clipboard preview, plus searchable glossary term reference |
-| **Clipboard History** | SQLite + FTS5 persistence (`plugins/sqlite`) with privacy filters (concealed types & excluded bundle IDs), pin (`⌘P` / `Ctrl+P`) and delete (`⌘⌫` / `Ctrl+⌫`) in both Clipboard tab and `@` prefix view |
-| **Inline Snippets** | Boundary-aware trigger expansion with dynamic tokens (`{{cursor}}`, `{{clipboard}}`, `{{date}}`, `{{time}}`, `{{app}}`), full-width leading punctuation tolerance (`；sig` → `;sig`), active IME preedit suppression, mouse/focus/navigation context resets, and OS Secure Input protection |
-| **Window Management** | `left_half`, `right_half`, `top_half`, `bottom_half`, `maximize`, `center`, `next_display`, `previous_display`, `restore` |
-| **中文本地化 / Chinese i18n** | Pure-Go `en` / `zh-CN` string tables, `language = "auto" | "zh-CN" | "en"`, localized HUD/tray/settings/diagnostics, CJK fallback fonts, and IME-safe composition handling / 纯 Go 字符串表、中文 HUD/托盘/设置/诊断、CJK 字体回退，保留输入法组合态安全逻辑 |
-| **动画 / Motion** | 60fps non-blocking capsule/HUD/list/AI/snippet motion with `full` / `reduced` / `off` modes and system Reduce Motion support / 支持完整、减少、关闭三档并尊重系统减少动态效果 |
-| **Vector & Native Icons** | Unified currentColor SVG icons with 16/20/24 optical sizes, HUD/empty-state/tray glyphs, macOS `plugins/sfsymbols`, multi-size PNG and Windows ICO / 统一矢量图标、光学尺寸、多尺寸应用图标及 Windows ICO |
+| **Visual Configuration Center & Onboarding** | Native `ui.Sidebar` Settings Center (General & Triggers, IME & Keymap, Input Engine, Leader Tree, Snippets, Glossary & Clipboard, AI & Keychain, Security Vault, Sync, Permissions & Diagnostics, Configs) backed by atomic TOML persistence with SHA-256 self-write loop suppression; first-run onboarding guide (`onboarding.json`) with live permission drag-in (`plugins/permissionflow`) |
+| **Inline Snippets, Glossary & Window Mgmt** | Boundary-aware trigger expansion (`{{cursor}}`, `{{clipboard}}`, `{{date}}`, `{{time}}`, `{{app}}`) with 5s Backspace undo & OS Secure Input protection; longest-first local glossary normalization (`normalize_glossary`); 9 window tiling commands (`left_half`…`restore`) |
+| **i18n, Motion & Vector Icons** | Pure-Go `en` / `zh-CN` string tables (`language = "auto" \| "zh-CN" \| "en"`), `classic` / `liquid_glass` / `spatial_3d` presets with `full` / `reduced` / `off` motion + Reduce Motion support, currentColor SVG icons + macOS `plugins/sfsymbols` |
 
 ## Architecture & Project Layout
 
-Clavis uses a unified Go codebase with a pure-stdlib core, zero-CGo native OS bridges, and native GPU-accelerated MyGo UI:
+Clavis uses a unified Go codebase with a pure-stdlib core, zero-CGo native OS bridges, and native GPU-accelerated MyGo UI (see [`docs/ROADMAP.md`](docs/ROADMAP.md) for current phase status and [`docs/design/`](docs/design/) for detailed specs):
 
 ```text
 clavis/
-├── main.go                 # Desktop entrypoint, --smoke-check, MyGo Capsule/IMEPill/Settings/Tray lifecycle
-├── main_test.go            # Smoke-check, Capsule & IME pill screen coordinate clamping, and tray icon tests
+├── main.go                 # Desktop entrypoint, --smoke-check, --self-check, Capsule/Annotate/IMEPill/Settings/Tray lifecycle
+├── selfcheck.go            # Strictly read-only local diagnostic (--self-check)
 ├── onboarding.go           # First-run guide window, per-machine completion marker, permission watcher
-├── mygo.json               # MyGo v0.9.0 bundle manifest, NSIS installer config & macOS privacy usage descriptions
-├── resources/icon.png      # High-craft squircle application icon (512x512 RGBA PNG)
-├── resources/icon.ico      # Multi-entry Windows icon (16–256px PNG entries)
-├── cmd/clavis-imk/         # IMK 宿主未实现，仅 -smoke-check
-├── uiapp/                  # Native MyGo UI & controller (AppController, CapsuleView, IMEPillView, SettingsView, SVG/SF Symbols)
+├── mygo.json               # MyGo v0.9.0 bundle manifest & macOS usage descriptions (incl. NSScreenCaptureUsageDescription)
+├── resources/              # Application icons (icon.png 512x512, multi-entry icon.ico)
+├── cmd/
+│   ├── clavis/             # CLI companion entrypoint
+│   └── clavis-dictgen/     # Rime/custom lexicon compiler for *.clvdict dictionaries
+├── uiapp/                  # Native MyGo UI & AppController (Capsule, Hubs ⌘7–⌘9, AI Center, Composer, Annotate, OCR/Translate, Agent Controls, Settings)
 ├── internal/
-│   ├── apps/               # Installed application discovery & Retina icon cache (MyGoAppProvider + MockAppProvider)
+│   ├── agentsession/       # Platform Codex state_5.sqlite read-only SQLite adapter (mode=ro, WAL-safe)
+│   ├── apps/               # Installed application discovery & Retina icon cache
 │   ├── bridge/             # Zero-CGo OS host bridges (purego on macOS, x/sys/windows on Windows, Linux fallback)
+│   ├── capture/            # Platform screenshot capture (macOS screencapture, Linux grim/slurp/scrot, Windows GDI)
 │   ├── daemon/             # Resident daemon lifecycle and wiring
-│   ├── secrets/            # OS Keychain / Credential Manager / Secret Service via mygo.Secrets (+ per-profile env fallback)
-│   ├── storage/            # Local clipboard persistence via mygo/plugins/sqlite + FTS5
-│   └── watcher/            # Debounced TOML config hot-reloader (mygo.WatchFiles + polling fallback)
+│   ├── secrets/            # AES-256-GCM EncryptedVaultStore (vault_secrets.enc), FileStore (ai-keys.toml), LayeredStore & OS Keychain
+│   ├── storage/            # Local SQLite + FTS5 clipboard, learning, AI usage telemetry & sync stores
+│   ├── sync/               # Sync watermark & recovery persistence
+│   ├── watcher/            # Debounced TOML config & .clvdict dictionary hot-reloaders
+│   └── mcp/, plugins/, skills/  # MCP client (Phase 4) and frozen extension packages (see docs/ROADMAP.md D2)
 └── pkg/
-    ├── core/               # Pure-stdlib core: toml, config, engine, clipboard, ai, actions, host
+    ├── core/               # Pure-stdlib core: actions, agentsession, ai, annotate, automation, clipboard, config, engine, host, i18n, ime, inputengine, inputmigration, jsonschema, prompt, runtime, sync, template, terminal, toml
     └── mobile/             # gomobile-compatible Session & StreamCallback bindings for iOS / Android
 ```
 
@@ -55,17 +58,17 @@ clavis/
 
 All desktop targets compile with zero CGo dependencies:
 
-- **macOS (`internal/bridge/bridge_darwin.go`)**: Uses `github.com/ebitengine/purego` (`dlopen`/`dlsym`/`objc_msgSend`) for `CoreFoundation`, `CoreGraphics` (`CGEventTap` with tap-hold keymap interception and automatic timeout recovery), `ApplicationServices` (`AXUIElement` caret bounds, selected text, browser `AXURL`/`AXDocument` active URL inspection, and window tiling), `Carbon` (`TISInputSource` & `IsSecureEventInputEnabled`), `AppKit` (`NSPasteboard` snapshot/restore), and `mygo/plugins/permissionflow`.
-- **Windows (`internal/bridge/bridge_windows.go`)**: Uses `golang.org/x/sys/windows` (`user32`, `imm32`, `kernel32`, `dwmapi`, `shell32`) for `WH_KEYBOARD_LL` hooks with tap-hold keymap remapping, `SendInput` (`SyntheticEventTag`), `GetGUIThreadInfo` caret anchoring, DWM-aware window tiling, `HKL` keyboard layout switching + `ImmGetDefaultIMEWnd` (`IMC_GETCONVERSIONMODE` / `IMC_SETCONVERSIONMODE` / `IMC_SETOPENSTATUS`) Chinese/English toggling, and `ExcludeClipboardContentFromMonitorProcessing` filtering.
-- **Linux (`internal/bridge/bridge_linux.go`)**: Uses `mygo.Clipboard`, `mygo.Shell`, `mygo.Secrets`, and `mygo.GlobalShortcut` for Wayland/X11 desktop integration without CGo.
+- **macOS (`internal/bridge/bridge_darwin.go`)**: Uses `github.com/ebitengine/purego` (`dlopen`/`dlsym`/`objc_msgSend`) for `CoreFoundation`, `CoreGraphics` (`CGEventTap` with tap-hold keymap interception, second-IME inline hook, and automatic timeout recovery), `ApplicationServices` (`AXUIElement` caret bounds, selected text, browser `AXURL`/`AXDocument` active URL inspection, and window tiling), `Carbon` (`TISInputSource` & `IsSecureEventInputEnabled`), `AppKit` (`NSPasteboard` change-count dedup & snapshot/restore), and `mygo/plugins/permissionflow`.
+- **Windows (`internal/bridge/bridge_windows.go`)**: Uses `golang.org/x/sys/windows` (`user32`, `imm32`, `kernel32`, `dwmapi`, `shell32`, `gdi32`) for `WH_KEYBOARD_LL` hooks with tap-hold keymap remapping, `SendInput` (`SyntheticEventTag`), `GetGUIThreadInfo` caret anchoring, DWM-aware window tiling, `HKL` keyboard layout switching + `ImmGetDefaultIMEWnd` Chinese/English toggling, GDI screen capture, and `ExcludeClipboardContentFromMonitorProcessing` filtering.
+- **Linux (`internal/bridge/bridge_linux.go`)**: Uses `mygo.Clipboard`, `mygo.Shell`, `mygo.Secrets`, `mygo.GlobalShortcut`, and Wayland/X11 capture utilities (`grim`+`slurp`, `scrot`, `import`) without CGo.
 
 ## Cross-Platform Support Matrix
 
-| Target | UI / Runtime | Core & Storage | System Bridge |
+| Target | UI / Runtime | Core & Storage | System Bridge & Capture |
 | --- | --- | --- | --- |
-| **macOS (`darwin/arm64`, `amd64`)** | MyGo v0.9.0 `Panel` + `VibrancyGlass` (`plugins/glass`) + `plugins/sfsymbols` + Menu Bar Tray | `pkg/core` + `plugins/sqlite` + Keychain | Full (`purego`: CGEventTap, Keymap Engine, AXUIElement + Browser URL, Carbon TIS, NSPasteboard) |
-| **Windows (`windows/amd64`, `arm64`)** | MyGo v0.9.0 `Panel` + `VibrancyGlass` + Embedded SVG Icons + System Tray | `pkg/core` + `plugins/sqlite` + Credential Manager | Full (`x/sys/windows`: WH_KEYBOARD_LL, Keymap Engine, SendInput, DWM, HKL + IMM32 IME Mode) |
-| **Linux (`linux/amd64`)** | MyGo v0.9.0 Native UI + Embedded SVG Icons + System Tray | `pkg/core` + `plugins/sqlite` + Secret Service | Clipboard, Shell, Keychain & `mygo.GlobalShortcut` fallback |
+| **macOS (`darwin/arm64`, `amd64`)** | MyGo v0.9.0 `Panel` + `VibrancyGlass` (`plugins/glass`) + `plugins/sfsymbols` + Menu Bar Tray | `pkg/core` + `plugins/sqlite` + Keychain / `vault_secrets.enc` | Full (`purego`: CGEventTap, Keymap & Input Engine, AXUIElement + Browser URL, Carbon TIS, NSPasteboard, `/usr/sbin/screencapture`) |
+| **Windows (`windows/amd64`, `arm64`)** | MyGo v0.9.0 `Panel` + `VibrancyGlass` + Embedded SVG Icons + System Tray | `pkg/core` + `plugins/sqlite` + Credential Manager / `vault_secrets.enc` | `x/sys/windows`: WH_KEYBOARD_LL, Keymap Engine, SendInput, DWM, HKL + IMM32, GDI full-screen capture (real-machine parity closure in Phase 4) |
+| **Linux (`linux/amd64`)** | MyGo v0.9.0 Native UI + Embedded SVG Icons + System Tray | `pkg/core` + `plugins/sqlite` + Secret Service / `vault_secrets.enc` | Clipboard, Shell, Keychain, `mygo.GlobalShortcut`, `grim+slurp` / `scrot` / `import` |
 | **Android / iOS (`pkg/mobile`)** | Native Kotlin / Swift UI | Shared `pkg/core` via `gomobile` (`Session`) | Host app implements `StreamCallback` & `CancelToken` |
 
 ## Development, Testing & Packaging
@@ -85,7 +88,7 @@ GOOS=windows GOARCH=amd64 go vet ./...
 GOOS=linux GOARCH=amd64 go vet ./...
 ```
 
-### Run & Smoke Check
+### Run, Smoke Check & Self-Check
 
 ```bash
 # Run directly in development
@@ -93,6 +96,9 @@ go run .
 
 # Validate config/bridge initialization without touching ~/.config/clavis
 go run . --smoke-check
+
+# Read-only diagnostic report (config, input engine probe, permissions, AI key source)
+go run . --self-check
 ```
 
 ### Cross-Platform Packaging (`mygo build`)
@@ -107,17 +113,21 @@ codesign --verify --deep --strict --verbose=2 build/darwin-arm64/Clavis.app
 ./build/darwin-arm64/Clavis.app/Contents/MacOS/Clavis --smoke-check
 ```
 
-## Configuration (`~/.config/clavis/*.toml`)
+## Configuration (`~/.config/clavis/`)
 
-On first launch, Clavis automatically creates `~/.config/clavis/` with default TOML files and hot-reloads changes via `watcher.ConfigWatcher`:
+On first launch, Clavis creates `~/.config/clavis/` with default TOML files and hot-reloads edits via `watcher.ConfigWatcher`:
 
 | File | Purpose |
 | --- | --- |
-| `config.toml` | `[trigger]`, `[appearance]` (`language`, `animations`, `show_preview_pane`, `visual_preset`, `stage_intensity`, `oblique_rows`, `glass_clarity`), `[ai]` + `[[ai.profiles]]` (`deepseek` default, `ollama`, `claude`, `gemini`), `[clipboard]`, `[ime]` (`lock_ascii_on_leader`, `show_floating_pill`, `switch_delay_ms`), `[input_engine]` (`enabled`, `mode`, `scheme`, `candidate_count`, `fuzzy_pinyin`, `custom_dict_paths`, `user_learning`, `shift_toggle_ascii`), and `[keymap]` + `[[keymap.remaps]]` settings. Raw API keys (`api_key`) are rejected—store keys in the OS credential store via **Settings → AI & Keychain** or the profile's `api_key_env_var` (`DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`). An OpenAI-compatible profile may set `reasoning_effort` (e.g. `"low"`) to cap a reasoning model's thinking before the first token. |
-| `leader.toml` | Recursive `[[nodes]]` key tree supporting `group`, `ai_rewrite`, `window`, `cli`, `open_app`, `switch_tab`, `snippet`, `toggle_ime`, and `normalize_glossary`. Editable visually under **Settings → Leader Tree**. |
-| `snippets.toml` | `[[snippets]]` inline expansion triggers, content templates, `word_boundary`, and optional `app_bundle_ids` / `process_names` scoping. Editable visually under **Settings → Snippets**. |
-| `glossary.toml` | `[[terms]]` canonical terms, `aliases`, `hint`, and `category` used for AI prompt injection and local `normalize_glossary` replacement. Editable visually under **Settings → Glossary & Clipboard**. |
-| `ime-rules.toml` | `[[rules]]` per-app and per-context rules with `bundle_id`, `process_name`, `url_pattern`, `title_pattern`, optional `input_source_id`, `preferred_mode` (`ascii`, `native`, `keep`), and `restore_on_leave`. When `input_source_id` is omitted, Clavis switches directly by `preferred_mode`. Editable visually under **Settings → IME & Keymap** or bound instantly from Omnibox (`>Bind Current App`). |
+| `config.toml` | `[trigger]` (including `screenshot_shortcut`), `[appearance]` (`language`, `animations`, `show_preview_pane`, `visual_preset`, `stage_intensity`, `oblique_rows`, `glass_clarity`), `[ai]` + `[[ai.profiles]]` (`vision_profile_id`, `continue_enabled`, `capabilities.vision`, `reasoning_effort`), `[clipboard]`, `[ime]`, `[input_engine]` (`enabled`, `mode`, `scheme`, `candidate_count`, `fuzzy_pinyin`, `custom_dict_paths`, `user_learning`, `shift_toggle_ascii`), `[keymap]`, `[terminal]`, and `[selection_bar]`. Raw API keys (`api_key`) are rejected. |
+| `leader.toml` | Recursive `[[nodes]]` key tree supporting `group`, `ai_rewrite`, `window`, `cli`, `open_app`, `switch_tab`, `snippet`, `toggle_ime`, and `normalize_glossary`. |
+| `snippets.toml` | `[[snippets]]` inline expansion triggers, content templates, `word_boundary`, and optional `app_bundle_ids` / `process_names` scoping. |
+| `glossary.toml` | `[[terms]]` canonical terms, `aliases`, `hint`, and `category` used for AI prompt injection and local `normalize_glossary` replacement. |
+| `ime-rules.toml` | `[[rules]]` per-app and per-context IME rules (`bundle_id`, `process_name`, `url_pattern`, `title_pattern`, `input_source_id`, `preferred_mode`, `restore_on_leave`). |
+| `prompts.toml` | Reusable `/` prompt templates, default optimizer preset, and inline optimize prefix. |
+| `quickjump.toml` | `[[bookmarks]]` destinations (`dir`, `worktree`, `url` with `{query}`, `workspace`) surfaced under `#` QuickJump alongside live Herdr workspaces/panes. |
+| `components.toml` & `workflows.toml` | Optional widget/source/script toggles and declarative workflow definitions. |
+| `ai-keys.toml` & `vault_secrets.enc` | `0600` provider API key store (`ai-keys.toml`, with `DEEPSEEK_API_KEY`/`ANTHROPIC_API_KEY`/`GEMINI_API_KEY` env fallback) strictly separated from AES-256-GCM Security Vault storage (`vault_secrets.enc` + Keychain / `0600` `vault.key`). |
 
 ## Language & Motion / 语言与动画
 
@@ -137,9 +147,7 @@ oblique_rows = true           # fan each result row; false keeps every row paral
 glass_clarity = 0.18          # 0..1, how much the vibrancy shows through
 ```
 
-`auto` language uses the system preference; `auto` animation mode respects the platform Reduce Motion preference. `full` enables capsule scale/fade, staggered results, HUD slide/fade, AI cursor pulse, error shake and snippet flash. `reduced` keeps subtle opacity/color changes and removes spatial motion; `off` jumps to settled frames. The setting is hot-reloadable and does not rewrite older config files until the user explicitly saves. `visual_preset` picks the flat `classic` look, planar `liquid_glass`, or the default `spatial_3d` stage; `stage_intensity` scales its yaw/pitch/row-skew/parallax/specular, and `oblique_rows` toggles the fan of the result list independently. All four are live in **Settings → General → Appearance**, and the design contract — token scale, elevation, the gate matrix, accessibility fallbacks and the 3-shader budget — lives in [`docs/design/visual-language.md`](docs/design/visual-language.md).
-
-`auto` 会跟随 macOS/Windows/Linux 的系统语言；动画 `auto` 会尊重系统“减少动态效果”。`full` 启用胶囊缩放淡入、列表交错、HUD 滑入淡出、AI 光标脉冲、错误抖动与片段高亮；`reduced` 保留轻微透明度/颜色变化并移除位移动画；`off` 直接显示最终状态。
+`auto` language uses the system preference; `auto` animation mode respects the platform Reduce Motion preference. `visual_preset` picks flat `classic`, planar `liquid_glass`, or default `spatial_3d`, and all appearance controls are live in **Settings → General → Appearance**. Design contract lives in [`docs/design/visual-language.md`](docs/design/visual-language.md).
 
 ## Omnibox Prefix Quick-Routing
 
@@ -147,12 +155,15 @@ Type a leading prefix in the **Actions** Omnibox (both half-width and Chinese IM
 
 | Prefix | Full-Width Alias | Scope | Examples |
 | --- | --- | --- | --- |
-| `>` | `＞` | Commands, Leader actions, App IME bind/unbind, Installed Apps & Settings | `>left`, `>英文输入法`, `>vscode` |
-| `;` | `；` | Snippets (matches both trigger & description/Pinyin) | `;`, `;sig`, `；sig` |
+| `>` | `＞` | Commands, Leader actions, Capture/Annotate/OCR, Listening Ports, App IME rules, Installed Apps & Settings | `>left`, `>截图`, `>vscode` |
+| `;` | `；` | Snippets (matches trigger, description & Pinyin) | `;`, `;sig`, `；sig` |
 | `@` or `cb ` | `＠` | Inline Clipboard History search (supports Pin & Delete) | `@`, `@token`, `cb url` |
 | `?` | `？` | Freeform AI Ask / Rewrite & AI preset modes | `?summarize in 3 bullets`, `？润色语气` |
-| `:` | `：` | Emoji search by English, Chinese, or Pinyin | `:rocket`, `：火箭`, `：huojian`, `:hj` |
-| `=` | `＝` | Calculator & Developer Utilities (UUID, Unix/ISO time, Base64, Hex) | `=`, `=(2+3)*4^2`, `＝（２＋３）×４` |
+| `:` | `：` | Emoji search (EN/ZH/Pinyin) & listening port quick-kill | `:rocket`, `：huojian`, `:3000` |
+| `=` | `＝` | Calculator & Developer Utilities (UUID, Unix/ISO time, Base64, Hex, JSON/URL/Hash) | `=`, `=(2+3)*4^2`, `＝（２＋３）×４` |
+| `/` | `／` | Configured Prompt templates (`prompts.toml`) | `/review`, `/sql` |
+| `#` | `＃` | QuickJump across live Herdr workspaces/agents & `quickjump.toml` bookmarks | `#clavis`, `#gh search` |
+| `tr ` / `fy ` / `翻译 ` | — | Bilingual Technical Translate (`zh->en` / `en->zh` auto-detected) | `tr hello world`, `翻译 连接超时` |
 
 ## Default Shortcuts
 
@@ -161,21 +172,21 @@ Type a leading prefix in the **Actions** Omnibox (both half-width and Chinese IM
 | Global | Double-tap `Right Option` (or `Right Command`) | Open Leader Capsule at caret/cursor (with temporary ASCII IME lock) |
 | Global | `Option + Space` (`Alt + Space`) | Toggle Actions Omnibox at caret/cursor |
 | Global (Keymap) | Tap `CapsLock` / Hold `CapsLock + h/j/k/l` | Tap sends `Escape`; hold activates Nav Layer (`←/↓/↑/→`, `u/d` PageUp/Down, `0/4` Home/End) |
-| Leader | Configured mnemonic keys | Drill into group or execute action (unmatched key downgrades to Actions Omnibox & restores IME) |
-| Leader | `/` (or `／`) | Jump directly to clean Actions Omnibox search bar (restoring previous IME) |
-| Leader | `⌫` / `Esc` | Step up one group or close Capsule (restoring previous IME) |
-| Omnibox | `⌘1` – `⌘5` (`Ctrl+1` – `Ctrl+5`) | Switch to Actions, Clipboard, Snippets, AI, or Glossary tab |
+| Leader | Configured mnemonic keys / `/` / `⌫` / `Esc` | Drill into group, jump to clean Omnibox (`/`), step up (`⌫`), or dismiss |
+| Omnibox | `⌘1` – `⌘6` (`Ctrl+1` – `Ctrl+6`) | Switch to Actions, Clipboard, Snippets, AI, Glossary, or Agent tab |
+| Omnibox Hubs | `⌘7` / `⌘8` / `⌘9` (`Ctrl+7` / `8` / `9`) | Toggle **Stats**, **Manage**, or **Assets** Hub overlay (`⌘R` refreshes active hub) |
 | Omnibox | `⌥1` – `⌥9` (`Alt+1` – `Alt+9`) | Instantly execute visible result row 1–9 (add `⌘`/`Ctrl` for Secondary Action) |
-| Omnibox | `Tab` / `Shift + Tab` | Cycle tabs forward / backward |
-| Omnibox | `↑` / `↓` or `⌃P` / `⌃N` | Move selection |
-| Omnibox | `⏎` | Primary action (run / paste / insert / copy utility) |
-| Omnibox | `⌘⏎` / `Ctrl+⏎` | Secondary action (copy clipboard/snippet/emoji, insert utility/glossary at cursor, ask AI without selection) |
-| Omnibox | `⌘K` / `Ctrl+K` | Toggle contextual Action Menu for selected item |
-| Omnibox | `⌘I` / `Ctrl+I` | Toggle multi-line Split Preview Pane |
-| Omnibox (Clipboard / `@`) | `⌘P` / `Ctrl+P` | Pin / unpin selected clipboard item |
-| Omnibox (Clipboard / `@`) | `⌘⌫` / `Ctrl+⌫` | Delete selected clipboard item |
-| AI Streaming | `⌘⇧M` / `Ctrl+Shift+M` | Cycle active AI provider/model profile |
-| AI Streaming | `Tab` | Focus IME-safe multi-turn follow-up input (submit with `⏎`) |
-| AI Streaming | `⏎` | Replace selection / inject AI output (when follow-up input is empty) |
-| AI Streaming | `⌘C` / `Ctrl+C` | Copy AI output to clipboard |
-| AI Streaming | `Esc` | Cancel active stream or close Capsule |
+| Omnibox | `Tab` / `Shift + Tab`, `↑` / `↓`, `⏎` / `⌘⏎` | Cycle tabs, move selection, Primary / Secondary action |
+| Omnibox | `⌘K` / `⌘I` (`Ctrl+K` / `Ctrl+I`) | Toggle contextual Action Menu / Split Preview Pane |
+| Omnibox (Clipboard / `@`) | `⌘P` / `⌘⌫` (`Ctrl+P` / `Ctrl+⌫`) | Pin/unpin or delete selected clipboard item |
+| AI Center | `⌘⇧M` / `⌘.` / `⌘R` / `⌘C` / `⌘D` | Cycle AI profile / Stop stream / Retry / Copy output / Toggle diff review |
+| AI Composer | `Tab`, `⏎`, `⇧⏎`, `↑`/`↓`, `@`, `/` | Focus composer, send, newline, recall history, attach context chip, insert slash command |
+| Annotate Window | `⌘Z` / `⌘⇧Z` / `⌘C` / `⌘S` / `Esc` | Undo / Redo / Flatten & Copy PNG / Save PNG / Close |
+
+## Design & Architecture Specs
+
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — Unified five-phase roadmap (`CLV-P0`–`CLV-P4`) and locked decisions (`D1`–`D4`)
+- [`docs/design/capture-annotate-spec.md`](docs/design/capture-annotate-spec.md) — Region Capture, Retina Vector Annotate & `MediaStore` dedup
+- [`docs/design/herdr-control-plane-spec.md`](docs/design/herdr-control-plane-spec.md) — Herdr Control Plane, Agent Discovery, Codex SQLite & Terminal Resolver
+- [`docs/design/ai-workbench-spec.md`](docs/design/ai-workbench-spec.md) — 5-State AI Center, `@`/`/` Composer, Vision OCR, Translate, Continuation & Telemetry
+- [`docs/design/visual-language.md`](docs/design/visual-language.md) — Spatial 3D & Liquid Glass visual language contract

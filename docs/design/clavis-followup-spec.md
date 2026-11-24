@@ -1,5 +1,7 @@
 # Clavis 后续能力收口规格
 
+> **Status: Superseded / Updated as of 2026-11-25** — 本文列出的多项后续能力已于 `CLV-P0` 与 `CLV-P1` 落地（Codex SQLite `mode=ro` 与 `terminal.Resolver` 接线、Herdr 聚焦/读输出/受控操作面、剪贴板 120Hz 缓存优化、Bigram 前缀匹配与词典热更新、Security Vault AES-256-GCM 加密、AI 用量遥测/翻译/续写）；尚未实施项（统一 SQLite 迁移、`MergeLearning`、同步 v2 与共享目录传输、可选 `NotificationStore`、Windows Parity）已统一收口至 [`docs/ROADMAP.md`](../ROADMAP.md) 的 `CLV-P3` / `CLV-P4`。下文保留作接口历史参考。
+
 - 任务：T-clavis-followup-spec
 - 日期：2026-11-21
 - 范围：agent、Omnibox Tab/搜索、剪贴板、keymap/终端、词库后端、同步、原生 DSH/飞书通知

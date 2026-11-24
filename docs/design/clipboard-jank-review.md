@@ -1,5 +1,7 @@
 # 剪贴板上下切换卡顿与闪烁：真渲染复现、根因诊断与施工设计
 
+> **Status: Superseded / Updated as of 2026-11-25** — 方案 B 全部 4 个施工批次现已全量合入 `main`（`85cfa27`、`4daa15d`、`fe21df5` 及 `CLV-P1-4` `79d325b`：COW Capsule 状态、行元数据与预览缓存、60 行预览上限，达成 120Hz 预算）。详见 [`docs/ROADMAP.md`](../ROADMAP.md)；本文保留作性能剖析与真渲染对比基线记录。
+
 > 任务号：`T-clavis-clipboard-jank-visual`（Spec / 诊断设计阶段，本轮不改实现代码）
 > 复现环境：macOS arm64 (Apple M4), MyGo `ui.NewTester` 真渲染 + `BenchmarkClipboardSwitch` + `go tool pprof`
 

@@ -1,5 +1,7 @@
 # Agent 会话打通规格
 
+> **Status: Superseded / Updated as of 2026-11-25** — 本文原为只读发现阶段草案；现已全部合入并扩展为受控写操作面（`CLV-P0-2` `0468f29`、`CLV-P1-3` `da85969`）：包括 Tab 6（`Agent`）、DSH/Codex `state_5.sqlite`（`mode=ro`）/Claude/Herdr 四源聚合、`pkg/core/terminal` 终端回退解析器，以及带二次确认、密钥拦截与 `StateUnknown` 守卫的 Herdr 控制面。当前事实规格请参见 [`docs/design/herdr-control-plane-spec.md`](herdr-control-plane-spec.md) 与 [`docs/ROADMAP.md`](../ROADMAP.md)。下文保留作早期取证记录。
+
 - 状态：方案草案，供后续实现任务使用
 - 范围：DSH、Codex app-server、Claude Code 会话的只读发现、会话跳转、命令/对话/消息补全
 - 边界：本文件不授权发送消息、改变 agent 状态或执行任意远程命令。写操作必须经过显式动作和独立权限检查。
