@@ -278,24 +278,49 @@ func (w *ConfigWatcher) watchDirWithPollSnapshot(ctx context.Context, prev map[s
 
 func (w *ConfigWatcher) triggerReloadIfChanged() {
 	if w.store != nil && len(w.store.LastErrors()) == 0 {
-		saved := w.store.SavedDigests()
-		if len(saved) > 0 {
+		for attempt := 0; attempt < 2; attempt++ {
+			savedBefore := w.store.SavedDigests()
 			curr := snapshotTOMLDir(w.store.Directory())
-			if len(curr) == len(saved) {
-				identical := true
-				for name, snap := range curr {
-					if savedHash, ok := saved[name]; !ok || savedHash != snap.hash {
-						identical = false
-						break
-					}
-				}
-				if identical {
-					return
-				}
+			savedAfter := w.store.SavedDigests()
+			if len(savedAfter) == 0 {
+				break
 			}
+			if configDigestsMatch(curr, savedAfter) {
+				return
+			}
+			// If ConfigStore.Save* ran concurrently while we scanned the directory,
+			// re-snapshot once so self-saves are not mistaken for external edits.
+			if !configDigestMapsEqual(savedBefore, savedAfter) {
+				continue
+			}
+			break
 		}
 	}
 	w.triggerReload()
+}
+
+func configDigestsMatch(curr map[string]fileDigest, saved map[string][32]byte) bool {
+	if len(curr) != len(saved) {
+		return false
+	}
+	for name, snap := range curr {
+		if savedHash, ok := saved[name]; !ok || savedHash != snap.hash {
+			return false
+		}
+	}
+	return true
+}
+
+func configDigestMapsEqual(a, b map[string][32]byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		if vb, ok := b[k]; !ok || vb != va {
+			return false
+		}
+	}
+	return true
 }
 
 func (w *ConfigWatcher) triggerReload() {

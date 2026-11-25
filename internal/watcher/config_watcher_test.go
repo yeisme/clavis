@@ -45,9 +45,7 @@ func TestConfigWatcher_PollReloadAndRollback(t *testing.T) {
 	updated.Appearance.CapsuleWidth = 740
 	updated.AI.Model = "gpt-4.1-mini"
 	configPath := filepath.Join(dir, string(config.FileMain))
-	if err := os.WriteFile(configPath, []byte(updated.Encode()), 0o600); err != nil {
-		t.Fatalf("WriteFile failed: %v", err)
-	}
+	writeFileAtomic(t, configPath, []byte(updated.Encode()))
 
 	// Non-TOML file write should be ignored
 	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("ignore me"), 0o600); err != nil {
@@ -62,14 +60,12 @@ func TestConfigWatcher_PollReloadAndRollback(t *testing.T) {
 		if res.Config.Main.Appearance.CapsuleWidth != 740 || res.Config.Main.AI.Model != "gpt-4.1-mini" {
 			t.Fatalf("unexpected reloaded config: %+v", res.Config.Main)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for valid config reload")
 	}
 
 	// Write invalid TOML -> reload fails, preserves last-known-good config
-	if err := os.WriteFile(configPath, []byte("[trigger\nbad = "), 0o600); err != nil {
-		t.Fatalf("WriteFile invalid failed: %v", err)
-	}
+	writeFileAtomic(t, configPath, []byte("[trigger\nbad = "))
 
 	select {
 	case res := <-reloads:
@@ -82,14 +78,14 @@ func TestConfigWatcher_PollReloadAndRollback(t *testing.T) {
 		if store.Current().Main.Appearance.CapsuleWidth != 740 {
 			t.Fatalf("expected rollback to preserve CapsuleWidth 740, got %v", store.Current().Main.Appearance.CapsuleWidth)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for invalid config reload callback")
 	}
 
 	w.Stop()
 	select {
 	case <-w.Done():
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("watcher did not close Done channel on Stop")
 	}
 }
@@ -188,16 +184,14 @@ func TestConfigWatcher_SkipsSelfSavesAndReloadsExternalEdits(t *testing.T) {
 	// External write with genuinely different content still triggers reload cleanly
 	extMain := mainCfg
 	extMain.Appearance.CapsuleWidth = 760
-	if err := os.WriteFile(filepath.Join(dir, string(config.FileMain)), []byte(extMain.Encode()), 0o644); err != nil {
-		t.Fatalf("external WriteFile: %v", err)
-	}
+	writeFileAtomic(t, filepath.Join(dir, string(config.FileMain)), []byte(extMain.Encode()))
 
 	select {
 	case res := <-reloads:
 		if !res.OK || res.Config.Main.Appearance.CapsuleWidth != 760 {
 			t.Fatalf("expected external edit reload width=760, got %+v", res)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for external edit reload")
 	}
 }

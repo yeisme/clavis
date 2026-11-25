@@ -299,7 +299,30 @@ func (w *DictionaryWatcher) snapshot(prev map[string]dictionaryDigest) (map[stri
 			out[t.path] = old
 			continue
 		}
-		sum, err := hashFn(t.path)
+		// Verify file stat did not change mid-hash so we never pair a stale
+		// (size, modTime) with newer content and force a duplicate re-hash.
+		var sum [32]byte
+		var err error
+		for attempt := 0; attempt < 2; attempt++ {
+			sum, err = hashFn(t.path)
+			if err != nil {
+				break
+			}
+			afterInfo, statErr := os.Stat(t.path)
+			if statErr != nil || afterInfo.IsDir() {
+				if statErr != nil {
+					err = statErr
+				} else {
+					err = os.ErrInvalid
+				}
+				break
+			}
+			if afterInfo.Size() == size && afterInfo.ModTime().UnixNano() == modTime {
+				break
+			}
+			size = afterInfo.Size()
+			modTime = afterInfo.ModTime().UnixNano()
+		}
 		if err != nil {
 			continue
 		}

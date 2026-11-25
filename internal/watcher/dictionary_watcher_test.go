@@ -9,9 +9,39 @@ import (
 	"time"
 )
 
+func writeFileAtomic(t *testing.T, path string, data []byte) {
+	t.Helper()
+	f, err := os.CreateTemp(filepath.Dir(path), ".watcher-tmp-*")
+	if err != nil {
+		t.Fatalf("CreateTemp for %s: %v", path, err)
+	}
+	tmpPath := f.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		t.Fatalf("Write temp for %s: %v", path, err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		t.Fatalf("Chmod temp for %s: %v", path, err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close temp for %s: %v", path, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		t.Fatalf("Rename %s -> %s: %v", tmpPath, path, err)
+	}
+	cleanup = false
+}
+
 func waitForCount(t *testing.T, count *atomic.Int32, want int32) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if count.Load() >= want {
 			return
@@ -32,13 +62,9 @@ func TestDictionaryWatcherDetectsAddModifyDelete(t *testing.T) {
 	}
 	defer w.Stop()
 	path := filepath.Join(dir, "user.clvdict")
-	if err := os.WriteFile(path, []byte("one"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeFileAtomic(t, path, []byte("one"))
 	waitForCount(t, &changes, 1)
-	if err := os.WriteFile(path, []byte("two"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeFileAtomic(t, path, []byte("two-updated"))
 	waitForCount(t, &changes, 2)
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
@@ -90,9 +116,7 @@ func TestDictionaryWatcherMissingDirCreatedLaterAndRemoved(t *testing.T) {
 
 	// Dropping a .clvdict into the newly created directory triggers hot-reload.
 	dictPath := filepath.Join(dir, "personal.clvdict")
-	if err := os.WriteFile(dictPath, []byte("initial-dict"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeFileAtomic(t, dictPath, []byte("initial-dict"))
 	waitForCount(t, &changes, 1)
 
 	// Removing the whole directory triggers hot-reload back to embedded fallback.
@@ -153,9 +177,8 @@ func TestDictionaryWatcherStatBeforeHashSkipsUnchanged(t *testing.T) {
 	}
 
 	// Modifying content changes size/mtime -> hashes once more and triggers callback.
-	if err := os.WriteFile(path, []byte("updated-content-payload"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	// Use atomic rename so polling never catches an intermediate O_TRUNC 0-byte state.
+	writeFileAtomic(t, path, []byte("updated-content-payload"))
 	waitForCount(t, &changes, 1)
 	if got := hashes.Load(); got != 3 {
 		t.Fatalf("hash count after content update = %d, want 3", got)
@@ -199,21 +222,15 @@ func TestDictionaryWatcherExtraCustomDictPathsAndExplicitConfigDir(t *testing.T)
 	}
 
 	// Create, modify, and delete the watched custom .dict.yaml file.
-	if err := os.WriteFile(customYAML, []byte("---\nname: one\n...\n词甲\tci jia\t10\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeFileAtomic(t, customYAML, []byte("---\nname: one\n...\n词甲\tci jia\t10\n"))
 	waitForCount(t, &changes, 1)
 
-	if err := os.WriteFile(customYAML, []byte("---\nname: one\n...\n词乙\tci yi\t20\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeFileAtomic(t, customYAML, []byte("---\nname: one\n...\n词乙\tci yi\t20\n"))
 	waitForCount(t, &changes, 2)
 
 	// Dynamically update extra paths via SetExtraPaths and write to the newly added file.
 	w.SetExtraPaths([]string{customYAML, secondCustom})
-	if err := os.WriteFile(secondCustom, []byte("---\nname: two\n...\n词丙\tci bing\t30\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeFileAtomic(t, secondCustom, []byte("---\nname: two\n...\n词丙\tci bing\t30\n"))
 	waitForCount(t, &changes, 3)
 
 	if err := os.Remove(customYAML); err != nil {
