@@ -307,6 +307,10 @@ func renderHubSnapshots(t *testing.T, dir, suffix string, lang i18n.Language, da
 	hubSeedStates(f.ctrl)
 	hubSnapshotShoot(t, dir, "30d-hub-stats-states-"+suffix, f.ctrl.CapsuleView, w, h, dark, nil)
 
+	// The Manage hub with loaded stats, so its media card draws its quota
+	// meters; a 500-row history cap keeps the fixture's 267 rows under it.
+	hubSeedLoaded(f.ctrl, "")
+	_ = f.ctrl.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.MaxHistoryItems = 500 })
 	f.ctrl.SetHubSurface(HubSurfaceManage)
 	hubSnapshotShoot(t, dir, "31-hub-manage-"+suffix, f.ctrl.CapsuleView, w, h, dark, nil)
 
