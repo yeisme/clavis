@@ -215,6 +215,18 @@ func (a *AppController) renderManageMediaCard(c *ui.Context, theme *ui.Theme, cf
 				ui.Text(c, clipboardStatsCountLabel(count, bytes)).FontSize(typeMicro).FontFeatures("tnum").TextColor(theme.TextMuted).SingleLine()
 			}
 		})
+		// Real usage against the real limits: image blobs against the media
+		// quota (the only kind QuotaEvictions counts) and rows against the
+		// history cap.
+		if st.loaded && st.err == nil {
+			images := clipboardKindBytes(st.kinds, "image")
+			kitQuotaMeter(c, theme, "manage-media-quota", "photo",
+				formatClipboardBytes(images)+" / "+fmtInt(clip.MediaQuotaMB)+" MB",
+				float64(images), float64(int64(clip.MediaQuotaMB)<<20))
+			kitQuotaMeter(c, theme, "manage-history-cap", "doc.on.clipboard",
+				fmtInt(count)+" / "+fmtInt(clip.MaxHistoryItems),
+				float64(count), float64(clip.MaxHistoryItems))
+		}
 		policy := pickLang(zh,
 			fmt.Sprintf("历史上限 %d 条 · 保留 %d 天", clip.MaxHistoryItems, clip.RetentionDays),
 			fmt.Sprintf("Max %d items · %d days retention", clip.MaxHistoryItems, clip.RetentionDays),
