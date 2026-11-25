@@ -249,3 +249,24 @@ func HasKey(key string) bool {
 	_, zh := zhTable[key]
 	return en && zh
 }
+
+// registerTable merges domain-scoped [en, zh] translation pairs at init time.
+// It panics immediately on empty keys, empty translations, or duplicate keys.
+func registerTable(entries map[string][2]string) {
+	for k, pair := range entries {
+		if strings.TrimSpace(k) == "" {
+			panic("i18n.registerTable: empty key")
+		}
+		if pair[0] == "" || pair[1] == "" {
+			panic(fmt.Sprintf("i18n.registerTable: empty translation for key %q", k))
+		}
+		if _, exists := enTable[k]; exists {
+			panic(fmt.Sprintf("i18n.registerTable: duplicate key %q in enTable", k))
+		}
+		if _, exists := zhTable[k]; exists {
+			panic(fmt.Sprintf("i18n.registerTable: duplicate key %q in zhTable", k))
+		}
+		enTable[k] = pair[0]
+		zhTable[k] = pair[1]
+	}
+}
