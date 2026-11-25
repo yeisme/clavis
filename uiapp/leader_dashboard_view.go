@@ -205,11 +205,18 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 				})
 				// Crisp 1px vertical hairline separating Actions from the Dashboard rail.
 				ui.Box(c).Width(space1).FillHeight().Padding(space6, space0).Background(hairline(theme)).Shrink(0)
+				activities := a.leaderRecentActivity(state)
+				rows := leaderRailActivityRows(leaderRailHeight(winH), len(activities))
 				ui.Column(c).Key("leader-dashboard-rail").Label("leader-dashboard-rail").Grow(10).MinWidth(0).FillHeight().
-					Padding(space6, space0).Gap(space8).Children(func() {
+					Padding(leaderRailPadY, space0).Gap(leaderRailSection).Clip().Children(func() {
 					a.renderLeaderWorkbenches(c, theme, state)
 					a.renderLeaderSystemStatus(c, theme)
-					a.renderLeaderRecentActivity(c, theme, state)
+					if rows > 0 {
+						a.renderLeaderRecentActivity(c, theme, state, activities[:rows])
+					}
+					// Quick tools sit on the rail's floor, level with the end of
+					// the action list, whatever the activity block took.
+					ui.Spacer(c)
 					a.renderLeaderQuickTools(c, theme)
 				})
 			})
@@ -217,7 +224,7 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 			renderActionsList()
 		}
 
-		ui.Divider(c)
+		kitDivider(c, theme)
 		ui.Row(c).FillWidth().Height(float32(leaderFooterHeight)).Gap(space12).AlignItems(ui.Center).Children(func() {
 			keyHint(c, theme, "a–z", i18n.T("leader.hint.trigger"), keyToneNeutral)
 			if len(state.LeaderPath) == 0 {
@@ -239,18 +246,18 @@ func (a *AppController) renderLeaderView(c *ui.Context, theme *ui.Theme, state e
 }
 
 func (a *AppController) renderLeaderWorkbenches(c *ui.Context, theme *ui.Theme, state engine.State) {
-	ui.Column(c).Key("leader-workbenches").Label("leader-workbenches").FillWidth().Gap(space4).Children(func() {
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
+	ui.Column(c).Key("leader-workbenches").Label("leader-workbenches").FillWidth().Gap(leaderRailInner).Shrink(0).Children(func() {
+		ui.Row(c).FillWidth().Height(leaderRailCaption).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, i18n.T("leader.dashboard.workbenches")).FontSize(typeMicro).FontWeight(700).TextColor(theme.TextMuted).SingleLine()
 			ui.Spacer(c)
 			ui.Text(c, i18n.T("leader.dashboard.workbenches_hint")).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 		})
-		ui.Grid(c).Columns(3).GapX(space4).GapY(space4).FillWidth().Children(func() {
+		ui.Grid(c).Columns(3).GapX(leaderRailInner).GapY(leaderRailInner).FillWidth().Children(func() {
 			for _, spec := range omniboxTabSpecs {
 				sp := spec
 				lbl := sp.LabelFunc()
 				btn := ui.ButtonBase(c).Key("leader-wb:"+string(sp.Tab)).Label("leader-wb:"+string(sp.Tab)).
-					FillWidth().Height(space24).Padding(space2, space6).Radius(radiusChip).
+					FillWidth().Height(leaderRailTile).Padding(space0, space6).Radius(radiusChip).
 					Background(tileFill(theme)).Border(space1, hairline(theme)).FocusRing(false)
 				if btn.Hovered() {
 					btn.Background(leaderSelectionFill(theme)).Border(space1, selectionEdge(theme))
@@ -305,7 +312,7 @@ func (a *AppController) renderLeaderSystemStatus(c *ui.Context, theme *ui.Theme)
 		imeLabel = i18n.T("leader.status.default_ime")
 	}
 
-	ui.Row(c).Key("leader-system-status").Label("leader-system-status").FillWidth().Padding(space4, space8).Gap(space8).
+	ui.Row(c).Key("leader-system-status").Label("leader-system-status").FillWidth().Height(leaderRailStatus).Shrink(0).Padding(space0, space8).Gap(space8).
 		Radius(radiusChip).Background(tileFill(theme)).Border(space1, hairline(theme)).AlignItems(ui.Center).Children(func() {
 		renderSemanticIcon(c, "sparkles", typeMicro, secondaryInk(theme))
 		ui.Text(c, modelLabel).FontSize(typeMicro).FontWeight(600).FontFeatures("tnum").TextColor(theme.Text).SingleLine().Grow(1).MinWidth(0)
@@ -318,71 +325,121 @@ func (a *AppController) renderLeaderSystemStatus(c *ui.Context, theme *ui.Theme)
 }
 
 func (a *AppController) renderLeaderQuickTools(c *ui.Context, theme *ui.Theme) {
-	ui.Column(c).Key("leader-quick-tools").FillWidth().Gap(space4).Children(func() {
-		ui.Text(c, i18n.T("leader.dashboard.quick_tools")).FontSize(typeMicro).FontWeight(700).TextColor(theme.TextMuted).SingleLine()
-		ui.Row(c).FillWidth().Gap(space4).AlignItems(ui.Center).Children(func() {
-			tool := func(key, label string, fn func()) {
-				b := ui.ButtonBase(c).Key(key).Label(label).Grow(1).Padding(space4, space6).Radius(radiusChip).
-					Background(tileFill(theme)).Border(space1, hairline(theme)).FocusRing(false)
-				b.Children(func() {
-					ui.Text(c, label).FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
-				})
-				if b.Clicked() {
-					fn()
-				}
+	// One row: the caption leads its four buttons, so the tools cost the rail
+	// a single tile height.
+	ui.Row(c).Key("leader-quick-tools").Label("leader-quick-tools").FillWidth().Height(leaderRailTile).Shrink(0).Gap(leaderRailInner).AlignItems(ui.Center).Children(func() {
+		ui.Text(c, i18n.T("leader.dashboard.quick_tools")).FontSize(typeMicro).FontWeight(700).TextColor(theme.TextMuted).SingleLine().Shrink(0).Padding(space0, space4, space0, space0)
+		tool := func(key, label string, fn func()) {
+			b := ui.ButtonBase(c).Key(key).Label(label).Grow(1).MinWidth(0).Height(leaderRailTile).Padding(space0, space6).Radius(radiusChip).
+				Background(tileFill(theme)).Border(space1, hairline(theme)).FocusRing(false).Center()
+			if b.Hovered() {
+				b.Background(leaderSelectionFill(theme)).Border(space1, selectionEdge(theme))
 			}
-			tool("leader-tool-capture", i18n.T("leader.tool.capture"), func() { go a.CaptureAndAnnotate() })
-			tool("leader-tool-ocr", "OCR", func() { go a.CaptureAndOCR() })
-			tool("leader-tool-translate", i18n.T("leader.tool.translate"), func() {
-				a.StartTranslation(a.State().Context.SelectedText, "")
+			b.Children(func() {
+				ui.Text(c, label).FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
 			})
-			tool("leader-tool-assets", i18n.T("leader.tool.assets"), func() {
-				a.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions})
-				a.SetHubSurface(HubSurfaceAssets)
-			})
+			if b.Clicked() {
+				fn()
+			}
+		}
+		tool("leader-tool-capture", i18n.T("leader.tool.capture"), func() { go a.CaptureAndAnnotate() })
+		tool("leader-tool-ocr", "OCR", func() { go a.CaptureAndOCR() })
+		tool("leader-tool-translate", i18n.T("leader.tool.translate"), func() {
+			a.StartTranslation(a.State().Context.SelectedText, "")
+		})
+		tool("leader-tool-assets", i18n.T("leader.tool.assets"), func() {
+			a.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions})
+			a.SetHubSurface(HubSurfaceAssets)
 		})
 	})
 }
 
-func (a *AppController) renderLeaderRecentActivity(c *ui.Context, theme *ui.Theme, state engine.State) {
-	activities := a.leaderRecentActivity(state)
-	ui.Column(c).Key("leader-recent-activity").Label("leader-recent-activity").FillWidth().Grow(1).MinHeight(0).Gap(space4).Children(func() {
-		ui.Text(c, i18n.T("leader.dashboard.recent_activity")).FontSize(typeMicro).FontWeight(700).TextColor(theme.TextMuted).SingleLine()
-		if len(activities) == 0 {
-			ui.Row(c).FillWidth().Padding(space6, space8).Radius(radiusChip).Background(tileFill(theme)).Border(space1, hairline(theme)).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, i18n.T("leader.dashboard.no_activity")).
-					FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
-			})
-			return
-		}
-		for _, act := range activities {
-			item := act
-			row := ui.ButtonBase(c).Key(item.Key).Label(item.Key).
-				FillWidth().Padding(space4, space8).Radius(radiusChip).
-				Background(tileFill(theme)).Border(space1, hairline(theme)).FocusRing(false)
-			if row.Hovered() {
-				row.Background(leaderSelectionFill(theme)).Border(space1, selectionEdge(theme))
-			}
-			row.Children(func() {
-				ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
-					renderSemanticIcon(c, item.Icon, typeMeta, secondaryInk(theme))
-					ui.Column(c).Grow(1).MinWidth(0).Gap(space1).Children(func() {
-						ui.Row(c).FillWidth().Gap(space4).AlignItems(ui.Center).Children(func() {
-							ui.Text(c, item.Tag).FontSize(typeMicro).FontWeight(700).TextColor(secondaryInk(theme)).SingleLine().Shrink(0)
-							ui.Text(c, item.Summary).FontSize(typeMicro).FontWeight(500).TextColor(theme.Text).SingleLine().Grow(1).MinWidth(0)
-						})
-						if item.Meta != "" && item.Meta != item.Summary {
-							ui.Text(c, item.Meta).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+// renderLeaderRecentActivity lists the activity lines the rail has room for
+// (leaderRailActivityRows): single-line list rows — tag, summary, a status dot
+// — that highlight on hover like a native list, instead of boxed cards.
+func (a *AppController) renderLeaderRecentActivity(c *ui.Context, theme *ui.Theme, state engine.State, activities []leaderActivityItem) {
+	ui.Column(c).Key("leader-recent-activity").Label("leader-recent-activity").FillWidth().Shrink(0).Gap(leaderRailInner).Children(func() {
+		ui.Row(c).FillWidth().Height(leaderRailCaption).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, i18n.T("leader.dashboard.recent_activity")).FontSize(typeMicro).FontWeight(700).TextColor(theme.TextMuted).SingleLine()
+		})
+		ui.Column(c).FillWidth().Gap(leaderRailRowGap).Children(func() {
+			for _, act := range activities {
+				item := act
+				row := ui.ButtonBase(c).Key(item.Key).Label(item.Key).
+					FillWidth().Height(leaderRailTile).Padding(space0, space8).Radius(radiusChip).FocusRing(false)
+				if row.Hovered() {
+					row.Background(leaderSelectionFill(theme))
+				}
+				row.Children(func() {
+					ui.Row(c).FillWidth().FillHeight().Gap(space6).AlignItems(ui.Center).Children(func() {
+						renderSemanticIcon(c, item.Icon, typeMeta, secondaryInk(theme))
+						ui.Text(c, item.Tag).FontSize(typeMicro).FontWeight(700).TextColor(secondaryInk(theme)).SingleLine().Shrink(0)
+						ui.Text(c, item.Summary).FontSize(typeMicro).FontWeight(500).TextColor(theme.Text).SingleLine().Grow(1).MinWidth(0)
+						if dot, ok := leaderActivityDot(theme, item.Tone); ok {
+							kitStatusDot(c, dot, false)
 						}
 					})
 				})
-			})
-			if row.Clicked() {
-				ctxCopy := state.Context
-				a.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: item.Target, Context: &ctxCopy})
+				if row.Clicked() {
+					ctxCopy := state.Context
+					a.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: item.Target, Context: &ctxCopy})
+				}
 			}
-		}
+		})
 	})
+}
+
+// leaderActivityDot is the status dot that closes an activity line: orange
+// for a session awaiting review, blue while one runs, green once it is done.
+func leaderActivityDot(theme *ui.Theme, tone chipTone) (ui.Color, bool) {
+	switch tone {
+	case chipWarning:
+		return kitStateWarningColor(theme), true
+	case chipAccent:
+		return kitStateLoadingColor(theme), true
+	case chipSuccess:
+		return theme.Success, true
+	case chipDanger:
+		return kitStateErrorColor(theme), true
+	}
+	return ui.Color{}, false
+}
+
+// Leader dashboard rail metrics. Every block of the rail has a fixed height,
+// so the rail can be fitted to the panel exactly: the panel follows the action
+// list (leaderHeightFor), and the rail shows only the recent-activity lines
+// the remaining room holds rather than drawing them over the quick tools.
+const (
+	leaderRailPadY    = space6
+	leaderRailSection = space8  // between the rail's blocks
+	leaderRailInner   = space4  // between a caption and its block, and between tiles
+	leaderRailCaption = space14 // a caption row: "Workbenches", "Recent activity"
+	leaderRailTile    = space24 // workbench tiles, quick-tool buttons, activity lines
+	leaderRailStatus  = space24 + space2
+	leaderRailRowGap  = space2
+)
+
+// leaderRailHeight is the rail's inner height in a Leader panel winH tall:
+// the panel less its header, footer, their two hairlines and the rail's
+// vertical padding.
+func leaderRailHeight(winH float32) float32 {
+	return winH - leaderHeaderHeight - leaderFooterHeight - 2*space1 - 2*leaderRailPadY
+}
+
+// leaderRailActivityRows is how many recent-activity lines fit in a rail
+// railH tall under its fixed blocks (workbenches, status, the activity
+// caption, quick tools), capped at the entries there are. Zero hides the
+// block.
+func leaderRailActivityRows(railH float32, available int) int {
+	fixed := leaderRailCaption + leaderRailInner + 2*leaderRailTile + leaderRailInner + // workbenches
+		leaderRailSection + leaderRailStatus + // system status
+		leaderRailSection + leaderRailCaption + leaderRailInner + // activity caption
+		leaderRailSection + leaderRailTile // quick tools
+	room := railH - fixed
+	if available <= 0 || room < leaderRailTile {
+		return 0
+	}
+	return min(int((room+leaderRailRowGap)/(leaderRailTile+leaderRailRowGap)), available)
 }
 
 func (a *AppController) leaderNodeHasKey(state engine.State, key string) bool {

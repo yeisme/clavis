@@ -3,6 +3,7 @@ package uiapp
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,7 +36,10 @@ func (cs *agentSessionControlState) isEmpty() bool {
 type agentManageUIState struct {
 	mu              sync.Mutex
 	workspaceFilter string
-	startOpen       bool
+	// workspacesOpen shows every workspace chip; collapsed, the strip keeps
+	// to agentWorkspaceChipLimit of them and a "+N" chip.
+	workspacesOpen bool
+	startOpen      bool
 	startCLI        string
 	startName       string
 	statusMsg       string
@@ -345,6 +349,7 @@ func (a *AppController) renderAgentWorkspaceStrip(c *ui.Context, theme *ui.Theme
 	st := agentManageStateFor(a)
 	st.mu.Lock()
 	activeWS := st.workspaceFilter
+	wsOpen := st.workspacesOpen
 	startOpen := st.startOpen
 	startCLI := st.startCLI
 	startName := st.startName
@@ -358,7 +363,8 @@ func (a *AppController) renderAgentWorkspaceStrip(c *ui.Context, theme *ui.Theme
 
 	ui.Column(c).Key("agent-workspace-strip").FillWidth().Gap(space4).Children(func() {
 		ui.Row(c).FillWidth().Wrap().Gap(space4).AlignItems(ui.Center).Children(func() {
-			for _, ws := range workspaces {
+			shown, hidden := visibleAgentWorkspaces(workspaces, activeWS, wsOpen)
+			for _, ws := range shown {
 				wCopy := ws
 				selected := activeWS == wCopy.WorkspaceID
 				lbl := nonEmptyOr(wCopy.Label, wCopy.WorkspaceID)
@@ -377,6 +383,25 @@ func (a *AppController) renderAgentWorkspaceStrip(c *ui.Context, theme *ui.Theme
 				})
 				if b.Clicked() {
 					a.SetAgentWorkspaceFilter(wCopy.WorkspaceID)
+				}
+			}
+			// The rest of a long workspace list folds behind one "+N" chip
+			// (and "−" folds it back), so the strip stays a strip instead
+			// of a cloud that pushes the sessions out of view.
+			if hidden > 0 || wsOpen && len(workspaces) > agentWorkspaceChipLimit {
+				more := "+" + strconv.Itoa(hidden)
+				if wsOpen {
+					more = "−"
+				}
+				mb := ui.ButtonBase(c).Key("agent-ws-more").Label(more).Padding(space2, space6).Radius(radiusChip).
+					Background(tileFill(theme)).Border(space1, hairline(theme)).FocusRing(false)
+				mb.Children(func() {
+					ui.Text(c, more).FontSize(typeMicro).FontWeight(600).FontFeatures("tnum").TextColor(secondaryInk(theme)).SingleLine()
+				})
+				if mb.Clicked() {
+					st.mu.Lock()
+					st.workspacesOpen = !st.workspacesOpen
+					st.mu.Unlock()
 				}
 			}
 
@@ -616,4 +641,37 @@ func (a *AppController) renderAgentManageControls(c *ui.Context, theme *ui.Theme
 			})
 		}
 	})
+}
+
+// agentWorkspaceChipLimit is how many workspace chips the collapsed strip
+// shows before folding the rest behind "+N".
+const agentWorkspaceChipLimit = 6
+
+// visibleAgentWorkspaces picks the chips the strip shows: all of them when
+// open, else the first agentWorkspaceChipLimit — always including the active
+// filter, so the chosen workspace never hides behind "+N" — and how many
+// stay folded.
+func visibleAgentWorkspaces(all []agentsession.HerdrWorkspace, active string, open bool) ([]agentsession.HerdrWorkspace, int) {
+	if open || len(all) <= agentWorkspaceChipLimit {
+		return all, 0
+	}
+	shown := append([]agentsession.HerdrWorkspace(nil), all[:agentWorkspaceChipLimit]...)
+	if active != "" {
+		inShown := false
+		for _, ws := range shown {
+			if ws.WorkspaceID == active {
+				inShown = true
+				break
+			}
+		}
+		if !inShown {
+			for _, ws := range all[agentWorkspaceChipLimit:] {
+				if ws.WorkspaceID == active {
+					shown[len(shown)-1] = ws
+					break
+				}
+			}
+		}
+	}
+	return shown, len(all) - len(shown)
 }
