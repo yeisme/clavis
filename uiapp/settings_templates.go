@@ -484,6 +484,7 @@ func optimizerPresetSettingOptions() []settingOption {
 func clonePromptTemplate(tpl config.PromptTemplate) config.PromptTemplate {
 	cp := tpl
 	cp.AppBundleIDs = append([]string(nil), tpl.AppBundleIDs...)
+	cp.Tags = append([]string(nil), tpl.Tags...)
 	if tpl.Slots != nil {
 		cp.Slots = make([]config.PromptSlot, len(tpl.Slots))
 		for i, sl := range tpl.Slots {

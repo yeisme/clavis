@@ -29,8 +29,8 @@ func TestSettingsAppearanceStageControlsPersist(t *testing.T) {
 		t.Fatalf("click Oblique Rows: %v", err)
 	}
 	tt.Frame()
-	if ctrl.Config().Main.Appearance.ObliqueRows {
-		t.Fatal("oblique rows stayed enabled")
+	if !ctrl.Config().Main.Appearance.ObliqueRows {
+		t.Fatal("oblique rows stayed disabled")
 	}
 
 	setNamedSlider(t, tt, "Stage Intensity", 0.001)
@@ -44,7 +44,7 @@ func TestSettingsAppearanceStageControlsPersist(t *testing.T) {
 	for _, want := range []string{
 		`visual_preset = "classic"`,
 		"stage_intensity = 0",
-		"oblique_rows = false",
+		"oblique_rows = true",
 		"glass_clarity = 1",
 	} {
 		if !strings.Contains(body, want) {

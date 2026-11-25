@@ -293,6 +293,13 @@ func loadConfigReadOnly(cfgDir string) (config.ClavisConfig, bool, []config.Load
 		}
 		return err
 	})
+	readOptional(config.FileIdentities, func(s string) error {
+		v, err := config.DecodeIdentitiesConfig(s)
+		if err == nil {
+			cfg.Identities = v
+		}
+		return err
+	})
 
 	var warnings []config.ValidationIssue
 	for _, issue := range config.Validate(cfg) {
