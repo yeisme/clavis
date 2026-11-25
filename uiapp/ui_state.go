@@ -42,6 +42,7 @@ type persistedUIState struct {
 
 type uiPersistState struct {
 	loaded bool
+	dirty  bool
 	state  persistedUIState
 	timer  *time.Timer
 }
@@ -84,6 +85,7 @@ func (c *AppController) setPreviewListPercent(p float32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.uiPersist.loaded = true
+	c.uiPersist.dirty = true
 	c.uiPersist.state.PreviewListPercent = clampPreviewListPercent(p)
 	if c.uiPersist.timer != nil {
 		c.uiPersist.timer.Stop()
@@ -91,33 +93,62 @@ func (c *AppController) setPreviewListPercent(p float32) {
 	c.uiPersist.timer = time.AfterFunc(uiStateSaveDelay, c.saveUIState)
 }
 
-// saveUIState writes ui-state.json atomically (temp file and rename).
+// saveUIState writes ui-state.json atomically (unique temp file and rename).
+// Writes are serialized under uiPersistSaveMu so overlapping timer/flush runs
+// can never race on temp files or overwrite newer state with older state.
 func (c *AppController) saveUIState() {
+	c.uiPersistSaveMu.Lock()
+	defer c.uiPersistSaveMu.Unlock()
+
 	c.mu.Lock()
+	dirty := c.uiPersist.dirty
 	st, path := c.uiPersist.state, c.uiStatePathLocked()
+	c.uiPersist.dirty = false
 	c.uiPersist.timer = nil
 	c.mu.Unlock()
-	if path == "" {
+	if !dirty || path == "" {
 		return
 	}
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), uiStateFileName+".*.tmp")
+	if err != nil {
 		return
 	}
-	_ = os.Rename(tmp, path)
+	tmp := f.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return
+	}
+	if err := f.Close(); err != nil {
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return
+	}
+	cleanup = false
 }
 
-// flushUIState writes a pending change now (on Close), so a divider moved
-// just before quitting is not lost.
+// flushUIState writes a pending change now (on Close) and waits for any
+// in-flight timer write to finish before the directory can be removed.
 func (c *AppController) flushUIState() {
 	c.mu.Lock()
-	pending := c.uiPersist.timer != nil && c.uiPersist.timer.Stop()
-	c.mu.Unlock()
-	if pending {
-		c.saveUIState()
+	if c.uiPersist.timer != nil {
+		c.uiPersist.timer.Stop()
+		c.uiPersist.timer = nil
 	}
+	c.mu.Unlock()
+	c.saveUIState()
 }

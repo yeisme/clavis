@@ -364,7 +364,8 @@ type AppController struct {
 	// Ephemeral UI state (used on the UI build thread)
 	uiState uiViewState
 	// uiPersist is view state saved to ui-state.json (the preview split).
-	uiPersist uiPersistState
+	uiPersist       uiPersistState
+	uiPersistSaveMu sync.Mutex
 
 	// Active prompt slot composer session & UI handles
 	promptSession         *prompt.SlotComposerSession

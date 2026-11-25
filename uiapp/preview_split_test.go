@@ -41,7 +41,8 @@ func splitHandleX(tt *ui.Tester, y float32, from, to int) (float32, bool) {
 	for x := from; x < to; x++ {
 		tt.Move(float32(x), y)
 		tt.Frame()
-		if tt.Cursor() == ui.CursorResizeEW {
+		switch tt.Cursor() {
+		case ui.CursorResizeEW, ui.CursorResizeE, ui.CursorResizeW:
 			return float32(x), true
 		}
 	}
@@ -130,15 +131,24 @@ func TestPreviewSplitDragsClampsResetsAndPersists(t *testing.T) {
 	if got := f.ctrl.previewListPercent(); got != minPreviewListPercent {
 		t.Fatalf("dragged far left: list %.1f%%, want clamped to %v%%", got, minPreviewListPercent)
 	}
-	leftX, _ := splitHandleX(tt, y, int(x0), int(x0)+int(total*0.5))
+	leftX, ok := splitHandleX(tt, y, int(x0), int(x0)+int(total*0.5))
+	if !ok {
+		t.Fatal("divider handle lost after dragging left")
+	}
 	wideW := drawnImageWidth(tt, leftX)
 
-	hx, _ = splitHandleX(tt, y, int(x0)+int(total*0.2), int(x0)+int(total*0.6))
+	hx, ok = splitHandleX(tt, y, int(x0)+int(total*0.2), int(x0)+int(total*0.6))
+	if !ok {
+		t.Fatal("divider handle not found at left clamp")
+	}
 	drag(hx, float32(w))
 	if got := f.ctrl.previewListPercent(); got != maxPreviewListPercent {
 		t.Fatalf("dragged far right: list %.1f%%, want clamped to %v%%", got, maxPreviewListPercent)
 	}
-	rightX, _ := splitHandleX(tt, y, int(x0)+int(total*0.5), w)
+	rightX, ok := splitHandleX(tt, y, int(x0)+int(total*0.5), w)
+	if !ok {
+		t.Fatal("divider handle lost at right clamp")
+	}
 	narrowW := drawnImageWidth(tt, rightX)
 	if narrowW == 0 || wideW <= narrowW+40 {
 		t.Fatalf("image drawn %dpx wide with the preview at 65%% and %dpx at 25%%: it must grow with the pane", wideW, narrowW)
@@ -155,14 +165,25 @@ func TestPreviewSplitDragsClampsResetsAndPersists(t *testing.T) {
 		t.Fatalf("double click: list %.1f%%, want the default %v%%", got, defaultPreviewListPercent)
 	}
 
-	hx, _ = splitHandleX(tt, y, int(x0)+int(total*0.4), int(x0)+int(total*0.75))
+	hx, ok = splitHandleX(tt, y, int(x0)+int(total*0.25), int(x0)+int(total*0.55))
+	if !ok {
+		t.Fatal("divider handle lost after double-click reset")
+	}
 	drag(hx, x0+total*0.45)
 	want := f.ctrl.previewListPercent()
-	waitUntil(t, 3*time.Second, func() bool {
-		_, err := os.Stat(filepath.Join(f.ctrl.ConfigStore.Directory(), uiStateFileName))
-		return err == nil
-	}, "ui-state.json written")
-	data, err := os.ReadFile(filepath.Join(f.ctrl.ConfigStore.Directory(), uiStateFileName))
+	if want == defaultPreviewListPercent {
+		t.Fatalf("expected final drag to move split from default %.1f%%", defaultPreviewListPercent)
+	}
+	statePath := filepath.Join(f.ctrl.ConfigStore.Directory(), uiStateFileName)
+	waitUntil(t, 5*time.Second, func() bool {
+		data, err := os.ReadFile(statePath)
+		if err != nil {
+			return false
+		}
+		var saved persistedUIState
+		return json.Unmarshal(data, &saved) == nil && saved.PreviewListPercent == want
+	}, "ui-state.json written with final split percent")
+	data, err := os.ReadFile(statePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +224,9 @@ func TestInvalidPersistedPreviewSplitValuesUseDefault(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctrl.mu.Lock()
-		ctrl.uiPersist = uiPersistState{}
+		ctrl.uiPersist.loaded = false
+		ctrl.uiPersist.dirty = false
+		ctrl.uiPersist.state = persistedUIState{}
 		ctrl.mu.Unlock()
 		if got := ctrl.previewListPercent(); got != defaultPreviewListPercent {
 			t.Fatalf("persisted %s: clamp=%v, want default %v", raw, got, defaultPreviewListPercent)
