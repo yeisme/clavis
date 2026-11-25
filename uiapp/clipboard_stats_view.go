@@ -3,6 +3,7 @@ package uiapp
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -335,6 +336,10 @@ func clipboardKindLabel(kind string) string {
 			return "链接"
 		}
 		return "Links"
+	case "video":
+		// Videos have a label in the media vocabulary already; reuse it rather
+		// than spell a second one.
+		return MediaCategoryLabel(MediaCategoryVideo)
 	default:
 		return kind
 	}
@@ -383,5 +388,146 @@ func renderClipboardSparkline(c *ui.Context, theme *ui.Theme, days []storage.Cli
 		p.StrokePolyline(pts, 1.5, line)
 		last := pts[len(pts)-1]
 		p.Fill(ui.Rect{X: last[0] - 2, Y: last[1] - 2, W: 4, H: 4}, ui.RGBA(10, 132, 255, 1), 2)
+	})
+}
+
+// The Stats hub's clipboard card: a 100% composition bar by kind with a legend
+// row per kind, and a seven-day column chart of captures. The icons are the
+// ones the clipboard list rows use (engine.clipboardMediaIcon for media,
+// clipboardContentIcon for text), so a kind reads the same in both places.
+
+// clipboardHubDays is the capture window the card plots.
+const clipboardHubDays = 7
+
+// clipboardKindIcon is the list-row icon of a stored kind.
+func clipboardKindIcon(kind string) string {
+	switch strings.ToLower(kind) {
+	case string(clipboard.KindImage):
+		return "photo"
+	case string(clipboard.KindVideo):
+		return "film"
+	case "file":
+		return "doc"
+	case "link":
+		return "link"
+	}
+	return "doc.text"
+}
+
+// clipboardKindsOrdered keeps the kinds that have entries, in the order the
+// clipboard filter lists them (clipboardKindOrder), ties by name, so the bar,
+// the legend and the filter agree on what comes first.
+func clipboardKindsOrdered(stats []storage.ClipboardKindStat) []storage.ClipboardKindStat {
+	out := make([]storage.ClipboardKindStat, 0, len(stats))
+	for _, stat := range stats {
+		if stat.Count > 0 {
+			out = append(out, stat)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		oi, oj := clipboardKindOrder(out[i].Kind), clipboardKindOrder(out[j].Kind)
+		if oi != oj {
+			return oi < oj
+		}
+		return out[i].Kind < out[j].Kind
+	})
+	return out
+}
+
+// clipboardCaptureColumns are the captures per day as single-series columns,
+// oldest first, labelled with their short date.
+func clipboardCaptureColumns(days []storage.ClipboardDay) []chartColumn {
+	if len(days) > clipboardHubDays {
+		days = days[len(days)-clipboardHubDays:]
+	}
+	cols := make([]chartColumn, len(days))
+	for i, day := range days {
+		cols[i] = chartColumn{Label: chartShortDay(day.Day), Values: []float64{float64(day.Count)}}
+	}
+	return cols
+}
+
+// clipboardCapturesMax is the tallest day of the window, the top of the y scale.
+func clipboardCapturesMax(days []storage.ClipboardDay) int {
+	top := 0
+	for _, day := range days {
+		top = max(top, day.Count)
+	}
+	return top
+}
+
+// renderClipboardHubChart is the body of the clipboard card once its snapshot
+// is loaded and holds entries.
+func renderClipboardHubChart(c *ui.Context, theme *ui.Theme, st clipboardStatsState) {
+	pal := newChartPalette(theme)
+	kinds := clipboardKindsOrdered(st.kinds)
+	count, bytes := clipboardStatsTotals(st.kinds)
+	values := make([]float64, len(kinds))
+	for i, kind := range kinds {
+		values[i] = float64(kind.Count)
+	}
+	percents := chartPercents(values)
+	fills := make([]ui.Color, len(kinds))
+	parts := make([]chartPart, len(kinds))
+	cells := make([][]chartKeyCell, len(kinds))
+	for i, kind := range kinds {
+		fills[i] = clipboardStatColor(theme, i, strings.EqualFold(st.filter, kind.Kind))
+		name := clipboardKindLabel(kind.Kind)
+		size := formatClipboardBytes(kind.Bytes)
+		parts[i] = chartPart{
+			Key:   "stats-clip-seg-" + strings.ToLower(kind.Kind),
+			Value: values[i],
+			Fill:  fills[i],
+			Tip:   name + " · " + fmtInt(kind.Count) + " · " + size + " · " + fmtInt(percents[i]) + "%",
+		}
+		cells[i] = []chartKeyCell{{Text: fmtInt(kind.Count), Strong: true}, {Text: size}}
+	}
+	widths := chartKeyWidths(c, cells)
+	scale, ticks := chartCountScale(clipboardCapturesMax(st.days))
+	captures := clipboardCaptureColumns(st.days)
+	last := len(captures) - 1
+	fill := func(_, column int) ui.Color {
+		if column == last {
+			return pal.accent
+		}
+		return pal.strong
+	}
+
+	ui.Column(c).Key("stats-clip-body").FillWidth().Grow(1).MinHeight(space0).Gap(space6).Children(func() {
+		ui.Text(c, clipboardStatsCountLabel(count, bytes)).Key("stats-clip-total").
+			FontSize(typeBody).FontWeight(600).FontFeatures("tnum").TextColor(theme.Text).SingleLine()
+		kitChartSegmentBar(c, chartBarSpec{Key: "stats-clip-bar", Parts: parts, Height: chartThinBarSize})
+		ui.Row(c).FillWidth().Grow(1).MinHeight(space0).Gap(space12).AlignItems(ui.Stretch).Children(func() {
+			ui.Column(c).Key("stats-clip-legend").Label("stats-clip-legend").Basis(0).Grow(11).MinWidth(space0).Gap(space4).Children(func() {
+				for i, kind := range kinds {
+					kitChartKeyRow(c, pal, "stats-clip-key-"+strings.ToLower(kind.Kind), fills[i],
+						clipboardKindIcon(kind.Kind), clipboardKindLabel(kind.Kind), cells[i], widths)
+				}
+			})
+			ui.Column(c).Basis(0).Grow(9).MinWidth(space0).MinHeight(space0).Gap(space2).Children(func() {
+				if len(captures) == 0 {
+					return
+				}
+				ui.Text(c, "7d").FontSize(typeMicro).TextColor(pal.label).NoWrap()
+				kitChartColumns(c, theme, chartColumnsSpec{
+					Key:        "stats-clip-chart",
+					Label:      i18n.T("stats.card.clipboard.title"),
+					Columns:    captures,
+					Scale:      scale,
+					Ticks:      ticks,
+					LabelEvery: 3,
+					Fill:       fill,
+					Describe: func(i int) string {
+						return captures[i].Label + ": " + fmtInt(int(captures[i].Values[0]))
+					},
+					Tooltip: func(i int) {
+						swatch := fill(0, i)
+						kitChartTipHeading(c, pal, captures[i].Label)
+						kitChartTipFigure(c, pal, &swatch, fmtInt(int(captures[i].Values[0])), "")
+					},
+					ValueLabel: func(i int) string { return fmtInt(int(captures[i].Values[0])) },
+				})
+			})
+		})
 	})
 }

@@ -3,9 +3,12 @@ package uiapp
 import (
 	"context"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
 const (
@@ -272,5 +275,134 @@ func renderLexiconSparkline(c *ui.Context, theme *ui.Theme, days []LexiconHitDay
 				})
 			}
 		}
+	})
+}
+
+// The Stats hub's lexicon card: a 14-day hit-rate line (0-100%) beside the
+// top-5 words as ranked bars. Both come from the cached snapshots only.
+
+// lexiconHubDays is the window of the hit-rate line, the reader's own.
+const lexiconHubDays = 14
+
+// lexiconHubTopWords is how many ranked words the card lists.
+const lexiconHubTopWords = 5
+
+// lexiconLastDays keeps the newest n days of an oldest-first window.
+func lexiconLastDays(days []LexiconHitDay, n int) []LexiconHitDay {
+	if len(days) > n {
+		return days[len(days)-n:]
+	}
+	return days
+}
+
+// lexiconHitSeries is the hit rate (0..1) of each day, and NaN for a day with
+// no events: such a day is a gap in the line, never a zero.
+func lexiconHitSeries(days []LexiconHitDay) []float64 {
+	out := make([]float64, len(days))
+	for i, day := range days {
+		if rate, ok := lexiconHitRate(day); ok {
+			out[i] = float64(rate)
+		} else {
+			out[i] = math.NaN()
+		}
+	}
+	return out
+}
+
+// lexiconRanks are the words to list, most used first, each with its length
+// relative to the busiest: empty words and non-positive counts are dropped.
+func lexiconRanks(words []LexiconTopWord, limit int) []chartRank {
+	rows := make([]chartRank, 0, len(words))
+	top := 0
+	for _, word := range words {
+		label := strings.TrimSpace(word.Word)
+		if label == "" || word.UseCount <= 0 {
+			continue
+		}
+		rows = append(rows, chartRank{Label: label, Value: word.UseCount})
+		top = max(top, word.UseCount)
+		if limit > 0 && len(rows) == limit {
+			break
+		}
+	}
+	for i := range rows {
+		rows[i].Frac = float64(rows[i].Value) / float64(top)
+	}
+	return rows
+}
+
+// lexiconPercent is a day's hit rate as a whole percent.
+func lexiconPercent(day LexiconHitDay) (int, bool) {
+	rate, ok := lexiconHitRate(day)
+	return int(math.Round(float64(rate) * 100)), ok
+}
+
+// lexiconTopCaption is the heading of the ranked list: the "Top: %s" caption
+// without its colon, in whichever language is active.
+func lexiconTopCaption() string {
+	return strings.TrimRight(i18n.Tf("stats.card.lexicon.top_words", ""), ":  ：")
+}
+
+// renderLexiconHubChart is the body of the lexicon card once its hit window is
+// loaded: the headline rate, the line chart, and the ranked words.
+func renderLexiconHubChart(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig, days []LexiconHitDay, topWords []LexiconTopWord, topLoaded bool) {
+	pal := newChartPalette(theme)
+	days = lexiconLastDays(days, lexiconHubDays)
+	hasEvents := lexiconTotalEvents(days) > 0
+	ranks := lexiconRanks(topWords, lexiconHubTopWords)
+
+	ui.Row(c).Key("stats-lex-body").FillWidth().Grow(1).MinHeight(space0).Gap(space12).AlignItems(ui.Stretch).Children(func() {
+		ui.Column(c).Basis(0).Grow(13).MinWidth(space0).MinHeight(space0).Gap(space6).Children(func() {
+			ui.Column(c).Gap(space2).Children(func() {
+				if rate, ok := lexiconOverallHitRate(days); ok {
+					ui.Text(c, i18n.Tf("stats.card.lexicon.hit_rate", rate)).Key("stats-lex-rate").
+						FontSize(typeKPI).FontWeight(600).FontFeatures("tnum").TextColor(theme.Text).SingleLine()
+				} else {
+					ui.Text(c, i18n.Tf("stats.card.lexicon.terms_count", len(cfg.Glossary.Terms))).
+						FontSize(typeBody).FontWeight(600).FontFeatures("tnum").TextColor(theme.Text).SingleLine()
+				}
+				ui.Text(c, i18n.Tf("stats.card.lexicon.summary", len(cfg.Glossary.Terms), len(cfg.Main.InputEngine.UserWords))).
+					FontSize(typeMicro).FontFeatures("tnum").TextColor(theme.TextMuted).SingleLine()
+			})
+			if !hasEvents {
+				// No events means no line: the headline above is the catalog size.
+				ui.Text(c, i18n.T("stats.status.no_records")).FontSize(typeMeta).TextColor(pal.label).SingleLine()
+				return
+			}
+			labels := make([]string, len(days))
+			for i, day := range days {
+				labels[i] = chartShortDay(day.Day)
+			}
+			kitChartLine(c, theme, chartLineSpec{
+				Key:        "stats-lex-chart",
+				Label:      i18n.T("stats.card.lexicon.title"),
+				Labels:     labels,
+				Values:     lexiconHitSeries(days),
+				LabelEvery: 4,
+				Describe: func(i int) string {
+					if pct, ok := lexiconPercent(days[i]); ok {
+						return labels[i] + ": " + i18n.Tf("stats.card.lexicon.hit_rate", pct) + " (" + fmtInt(days[i].Hits) + " / " + fmtInt(days[i].Hits+days[i].Misses) + ")"
+					}
+					return labels[i] + ": " + i18n.T("stats.status.no_records")
+				},
+				Tooltip: func(i int) {
+					kitChartTipHeading(c, pal, labels[i])
+					if pct, ok := lexiconPercent(days[i]); ok {
+						kitChartTipFigure(c, pal, nil, i18n.Tf("stats.card.lexicon.hit_rate", pct), "")
+						kitChartTipHeading(c, pal, fmtInt(days[i].Hits)+" / "+fmtInt(days[i].Hits+days[i].Misses))
+						return
+					}
+					kitChartTipHeading(c, pal, i18n.T("stats.status.no_records"))
+				},
+			})
+		})
+		ui.Column(c).Basis(0).Grow(10).MinWidth(space0).MinHeight(space0).Gap(space6).Children(func() {
+			ui.Text(c, lexiconTopCaption()).FontSize(typeMicro).TextColor(pal.label).NoWrap()
+			if topLoaded && len(ranks) > 0 {
+				kitChartRankedBars(c, theme, "stats-lex-top", ranks)
+				return
+			}
+			ui.Text(c, i18n.T("stats.status.no_records")).FontSize(typeMeta).TextColor(pal.label).SingleLine()
+		})
 	})
 }

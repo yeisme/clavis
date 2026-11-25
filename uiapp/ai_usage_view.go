@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
 const (
@@ -251,6 +252,133 @@ func renderAIUsageChart(c *ui.Context, theme *ui.Theme, days []AIUsageDay) {
 				p.FillRadii(r, [4]float32{2, 2, 0, 0}, aiUsageBarColor(theme, i == 6))
 			})
 		}
+	})
+}
+
+// The Stats hub plots the last aiUsageHubDays days as a stacked column chart.
+// Tokens are the spend measure: this codebase never stores a price (see
+// internal/storage/learning_store.go), so no currency figure is ever shown.
+const aiUsageHubDays = 7
+
+// Stack order of a usage column, bottom-up: output carries the stronger
+// neutral step at the baseline, input the lighter one above it.
+const (
+	aiSeriesOutput = 0
+	aiSeriesInput  = 1
+)
+
+// aiUsageLastDays keeps the newest n days of an oldest-first window.
+func aiUsageLastDays(days []AIUsageDay, n int) []AIUsageDay {
+	if len(days) > n {
+		return days[len(days)-n:]
+	}
+	return days
+}
+
+// aiUsageSeriesNames are the legend and tooltip names of the two token series.
+// Output tokens are the model's result, so the output series takes ai.view.result
+// ("Result" / "结果"); the only other "Output" in the tables is the workflow
+// setting's, whose Chinese reads "output mode".
+func aiUsageSeriesNames() (input, output string) {
+	return i18n.T("settings.field.input"), i18n.T("ai.view.result")
+}
+
+// aiUsageColumns turns days into stacked columns: output at the bottom, input
+// on top, each labelled with its short date.
+func aiUsageColumns(days []AIUsageDay) []chartColumn {
+	cols := make([]chartColumn, len(days))
+	for i, day := range days {
+		cols[i] = chartColumn{
+			Label:  chartShortDay(day.Day),
+			Values: []float64{float64(day.OutputTokens), float64(day.InputTokens)},
+		}
+	}
+	return cols
+}
+
+// aiUsageMaxTokens is the tallest stack of the window, the top of the y scale.
+func aiUsageMaxTokens(days []AIUsageDay) int {
+	top := 0
+	for _, day := range days {
+		top = max(top, aiUsageTokens(day))
+	}
+	return top
+}
+
+// aiUsageDayFill is the exact color of one mark. History uses two neutral
+// steps (output stronger, input lighter); today, the newest column, uses the
+// accent for output and a lighter blue step for input.
+func aiUsageDayFill(pal chartPalette, series int, today bool) ui.Color {
+	switch {
+	case today && series == aiSeriesOutput:
+		return pal.accent
+	case today:
+		return pal.accentSoft
+	case series == aiSeriesOutput:
+		return pal.strong
+	}
+	return pal.soft
+}
+
+// aiUsageDescribe is the plain-text reading of one day, for the selection
+// announcement and screen readers: "11/19: Input 27.4k, Output 9.8k, 12 req".
+func aiUsageDescribe(day AIUsageDay) string {
+	input, output := aiUsageSeriesNames()
+	return chartShortDay(day.Day) + ": " + input + " " + formatTokenCount(day.InputTokens) + ", " +
+		output + " " + formatTokenCount(day.OutputTokens) + ", " + fmtInt(day.Requests) + " req"
+}
+
+// renderAIUsageHubChart is the AI card of the Stats hub: today's tokens and the
+// seven-day total above a seven-day stacked column chart (input + output
+// tokens per day) with a legend. Every figure comes from the cached usage
+// snapshot; nothing is estimated.
+func renderAIUsageHubChart(c *ui.Context, theme *ui.Theme, days []AIUsageDay) {
+	days = aiUsageLastDays(days, aiUsageHubDays)
+	if len(days) == 0 {
+		return
+	}
+	pal := newChartPalette(theme)
+	inputName, outputName := aiUsageSeriesNames()
+	scale, ticks := chartTokenScale(aiUsageMaxTokens(days))
+	last := len(days) - 1
+	fill := func(series, column int) ui.Color { return aiUsageDayFill(pal, series, column == last) }
+
+	ui.Column(c).Key("stats-ai-body").FillWidth().Grow(1).MinHeight(space0).Gap(space6).Children(func() {
+		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.End).Children(func() {
+			ui.Column(c).Gap(space2).Children(func() {
+				ui.Row(c).Gap(space6).AlignItems(ui.Center).Children(func() {
+					// The accent dot is today's key: the same blue as today's column.
+					ui.Box(c).Size(chartSwatchSize, chartSwatchSize).Radius(radiusPill).Background(pal.accent).Shrink(0)
+					ui.Text(c, aiUsageTodayLabel(days)).Key("stats-ai-today").
+						FontSize(typeKPI).FontWeight(600).FontFeatures("tnum").TextColor(theme.Text).SingleLine()
+					ui.Text(c, chartShortDay(days[last].Day)).FontSize(typeMicro).FontFeatures("tnum").TextColor(pal.label).SingleLine()
+				})
+				ui.Text(c, i18n.Tf("stats.card.ai.summary", formatTokenCount(aiUsageTotalTokens(days)), aiUsageTotalRequests(days))).
+					FontSize(typeMicro).FontFeatures("tnum").TextColor(theme.TextMuted).SingleLine()
+			})
+			ui.Spacer(c)
+			kitChartLegend(c, pal, "stats-ai-legend", []chartLegendItem{
+				{Label: inputName, Fill: pal.soft},
+				{Label: outputName, Fill: pal.strong},
+			})
+		})
+		kitChartColumns(c, theme, chartColumnsSpec{
+			Key:        "stats-ai-chart",
+			Label:      i18n.T("stats.card.ai.title"),
+			Columns:    aiUsageColumns(days),
+			Scale:      scale,
+			Ticks:      ticks,
+			LabelEvery: 1,
+			Fill:       fill,
+			Describe:   func(i int) string { return aiUsageDescribe(days[i]) },
+			Tooltip: func(i int) {
+				day := days[i]
+				kitChartTipHeading(c, pal, chartShortDay(day.Day)+" · "+fmtInt(day.Requests)+" req")
+				in, out := fill(aiSeriesInput, i), fill(aiSeriesOutput, i)
+				kitChartTipFigure(c, pal, &in, formatTokenCount(day.InputTokens), inputName)
+				kitChartTipFigure(c, pal, &out, formatTokenCount(day.OutputTokens), outputName)
+			},
+		})
 	})
 }
 
