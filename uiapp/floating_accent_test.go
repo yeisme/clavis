@@ -28,7 +28,8 @@ func accentPixels(tt *ui.Tester, x0, y0, x1, y1 int, accent ui.Color) int {
 // bar, the layer pill and an unselected AI suggestion's ✦ carry no accent;
 // the IME pill's live segment and the chosen candidate still do.
 func TestFloatingSurfacesKeepAccentForSelection(t *testing.T) {
-	accent := ui.LightTheme().Accent
+	// The floating windows paint with the Clavis palette: one system blue.
+	accent := macAccent
 
 	f := newInteractionFixture(t, nil)
 	f.ctrl.Dispatch(engine.Event{Type: engine.EventOpenLeader, Context: &engine.CapsuleContext{AppName: "Xcode"}})

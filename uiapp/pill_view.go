@@ -71,7 +71,8 @@ func PillDisplayDuration(label string) time.Duration {
 
 // renderIMEPill draws the floating pill for label.
 func renderIMEPill(c *ui.Context, label string) {
-	theme := c.Theme()
+	theme := resolveAppearanceTheme(c, CandidateAppearance().Theme)
+	c.SetTheme(theme)
 	prefs := c.Preferences()
 	spec := classifyPill(label)
 

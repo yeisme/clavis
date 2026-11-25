@@ -84,9 +84,10 @@ func TestClipboardRowMeta(t *testing.T) {
 func TestOmniboxSelectionIsEdgeBarNotFlood(t *testing.T) {
 	for _, dark := range []bool{false, true} {
 		name := "light"
-		theme := ui.LightTheme()
+		// The Capsule paints with the Clavis macOS palette (theme_macos.go).
+		theme := macTheme(false, ui.Preferences{})
 		if dark {
-			name, theme = "dark", ui.DarkTheme()
+			name, theme = "dark", macTheme(true, ui.Preferences{})
 		}
 		t.Run(name, func(t *testing.T) {
 			f := newInteractionFixture(t, nil)

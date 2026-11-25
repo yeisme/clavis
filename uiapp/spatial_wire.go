@@ -89,12 +89,9 @@ func capsuleStageIndex(phase engine.CapsulePhase) (int, bool) {
 	}
 }
 
-// applyCapsuleCardSurface applies Liquid Glass (with opaque accessibility
-// fallback) to the Capsule card, or preserves the exact pre-spatial surface for
-// the "classic" preset.
-// glassBodyTint is the wash laid over the native material behind panel text. 0.92 keeps the
-// surface recognisably glass at its edges while pushing the body close to opaque, which is what
-// text legibility needs; Apple's materials guidance likewise keeps content backplates opaque.
+// glassBodyTint is the wash laid over the native material of the small floating notices (HUD
+// line, IME pill, selection bar), whose whole face is one short label: 0.92 keeps the surface
+// recognisably glass at its edges while pushing the label's backplate close to opaque.
 func glassBodyTint(theme *ui.Theme) ui.Color {
 	if theme == nil {
 		return ui.RGBA(0, 0, 0, 0)
@@ -105,6 +102,32 @@ func glassBodyTint(theme *ui.Theme) ui.Color {
 	return theme.Background.Alpha(0.94)
 }
 
+// shellGlassTint is the tint of a floating panel's Liquid Glass shell — the part of the panel
+// that is chrome (title bar, tabs, edge), never the reading area: #F5F5F7 at 82% in light mode,
+// #1E1E20 at 80% in dark mode. Everything a user reads sits on contentSurface instead.
+func shellGlassTint(theme *ui.Theme) ui.Color {
+	if theme == nil {
+		return ui.RGBA(0, 0, 0, 0)
+	}
+	if theme.Dark {
+		return ui.Hex("#1E1E20").Alpha(0.80)
+	}
+	return ui.Hex("#F5F5F7").Alpha(0.82)
+}
+
+// contentSurface is the backplate of every reading area — lists, previews, AI answers, dialog
+// bodies, settings panes. It is the theme's content color at full opacity: the owner's rule is
+// glass for floating shells only, so wallpaper and the windows underneath never show through
+// text.
+func contentSurface(theme *ui.Theme) ui.Color {
+	bg := theme.Background
+	bg.A = 255
+	return bg
+}
+
+// applyCapsuleCardSurface makes the Capsule card a floating Liquid Glass shell (with an opaque
+// accessibility fallback), or keeps the plain native material of the "classic" preset. Only
+// the shell is glass: CapsuleView lays the body over contentSurface.
 func applyCapsuleCardSurface(c *ui.Context, card ui.Element, theme *ui.Theme, cfg config.AppearanceConfig) ui.Element {
 	prefs := c.Preferences()
 	radius := NormalizeCornerRadius(cfg)
@@ -127,50 +150,17 @@ func applyCapsuleCardSurface(c *ui.Context, card ui.Element, theme *ui.Theme, cf
 		return card
 	}
 
-	// Tint the glass toward the theme background so the desktop behind cannot read through the
-	// body text. Without it a terminal behind the panel shows through between glyphs, which was
-	// reported as "the text bleeds together / colours look wrong" — the glyphs were competing
-	// with whatever sat behind them rather than with each other.
-	//
-	// Not fully opaque: the outer edge keeps the material's translucency, which is the look the
-	// brief asks for ("glass for the floating surface"), while the reading area stays legible.
+	// The shell (title bar, tabs, edge) is the translucent part of the panel. The reading area is
+	// not: CapsuleView paints it with the opaque contentSurface, because a tinted-but-translucent
+	// body let a terminal behind the panel show through between glyphs ("the text bleeds
+	// together / colours look wrong").
 	GlassSurface(c, card, cfg, GlassOpts{
 		Native: c.Vibrancy(),
 		Radius: radius,
-		Tint:   glassBodyTint(c.Theme()),
+		Tint:   shellGlassTint(theme),
 	})
 	if prefs.HighContrast {
 		card.Border(1.5, theme.Border)
 	}
 	return card
-}
-
-// drawCapsuleAIHeaderGlow paints the AIStageGlowShader aura (or its zero-cost
-// CPU/static fallback) behind the Capsule header during PhaseAIStreaming.
-func drawCapsuleAIHeaderGlow(
-	c *ui.Context,
-	p *ui.Painter,
-	r ui.Rect,
-	theme *ui.Theme,
-	cfg config.AppearanceConfig,
-	state engine.State,
-) {
-	if state.Phase != engine.PhaseAIStreaming || isClassicPreset(cfg) || c == nil || p == nil {
-		return
-	}
-	if c.Preferences().ReduceTransparency {
-		return
-	}
-	glowCfg := effectiveSpatialAppearance(c, cfg)
-	accent := theme.Accent
-	intensity := float32(0.62)
-	if state.AIError != "" {
-		accent = theme.Danger
-		intensity = 0.24
-		glowCfg.EnableShaders = false
-	} else if state.AIComplete {
-		intensity = 0.28
-		glowCfg.EnableShaders = false
-	}
-	DrawAIStageGlow(c, p, r, intensity, accent, glowCfg)
 }

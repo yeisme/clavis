@@ -1069,7 +1069,7 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 					Background(withAlpha(theme.Danger, alphaFaint)).
 					Border(space1, withAlpha(theme.Danger, alphaHalf)).
 					Children(func() {
-						ui.Text(c, validationErr).FontSize(typeLabel).FontWeight(600).TextColor(theme.Danger)
+						ui.Text(c, validationErr).FontSize(typeLabel).FontWeight(600).TextColor(statusInk(theme, theme.Danger))
 					})
 			}
 
@@ -1107,7 +1107,7 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 			kitCard(c, theme, cardInset, func() {
 				ui.Text(c, i18n.T("prompts.preview")).FontSize(typeMeta).FontWeight(700).TextColor(theme.TextMuted).SingleLine()
 				if contractActive && contractFatal {
-					ui.Text(c, i18n.T("prompts.contract.preview_blocked")).FontSize(typeLabel).TextColor(theme.Danger).Wrap()
+					ui.Text(c, i18n.T("prompts.contract.preview_blocked")).FontSize(typeLabel).TextColor(statusInk(theme, theme.Danger)).Wrap()
 					for _, d := range contractDiags {
 						if d.Code == "builtin_conflict" {
 							continue

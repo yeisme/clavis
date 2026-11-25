@@ -261,7 +261,10 @@ func (a *AppController) SettingsView(c *ui.Context) {
 func (a *AppController) renderSettingsSidebar(c *ui.Context, section int, cfg config.ClavisConfig, query string) {
 	theme := resolveAppearanceTheme(c, cfg.Main.Appearance.Theme)
 	selected := settingsSectionKey(section)
-	ui.Column(c).Width(railWidth).FillHeight().Padding(cardPadY, space8).Gap(space4).Children(func() {
+	// The sidebar is the elevated gray layer beside the white (or #1C1C1E)
+	// content pane — opaque, like every reading surface; glass is for
+	// floating panels only.
+	ui.Column(c).Width(railWidth).FillHeight().Padding(cardPadY, space8).Gap(space4).Background(theme.Surface).Children(func() {
 		ui.Text(c, i18n.T("settings.center")).FontSize(typeLabel).FontWeight(600).TextColor(theme.TextMuted).Padding(space8, space4).SingleLine()
 		search := query
 		input := ui.TextInput(c.Key("settings-search"), &search).Placeholder(i18n.T("settings.search.placeholder")).FillWidth()
@@ -298,12 +301,15 @@ func (a *AppController) renderSettingsSidebar(c *ui.Context, section int, cfg co
 						Padding(space4, space8).Radius(radiusRow).Gap(space8).AlignItems(ui.Center).FocusRing(false)
 					if active {
 						row = kitInteractive(c, theme, row, interactionState{Selected: true}, motionProfiles[animationOff])
-						x, y, blur, spread, shadow := elevationShadow(theme, elev1)
-						row.Shadow(x, y, blur, spread, shadow)
+					} else if row.Hovered() {
+						row.Background(tileFill(theme))
 					}
 					row.Children(func() {
 						kitIconTile(c, theme, item.Icon, active)
-						ui.Text(c, item.Label).FontSize(typeLabel).TextColor(theme.Text).SingleLine().Grow(1).MinWidth(0)
+						label := ui.Text(c, item.Label).FontSize(typeLabel).TextColor(theme.Text).SingleLine().Grow(1).MinWidth(0)
+						if active {
+							label.FontWeight(600)
+						}
 						if badge := settingsSectionBadge(item.Index, cfg); badge != "" {
 							ui.Text(c, badge).FontSize(typeMeta).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
 						}
@@ -803,7 +809,7 @@ func renderConfigValidationCard(c *ui.Context, a *AppController, theme *ui.Theme
 		if len(errs) == 0 && len(warns) == 0 {
 			ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 				renderSemanticIcon(c, "checkmark", typeLabel, theme.Success)
-				ui.Text(c, i18n.T("settings.validation.ok")).FontSize(typeLabel).TextColor(theme.Success).Wrap().Grow(1)
+				ui.Text(c, i18n.T("settings.validation.ok")).FontSize(typeLabel).TextColor(statusInk(theme, theme.Success)).Wrap().Grow(1)
 			})
 			return
 		}
@@ -898,7 +904,7 @@ func yesNo(v string) string {
 // settingsSourceCard is a settings card naming, on the right of its title,
 // the config table or file its rows write ("[trigger]", "ime-rules.toml").
 func settingsSourceCard(c *ui.Context, theme *ui.Theme, title, source string, body func()) {
-	kitCard(c, theme, cardElevated, func() {
+	kitCard(c, theme, cardFlat, func() {
 		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, title).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Grow(1)
 			if source != "" {
@@ -916,7 +922,7 @@ func settingsCardDivider(c *ui.Context, theme *ui.Theme) {
 }
 
 func settingsEditorCard(c *ui.Context, theme *ui.Theme, title string, body func()) {
-	kitCard(c, theme, cardElevated, func() {
+	kitCard(c, theme, cardFlat, func() {
 		ui.Text(c, title).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine()
 		kitDivider(c, theme)
 		body()

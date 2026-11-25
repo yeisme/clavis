@@ -35,8 +35,11 @@ func settingCaption(key, value string) string {
 // control on the right. The name labels the control (LabelledBy), so a
 // click on it toggles a switch or focuses the control, as HTML's <label
 // for> does. help, when set, shows as the name's tooltip.
+// settingRow is one form row: name (and its config-key caption) leading, the
+// control trailing. It is at least settingRowHeight tall and grows with its
+// name, so a two-line name never spills into the row below.
 func settingRow(c *ui.Context, theme *ui.Theme, title, caption, help string, control func() ui.Element) {
-	ui.Row(c).FillWidth().Height(controlHeight).Gap(space12).AlignItems(ui.Center).Padding(space2, 0).Children(func() {
+	ui.Row(c).FillWidth().MinHeight(settingRowHeight).Gap(space12).AlignItems(ui.Center).Padding(space4, 0).Children(func() {
 		name := settingRowName(c, theme, title, caption, help)
 		control().LabelledBy(name)
 	})

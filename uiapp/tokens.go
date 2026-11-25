@@ -179,6 +179,9 @@ const (
 	cardPadY                  float32 = 10
 	cardGap                   float32 = 10
 	railWidth                 float32 = 216
+	// settingRowHeight is a settings form row: room for a 13pt name over an
+	// 11pt config-key caption, like a macOS grouped-form row.
+	settingRowHeight float32 = 40
 )
 
 // Row metrics for the Omnibox result list.

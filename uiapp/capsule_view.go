@@ -239,16 +239,20 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 	card = applyCapsuleCardSurface(c, card, theme, appearance)
 
 	renderInteractivePhase := func() {
+		// The header is the glass shell's title bar; everything below it is
+		// the reading area and sits on the opaque content surface.
 		a.renderCapsuleHeader(c, theme, cfg, state, diag)
-		ui.Divider(c)
-		switch state.Phase {
-		case engine.PhaseLeader:
-			a.renderLeaderView(c, theme, state)
-		case engine.PhaseOmnibox:
-			a.renderOmniboxView(c, theme, cfg, state)
-		case engine.PhaseAIStreaming:
-			a.renderAIStreamingView(c, theme, cfg, state)
-		}
+		kitDivider(c, theme)
+		capsuleBody(c, theme).Children(func() {
+			switch state.Phase {
+			case engine.PhaseLeader:
+				a.renderLeaderView(c, theme, state)
+			case engine.PhaseOmnibox:
+				a.renderOmniboxView(c, theme, cfg, state)
+			case engine.PhaseAIStreaming:
+				a.renderAIStreamingView(c, theme, cfg, state)
+			}
+		})
 	}
 
 	card.Children(func() {
@@ -272,6 +276,12 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 			col.Children(renderInteractivePhase)
 		})
 	})
+}
+
+// capsuleBody is the Capsule's reading area under the glass title bar: an
+// opaque contentSurface column that takes the rest of the card.
+func capsuleBody(c *ui.Context, theme *ui.Theme) ui.Element {
+	return ui.Column(c).FillWidth().Grow(1).MinHeight(0).Background(contentSurface(theme))
 }
 
 // clearHubSurfaceSilently clears any active hub surface without invoking
@@ -370,34 +380,41 @@ func IMEPillView(c *ui.Context, label string) {
 	renderIMEPill(c, label)
 }
 
+// resolveAppearanceTheme picks the Clavis macOS palette (theme_macos.go) for
+// the configured appearance; "system" follows the desktop, whose appearance
+// the frame's default theme carries.
 func resolveAppearanceTheme(c *ui.Context, mode string) *ui.Theme {
-	prefs := c.Preferences()
+	dark := c.Theme().Dark
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "dark":
-		return ui.DarkTheme().WithPreferences(prefs)
+		dark = true
 	case "light":
-		return ui.LightTheme().WithPreferences(prefs)
-	default:
-		return c.Theme()
+		dark = false
 	}
+	return macTheme(dark, c.Preferences())
 }
 
+// capsuleSegmentedTabs is the Omnibox tab strip as one macOS segmented
+// control: a neutral track with a hairline, quiet labels, and the single
+// accent capsule on the active tab — instead of six separate gray pills
+// competing with the selection.
 func capsuleSegmentedTabs(c *ui.Context, theme *ui.Theme, labels []string, active int, onPick func(int)) {
-	ui.Row(c).Gap(space2).AlignItems(ui.Center).Children(func() {
+	ui.Row(c).Gap(space2).Padding(space2).Radius(radiusSegment+space2).AlignItems(ui.Center).
+		Background(tileFill(theme)).Border(space1, hairline(theme)).Children(func() {
 		for i, label := range labels {
 			selected := i == active
-			segment := ui.ButtonBase(c).Padding(space4, space8).Radius(radiusSegment).FocusRing(false)
+			segment := ui.ButtonBase(c).Padding(space2, space10).Radius(radiusSegment).FocusRing(false)
 			if selected {
 				segment.Background(theme.Accent)
-			} else {
+			} else if segment.Hovered() {
 				segment.Background(tileFill(theme))
 			}
 			segment.Children(func() {
-				text := ui.Text(c, label).FontSize(typeLabel).SingleLine()
+				text := ui.Text(c, label).FontSize(typeLabel).FontWeight(500).SingleLine()
 				if selected {
 					text.TextColor(theme.AccentText).FontWeight(600)
 				} else {
-					text.TextColor(theme.TextMuted)
+					text.TextColor(secondaryInk(theme))
 				}
 			})
 			if segment.Clicked() && onPick != nil {
@@ -414,12 +431,9 @@ func (a *AppController) renderCapsuleHeader(
 	state engine.State,
 	diag DiagnosticsSnapshot,
 ) {
+	// No aura behind the title bar: the AI run state reads from the flat
+	// status mark below (owner's anchor — no gradients, no neon glow).
 	header := kitHeaderBar(c)
-	if state.Phase == engine.PhaseAIStreaming && !isClassicPreset(cfg.Main.Appearance) {
-		header.Draw(func(p *ui.Painter, r ui.Rect) {
-			drawCapsuleAIHeaderGlow(c, p, r, theme, cfg.Main.Appearance, state)
-		})
-	}
 	header.Children(func() {
 		switch state.Phase {
 		case engine.PhaseLeader:
@@ -461,7 +475,11 @@ func (a *AppController) renderCapsuleHeader(
 			aiPhase := resolveAIInteractionPhase(state, false)
 			switch aiPhase {
 			case aiPhaseRunning:
-				RenderLiquidOrb(c, 20, true, effectiveSpatialAppearance(c, cfg.Main.Appearance))
+				// A running AI turn is one of the four places the accent may
+				// appear (spec §0): a flat, softly pulsing system-blue dot
+				// beside the sparkles mark, not a shader orb.
+				renderSemanticIcon(c, "sparkles", IconSize16, secondaryInk(theme))
+				kitStatusDot(c, kitStateLoadingColor(theme), true)
 			case aiPhaseFailed:
 				renderSemanticIcon(c, "exclamationmark.circle", IconSize16, kitStateErrorColor(theme))
 			default:

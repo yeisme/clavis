@@ -68,10 +68,8 @@ func TestOnboardingPermissionRowsSayGrantOnce(t *testing.T) {
 func TestOnboardingDecorationIsNeutral(t *testing.T) {
 	for _, dark := range []bool{false, true} {
 		tt := renderGuide(t, false, dark)
-		accent := ui.LightTheme().Accent
-		if dark {
-			accent = ui.DarkTheme().Accent
-		}
+		// One system blue in both appearances (theme_macos.go).
+		accent := macAccent
 		title, ok := tt.Find(i18n.T("onboarding.step.permissions"))
 		if !ok {
 			t.Fatalf("step title missing; texts %q", tt.Texts())

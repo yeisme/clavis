@@ -57,10 +57,14 @@ func kitIconButton(c *ui.Context, t *ui.Theme, icon string, active bool, label s
 			onClick()
 		}
 	})
-	color := t.TextMuted
+	// An "on" toggle reads as pressed in, the way a macOS toolbar toggle
+	// does: a deeper neutral well and primary ink. Blue stays reserved for
+	// the selection, focus and the primary action (spec §0), so the ⌘I
+	// preview toggle no longer competes with the chosen row.
+	color := secondaryInk(t)
 	if active {
-		button.Background(t.Accent.Alpha(alphaSubtle)).Border(space1, t.Accent.Alpha(alphaHalf))
-		color = accentInk(t, surfaceBase(t))
+		button.Background(toggleOnFill(t)).Border(space1, t.Border)
+		color = t.Text
 	} else {
 		button.Background(tileFill(t)).Border(space1, hairline(t))
 	}
@@ -105,4 +109,13 @@ func kitStatusPillElement(c *ui.Context, t *ui.Theme, icon, label string, tone c
 
 func kitStatusPill(c *ui.Context, t *ui.Theme, label string, tone chipTone) {
 	kitStatusPillElement(c, t, "", label, tone)
+}
+
+// toggleOnFill is the well of a toggle that is on: a step deeper than the
+// resting tile, still neutral.
+func toggleOnFill(t *ui.Theme) ui.Color {
+	if t.Dark {
+		return ui.RGBA(255, 255, 255, 0.14)
+	}
+	return ui.RGBA(0, 0, 0, 0.09)
 }

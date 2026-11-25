@@ -18,12 +18,17 @@ func kitFocusRing(t *ui.Theme) ui.Color {
 }
 
 func kitInteractive(c *ui.Context, t *ui.Theme, el ui.Element, st interactionState, p motionProfile) ui.Element {
-	_ = c
 	if st.Hovered {
 		el.Background(selectionFill(t))
 	}
 	if st.Selected {
-		el.Background(selectionFill(t)).Border(space1, selectionEdge(t))
+		// A chosen row is a soft accent fill, as in a macOS sidebar or list:
+		// an outline on top of the fill only returns under Increase Contrast,
+		// where the tint alone may not separate the row.
+		el.Background(selectionFill(t))
+		if c != nil && c.Preferences().HighContrast {
+			el.Border(space1, selectionEdge(t))
+		}
 	}
 	if st.Focused {
 		el.Border(space2, kitFocusRing(t))

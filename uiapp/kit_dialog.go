@@ -11,9 +11,9 @@ import (
 // footer, so radius, padding, title bar and button placement no longer differ
 // from one surface to the next.
 //
-//	┌ shell ─────────────────────────────────────────────┐ glass only at the
-//	│ ⌁ Title  secondary                     [meta][meta] │ edge, body washed
-//	├─────────────────────────────────────────────────────┤ near-opaque
+//	┌ shell ─────────────────────────────────────────────┐ glass only for the
+//	│ ⌁ Title  secondary                     [meta][meta] │ shell; the body is
+//	├─────────────────────────────────────────────────────┤ fully opaque
 //	│ body  (dialogPadY × dialogPadX, cardGap)            │
 //	├─────────────────────────────────────────────────────┤
 //	│ hint …                     [Other] [Cancel] [Primary]│ primary trails
@@ -62,9 +62,12 @@ func kitDialogHeader(c *ui.Context, t *ui.Theme, icon, title, subtitle string, t
 }
 
 // kitDialogBody is the content column between header and footer; callers
-// add children (and may bind focus to it).
+// add children (and may bind focus to it). It is the dialog's reading area,
+// so it sits on the opaque content surface while the shell around it stays
+// glass.
 func kitDialogBody(c *ui.Context) ui.Element {
-	return ui.Column(c).FillWidth().Grow(1).Padding(dialogPadY, dialogPadX).Gap(cardGap)
+	return ui.Column(c).FillWidth().Grow(1).Padding(dialogPadY, dialogPadX).Gap(cardGap).
+		Background(contentSurface(c.Theme()))
 }
 
 // dialogAction is one footer button. Footers list secondary actions first

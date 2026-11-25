@@ -1370,7 +1370,7 @@ func (a *AppController) renderCatalogTemplateLibraryTab(c *ui.Context, theme *ui
 		if len(diags) == 0 {
 			ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 				renderSemanticIcon(c, "checkmark", typeLabel, theme.Success)
-				ui.Text(c, i18n.T("settings.templates.diag.clean")).FontSize(typeLabel).TextColor(theme.Success).Wrap().Grow(1)
+				ui.Text(c, i18n.T("settings.templates.diag.clean")).FontSize(typeLabel).TextColor(statusInk(theme, theme.Success)).Wrap().Grow(1)
 			})
 			return
 		}
