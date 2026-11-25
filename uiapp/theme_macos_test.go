@@ -6,6 +6,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/engine"
 )
 
 // TestMacThemeHardMetrics pins the owner's visual anchor on the palette every
@@ -104,4 +105,59 @@ func TestCapsuleBodyIsOpaque(t *testing.T) {
 func magentaTinted(c color.Color) bool {
 	p := color.NRGBAModel.Convert(c).(color.NRGBA)
 	return int(p.R)-int(p.G) > 8 && int(p.B)-int(p.G) > 8
+}
+
+// TestDialogBodyIsOpaque does for the prompt composer what
+// TestCapsuleBodyIsOpaque does for the Capsule: over a magenta backdrop the
+// dialog's glass title bar lets it through, while the body between the title
+// bar and the footer stays fully opaque.
+func TestDialogBodyIsOpaque(t *testing.T) {
+	magenta := ui.RGBA(255, 0, 255, 1)
+	tpl := config.PromptTemplate{
+		ID: "opaque-body", Trigger: "/ob", Title: "Opaque body",
+		Template: "Review {{code}} for {{focus}}.",
+		Slots: []config.PromptSlot{
+			{Name: "focus", Label: "Focus", Kind: "text", Default: "races"},
+			{Name: "code", Label: "Code", Kind: "text"},
+		},
+	}
+	for _, dark := range []bool{false, true} {
+		f := newInteractionFixture(t, nil)
+		_ = f.ctrl.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.VisualPreset = "liquid_glass" })
+		f.ctrl.OpenPromptComposer(tpl, engine.CapsuleContext{AppName: "Xcode"})
+		w, h := PreferredPromptComposerPanelSize(len(tpl.Slots))
+		tt := ui.NewTester(func(c *ui.Context) {
+			f.ctrl.PromptComposerView(c)
+			c.Root().Background(magenta)
+		}, w, h)
+		tt.SetDark(dark)
+		tt.Frame()
+		img := tt.Image()
+		b := img.Bounds()
+		scale := float32(b.Dx()) / float32(w)
+		inset := int(float32(radiusCard+space4) * scale)
+		top := int(float32(headerHeight+space4) * scale)
+		bottom := b.Max.Y - int(float32(footerHeight+space4)*scale)
+		tinted := 0
+		for y := top; y < bottom; y++ {
+			for x := inset; x < b.Max.X-inset; x++ {
+				if magentaTinted(img.At(x, y)) {
+					tinted++
+				}
+			}
+		}
+		if tinted > 0 {
+			t.Fatalf("dark=%v: %d prompt-composer body pixels show the backdrop through", dark, tinted)
+		}
+		glassy := 0
+		for x := inset; x < b.Max.X-inset; x++ {
+			if magentaTinted(img.At(x, int(float32(headerHeight/2)*scale))) {
+				glassy++
+			}
+		}
+		if glassy == 0 {
+			t.Fatalf("dark=%v: the composer's title bar shows no glass", dark)
+		}
+		f.ctrl.ClosePromptComposer()
+	}
 }
