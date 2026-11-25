@@ -30,11 +30,12 @@ const (
 	maxJSONIndentBytes      = 16 << 10
 )
 
+// markdownThemeKey is what buildClavisMarkdownTheme reads off the window theme:
+// when it changes the Markdown theme, and the Xcode code colors inside it, are
+// built again.
 type markdownThemeKey struct {
-	dark   bool
-	accent ui.Color
-	text   ui.Color
-	bg     ui.Color
+	dark                                     bool
+	accent, text, muted, bg, surface, border ui.Color
 }
 
 // detectPreviewContentKind classifies text in O(1) using only the leading
@@ -197,6 +198,9 @@ func isSafeExternalURL(raw string) bool {
 	}
 }
 
+// buildClavisMarkdownTheme is the Markdown theme of t. Fenced code sits on an
+// opaque well (codeWellFill) and is colored in Xcode's palette, in AI answers
+// and Markdown previews alike, where MyGo's default would color it as GitHub.
 func buildClavisMarkdownTheme(t *ui.Theme) *markdown.Theme {
 	linkColor := accentInk(t, surfaceBase(t))
 	return &markdown.Theme{
@@ -214,9 +218,10 @@ func buildClavisMarkdownTheme(t *ui.Theme) *markdown.Theme {
 		QuoteBar:            hairline(t),
 		QuoteText:           secondaryInk(t),
 		Rule:                hairline(t),
-		CodeBlockBackground: tileFill(t),
+		CodeBlockBackground: codeWellFill(t),
 		CodeBlockBorder:     hairline(t),
 		CodeBlockRadius:     radiusChip,
+		CodeColors:          xcodeCodeTheme(t),
 		TableBorder:         hairline(t),
 		TableHeader:         tileFill(t),
 		Checkbox:            linkColor,
@@ -225,10 +230,13 @@ func buildClavisMarkdownTheme(t *ui.Theme) *markdown.Theme {
 
 func (a *AppController) ensureMarkdownOptions(theme *ui.Theme) *markdown.Options {
 	key := markdownThemeKey{
-		dark:   theme.Dark,
-		accent: theme.Accent,
-		text:   theme.Text,
-		bg:     theme.Background,
+		dark:    theme.Dark,
+		accent:  theme.Accent,
+		text:    theme.Text,
+		muted:   theme.TextMuted,
+		bg:      theme.Background,
+		surface: theme.Surface,
+		border:  theme.Border,
 	}
 	if a.uiState.mdThemeKey != key || a.uiState.mdOpts.Theme == nil {
 		a.uiState.mdThemeKey = key
@@ -260,7 +268,7 @@ func renderClavisCodeBlock(c *ui.Context, theme *ui.Theme, b *markdown.CodeBlock
 	}
 	copyLbl := pickLang(zh, "复制", "Copy")
 
-	ui.Column(c).FillWidth().Radius(radiusChip).Background(tileFill(theme)).Border(space1, hairline(theme)).Clip().Children(func() {
+	ui.Column(c).FillWidth().Radius(radiusChip).Background(codeWellFill(theme)).Border(space1, hairline(theme)).Clip().Children(func() {
 		ui.Row(c).FillWidth().Padding(space4, space8).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, lang).Font("monospace").FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
 			ui.Spacer(c)

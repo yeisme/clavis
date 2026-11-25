@@ -192,7 +192,13 @@ func computePreviewText(content string, rawMode bool, limit int) cachedPreviewTe
 			if codeHidden > 0 {
 				srcInput = strings.Join(codeLines, "\n")
 			}
-			src, trunc, omitted := formatMarkdownPreviewSource(srcInput, previewKindCode, "", defaultMarkdownMaxBytes, limit+2)
+			// The fence names the language the text reads as, so the block is
+			// colored; a text no language claims keeps its bare fence.
+			fenceExt := ""
+			if lang := detectCodeLanguage(content); lang != "" {
+				fenceExt = "." + lang
+			}
+			src, trunc, omitted := formatMarkdownPreviewSource(srcInput, previewKindCode, fenceExt, defaultMarkdownMaxBytes, limit+2)
 			entry.mdSource = src
 			entry.mdTruncated = trunc || codeHidden > 0
 			entry.mdOmitted = codeHidden + omitted
@@ -1265,16 +1271,31 @@ func renderPreviewLinesSlice(c *ui.Context, theme *ui.Theme, lines []string, mon
 		ui.Text(c, "—").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 		return
 	}
+	// Code in a language Clavis can name is drawn in Xcode's colors. The spans
+	// come from a cache: the preview is rebuilt every frame, and tokenizing a
+	// screenful of code each time would be most of it. Anything else keeps the
+	// plain monospace text.
+	var spans [][]ui.Span
+	if mono {
+		spans = previewCodeCache.spans(theme, lines)
+	}
 	body := ui.Column(c).FillWidth().Gap(space2)
 	if mono {
-		body.Padding(space6, space8).Radius(radiusChip).Background(tileFill(theme)).Border(1, hairline(theme))
+		// An opaque well with a hairline: glass is for floating shells, and
+		// the syntax colors are checked against exactly this fill.
+		body.Padding(space6, space8).Radius(radiusChip).Background(codeWellFill(theme)).Border(space1, hairline(theme))
 	}
 	body.Children(func() {
-		for _, line := range lines {
+		for i, line := range lines {
 			if strings.TrimSpace(line) == "" {
 				if mono {
 					ui.Box(c).Height(space6)
 				}
+				continue
+			}
+			if spans != nil && spans[i] != nil {
+				// Wraps at the pane width like the plain lines below.
+				ui.RichText(c, spans[i]...).TextColor(theme.Text).Font("monospace").FontSize(typeMeta)
 				continue
 			}
 			// Lines wrap at the pane width: a long URL or SQL statement reads
