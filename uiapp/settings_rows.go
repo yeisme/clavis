@@ -273,11 +273,16 @@ func settingsNarrowCard(c *ui.Context) bool {
 func settingsListRow(c *ui.Context, theme *ui.Theme, key string, selected bool) ui.Element {
 	row := ui.ButtonBase(c).Key(key).FillWidth().Padding(space4, space8).Radius(radiusChip).
 		Gap(space8).AlignItems(ui.Center).FocusRing(true).FocusRingColor(kitFocusRing(theme))
+	// The chosen row is a soft accent fill like the sidebar's; its edge stays
+	// transparent (keeping the geometry) unless Increase Contrast asks for it.
+	edge := ui.Transparent
 	if selected {
-		row.Background(selectionFill(theme)).Border(1, selectionEdge(theme))
-	} else {
-		row.Border(1, ui.Transparent)
+		row.Background(selectionFill(theme))
+		if c.Preferences().HighContrast {
+			edge = selectionEdge(theme)
+		}
 	}
+	row.Border(1, edge)
 	return row
 }
 

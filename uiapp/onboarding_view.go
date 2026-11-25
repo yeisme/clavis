@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -154,28 +153,16 @@ func (a *AppController) renderOnboarding(c *ui.Context, goos string) {
 	})
 }
 
-var (
-	onboardingIconOnce sync.Once
-	onboardingIcon     *ui.Bitmap
-)
-
-// onboardingAppIcon is the app icon the guide greets with, drawn once.
-func onboardingAppIcon() *ui.Bitmap {
-	onboardingIconOnce.Do(func() {
-		if bmp, err := ui.DecodeBitmap(GenerateAppIconPNG(128)); err == nil {
-			onboardingIcon = bmp
-		}
-	})
-	return onboardingIcon
-}
-
 func renderOnboardingHeader(c *ui.Context, theme *ui.Theme) {
 	ui.Row(c).FillWidth().Gap(space14).AlignItems(ui.Center).Children(func() {
-		if icon := onboardingAppIcon(); icon != nil {
-			ui.Box(c).Size(onboardingIconSize, onboardingIconSize).Radius(radius12).Clip().Shrink(0).Children(func() {
-				ui.Image(c, icon).Size(onboardingIconSize, onboardingIconSize)
-			})
-		}
+		// The guide greets with the same neutral ⌘ mark as the Leader's title
+		// bar, not the Dock icon: its indigo-to-cobalt gradient and amber
+		// sparks break the in-app anchor (grays + one system blue, no
+		// gradients), and the accent here is left to the primary button.
+		ui.Box(c).Size(onboardingIconSize, onboardingIconSize).Radius(radius12).Shrink(0).Center().
+			Background(theme.Surface).Border(space1, hairline(theme)).Children(func() {
+			renderSemanticIcon(c, "command", onboardingIconSize/2, theme.Text)
+		})
 		ui.Column(c).Grow(1).Shrink(1).Gap(space4).Children(func() {
 			ui.Text(c, i18n.T("onboarding.title")).FontSize(typeHero).FontWeight(700).TextColor(theme.Text).SingleLine()
 			applyProseLineHeight(ui.Text(c, i18n.T("onboarding.subtitle"))).FontSize(typeBody).TextColor(theme.TextMuted)
