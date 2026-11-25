@@ -29,8 +29,9 @@ const (
 
 const (
 	// AppSchemaVersion is the current PRAGMA user_version for the shared app database
-	// (clipboard_items + FTS5 + learning/frecency/prompt/usage tables).
-	AppSchemaVersion = 2
+	// (clipboard_items + FTS5 + learning/frecency/prompt/usage tables +
+	// entity_annotations + ai_conversations + ai_conversation_turns).
+	AppSchemaVersion = 3
 	// SyncSchemaVersion is the current PRAGMA user_version for the sync database.
 	SyncSchemaVersion = 1
 	// DeviceStateSchemaVersion is the current PRAGMA user_version for the non-secret device state DB.
@@ -392,6 +393,54 @@ func ValidateSchema(ctx context.Context, db *sqlite.DB, kind DBKind, version int
 				return err
 			}
 		}
+		if version >= 3 {
+			v3Cols := map[string][]string{
+				"entity_annotations": {
+					"entity_kind", "entity_key", "custom_title", "tags_json",
+					"is_favorite", "notes", "props_json", "updated_at_ns",
+				},
+				"ai_conversations": {
+					"id", "title", "auto_title", "tags_json", "is_favorite",
+					"persona_id", "profile_id", "mode", "created_at_ns", "updated_at_ns",
+				},
+				"ai_conversation_turns": {
+					"id", "conversation_id", "turn_index", "role", "content", "created_at_ns",
+				},
+			}
+			for _, tbl := range []string{"entity_annotations", "ai_conversations", "ai_conversation_turns"} {
+				if _, ok := tableSet[tbl]; !ok {
+					return fmt.Errorf("%w: missing app v3 table %q", ErrIntegrityFailed, tbl)
+				}
+				cols, err := tableColumns(ctx, db, tbl)
+				if err != nil {
+					return err
+				}
+				for _, col := range v3Cols[tbl] {
+					if _, ok := cols[col]; !ok {
+						return fmt.Errorf("%w: %s missing column %q for v%d", ErrIntegrityFailed, tbl, col, version)
+					}
+				}
+			}
+			idxRows, err := db.Query(ctx, `SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_entity_annotations_kind_fav','idx_ai_conversations_order','idx_ai_conversation_turns_conv')`)
+			if err != nil {
+				return fmt.Errorf("inspect v3 indexes: %w", err)
+			}
+			idxSet := make(map[string]struct{}, len(idxRows.Values))
+			for _, r := range idxRows.Values {
+				if n := str(r, 0); n != "" {
+					idxSet[n] = struct{}{}
+				}
+			}
+			for _, reqIdx := range []string{
+				"idx_entity_annotations_kind_fav",
+				"idx_ai_conversations_order",
+				"idx_ai_conversation_turns_conv",
+			} {
+				if _, ok := idxSet[reqIdx]; !ok {
+					return fmt.Errorf("%w: missing app v3 index %q", ErrIntegrityFailed, reqIdx)
+				}
+			}
+		}
 		return nil
 
 	case DBKindDeviceState:
@@ -462,6 +511,16 @@ func runMigrationChain(ctx context.Context, db *sqlite.DB, kind DBKind, from, to
 				stmts = append(stmts, v2Stmts...)
 				applied = append(applied, "app:v1->v2")
 				if err := maybeFail(opts, "app.v1_to_v2.after_version"); err != nil {
+					postErr = err
+					stmts = append(stmts, failpointAbortStatement())
+				}
+			case 2:
+				if err := maybeFail(opts, "app.v2_to_v3.before_ddl"); err != nil {
+					return nil, fmt.Errorf("%w: %v", ErrMigrationFailed, err)
+				}
+				stmts = append(stmts, appV2ToV3Statements()...)
+				applied = append(applied, "app:v2->v3")
+				if err := maybeFail(opts, "app.v2_to_v3.after_version"); err != nil {
 					postErr = err
 					stmts = append(stmts, failpointAbortStatement())
 				}
@@ -614,6 +673,50 @@ func appV1ToV2Statements(ctx context.Context, db *sqlite.DB, creatingFromV0 bool
 	return stmts, nil
 }
 
+func appV2ToV3Statements() []sqlite.Statement {
+	return []sqlite.Statement{
+		{SQL: `CREATE TABLE IF NOT EXISTS entity_annotations (
+			entity_kind   TEXT NOT NULL,
+			entity_key    TEXT NOT NULL,
+			custom_title  TEXT NOT NULL DEFAULT '',
+			tags_json     TEXT NOT NULL DEFAULT '[]',
+			is_favorite   INTEGER NOT NULL DEFAULT 0,
+			notes         TEXT NOT NULL DEFAULT '',
+			props_json    TEXT NOT NULL DEFAULT '{}',
+			updated_at_ns INTEGER NOT NULL,
+			PRIMARY KEY (entity_kind, entity_key)
+		)`},
+		{SQL: `CREATE INDEX IF NOT EXISTS idx_entity_annotations_kind_fav
+			ON entity_annotations(entity_kind, is_favorite DESC, updated_at_ns DESC)`},
+		{SQL: `CREATE TABLE IF NOT EXISTS ai_conversations (
+			id            TEXT PRIMARY KEY,
+			title         TEXT NOT NULL DEFAULT '',
+			auto_title    TEXT NOT NULL DEFAULT '',
+			tags_json     TEXT NOT NULL DEFAULT '[]',
+			is_favorite   INTEGER NOT NULL DEFAULT 0,
+			persona_id    TEXT NOT NULL DEFAULT '',
+			profile_id    TEXT NOT NULL DEFAULT '',
+			mode          TEXT NOT NULL DEFAULT 'ask',
+			created_at_ns INTEGER NOT NULL,
+			updated_at_ns INTEGER NOT NULL
+		)`},
+		{SQL: `CREATE INDEX IF NOT EXISTS idx_ai_conversations_order
+			ON ai_conversations(is_favorite DESC, updated_at_ns DESC, id ASC)`},
+		{SQL: `CREATE TABLE IF NOT EXISTS ai_conversation_turns (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			conversation_id TEXT NOT NULL,
+			turn_index      INTEGER NOT NULL,
+			role            TEXT NOT NULL,
+			content         TEXT NOT NULL,
+			created_at_ns   INTEGER NOT NULL,
+			FOREIGN KEY(conversation_id) REFERENCES ai_conversations(id) ON DELETE CASCADE
+		)`},
+		{SQL: `CREATE INDEX IF NOT EXISTS idx_ai_conversation_turns_conv
+			ON ai_conversation_turns(conversation_id, turn_index ASC)`},
+		{SQL: `PRAGMA user_version = 3`},
+	}
+}
+
 func syncV0ToV1Statements() []sqlite.Statement {
 	return []sqlite.Statement{
 		{SQL: `CREATE TABLE IF NOT EXISTS sync_accounts (account_id TEXT PRIMARY KEY, credential BLOB NOT NULL, sequence INTEGER NOT NULL DEFAULT 0)`},
@@ -641,7 +744,7 @@ type columnInfo struct {
 func tableColumns(ctx context.Context, db *sqlite.DB, table string) (map[string]columnInfo, error) {
 	// Strict whitelist prevents any SQL injection through PRAGMA table_info.
 	switch table {
-	case "clipboard_items", "sync_device_state":
+	case "clipboard_items", "sync_device_state", "entity_annotations", "ai_conversations", "ai_conversation_turns":
 	default:
 		return nil, fmt.Errorf("%w: unexpected table inspection %q", ErrIntegrityFailed, table)
 	}

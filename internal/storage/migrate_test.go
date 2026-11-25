@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +29,7 @@ func TestMigrateAppFreshDB(t *testing.T) {
 	if report.Kind != DBKindApp || report.From != 0 || report.To != AppSchemaVersion || report.ReadOnly {
 		t.Fatalf("unexpected report: %+v", report)
 	}
-	if len(report.Applied) != 2 || report.Applied[0] != "app:v0->v1" || report.Applied[1] != "app:v1->v2" {
+	if len(report.Applied) != 3 || report.Applied[0] != "app:v0->v1" || report.Applied[1] != "app:v1->v2" || report.Applied[2] != "app:v2->v3" {
 		t.Fatalf("unexpected applied steps: %v", report.Applied)
 	}
 	if report.BackupPath != "" || report.ManifestPath != "" {
@@ -84,7 +85,7 @@ func TestMigrateAppLegacyV0UpgradeWithBackupManifestAndWAL(t *testing.T) {
 	if report.From != 0 || report.To != AppSchemaVersion {
 		t.Fatalf("report versions = %d -> %d, want 0 -> %d", report.From, report.To, AppSchemaVersion)
 	}
-	wantBackup := dbPath + ".pre-migrate-v0-to-v2.bak"
+	wantBackup := fmt.Sprintf("%s.pre-migrate-v0-to-v%d.bak", dbPath, AppSchemaVersion)
 	wantManifest := wantBackup + ".manifest.json"
 	assertSameFilePath(t, report.BackupPath, wantBackup)
 	assertSameFilePath(t, report.ManifestPath, wantManifest)
@@ -149,15 +150,16 @@ func TestMigrateAppV1ToV2AndIdempotentRerun(t *testing.T) {
 
 	first, err := Migrate(ctx, db, DBKindApp, MigrationOptions{AllowCreate: true})
 	if err != nil {
-		t.Fatalf("v1->v2 Migrate: %v", err)
+		t.Fatalf("v1->v%d Migrate: %v", AppSchemaVersion, err)
 	}
-	if first.From != 1 || first.To != 2 || len(first.Applied) != 1 || first.Applied[0] != "app:v1->v2" {
-		t.Fatalf("unexpected v1->v2 report: %+v", first)
+	if first.From != 1 || first.To != AppSchemaVersion || len(first.Applied) != 2 || first.Applied[0] != "app:v1->v2" || first.Applied[1] != "app:v2->v3" {
+		t.Fatalf("unexpected v1->v%d report: %+v", AppSchemaVersion, first)
 	}
-	assertSameFilePath(t, first.BackupPath, dbPath+".pre-migrate-v1-to-v2.bak")
-	assertSameFilePath(t, first.ManifestPath, dbPath+".pre-migrate-v1-to-v2.bak.manifest.json")
+	wantBackup := fmt.Sprintf("%s.pre-migrate-v1-to-v%d.bak", dbPath, AppSchemaVersion)
+	assertSameFilePath(t, first.BackupPath, wantBackup)
+	assertSameFilePath(t, first.ManifestPath, wantBackup+".manifest.json")
 	if _, err := VerifyBackup(first.ManifestPath); err != nil {
-		t.Fatalf("VerifyBackup v1->v2: %v", err)
+		t.Fatalf("VerifyBackup v1->v%d: %v", AppSchemaVersion, err)
 	}
 
 	rows, err := db.Query(ctx, `SELECT byte_size FROM clipboard_items WHERE id='row-1'`)
@@ -170,7 +172,7 @@ func TestMigrateAppV1ToV2AndIdempotentRerun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("idempotent rerun Migrate: %v", err)
 	}
-	if second.From != 2 || second.To != 2 || len(second.Applied) != 0 || second.BackupPath != "" {
+	if second.From != AppSchemaVersion || second.To != AppSchemaVersion || len(second.Applied) != 0 || second.BackupPath != "" {
 		t.Fatalf("unexpected idempotent rerun report: %+v", second)
 	}
 	if second.SchemaHash != first.SchemaHash {
@@ -216,9 +218,12 @@ func TestMigrateSchemaTooNewRejectedReadOnly(t *testing.T) {
 	if !report.ReadOnly || report.From != 99 || report.To != AppSchemaVersion || report.BackupPath != "" {
 		t.Fatalf("unexpected schema_too_new report: %+v", report)
 	}
-	// LearningStore must also reject schema_too_new.
+	// LearningStore and AnnotationStore must also reject schema_too_new.
 	if _, err := NewLearningStore(db2); !errors.Is(err, ErrSchemaTooNew) {
 		t.Fatalf("NewLearningStore expected ErrSchemaTooNew, got %v", err)
+	}
+	if _, err := NewAnnotationStore(db2); !errors.Is(err, ErrSchemaTooNew) {
+		t.Fatalf("NewAnnotationStore expected ErrSchemaTooNew, got %v", err)
 	}
 	if err := db2.Close(); err != nil {
 		t.Fatal(err)
@@ -295,12 +300,12 @@ func TestMigrateFailpointRollbackLeavesPriorVersionIntact(t *testing.T) {
 				t.Fatalf("after rollback row corrupted: %v err=%v", rows.Values, err)
 			}
 
-			// Re-running without failpoint succeeds cleanly from v1 to v2.
+			// Re-running without failpoint succeeds cleanly from v1 to target version.
 			report, err := Migrate(ctx, db, DBKindApp, MigrationOptions{AllowCreate: true})
 			if err != nil {
 				t.Fatalf("recovery Migrate after rollback: %v", err)
 			}
-			if report.From != 1 || report.To != 2 {
+			if report.From != 1 || report.To != AppSchemaVersion {
 				t.Fatalf("unexpected recovery report: %+v", report)
 			}
 		})
@@ -485,5 +490,146 @@ func assertSameFilePath(t *testing.T, got, want string) {
 	}
 	if !os.SameFile(gotInfo, wantInfo) || filepath.Base(got) != filepath.Base(want) {
 		t.Fatalf("path mismatch: got=%q want=%q", got, want)
+	}
+}
+
+func seedAppV2DB(t *testing.T, ctx context.Context, db *sqlite.DB) {
+	t.Helper()
+	if _, err := db.Transaction(ctx, appV0ToV1Statements()); err != nil {
+		t.Fatalf("seed v1: %v", err)
+	}
+	v2Stmts, err := appV1ToV2Statements(ctx, db, false)
+	if err != nil {
+		t.Fatalf("build v2 stmts: %v", err)
+	}
+	if _, err := db.Transaction(ctx, v2Stmts); err != nil {
+		t.Fatalf("seed v2: %v", err)
+	}
+	if ver, err := CurrentSchemaVersion(ctx, db); err != nil || ver != 2 {
+		t.Fatalf("seeded v2 user_version=%d err=%v, want 2", ver, err)
+	}
+}
+
+func TestMigrateAppV2ToV3AndIdempotentRerun(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "v2.db")
+	db, err := sqlite.Open(ctx, dbPath, sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.Execute(ctx, `PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatal(err)
+	}
+	seedAppV2DB(t, ctx, db)
+	if _, err := db.Execute(ctx, `INSERT INTO clipboard_items(id,content,content_hash,source_bundle_id,source_app_name,created_at_ns,updated_at_ns,is_pinned,kind,byte_size) VALUES('v2-row','wal payload','h-v2','','Notes',100,200,1,'text',11)`); err != nil {
+		t.Fatalf("insert v2 row: %v", err)
+	}
+
+	first, err := Migrate(ctx, db, DBKindApp, MigrationOptions{AllowCreate: true})
+	if err != nil {
+		t.Fatalf("v2->v3 Migrate: %v", err)
+	}
+	if first.From != 2 || first.To != 3 || len(first.Applied) != 1 || first.Applied[0] != "app:v2->v3" {
+		t.Fatalf("unexpected v2->v3 report: %+v", first)
+	}
+	assertSameFilePath(t, first.BackupPath, dbPath+".pre-migrate-v2-to-v3.bak")
+	assertSameFilePath(t, first.ManifestPath, dbPath+".pre-migrate-v2-to-v3.bak.manifest.json")
+	manifest, err := VerifyBackup(first.ManifestPath)
+	if err != nil {
+		t.Fatalf("VerifyBackup v2->v3: %v", err)
+	}
+	if manifest.FromVersion != 2 || manifest.ToVersion != 3 {
+		t.Fatalf("unexpected v2->v3 manifest: %+v", manifest)
+	}
+
+	if err := ValidateSchema(ctx, db, DBKindApp, 3); err != nil {
+		t.Fatalf("ValidateSchema v3: %v", err)
+	}
+	rows, err := db.Query(ctx, `SELECT content FROM clipboard_items WHERE id='v2-row'`)
+	if err != nil || len(rows.Values) != 1 || str(rows.Values[0], 0) != "wal payload" {
+		t.Fatalf("v2 WAL row missing after v3 migration: rows=%v err=%v", rows.Values, err)
+	}
+
+	// Idempotent rerun produces zero writes and identical schema hash.
+	second, err := Migrate(ctx, db, DBKindApp, MigrationOptions{AllowCreate: true})
+	if err != nil {
+		t.Fatalf("idempotent v3 rerun: %v", err)
+	}
+	if second.From != 3 || second.To != 3 || len(second.Applied) != 0 || second.BackupPath != "" {
+		t.Fatalf("unexpected v3 rerun report: %+v", second)
+	}
+	if second.SchemaHash != first.SchemaHash {
+		t.Fatalf("schema hash drifted on v3 rerun: %s vs %s", second.SchemaHash, first.SchemaHash)
+	}
+
+	// AppSchemaVersion + 1 (v4) must be rejected read-only.
+	if _, err := db.Execute(ctx, `PRAGMA user_version = 4`); err != nil {
+		t.Fatal(err)
+	}
+	tooNew, err := Migrate(ctx, db, DBKindApp, MigrationOptions{})
+	if !errors.Is(err, ErrSchemaTooNew) || !tooNew.ReadOnly {
+		t.Fatalf("expected ErrSchemaTooNew for v4, got report=%+v err=%v", tooNew, err)
+	}
+}
+
+func TestMigrateAppV2ToV3FailpointRollback(t *testing.T) {
+	ctx := context.Background()
+	for _, step := range []string{"app.v2_to_v3.before_ddl", "app.v2_to_v3.after_version"} {
+		t.Run(step, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "rollback-v2.db")
+			db, err := sqlite.Open(ctx, dbPath, sqlite.OpenOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+
+			seedAppV2DB(t, ctx, db)
+			if _, err := db.Execute(ctx, `INSERT INTO clipboard_items(id,content,content_hash,source_bundle_id,source_app_name,created_at_ns,updated_at_ns,is_pinned,kind,byte_size) VALUES('keep-v2','intact','h-keep','','App',1,2,0,'text',6)`); err != nil {
+				t.Fatal(err)
+			}
+
+			injected := errors.New("injected failpoint: " + step)
+			_, err = Migrate(ctx, db, DBKindApp, MigrationOptions{
+				AllowCreate: true,
+				Failpoint: func(s string) error {
+					if s == step {
+						return injected
+					}
+					return nil
+				},
+			})
+			if !errors.Is(err, ErrMigrationFailed) {
+				t.Fatalf("expected ErrMigrationFailed for %s, got %v", step, err)
+			}
+
+			ver, err := CurrentSchemaVersion(ctx, db)
+			if err != nil || ver != 2 {
+				t.Fatalf("after rollback user_version=%d err=%v, want 2", ver, err)
+			}
+			tables, err := listUserTables(ctx, db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, tbl := range tables {
+				if tbl == "entity_annotations" || tbl == "ai_conversations" || tbl == "ai_conversation_turns" {
+					t.Fatalf("after v2->v3 rollback table %q leaked into v2 schema", tbl)
+				}
+			}
+			rows, err := db.Query(ctx, `SELECT content FROM clipboard_items WHERE id='keep-v2'`)
+			if err != nil || len(rows.Values) != 1 || str(rows.Values[0], 0) != "intact" {
+				t.Fatalf("after rollback v2 row corrupted: %v err=%v", rows.Values, err)
+			}
+
+			// Recovery Migrate without failpoint succeeds cleanly from v2 to v3.
+			report, err := Migrate(ctx, db, DBKindApp, MigrationOptions{AllowCreate: true})
+			if err != nil {
+				t.Fatalf("recovery Migrate v2->v3: %v", err)
+			}
+			if report.From != 2 || report.To != 3 {
+				t.Fatalf("unexpected v2->v3 recovery report: %+v", report)
+			}
+		})
 	}
 }
