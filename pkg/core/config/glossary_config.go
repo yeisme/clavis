@@ -12,6 +12,8 @@ type GlossaryTerm struct {
 	Aliases  []string `json:"aliases"`
 	Hint     string   `json:"hint"`
 	Category string   `json:"category"`
+	Tags     []string `json:"tags,omitempty"`
+	Favorite bool     `json:"favorite,omitempty"`
 }
 
 func decodeGlossaryTerm(tbl *toml.Table, path string) (GlossaryTerm, error) {
@@ -36,11 +38,24 @@ func decodeGlossaryTerm(tbl *toml.Table, path string) (GlossaryTerm, error) {
 	} else if ok {
 		category = s
 	}
+	tags, _, err := optionalStringArray(tbl, "tags", path)
+	if err != nil {
+		return GlossaryTerm{}, err
+	}
+	if len(tags) == 0 {
+		tags = nil
+	}
+	favorite, _, err := optionalBool(tbl, "favorite", path)
+	if err != nil {
+		return GlossaryTerm{}, err
+	}
 	return GlossaryTerm{
 		Term:     term,
 		Aliases:  aliases,
 		Hint:     hint,
 		Category: category,
+		Tags:     tags,
+		Favorite: favorite,
 	}, nil
 }
 
@@ -50,6 +65,12 @@ func (g GlossaryTerm) toTOML() *toml.Table {
 	t.Set("aliases", stringsToTOMLArray(g.Aliases))
 	t.Set("hint", toml.StringVal(g.Hint))
 	t.Set("category", toml.StringVal(g.Category))
+	if len(g.Tags) > 0 {
+		t.Set("tags", stringsToTOMLArray(g.Tags))
+	}
+	if g.Favorite {
+		t.Set("favorite", toml.BoolVal(true))
+	}
 	return t
 }
 

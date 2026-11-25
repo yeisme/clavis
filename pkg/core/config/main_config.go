@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"strings"
 
@@ -152,6 +153,12 @@ type AppearanceConfig struct {
 	StageIntensity float64 `json:"stageIntensity"`
 	// ObliqueRows turns the per-row fan of the result list on or off.
 	ObliqueRows bool `json:"obliqueRows"`
+	// FontPreset selects the UI font stack ("system", "rounded", or "mono_accent").
+	FontPreset string `json:"fontPreset"`
+	// CodeFontFamily optionally prepends a custom monospace font to the Technical Mono stack.
+	CodeFontFamily string `json:"codeFontFamily,omitempty"`
+	// TextScale scales UI typography within [0.90, 1.15] (default 1.0).
+	TextScale float64 `json:"textScale"`
 }
 
 func DefaultAppearanceConfig() AppearanceConfig {
@@ -171,8 +178,26 @@ func DefaultAppearanceConfig() AppearanceConfig {
 		GlassClarity:            0.18,
 		CandidateBarOrientation: "horizontal",
 		StageIntensity:          0.7,
-		ObliqueRows:             true,
+		ObliqueRows:             false,
+		FontPreset:              "system",
+		CodeFontFamily:          "",
+		TextScale:               1.0,
 	}
+}
+
+// NormalizeTextScale normalizes a configured text scale into [0.90, 1.15],
+// treating 0, NaN, and Inf as the default 1.0.
+func NormalizeTextScale(v float64) float64 {
+	if v == 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+		return 1.0
+	}
+	if v < 0.90 {
+		return 0.90
+	}
+	if v > 1.15 {
+		return 1.15
+	}
+	return v
 }
 
 func decodeAppearanceConfig(tbl *toml.Table, path string) (AppearanceConfig, error) {
@@ -263,6 +288,21 @@ func decodeAppearanceConfig(tbl *toml.Table, path string) (AppearanceConfig, err
 	} else if ok {
 		cfg.ObliqueRows = b
 	}
+	if s, ok, err := optionalString(tbl, "font_preset", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.FontPreset = s
+	}
+	if s, ok, err := optionalString(tbl, "code_font_family", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.CodeFontFamily = s
+	}
+	if f, ok, err := optionalFloat(tbl, "text_scale", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.TextScale = f
+	}
 	return cfg, nil
 }
 
@@ -284,6 +324,19 @@ func (c AppearanceConfig) toTOML() *toml.Table {
 	t.Set("candidate_bar_orientation", toml.StringVal(c.CandidateBarOrientation))
 	t.Set("stage_intensity", toml.FloatVal(c.StageIntensity))
 	t.Set("oblique_rows", toml.BoolVal(c.ObliqueRows))
+	fontPreset := strings.TrimSpace(c.FontPreset)
+	if fontPreset == "" {
+		fontPreset = "system"
+	}
+	t.Set("font_preset", toml.StringVal(fontPreset))
+	if c.CodeFontFamily != "" {
+		t.Set("code_font_family", toml.StringVal(c.CodeFontFamily))
+	}
+	textScale := c.TextScale
+	if textScale == 0 {
+		textScale = 1.0
+	}
+	t.Set("text_scale", toml.FloatVal(textScale))
 	return t
 }
 

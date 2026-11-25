@@ -85,6 +85,8 @@ type Workflow struct {
 	Name        string                `json:"name"`
 	Description string                `json:"description"`
 	Enabled     bool                  `json:"enabled"`
+	Tags        []string              `json:"tags,omitempty"`
+	Favorite    bool                  `json:"favorite,omitempty"`
 	Source      WorkflowSource        `json:"source"`
 	Output      WorkflowOutput        `json:"output"`
 	Failure     WorkflowFailureMode   `json:"failure"`
@@ -269,6 +271,16 @@ func decodeWorkflow(t *toml.Table, path string) (Workflow, error) {
 	} else if ok {
 		workflow.Enabled = value
 	}
+	if tags, _, e := optionalStringArray(t, "tags", path); e != nil {
+		return Workflow{}, e
+	} else if len(tags) > 0 {
+		workflow.Tags = tags
+	}
+	if fav, ok, e := optionalBool(t, "favorite", path); e != nil {
+		return Workflow{}, e
+	} else if ok {
+		workflow.Favorite = fav
+	}
 	if value, ok, e := optionalString(t, "source", path); e != nil {
 		return Workflow{}, e
 	} else if ok {
@@ -327,6 +339,12 @@ func (w Workflow) toTOML() *toml.Table {
 	t.Set("name", toml.StringVal(w.Name))
 	t.Set("description", toml.StringVal(w.Description))
 	t.Set("enabled", toml.BoolVal(w.Enabled))
+	if len(w.Tags) > 0 {
+		t.Set("tags", stringsToTOMLArray(w.Tags))
+	}
+	if w.Favorite {
+		t.Set("favorite", toml.BoolVal(true))
+	}
 	t.Set("source", toml.StringVal(string(w.Source)))
 	t.Set("output", toml.StringVal(string(w.Output)))
 	t.Set("failure", toml.StringVal(string(w.Failure)))

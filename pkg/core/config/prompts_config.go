@@ -2,9 +2,12 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/yeisme/clavis/pkg/core/toml"
@@ -13,21 +16,29 @@ import (
 type PromptSlotKind string
 
 const (
-	PromptSlotText       PromptSlotKind = "text"
-	PromptSlotSelect     PromptSlotKind = "select"
-	PromptSlotNumber     PromptSlotKind = "number"
-	PromptSlotKindText                  = PromptSlotText
-	PromptSlotKindSelect                = PromptSlotSelect
-	PromptSlotKindNumber                = PromptSlotNumber
+	PromptSlotText        PromptSlotKind = "text"
+	PromptSlotSelect      PromptSlotKind = "select"
+	PromptSlotNumber      PromptSlotKind = "number"
+	PromptSlotBoolean     PromptSlotKind = "boolean"
+	PromptSlotKindText                   = PromptSlotText
+	PromptSlotKindSelect                 = PromptSlotSelect
+	PromptSlotKindNumber                 = PromptSlotNumber
+	PromptSlotKindBoolean                = PromptSlotBoolean
 )
 
 type PromptSlot struct {
-	Name     string   `json:"name"`
-	Label    string   `json:"label"`
-	Kind     string   `json:"kind"`
-	Default  string   `json:"default"`
-	Options  []string `json:"options"`
-	Required bool     `json:"required"`
+	Name        string   `json:"name"`
+	Label       string   `json:"label"`
+	Kind        string   `json:"kind"`
+	Default     string   `json:"default"`
+	Options     []string `json:"options"`
+	Required    bool     `json:"required"`
+	Description string   `json:"description,omitempty"`
+	Regex       string   `json:"regex,omitempty"`
+	Min         *float64 `json:"min,omitempty"`
+	Max         *float64 `json:"max,omitempty"`
+	MinLength   *int     `json:"minLength,omitempty"`
+	MaxLength   *int     `json:"maxLength,omitempty"`
 }
 type PromptTemplate struct {
 	ID              string       `json:"id"`
@@ -40,6 +51,11 @@ type PromptTemplate struct {
 	InjectGlossary  bool         `json:"injectGlossary"`
 	AppBundleIDs    []string     `json:"appBundleIds"`
 	Slots           []PromptSlot `json:"slots"`
+	Tags            []string     `json:"tags,omitempty"`
+	Favorite        bool         `json:"favorite,omitempty"`
+	Version         string       `json:"version,omitempty"`
+	Locale          string       `json:"locale,omitempty"`
+	Role            string       `json:"role,omitempty"`
 }
 type PromptsConfig struct {
 	Items                  []PromptTemplate `json:"items"`
@@ -89,7 +105,54 @@ func decodePromptSlot(t *toml.Table, path string) (PromptSlot, error) {
 	} else if o {
 		r = b
 	}
-	return PromptSlot{Name: n, Label: l, Kind: k, Default: d, Options: opts, Required: r}, nil
+	desc, _, e := optionalString(t, "description", path)
+	if e != nil {
+		return PromptSlot{}, e
+	}
+	regexStr, _, e := optionalString(t, "regex", path)
+	if e != nil {
+		return PromptSlot{}, e
+	}
+	var minVal, maxVal *float64
+	if f, o, e := optionalFloat(t, "min", path); e != nil {
+		return PromptSlot{}, e
+	} else if o {
+		v := f
+		minVal = &v
+	}
+	if f, o, e := optionalFloat(t, "max", path); e != nil {
+		return PromptSlot{}, e
+	} else if o {
+		v := f
+		maxVal = &v
+	}
+	var minLen, maxLen *int
+	if n, o, e := optionalInt(t, "min_length", path); e != nil {
+		return PromptSlot{}, e
+	} else if o {
+		v := n
+		minLen = &v
+	}
+	if n, o, e := optionalInt(t, "max_length", path); e != nil {
+		return PromptSlot{}, e
+	} else if o {
+		v := n
+		maxLen = &v
+	}
+	return PromptSlot{
+		Name:        n,
+		Label:       l,
+		Kind:        k,
+		Default:     d,
+		Options:     opts,
+		Required:    r,
+		Description: desc,
+		Regex:       regexStr,
+		Min:         minVal,
+		Max:         maxVal,
+		MinLength:   minLen,
+		MaxLength:   maxLen,
+	}, nil
 }
 func (s PromptSlot) toTOML() *toml.Table {
 	t := toml.NewTable()
@@ -99,6 +162,24 @@ func (s PromptSlot) toTOML() *toml.Table {
 	t.Set("default", toml.StringVal(s.Default))
 	t.Set("options", stringsToTOMLArray(s.Options))
 	t.Set("required", toml.BoolVal(s.Required))
+	if s.Description != "" {
+		t.Set("description", toml.StringVal(s.Description))
+	}
+	if s.Regex != "" {
+		t.Set("regex", toml.StringVal(s.Regex))
+	}
+	if s.Min != nil {
+		t.Set("min", toml.FloatVal(*s.Min))
+	}
+	if s.Max != nil {
+		t.Set("max", toml.FloatVal(*s.Max))
+	}
+	if s.MinLength != nil {
+		t.Set("min_length", toml.IntVal(int64(*s.MinLength)))
+	}
+	if s.MaxLength != nil {
+		t.Set("max_length", toml.IntVal(int64(*s.MaxLength)))
+	}
 	return t
 }
 func decodePrompt(t *toml.Table, path string) (PromptTemplate, error) {
@@ -155,7 +236,46 @@ func decodePrompt(t *toml.Table, path string) (PromptTemplate, error) {
 		}
 		slots = append(slots, x)
 	}
-	return PromptTemplate{ID: id, Trigger: tr, Title: title, Category: cat, Description: desc, Template: body, OptimizerPreset: preset, InjectGlossary: inj, AppBundleIDs: apps, Slots: slots}, nil
+	tags, _, e := optionalStringArray(t, "tags", path)
+	if e != nil {
+		return PromptTemplate{}, e
+	}
+	if len(tags) == 0 {
+		tags = nil
+	}
+	fav, _, e := optionalBool(t, "favorite", path)
+	if e != nil {
+		return PromptTemplate{}, e
+	}
+	ver, _, e := optionalString(t, "version", path)
+	if e != nil {
+		return PromptTemplate{}, e
+	}
+	loc, _, e := optionalString(t, "locale", path)
+	if e != nil {
+		return PromptTemplate{}, e
+	}
+	role, _, e := optionalString(t, "role", path)
+	if e != nil {
+		return PromptTemplate{}, e
+	}
+	return PromptTemplate{
+		ID:              id,
+		Trigger:         tr,
+		Title:           title,
+		Category:        cat,
+		Description:     desc,
+		Template:        body,
+		OptimizerPreset: preset,
+		InjectGlossary:  inj,
+		AppBundleIDs:    apps,
+		Slots:           slots,
+		Tags:            tags,
+		Favorite:        fav,
+		Version:         ver,
+		Locale:          loc,
+		Role:            role,
+	}, nil
 }
 func (p PromptTemplate) toTOML() *toml.Table {
 	t := toml.NewTable()
@@ -173,6 +293,21 @@ func (p PromptTemplate) toTOML() *toml.Table {
 		v[i] = toml.TableVal(s.toTOML())
 	}
 	t.Set("slots", toml.ArrayVal(v))
+	if len(p.Tags) > 0 {
+		t.Set("tags", stringsToTOMLArray(p.Tags))
+	}
+	if p.Favorite {
+		t.Set("favorite", toml.BoolVal(true))
+	}
+	if p.Version != "" {
+		t.Set("version", toml.StringVal(p.Version))
+	}
+	if p.Locale != "" {
+		t.Set("locale", toml.StringVal(p.Locale))
+	}
+	if p.Role != "" {
+		t.Set("role", toml.StringVal(p.Role))
+	}
 	return t
 }
 func DecodePromptsConfig(input string) (PromptsConfig, error) {
@@ -235,8 +370,54 @@ func ValidatePrompts(c PromptsConfig) []ValidationIssue {
 			out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: path + ".trigger", Severity: SeverityError, Message: "prompt trigger cannot be empty"})
 		}
 		for j, s := range p.Slots {
-			if s.Kind != "text" && s.Kind != "select" && s.Kind != "number" {
-				out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: fmt.Sprintf("%s.slots[%d].kind", path, j), Severity: SeverityError, Message: "prompt slot kind must be text, select, or number"})
+			slotPath := fmt.Sprintf("%s.slots[%d]", path, j)
+			if s.Kind != "text" && s.Kind != "select" && s.Kind != "number" && s.Kind != "boolean" {
+				out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: slotPath + ".kind", Severity: SeverityError, Message: "prompt slot kind must be text, select, number, or boolean"})
+			}
+			if s.Regex != "" {
+				if _, err := regexp.Compile(s.Regex); err != nil {
+					out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: slotPath + ".regex", Severity: SeverityError, Message: fmt.Sprintf("invalid slot regex: %v", err)})
+				}
+			}
+			minFinite := s.Min == nil || (!math.IsNaN(*s.Min) && !math.IsInf(*s.Min, 0))
+			maxFinite := s.Max == nil || (!math.IsNaN(*s.Max) && !math.IsInf(*s.Max, 0))
+			if !minFinite {
+				out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: slotPath + ".min", Severity: SeverityError, Message: "slot min must be finite"})
+			}
+			if !maxFinite {
+				out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: slotPath + ".max", Severity: SeverityError, Message: "slot max must be finite"})
+			}
+			if s.Min != nil && s.Max != nil && minFinite && maxFinite && *s.Min > *s.Max {
+				out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: slotPath + ".max", Severity: SeverityError, Message: "slot max cannot be less than min"})
+			}
+			if s.MinLength != nil && *s.MinLength < 0 {
+				out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: slotPath + ".min_length", Severity: SeverityError, Message: "slot min_length cannot be negative"})
+			}
+			if s.MaxLength != nil && *s.MaxLength < 0 {
+				out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: slotPath + ".max_length", Severity: SeverityError, Message: "slot max_length cannot be negative"})
+			}
+			if s.MinLength != nil && s.MaxLength != nil && *s.MinLength >= 0 && *s.MaxLength >= 0 && *s.MinLength > *s.MaxLength {
+				out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: slotPath + ".max_length", Severity: SeverityError, Message: "slot max_length cannot be less than min_length"})
+			}
+			if s.Default != "" {
+				switch s.Kind {
+				case "boolean":
+					if s.Default != "true" && s.Default != "false" {
+						out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: slotPath + ".default", Severity: SeverityError, Message: "boolean slot default must be \"true\" or \"false\""})
+					}
+				case "number":
+					num, err := strconv.ParseFloat(s.Default, 64)
+					if err != nil || math.IsNaN(num) || math.IsInf(num, 0) {
+						out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: slotPath + ".default", Severity: SeverityError, Message: "number slot default must be a finite number"})
+					} else {
+						if s.Min != nil && minFinite && num < *s.Min {
+							out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: slotPath + ".default", Severity: SeverityError, Message: "number slot default is below min"})
+						}
+						if s.Max != nil && maxFinite && num > *s.Max {
+							out = append(out, ValidationIssue{File: string(FilePrompts), KeyPath: slotPath + ".default", Severity: SeverityError, Message: "number slot default exceeds max"})
+						}
+					}
+				}
 			}
 		}
 	}
@@ -308,6 +489,30 @@ func promptFromMarkdown(raw, path string) (PromptTemplate, error) {
 				p.OptimizerPreset = v
 			case "inject_glossary":
 				p.InjectGlossary = strings.EqualFold(v, "true")
+			case "tags":
+				trimmed := strings.TrimSpace(v)
+				trimmed = strings.TrimPrefix(trimmed, "[")
+				trimmed = strings.TrimSuffix(trimmed, "]")
+				var parsedTags []string
+				for _, part := range strings.Split(trimmed, ",") {
+					item := strings.TrimSpace(part)
+					item = strings.Trim(item, `"'`)
+					item = strings.TrimSpace(item)
+					if item != "" {
+						parsedTags = append(parsedTags, item)
+					}
+				}
+				if len(parsedTags) > 0 {
+					p.Tags = parsedTags
+				}
+			case "favorite":
+				p.Favorite = strings.EqualFold(v, "true")
+			case "version":
+				p.Version = v
+			case "locale":
+				p.Locale = v
+			case "role":
+				p.Role = v
 			}
 		}
 		start = end + 1

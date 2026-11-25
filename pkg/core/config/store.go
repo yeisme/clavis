@@ -390,6 +390,27 @@ func (s *ConfigStore) SaveQuickJump(quickJumpCfg QuickJumpConfig) error {
 	return nil
 }
 
+// SaveIdentities validates identitiesCfg, atomically writes identities.toml, and updates Current().Identities.
+func (s *ConfigStore) SaveIdentities(identitiesCfg IdentitiesConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := firstErrorIssue(ValidateIdentities(identitiesCfg)); err != nil {
+		return err
+	}
+	encoded := identitiesCfg.Encode()
+	if err := atomicWriteConfigFile(s.dir, FileIdentities, encoded); err != nil {
+		return err
+	}
+	sum := sha256.Sum256([]byte(encoded))
+	s.ensureSavedDigestsLocked()
+	s.current.Identities = identitiesCfg
+	s.lastErrors = nil
+	s.lastWarnings = collectWarningIssues(Validate(s.current))
+	s.savedDigests[string(FileIdentities)] = sum
+	return nil
+}
+
 func (s *ConfigStore) SaveIMERules(imeRulesCfg IMERulesConfig) error {
 	if err := firstErrorIssue(ValidateIMERules(imeRulesCfg)); err != nil {
 		return err
@@ -586,6 +607,13 @@ func (s *ConfigStore) Reload() bool {
 	} else if !os.IsNotExist(err) {
 		_, ok9 = loadConfigFile(s.dir, FileQuickJump, DecodeQuickJumpConfig, &errs)
 	}
+	identitiesCfg := DefaultIdentitiesConfig()
+	ok10 := true
+	if _, err := os.Stat(filepath.Join(s.dir, string(FileIdentities))); err == nil {
+		identitiesCfg, ok10 = loadConfigFile(s.dir, FileIdentities, DecodeIdentitiesConfig, &errs)
+	} else if !os.IsNotExist(err) {
+		_, ok10 = loadConfigFile(s.dir, FileIdentities, DecodeIdentitiesConfig, &errs)
+	}
 	if ok6 {
 		var mergeErr error
 		promptsCfg, mergeErr = mergePromptMarkdown(promptsCfg, s.dir)
@@ -601,7 +629,7 @@ func (s *ConfigStore) Reload() bool {
 		}
 	}
 
-	if len(errs) > 0 || !ok || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 || !ok7 || !ok8 || !ok9 {
+	if len(errs) > 0 || !ok || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 || !ok7 || !ok8 || !ok9 || !ok10 {
 		s.lastErrors = errs
 		return false
 	}
@@ -616,6 +644,7 @@ func (s *ConfigStore) Reload() bool {
 		Components: componentsCfg,
 		Workflows:  workflowsCfg,
 		QuickJump:  quickJumpCfg,
+		Identities: identitiesCfg,
 	}
 
 	// Speak the language of the config being validated so its diagnostics

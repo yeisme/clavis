@@ -15,6 +15,8 @@ type SnippetItem struct {
 	WordBoundary bool     `json:"wordBoundary"`
 	AppBundleIDs []string `json:"appBundleIds"`
 	ProcessNames []string `json:"processNames,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
+	Favorite     bool     `json:"favorite,omitempty"`
 }
 
 func decodeSnippetItem(tbl *toml.Table, path string) (SnippetItem, error) {
@@ -54,6 +56,17 @@ func decodeSnippetItem(tbl *toml.Table, path string) (SnippetItem, error) {
 	if processNames == nil {
 		processNames = []string{}
 	}
+	tags, _, err := optionalStringArray(tbl, "tags", path)
+	if err != nil {
+		return SnippetItem{}, err
+	}
+	if len(tags) == 0 {
+		tags = nil
+	}
+	favorite, _, err := optionalBool(tbl, "favorite", path)
+	if err != nil {
+		return SnippetItem{}, err
+	}
 	return SnippetItem{
 		ID:           id,
 		Trigger:      trigger,
@@ -62,6 +75,8 @@ func decodeSnippetItem(tbl *toml.Table, path string) (SnippetItem, error) {
 		WordBoundary: wordBoundary,
 		AppBundleIDs: bundleIDs,
 		ProcessNames: processNames,
+		Tags:         tags,
+		Favorite:     favorite,
 	}, nil
 }
 
@@ -75,6 +90,12 @@ func (s SnippetItem) toTOML() *toml.Table {
 	t.Set("app_bundle_ids", stringsToTOMLArray(s.AppBundleIDs))
 	if len(s.ProcessNames) > 0 {
 		t.Set("process_names", stringsToTOMLArray(s.ProcessNames))
+	}
+	if len(s.Tags) > 0 {
+		t.Set("tags", stringsToTOMLArray(s.Tags))
+	}
+	if s.Favorite {
+		t.Set("favorite", toml.BoolVal(true))
 	}
 	return t
 }

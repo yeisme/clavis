@@ -22,6 +22,7 @@ const (
 	FileComponents ConfigFileKind = "components.toml"
 	FileWorkflows  ConfigFileKind = "workflows.toml"
 	FileQuickJump  ConfigFileKind = "quickjump.toml"
+	FileIdentities ConfigFileKind = "identities.toml"
 )
 
 // AllConfigFileKinds returns all config file kinds in deterministic order.
@@ -62,6 +63,7 @@ type ClavisConfig struct {
 	Components ComponentsConfig `json:"components"`
 	Workflows  WorkflowsConfig  `json:"workflows"`
 	QuickJump  QuickJumpConfig  `json:"quickJump"`
+	Identities IdentitiesConfig `json:"identities"`
 }
 
 // DefaultConfig returns the complete default ClavisConfig.
@@ -76,6 +78,7 @@ func DefaultConfig() ClavisConfig {
 		Components: DefaultComponentsConfig(),
 		Workflows:  DefaultWorkflowsConfig(),
 		QuickJump:  DefaultQuickJumpConfig(),
+		Identities: DefaultIdentitiesConfig(),
 	}
 }
 

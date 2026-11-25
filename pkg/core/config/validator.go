@@ -50,6 +50,7 @@ func Validate(cfg ClavisConfig) []ValidationIssue {
 	issues = append(issues, ValidateComponents(cfg.Components)...)
 	issues = append(issues, ValidateWorkflows(cfg.Workflows)...)
 	issues = append(issues, ValidateQuickJump(cfg.QuickJump)...)
+	issues = append(issues, ValidateIdentities(cfg.Identities)...)
 	return issues
 }
 
@@ -354,6 +355,25 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 		issues = append(issues, ValidationIssue{
 			File: file, KeyPath: "appearance.stage_intensity", Severity: SeverityWarning,
 			Message: fmt.Sprintf("stage_intensity %v is outside 0..1; clamped to %v", main.Appearance.StageIntensity, clamped),
+		})
+	}
+	if fp := strings.TrimSpace(main.Appearance.FontPreset); fp != "" && fp != "system" && fp != "rounded" && fp != "mono_accent" {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "appearance.font_preset", Severity: SeverityError,
+			Message: "unsupported appearance font_preset",
+		})
+	}
+	if strings.ContainsAny(main.Appearance.CodeFontFamily, "\r\n\x00") {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "appearance.code_font_family", Severity: SeverityError,
+			Message: "code_font_family cannot contain control characters",
+		})
+	}
+	ts := main.Appearance.TextScale
+	if math.IsNaN(ts) || math.IsInf(ts, 0) || (ts != 0 && (ts < 0.90 || ts > 1.15)) {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "appearance.text_scale", Severity: SeverityError,
+			Message: "text_scale must be within 0.90..1.15",
 		})
 	}
 	if main.InputEngine.Mode != "inline_hook" && main.InputEngine.Mode != "off" {

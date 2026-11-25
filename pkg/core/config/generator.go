@@ -76,6 +76,8 @@ default_input_source_id = "`+WindowsDefaultInputSourceID+`"`, 1)
 		return DefaultWorkflowsConfig().Encode()
 	case FileQuickJump:
 		return DefaultQuickJumpConfig().Encode()
+	case FileIdentities:
+		return DefaultIdentitiesConfig().Encode()
 	default:
 		return ""
 	}
@@ -164,7 +166,10 @@ candidate_bar_orientation = "horizontal"
 # Stage intensity scales yaw, pitch, row skew, parallax and specular: 0 flattens the geometry but keeps the same materials, 1 is the full spatial look
 stage_intensity = 0.7
 # Fan each result row obliquely; false keeps every row parallel
-oblique_rows = true
+oblique_rows = false
+font_preset = "system"
+code_font_family = ""
+text_scale = 1.0
 
 [ai]
 # API keys are never stored in config.toml; store them in OS Keychain / Credential Manager under keychain_account

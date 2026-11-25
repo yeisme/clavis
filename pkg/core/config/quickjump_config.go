@@ -20,12 +20,13 @@ const (
 
 // QuickJumpBookmark defines one user-configured `#` quick-jump destination.
 type QuickJumpBookmark struct {
-	ID     string        `json:"id"`
-	Name   string        `json:"name"`
-	Kind   QuickJumpKind `json:"kind"`
-	Target string        `json:"target"`
-	Tags   []string      `json:"tags,omitempty"`
-	Hotkey string        `json:"hotkey,omitempty"`
+	ID       string        `json:"id"`
+	Name     string        `json:"name"`
+	Kind     QuickJumpKind `json:"kind"`
+	Target   string        `json:"target"`
+	Tags     []string      `json:"tags,omitempty"`
+	Favorite bool          `json:"favorite,omitempty"`
+	Hotkey   string        `json:"hotkey,omitempty"`
 }
 
 // QuickJumpConfig configures bookmarks in `quickjump.toml`.
@@ -56,6 +57,9 @@ func (c QuickJumpConfig) Encode() string {
 					tags[ti] = toml.StringVal(tg)
 				}
 				bt.Set("tags", toml.ArrayVal(tags))
+			}
+			if b.Favorite {
+				bt.Set("favorite", toml.BoolVal(true))
 			}
 			if b.Hotkey != "" {
 				bt.Set("hotkey", toml.StringVal(b.Hotkey))
@@ -111,6 +115,10 @@ func DecodeQuickJumpConfig(src string) (QuickJumpConfig, error) {
 		if err != nil {
 			return cfg, err
 		}
+		favorite, _, err := optionalBool(bt, "favorite", p)
+		if err != nil {
+			return cfg, err
+		}
 		hotkey, _, err := optionalString(bt, "hotkey", p)
 		if err != nil {
 			return cfg, err
@@ -120,12 +128,13 @@ func DecodeQuickJumpConfig(src string) (QuickJumpConfig, error) {
 			kind = QuickJumpDir
 		}
 		bookmarks = append(bookmarks, QuickJumpBookmark{
-			ID:     strings.TrimSpace(id),
-			Name:   strings.TrimSpace(name),
-			Kind:   kind,
-			Target: strings.TrimSpace(target),
-			Tags:   tags,
-			Hotkey: strings.TrimSpace(hotkey),
+			ID:       strings.TrimSpace(id),
+			Name:     strings.TrimSpace(name),
+			Kind:     kind,
+			Target:   strings.TrimSpace(target),
+			Tags:     tags,
+			Favorite: favorite,
+			Hotkey:   strings.TrimSpace(hotkey),
 		})
 	}
 	cfg.Bookmarks = bookmarks

@@ -16,8 +16,8 @@ func TestStageIntensityDefaultsWhenAppearanceAbsent(t *testing.T) {
 	if cfg.Appearance.StageIntensity != 0.7 {
 		t.Fatalf("StageIntensity = %v, want 0.7", cfg.Appearance.StageIntensity)
 	}
-	if !cfg.Appearance.ObliqueRows {
-		t.Fatal("ObliqueRows = false, want true by default")
+	if cfg.Appearance.ObliqueRows {
+		t.Fatal("ObliqueRows = true, want false by default")
 	}
 }
 
@@ -25,7 +25,7 @@ func TestStageIntensityExplicitValues(t *testing.T) {
 	input := `
 [appearance]
 stage_intensity = 0.25
-oblique_rows = false
+oblique_rows = true
 `
 	cfg, err := DecodeMainConfig(input)
 	if err != nil {
@@ -34,8 +34,8 @@ oblique_rows = false
 	if cfg.Appearance.StageIntensity != 0.25 {
 		t.Fatalf("StageIntensity = %v, want 0.25", cfg.Appearance.StageIntensity)
 	}
-	if cfg.Appearance.ObliqueRows {
-		t.Fatal("ObliqueRows = true, want false")
+	if !cfg.Appearance.ObliqueRows {
+		t.Fatal("ObliqueRows = false, want true")
 	}
 	// A key that is present must not disturb the other appearance defaults.
 	if cfg.Appearance.Theme != "system" || cfg.Appearance.CapsuleWidth != 680.0 {
@@ -131,7 +131,7 @@ in_place_optimize_shortcut = "option+tab"
 	if err != nil {
 		t.Fatalf("a pre-existing config.toml no longer loads: %v", err)
 	}
-	if cfg.Appearance.StageIntensity != 0.7 || !cfg.Appearance.ObliqueRows {
+	if cfg.Appearance.StageIntensity != 0.7 || cfg.Appearance.ObliqueRows {
 		t.Fatalf("missing keys should take defaults, got intensity=%v oblique=%v",
 			cfg.Appearance.StageIntensity, cfg.Appearance.ObliqueRows)
 	}
