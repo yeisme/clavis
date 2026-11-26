@@ -83,10 +83,12 @@ func (b *linuxBridge) Permissions(ctx context.Context) (host.PermissionStatus, e
 		return host.PermissionStatus{}, err
 	}
 	return host.PermissionStatus{
-		Granted:    true,
-		Promptable: false,
+		ScreenRecording: true,
+		Granted:         true,
+		Promptable:      false,
 		Details: map[string]string{
-			"platform": "linux",
+			"platform":        "linux",
+			"screenRecording": "not_required",
 		},
 	}, nil
 }

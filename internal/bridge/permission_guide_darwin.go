@@ -44,6 +44,8 @@ func darwinGuidePermission(kind string) (permissionflow.Permission, bool) {
 		return permissionflow.Accessibility, true
 	case "input_monitoring", "input-monitoring", "inputmonitoring":
 		return permissionflow.InputMonitoring, true
+	case "screen_recording", "screen-recording", "screencapture":
+		return permissionflow.ScreenRecording, true
 	}
 	return "", false
 }

@@ -105,6 +105,7 @@ type WindowCommand = config.WindowCommand
 type PermissionStatus struct {
 	Accessibility   bool              `json:"accessibility"`
 	InputMonitoring bool              `json:"inputMonitoring"`
+	ScreenRecording bool              `json:"screenRecording"`
 	AppleEvents     bool              `json:"appleEvents"`
 	Granted         bool              `json:"granted"`
 	Promptable      bool              `json:"promptable"`
@@ -123,8 +124,8 @@ const (
 	// TriggerScreenshotAnnotate captures an interactive region and opens the vector annotator.
 	TriggerScreenshotAnnotate TriggerKind = "screenshot_annotate"
 	TriggerSnippetKey         TriggerKind = "snippet_key"
-	TriggerSnippetBack     TriggerKind = "snippet_backspace"
-	TriggerSnippetReset    TriggerKind = "snippet_reset"
+	TriggerSnippetBack        TriggerKind = "snippet_backspace"
+	TriggerSnippetReset       TriggerKind = "snippet_reset"
 	// TriggerSelectionQuickBar opens the floating selection action bar.
 	TriggerSelectionQuickBar TriggerKind = "selection_quick_bar"
 	// TriggerInputEngineToggle flips the own input engine between forced Chinese

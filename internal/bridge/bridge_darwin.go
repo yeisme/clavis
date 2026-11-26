@@ -693,15 +693,23 @@ func (b *darwinBridge) Permissions(ctx context.Context) (host.PermissionStatus, 
 	}
 	ax := axIsProcessTrusted()
 	im := cgPreflightListenEventAccess()
+	screenStatus, screenErr := permissionflow.Check(permissionflow.ScreenRecording)
+	screenGranted := screenStatus == permissionflow.Granted
+	details := map[string]string{
+		"secureInput":     strconv.FormatBool(isSecureEventInputEnabled()),
+		"screenRecording": screenStatus.String(),
+	}
+	if screenErr != nil {
+		details["screenRecordingError"] = screenErr.Error()
+	}
 	return host.PermissionStatus{
 		Accessibility:   ax,
 		InputMonitoring: im,
+		ScreenRecording: screenGranted,
 		AppleEvents:     true,
-		Granted:         ax && im,
-		Promptable:      !(ax && im),
-		Details: map[string]string{
-			"secureInput": strconv.FormatBool(isSecureEventInputEnabled()),
-		},
+		Granted:         ax && im && screenGranted,
+		Promptable:      !(ax && im && screenGranted),
+		Details:         details,
 	}, nil
 }
 
@@ -719,6 +727,9 @@ func (b *darwinBridge) OpenPermissionSettings(kind string) error {
 	case "input_monitoring", "input-monitoring", "inputmonitoring":
 		p = permissionflow.InputMonitoring
 		anchor = "Privacy_ListenEvent"
+	case "screen_recording", "screen-recording", "screencapture":
+		p = permissionflow.ScreenRecording
+		anchor = "Privacy_ScreenCapture"
 	case "apple_events", "apple-events", "automation":
 		anchor = "Privacy_Automation"
 	default:
@@ -747,6 +758,8 @@ func (b *darwinBridge) PromptPermission(kind string) (host.PermissionStatus, err
 		_ = axIsProcessTrustedWithOptions(dict)
 	case "input_monitoring", "input-monitoring", "inputmonitoring":
 		_ = cgRequestListenEventAccess()
+	case "screen_recording", "screen-recording", "screencapture":
+		_, _ = permissionflow.Request(context.Background(), permissionflow.ScreenRecording)
 	}
 	return b.Permissions(context.Background())
 }

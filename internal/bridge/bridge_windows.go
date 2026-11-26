@@ -468,6 +468,7 @@ func (b *windowsBridge) Permissions(ctx context.Context) (host.PermissionStatus,
 	return host.PermissionStatus{
 		Accessibility:   true,
 		InputMonitoring: true,
+		ScreenRecording: true,
 		AppleEvents:     true,
 		Granted:         true,
 		Promptable:      false,

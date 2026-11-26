@@ -17,12 +17,14 @@ func TestDarwinGuidePermissionKinds(t *testing.T) {
 		"input_monitoring": permissionflow.InputMonitoring,
 		"input-monitoring": permissionflow.InputMonitoring,
 		"InputMonitoring":  permissionflow.InputMonitoring,
+		"screen_recording": permissionflow.ScreenRecording,
+		"screen-recording": permissionflow.ScreenRecording,
 	} {
 		if got, ok := darwinGuidePermission(kind); !ok || got != want {
 			t.Errorf("darwinGuidePermission(%q) = %q, %v; want %q", kind, got, ok, want)
 		}
 	}
-	for _, kind := range []string{"", "automation", "screen_recording"} {
+	for _, kind := range []string{"", "automation", "unknown"} {
 		if got, ok := darwinGuidePermission(kind); ok {
 			t.Errorf("darwinGuidePermission(%q) = %q; want no guide", kind, got)
 		}

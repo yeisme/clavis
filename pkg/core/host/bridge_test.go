@@ -51,7 +51,7 @@ func (stubBridge) CurrentInputSource(context.Context) (host.InputSourceInfo, err
 }
 func (stubBridge) SelectInputSource(context.Context, string) error { return nil }
 func (stubBridge) Permissions(context.Context) (host.PermissionStatus, error) {
-	return host.PermissionStatus{Accessibility: true, InputMonitoring: true, Granted: true}, nil
+	return host.PermissionStatus{Accessibility: true, InputMonitoring: true, ScreenRecording: true, Granted: true}, nil
 }
 
 func TestBridgeInterfaceSatisfaction(t *testing.T) {
