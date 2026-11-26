@@ -77,6 +77,7 @@ func TestMigrateAppLegacyV0UpgradeWithBackupManifestAndWAL(t *testing.T) {
 			t.Fatalf("seed legacy v0 db (%s): %v", stmt, err)
 		}
 	}
+	assertJournalMode(t, ctx, db, "wal")
 
 	report, err := Migrate(ctx, db, DBKindApp, MigrationOptions{AllowCreate: true})
 	if err != nil {
@@ -100,13 +101,15 @@ func TestMigrateAppLegacyV0UpgradeWithBackupManifestAndWAL(t *testing.T) {
 	if manifest.SizeBytes <= 0 || len(manifest.SHA256) != 64 || manifest.SchemaHash == "" {
 		t.Fatalf("incomplete manifest digests: %+v", manifest)
 	}
+	if !manifest.WALCheckpointed {
+		t.Fatal("manifest did not record a WAL checkpoint")
+	}
 
 	// Open the backup file independently to confirm WAL rows were flushed and are readable.
 	bakDB, err := sqlite.Open(ctx, manifest.BackupPath, sqlite.OpenOptions{ReadOnly: true})
 	if err != nil {
 		t.Fatalf("open backup db: %v", err)
 	}
-	defer bakDB.Close()
 	bakRows, err := bakDB.Query(ctx, `SELECT content FROM clipboard_items WHERE id='legacy-1'`)
 	if err != nil || len(bakRows.Values) != 1 || str(bakRows.Values[0], 0) != "你好世界" {
 		t.Fatalf("backup db missing WAL row: rows=%v err=%v", bakRows.Values, err)
@@ -114,6 +117,23 @@ func TestMigrateAppLegacyV0UpgradeWithBackupManifestAndWAL(t *testing.T) {
 	bakVer, err := CurrentSchemaVersion(ctx, bakDB)
 	if err != nil || bakVer != 0 {
 		t.Fatalf("backup db user_version=%d err=%v, want 0", bakVer, err)
+	}
+	if err := bakDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// VerifyBackup must reject a changed backup payload, not merely confirm that
+	// the backup and manifest files exist.
+	backupBytes, err := os.ReadFile(manifest.BackupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupBytes[len(backupBytes)-1] ^= 0xff
+	if err := os.WriteFile(manifest.BackupPath, backupBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyBackup(report.ManifestPath); !errors.Is(err, ErrBackupFailed) {
+		t.Fatalf("VerifyBackup accepted corrupted backup: %v", err)
 	}
 
 	// Verify upgraded DB preserved rows and backfilled UTF-8 byte_size.
@@ -493,6 +513,14 @@ func assertSameFilePath(t *testing.T, got, want string) {
 	}
 }
 
+func assertJournalMode(t *testing.T, ctx context.Context, db *sqlite.DB, want string) {
+	t.Helper()
+	rows, err := db.Query(ctx, `PRAGMA journal_mode`)
+	if err != nil || len(rows.Values) != 1 || !strings.EqualFold(str(rows.Values[0], 0), want) {
+		t.Fatalf("journal_mode=%v err=%v, want %q", rows.Values, err, want)
+	}
+}
+
 func seedAppV2DB(t *testing.T, ctx context.Context, db *sqlite.DB) {
 	t.Helper()
 	if _, err := db.Transaction(ctx, appV0ToV1Statements()); err != nil {
@@ -522,6 +550,7 @@ func TestMigrateAppV2ToV3AndIdempotentRerun(t *testing.T) {
 	if _, err := db.Execute(ctx, `PRAGMA journal_mode=WAL`); err != nil {
 		t.Fatal(err)
 	}
+	assertJournalMode(t, ctx, db, "wal")
 	seedAppV2DB(t, ctx, db)
 	if _, err := db.Execute(ctx, `INSERT INTO clipboard_items(id,content,content_hash,source_bundle_id,source_app_name,created_at_ns,updated_at_ns,is_pinned,kind,byte_size) VALUES('v2-row','wal payload','h-v2','','Notes',100,200,1,'text',11)`); err != nil {
 		t.Fatalf("insert v2 row: %v", err)
@@ -543,6 +572,10 @@ func TestMigrateAppV2ToV3AndIdempotentRerun(t *testing.T) {
 	if manifest.FromVersion != 2 || manifest.ToVersion != 3 {
 		t.Fatalf("unexpected v2->v3 manifest: %+v", manifest)
 	}
+	if !manifest.WALCheckpointed {
+		t.Fatal("v2 WAL migration manifest did not record a WAL checkpoint")
+	}
+	assertJournalMode(t, ctx, db, "wal")
 
 	if err := ValidateSchema(ctx, db, DBKindApp, 3); err != nil {
 		t.Fatalf("ValidateSchema v3: %v", err)
