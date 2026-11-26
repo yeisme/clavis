@@ -633,3 +633,166 @@ func TestMigrateAppV2ToV3FailpointRollback(t *testing.T) {
 		})
 	}
 }
+
+func TestMigrateLegacyAppVersionsSurviveReopen(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		from int
+		seed func(*testing.T, *sqlite.DB)
+	}{
+		{
+			name: "v0",
+			from: 0,
+			seed: func(t *testing.T, db *sqlite.DB) {
+				for _, stmt := range []string{
+					`PRAGMA journal_mode=WAL`,
+					`CREATE TABLE clipboard_items (id TEXT PRIMARY KEY, content TEXT NOT NULL, content_hash TEXT NOT NULL UNIQUE, source_bundle_id TEXT NOT NULL DEFAULT '', source_app_name TEXT NOT NULL DEFAULT '', created_at_ns INTEGER NOT NULL, updated_at_ns INTEGER NOT NULL, is_pinned INTEGER NOT NULL DEFAULT 0)`,
+					`CREATE TABLE ime_user_lexicon (pinyin_key TEXT NOT NULL, word TEXT NOT NULL, frequency INTEGER NOT NULL DEFAULT 0, last_used_ns INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (pinyin_key, word))`,
+					`INSERT INTO clipboard_items VALUES ('reopen-v0', 'legacy v0', 'hash-v0', '', 'Notes', 1, 2, 0)`,
+				} {
+					if _, err := db.Execute(ctx, stmt); err != nil {
+						t.Fatalf("seed v0 with %q: %v", stmt, err)
+					}
+				}
+			},
+		},
+		{
+			name: "v1",
+			from: 1,
+			seed: func(t *testing.T, db *sqlite.DB) {
+				if _, err := db.Transaction(ctx, appV0ToV1Statements()); err != nil {
+					t.Fatalf("seed v1 schema: %v", err)
+				}
+				if _, err := db.Execute(ctx, `INSERT INTO clipboard_items(id,content,content_hash,source_bundle_id,source_app_name,created_at_ns,updated_at_ns,is_pinned) VALUES('reopen-v1','legacy v1','hash-v1','','Notes',1,2,0)`); err != nil {
+					t.Fatalf("seed v1 row: %v", err)
+				}
+			},
+		},
+		{
+			name: "v2",
+			from: 2,
+			seed: func(t *testing.T, db *sqlite.DB) {
+				seedAppV2DB(t, ctx, db)
+				if _, err := db.Execute(ctx, `INSERT INTO clipboard_items(id,content,content_hash,source_bundle_id,source_app_name,created_at_ns,updated_at_ns,is_pinned,kind,byte_size) VALUES('reopen-v2','legacy v2','hash-v2','','Notes',1,2,0,'text',9)`); err != nil {
+					t.Fatalf("seed v2 row: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), tc.name+".db")
+			db, err := sqlite.Open(ctx, dbPath, sqlite.OpenOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.seed(t, db)
+			if got, err := CurrentSchemaVersion(ctx, db); err != nil || got != tc.from {
+				t.Fatalf("seeded schema=%d err=%v, want %d", got, err, tc.from)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			db, err = sqlite.Open(ctx, dbPath, sqlite.OpenOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, err := Migrate(ctx, db, DBKindApp, MigrationOptions{AllowCreate: true})
+			if err != nil {
+				t.Fatalf("reopened %s migration: %v", tc.name, err)
+			}
+			if report.From != tc.from || report.To != AppSchemaVersion || len(report.Applied) != AppSchemaVersion-tc.from {
+				t.Fatalf("reopened %s report=%+v", tc.name, report)
+			}
+			if _, err := VerifyBackup(report.ManifestPath); err != nil {
+				t.Fatalf("reopened %s backup verification: %v", tc.name, err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			db, err = sqlite.Open(ctx, dbPath, sqlite.OpenOptions{ReadOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if err := ValidateSchema(ctx, db, DBKindApp, AppSchemaVersion); err != nil {
+				t.Fatalf("reopened %s v3 validation: %v", tc.name, err)
+			}
+			row, err := db.Query(ctx, `SELECT content FROM clipboard_items WHERE id=?`, "reopen-"+tc.name)
+			if err != nil || len(row.Values) != 1 || str(row.Values[0], 0) != "legacy "+tc.name {
+				t.Fatalf("reopened %s row=%v err=%v", tc.name, row.Values, err)
+			}
+		})
+	}
+}
+
+func TestMigrateFailpointRollbackSurvivesReopen(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "rollback-reopen.db")
+	db, err := sqlite.Open(ctx, dbPath, sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedAppV2DB(t, ctx, db)
+	if _, err := db.Execute(ctx, `INSERT INTO clipboard_items(id,content,content_hash,source_bundle_id,source_app_name,created_at_ns,updated_at_ns,is_pinned,kind,byte_size) VALUES('rollback-reopen','keep me','hash-rollback','','Notes',1,2,0,'text',7)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = sqlite.Open(ctx, dbPath, sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Migrate(ctx, db, DBKindApp, MigrationOptions{
+		AllowCreate: true,
+		Failpoint: func(step string) error {
+			if step == "app.v2_to_v3.after_version" {
+				return errors.New("reopen rollback injection")
+			}
+			return nil
+		},
+	})
+	if !errors.Is(err, ErrMigrationFailed) {
+		t.Fatalf("expected failpoint migration failure, got %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = sqlite.Open(ctx, dbPath, sqlite.OpenOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := CurrentSchemaVersion(ctx, db); err != nil || got != 2 {
+		t.Fatalf("reopened rollback schema=%d err=%v, want v2", got, err)
+	}
+	if tables, err := listUserTables(ctx, db); err != nil {
+		t.Fatal(err)
+	} else {
+		for _, table := range tables {
+			if table == "entity_annotations" || table == "ai_conversations" || table == "ai_conversation_turns" {
+				t.Fatalf("reopened rollback leaked v3 table %q", table)
+			}
+		}
+	}
+	row, err := db.Query(ctx, `SELECT content FROM clipboard_items WHERE id='rollback-reopen'`)
+	if err != nil || len(row.Values) != 1 || str(row.Values[0], 0) != "keep me" {
+		t.Fatalf("reopened rollback row=%v err=%v", row.Values, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = sqlite.Open(ctx, dbPath, sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if report, err := Migrate(ctx, db, DBKindApp, MigrationOptions{AllowCreate: true}); err != nil || report.From != 2 || report.To != 3 {
+		t.Fatalf("recovery after reopened rollback report=%+v err=%v", report, err)
+	}
+}
