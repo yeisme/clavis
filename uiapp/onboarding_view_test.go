@@ -22,10 +22,60 @@ func onboardingTester(ctrl *AppController, goos string) *ui.Tester {
 func setMockPerms(t *testing.T, ctrl *AppController, br *mockBridge, ax, im bool) {
 	t.Helper()
 	br.mu.Lock()
-	br.perms = host.PermissionStatus{Accessibility: ax, InputMonitoring: im, Granted: ax && im}
+	screen := ax && im
+	br.perms = host.PermissionStatus{Accessibility: ax, InputMonitoring: im, ScreenRecording: screen, Granted: screen, Details: map[string]string{"screenRecording": map[bool]string{true: "granted", false: "denied"}[screen]}}
 	br.mu.Unlock()
 	if _, err := ctrl.RefreshPermissions(context.Background()); err != nil {
 		t.Fatalf("RefreshPermissions: %v", err)
+	}
+}
+
+func setMockPermissionState(t *testing.T, ctrl *AppController, br *mockBridge, ax, im, screen bool, screenState string) {
+	t.Helper()
+	br.mu.Lock()
+	br.perms = host.PermissionStatus{
+		Accessibility:   ax,
+		InputMonitoring: im,
+		ScreenRecording: screen,
+		Granted:         ax && im && screen,
+		Details:         map[string]string{"screenRecording": screenState},
+	}
+	br.mu.Unlock()
+	if _, err := ctrl.RefreshPermissions(context.Background()); err != nil {
+		t.Fatalf("RefreshPermissions: %v", err)
+	}
+}
+
+func TestOnboardingScreenRecordingPermissionStates(t *testing.T) {
+	cases := []struct {
+		name        string
+		access      bool
+		input       bool
+		screen      bool
+		screenState string
+		wantUnknown bool
+	}{
+		{name: "none", screenState: "denied"},
+		{name: "keyboard-only", access: true, input: true, screenState: "denied"},
+		{name: "screen-only", screen: true, screenState: "granted"},
+		{name: "all-granted", access: true, input: true, screen: true, screenState: "granted"},
+		{name: "screen-unknown", access: true, input: true, screenState: "unknown", wantUnknown: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl, br, _, _ := newTestController(t, nil)
+			setMockPermissionState(t, ctrl, br, tc.access, tc.input, tc.screen, tc.screenState)
+			tt := onboardingTester(ctrl, "darwin")
+			if !tt.HasText(i18n.T("settings.perm.screen_recording")) || !tt.HasText(i18n.T("onboarding.perm.why_screen_recording")) {
+				t.Fatalf("screen permission row missing: %v", tt.Texts())
+			}
+			if tc.wantUnknown && !tt.HasText(i18n.T("settings.perm.unknown")) {
+				t.Fatalf("unknown screen status missing: %v", tt.Texts())
+			}
+			if tc.name == "all-granted" && tt.HasText(i18n.T("onboarding.perm.grant")) {
+				t.Fatalf("grant action remained visible for all-granted state: %v", tt.Texts())
+			}
+		})
 	}
 }
 

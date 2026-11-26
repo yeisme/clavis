@@ -665,7 +665,7 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, m
 	shoot("18-onboarding-fresh", guide("darwin"), 520, 520, 1.5, nil)
 	shoot("18b-onboarding-min", guide("darwin"), 520, 520, 1.5, nil)
 	f.bridge.mu.Lock()
-	f.bridge.perms = host.PermissionStatus{Accessibility: true, InputMonitoring: true, Granted: true}
+	f.bridge.perms = host.PermissionStatus{Accessibility: true, InputMonitoring: true, ScreenRecording: true, Granted: true, Details: map[string]string{"screenRecording": "granted"}}
 	f.bridge.mu.Unlock()
 	_, _ = f.ctrl.RefreshPermissions(context.Background())
 	f.ctrl.SetRelaunchNeeded(true)

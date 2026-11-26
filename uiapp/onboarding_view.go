@@ -117,6 +117,19 @@ func (a *AppController) GuidePermission(ctx context.Context, kind string) (host.
 // Windows gives a desktop app its keyboard hook without asking.
 func onboardingAsksPermissions(goos string) bool { return goos == "darwin" }
 
+// screenRecordingGranted keeps older host bridges compatible while preserving
+// explicit Screen Recording states. New bridges report the state in Details,
+// so unknown or denied values never inherit the aggregate Granted flag.
+func screenRecordingGranted(perms host.PermissionStatus) bool {
+	if perms.ScreenRecording {
+		return true
+	}
+	if state, ok := perms.Details["screenRecording"]; ok && strings.TrimSpace(state) != "" {
+		return strings.EqualFold(strings.TrimSpace(state), "granted")
+	}
+	return perms.Granted
+}
+
 // OnboardingView renders the first-run guide.
 func (a *AppController) OnboardingView(c *ui.Context) {
 	a.renderOnboarding(c, runtime.GOOS)
@@ -132,7 +145,7 @@ func (a *AppController) renderOnboarding(c *ui.Context, goos string) {
 	a.mu.Unlock()
 
 	perms := diag.Permissions
-	granted := !onboardingAsksPermissions(goos) || perms.Accessibility && perms.InputMonitoring
+	granted := !onboardingAsksPermissions(goos) || perms.Accessibility && perms.InputMonitoring && screenRecordingGranted(perms)
 	ready := granted && diag.MonitorRunning
 
 	applyTextLocale(ui.Column(c).Fill().Background(theme.Background)).Children(func() {
@@ -233,16 +246,30 @@ func (a *AppController) renderOnboardingPermissions(c *ui.Context, theme *ui.The
 		}
 		perms := diag.Permissions
 		// The one accent button is the next permission to grant.
+		next := ""
+		switch {
+		case !perms.Accessibility:
+			next = "accessibility"
+		case !perms.InputMonitoring:
+			next = "input_monitoring"
+		case !screenRecordingGranted(perms):
+			next = "screen_recording"
+		}
 		kitCard(c, theme, cardInset, func() {
 			a.onboardingPermRow(c, theme, "accessibility", i18n.T("settings.perm.accessibility"),
-				i18n.T("onboarding.perm.why_accessibility"), perms.Accessibility, true)
+				i18n.T("onboarding.perm.why_accessibility"), perms.Accessibility, next == "accessibility", "")
 		})
 		kitDivider(c, theme)
 		kitCard(c, theme, cardInset, func() {
 			a.onboardingPermRow(c, theme, "input_monitoring", i18n.T("settings.perm.input_monitoring"),
-				i18n.T("onboarding.perm.why_input_monitoring"), perms.InputMonitoring, perms.Accessibility)
+				i18n.T("onboarding.perm.why_input_monitoring"), perms.InputMonitoring, next == "input_monitoring", "")
 		})
-		if !perms.Accessibility || !perms.InputMonitoring || diag.MonitorRunning {
+		kitDivider(c, theme)
+		kitCard(c, theme, cardInset, func() {
+			a.onboardingPermRow(c, theme, "screen_recording", i18n.T("settings.perm.screen_recording"),
+				i18n.T("onboarding.perm.why_screen_recording"), screenRecordingGranted(perms), next == "screen_recording", perms.Details["screenRecording"])
+		})
+		if !perms.Accessibility || !perms.InputMonitoring || !screenRecordingGranted(perms) || diag.MonitorRunning {
 			return
 		}
 		if !st.relaunchNeeded {
@@ -260,11 +287,13 @@ func (a *AppController) renderOnboardingPermissions(c *ui.Context, theme *ui.The
 	})
 }
 
-func (a *AppController) onboardingPermRow(c *ui.Context, theme *ui.Theme, kind, label, purpose string, granted, primary bool) {
+func (a *AppController) onboardingPermRow(c *ui.Context, theme *ui.Theme, kind, label, purpose string, granted, primary bool, state string) {
 	ui.Row(c).Key("onboarding-perm:" + kind).FillWidth().Gap(space10).AlignItems(ui.Center).Children(func() {
 		icon := "lock.fill"
 		if kind == "input_monitoring" {
 			icon = "keyboard"
+		} else if kind == "screen_recording" {
+			icon = "rectangle.center.inset.filled"
 		}
 		// A neutral tile: the primary "Grant…" button already marks the
 		// permission to take next.
@@ -273,28 +302,41 @@ func (a *AppController) onboardingPermRow(c *ui.Context, theme *ui.Theme, kind, 
 			ui.Text(c, label).FontSize(typeBody).FontWeight(600).TextColor(theme.Text).SingleLine()
 			applyProseLineHeight(ui.Text(c, purpose)).FontSize(typeMeta).TextColor(theme.TextMuted)
 		})
+		state = strings.ToLower(strings.TrimSpace(state))
+		unknown := !granted && (state == "unknown" || state == "unsupported")
+		notRequired := state == "not_required"
 		color := theme.TextMuted
-		if granted {
+		if granted || notRequired {
 			color = theme.Success
+		} else if unknown {
+			color = theme.Warning
 		}
 		ui.Row(c).Gap(space4).AlignItems(ui.Center).Shrink(0).Children(func() {
-			kitStatusDot(c, color, !granted && primary)
+			kitStatusDot(c, color, !granted && !notRequired && primary)
 			if granted {
 				kitStatusPill(c, theme, i18n.T("settings.perm.granted"), chipSuccess)
 				return
 			}
-			// Not granted, the button is both the state and the action. A
-			// status pill beside it used to repeat "Grant…" word for word.
-			btn := ui.Button
-			if primary {
-				btn = ui.PrimaryButton
+			if notRequired {
+				kitStatusPill(c, theme, i18n.T("settings.perm.not_required"), chipNeutral)
+				return
 			}
-			if btn(c, i18n.T("onboarding.perm.grant")).Key("onboarding-grant:" + kind).Clicked() {
-				go func() {
-					ctx, cancel := context.WithTimeout(context.Background(), onboardingGuideTimeout)
-					defer cancel()
-					_, _ = a.GuidePermission(ctx, kind)
-				}()
+			if unknown {
+				kitStatusPill(c, theme, i18n.T("settings.perm.unknown"), chipWarning)
+			} else {
+				// Not granted, the button is both the state and the action. A
+				// status pill beside it used to repeat "Grant…" word for word.
+				btn := ui.Button
+				if primary {
+					btn = ui.PrimaryButton
+				}
+				if btn(c, i18n.T("onboarding.perm.grant")).Key("onboarding-grant:" + kind).Clicked() {
+					go func() {
+						ctx, cancel := context.WithTimeout(context.Background(), onboardingGuideTimeout)
+						defer cancel()
+						_, _ = a.GuidePermission(ctx, kind)
+					}()
+				}
 			}
 		})
 	})

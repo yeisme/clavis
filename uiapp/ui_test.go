@@ -97,9 +97,10 @@ func newMockBridge() *mockBridge {
 		perms: host.PermissionStatus{
 			Accessibility:   true,
 			InputMonitoring: true,
+			ScreenRecording: true,
 			AppleEvents:     true,
 			Granted:         true,
-			Details:         map[string]string{"secureInput": "false"},
+			Details:         map[string]string{"secureInput": "false", "screenRecording": "granted"},
 		},
 		inputSources: []host.InputSourceInfo{
 			{ID: "com.apple.keylayout.ABC", Name: "ABC", IsASCII: true},

@@ -10,14 +10,14 @@ import (
 )
 
 // renderGuide renders the first-run guide for a fresh Mac (no permissions)
-// or with both permissions granted, at the guide's 520×520 window.
+// or with all required permissions granted, at the guide's 520×520 window.
 func renderGuide(t *testing.T, granted bool, dark bool) *ui.Tester {
 	t.Helper()
 	f := newInteractionFixture(t, nil)
 	_ = f.ctrl.Stop()
 	f.bridge.mu.Lock()
 	if granted {
-		f.bridge.perms = host.PermissionStatus{Accessibility: true, InputMonitoring: true, Granted: true}
+		f.bridge.perms = host.PermissionStatus{Accessibility: true, InputMonitoring: true, ScreenRecording: true, Granted: true, Details: map[string]string{"screenRecording": "granted"}}
 	} else {
 		f.bridge.perms = host.PermissionStatus{}
 	}
@@ -46,8 +46,8 @@ func countText(tt *ui.Tester, want string) int {
 func TestOnboardingPermissionRowsSayGrantOnce(t *testing.T) {
 	grant, ok := i18n.T("onboarding.perm.grant"), i18n.T("settings.perm.granted")
 	fresh := renderGuide(t, false, false)
-	if n := countText(fresh, grant); n != 2 {
-		t.Fatalf("fresh guide shows %q %d times, want 2 (one button per permission); texts %q", grant, n, fresh.Texts())
+	if n := countText(fresh, grant); n != 3 {
+		t.Fatalf("fresh guide shows %q %d times, want 3 (one button per permission); texts %q", grant, n, fresh.Texts())
 	}
 	if n := countText(fresh, ok); n != 0 {
 		t.Fatalf("fresh guide claims %q %d times", ok, n)
@@ -56,8 +56,8 @@ func TestOnboardingPermissionRowsSayGrantOnce(t *testing.T) {
 	if n := countText(done, grant); n != 0 {
 		t.Fatalf("granted guide still shows %q %d times", grant, n)
 	}
-	if n := countText(done, ok); n != 2 {
-		t.Fatalf("granted guide shows %q %d times, want 2", ok, n)
+	if n := countText(done, ok); n != 3 {
+		t.Fatalf("granted guide shows %q %d times, want 3", ok, n)
 	}
 }
 

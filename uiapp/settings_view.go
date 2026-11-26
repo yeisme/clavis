@@ -757,6 +757,15 @@ func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *u
 		}, func() {
 			_ = a.OpenPermissionSettings("input_monitoring")
 		})
+
+		renderPermStateRow(c, theme, i18n.T("settings.perm.screen_recording"), diag.Permissions.ScreenRecording, diag.Permissions.Details["screenRecording"], func() {
+			go func() {
+				_, _ = a.PromptPermission("screen_recording")
+				svc.Invalidate()
+			}()
+		}, func() {
+			_ = a.OpenPermissionSettings("screen_recording")
+		})
 	})
 
 	ui.Grid(c).Columns(settingsTwoColumns(c)).Gap(10).FillWidth().Children(func() {
@@ -774,6 +783,9 @@ func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *u
 			settingsKeyValueRow(c, theme, i18n.T("settings.diag.layer"), layer)
 			settingsKeyValueRow(c, theme, i18n.T("settings.diag.secure_input"), yesNo(secureInput))
 			settingsKeyValueRow(c, theme, i18n.T("settings.diag.monitor"), yesNo(strconv.FormatBool(diag.MonitorRunning)))
+			if screenState := strings.TrimSpace(diag.Permissions.Details["screenRecording"]); screenState != "" {
+				settingsKeyValueRow(c, theme, i18n.T("settings.perm.screen_recording"), screenState)
+			}
 			settingsKeyValueRow(c, theme, i18n.T("settings.diag.recovery"), fmt.Sprintf("%d", diag.RecoveryCount))
 			settingsKeyValueRow(c, theme, i18n.T("settings.diag.input_source"), activeIME)
 			if diag.LastIMEError != "" {
@@ -863,11 +875,32 @@ func renderPermRow(
 	onPrompt func(),
 	onOpenSettings func(),
 ) {
+	renderPermStateRow(c, theme, label, granted, "", onPrompt, onOpenSettings)
+}
+
+func renderPermStateRow(
+	c *ui.Context,
+	theme *ui.Theme,
+	label string,
+	granted bool,
+	state string,
+	onPrompt func(),
+	onOpenSettings func(),
+) {
 	statusText := i18n.T("settings.perm.not_granted")
 	statusColor := theme.Warning
+	state = strings.ToLower(strings.TrimSpace(state))
+	unknown := !granted && (state == "unknown" || state == "unsupported")
+	notRequired := state == "not_required"
 	if granted {
 		statusText = i18n.T("settings.perm.granted")
 		statusColor = theme.Success
+	} else if notRequired {
+		statusText = i18n.T("settings.perm.not_required")
+		statusColor = theme.TextMuted
+	} else if unknown {
+		statusText = i18n.T("settings.perm.unknown")
+		statusColor = theme.Warning
 	}
 	ui.Row(c).Key("perm:" + label).FillWidth().Height(controlHeight).Gap(space8).AlignItems(ui.Center).Children(func() {
 		ui.Text(c, label).FontSize(typeBody).TextColor(theme.Text).SingleLine().Grow(1)
