@@ -872,7 +872,20 @@ func (a *desktopApp) missingRequiredPermissions() bool {
 // permissionsRequiredMissing is the pure rule behind missingRequiredPermissions, kept
 // separable so the launch-time guide decision stays unit-testable without a bridge.
 func permissionsRequiredMissing(status host.PermissionStatus) bool {
-	return !status.Accessibility || !status.InputMonitoring
+	if !status.Accessibility || !status.InputMonitoring {
+		return true
+	}
+	return screenRecordingRequiredMissing(status)
+}
+
+func screenRecordingRequiredMissing(status host.PermissionStatus) bool {
+	// Current macOS bridges publish an explicit Screen Recording state. Keep
+	// older bridge snapshots compatible when that detail is absent, while never
+	// treating an explicit denied/unknown state as granted.
+	if state, ok := status.Details["screenRecording"]; ok && strings.TrimSpace(state) != "" {
+		return !strings.EqualFold(strings.TrimSpace(state), "granted")
+	}
+	return false
 }
 
 // closeHides is the close handler of a window that only hides: Clavis lives
@@ -3013,7 +3026,9 @@ func formatPermissionsMenuLabel(status host.PermissionStatus, err error, caps ho
 		return i18n.T("tray.permissions_standard")
 	}
 	if status.Accessibility && status.InputMonitoring {
-		return i18n.T("tray.permissions_all")
+		if !screenRecordingRequiredMissing(status) {
+			return i18n.T("tray.permissions_all")
+		}
 	}
 	var missing []string
 	if caps.Accessibility && !status.Accessibility {
@@ -3021,6 +3036,11 @@ func formatPermissionsMenuLabel(status host.PermissionStatus, err error, caps ho
 	}
 	if caps.InputMonitoring && !status.InputMonitoring {
 		missing = append(missing, i18n.T("settings.perm.input_monitoring"))
+	}
+	if screenRecordingRequiredMissing(status) {
+		if state, ok := status.Details["screenRecording"]; ok && strings.TrimSpace(state) != "" {
+			missing = append(missing, i18n.T("settings.perm.screen_recording"))
+		}
 	}
 	if len(missing) == 0 {
 		return i18n.T("tray.permissions_granted")

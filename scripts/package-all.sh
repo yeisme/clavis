@@ -64,6 +64,9 @@ PY
 SIGN_ARGS=()
 if [[ -n "${CLAVIS_SIGN_IDENTITY:-}" ]]; then
   SIGN_ARGS=(-sign "${CLAVIS_SIGN_IDENTITY}")
+else
+  # Use an explicit ad-hoc signature when no local Developer ID is available.
+  SIGN_ARGS=(-sign "-")
 fi
 
 echo "==> Building darwin/arm64, windows/amd64, windows/arm64, linux/amd64 (via MYGO_LDFLAGS)..."

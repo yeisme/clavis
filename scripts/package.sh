@@ -58,6 +58,11 @@ rm -rf "$APP" "$CLI_BIN" "$DMG" "$ZIP" "$APP.sha256" "$CLI_BIN.sha256" "$DMG.sha
 SIGN_ARGS=()
 if [[ -n "${CLAVIS_SIGN_IDENTITY:-}" ]]; then
   SIGN_ARGS=(-sign "${CLAVIS_SIGN_IDENTITY}")
+else
+  # A local checkout may have no Developer ID identity. MyGo's explicit
+  # ad-hoc marker keeps package verification useful without changing the
+  # tracked manifest or pretending a distribution certificate exists.
+  SIGN_ARGS=(-sign "-")
 fi
 
 echo "==> version: $VERSION"
