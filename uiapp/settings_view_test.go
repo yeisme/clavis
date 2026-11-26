@@ -275,6 +275,7 @@ func TestSettingsIMEConfigCachesSourcesAsyncAndRefreshes(t *testing.T) {
 		ConfigStore: config.NewConfigStore(t.TempDir()),
 		Bridge:      br,
 	})
+	t.Cleanup(ctrl.Close)
 	tt := ui.NewTester(func(c *ui.Context) {
 		ctrl.renderIMEConfig(c, ui.LightTheme(), ctrl.Config())
 	}, 520, 480)

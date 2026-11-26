@@ -13,8 +13,8 @@ import (
 // that sound, and a word with no reading can never be typed at all.
 func TestAddUserWordDraftRejectsUnusableInput(t *testing.T) {
 	cases := []struct {
-		name  string
-		word  string
+		name    string
+		word    string
 		wantErr bool
 	}{
 		{"single character is refused", "是", true},
@@ -24,6 +24,7 @@ func TestAddUserWordDraftRejectsUnusableInput(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctrl := NewAppController(Options{ConfigStore: config.NewConfigStore(t.TempDir())})
+			t.Cleanup(ctrl.Close)
 			st := ctrl.settingsEditor()
 			st.myWordDraft = tc.word
 			st.myWordError = ""

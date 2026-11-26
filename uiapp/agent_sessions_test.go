@@ -390,7 +390,10 @@ func TestRefreshAgentSessionsUsesCodexSQLiteReader(t *testing.T) {
 	defer restoreDB()
 
 	ctrl, _, _, _ := newTestController(t, nil)
-	waitUntil(t, 3*time.Second, func() bool { return !ctrl.agentRefreshing() }, "initial agent refresh settled")
+	waitUntil(t, 3*time.Second, func() bool {
+		res := ctrl.agentRecordedOperationResult()
+		return !ctrl.agentRefreshing() && res.State != "" && res.State != host.StateRefreshing
+	}, "initial agent refresh settled")
 
 	ctrl.refreshAgentSessions()
 	sessions, _ := ctrl.cachedAgentData()

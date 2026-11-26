@@ -615,6 +615,7 @@ func TestSettingsCenter_ClipboardMediaControlsPersist(t *testing.T) {
 		t.Fatalf("restarted LoadOrInitialize: %v", err)
 	}
 	restartedCtrl := NewAppController(Options{ConfigStore: restartedStore})
+	t.Cleanup(restartedCtrl.Close)
 	restartedCtrl.setSettingsSection(settingsSectionClipboard)
 	tt2 := ui.NewTester(restartedCtrl.SettingsView, 960, 1200)
 	tt2.Frame()

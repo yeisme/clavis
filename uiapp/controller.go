@@ -288,6 +288,7 @@ type AppController struct {
 	workflowRunID       uint64
 	workflowTargetGen   uint64
 	closed              bool
+	backgroundWG        sync.WaitGroup
 
 	// Clipboard paste operations are serialized and invalidated when the foreground
 	// target changes. Clipboard writes happen before the asynchronous platform paste;
@@ -513,9 +514,26 @@ func NewAppController(opts Options) *AppController {
 	c.AIClient.UsageRecorder = c.aiUsageRecorder
 
 	c.refreshAPIKeySource()
-	go c.refreshAgentSessions()
-	go c.runClipboardWorker()
+	c.startBackground(c.refreshAgentSessions)
+	c.startBackground(c.runClipboardWorker)
 	return c
+}
+
+// startBackground owns a controller-scoped goroutine so Close can wait for it
+// after cancellation. Test controllers and short-lived UI surfaces otherwise
+// leave agent refresh work running into the next test.
+func (c *AppController) startBackground(fn func()) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.backgroundWG.Add(1)
+	c.mu.Unlock()
+	go func() {
+		defer c.backgroundWG.Done()
+		fn()
+	}()
 }
 
 func defaultConfigDir() string {
@@ -621,6 +639,7 @@ func (c *AppController) Close() {
 	} else {
 		c.clipMu.Unlock()
 	}
+	c.backgroundWG.Wait()
 }
 
 // Start starts the host bridge (if configured), syncs installed applications, and refreshes initial permissions.
@@ -632,7 +651,7 @@ func (c *AppController) Start(ctx context.Context) error {
 	// main thread so startup stays responsive. SyncInstalledApps itself remains synchronous
 	// whenever callers invoke it directly (tests rely on that).
 	if len(c.State().InstalledApps) == 0 && c.AppProvider != nil {
-		go c.SyncInstalledApps(ctx)
+		c.startBackground(func() { c.SyncInstalledApps(ctx) })
 	}
 	if c.Bridge == nil {
 		return nil

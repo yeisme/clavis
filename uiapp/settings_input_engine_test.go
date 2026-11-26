@@ -296,6 +296,7 @@ func TestInputEngineUserBlocklistViewerAndEditor(t *testing.T) {
 			ConfigStore:    config.NewConfigStore(t.TempDir()),
 			ClipboardStore: sqlStore,
 		})
+		t.Cleanup(ctrl.Close)
 		tt := ui.NewTester(func(c *ui.Context) {
 			ctrl.renderUserBlocklistCard(c, ui.LightTheme())
 		}, 520, 320)
