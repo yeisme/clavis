@@ -364,7 +364,7 @@ func settingsSectionKeywords(key string) string {
 	case "permissions":
 		return "permissions diagnostics accessibility input_monitoring screen_recording secure_input monitor recovery hook validation health 权限 诊断 辅助功能 输入监控 录屏 屏幕录制 安全输入 校验 健康"
 	case "configs":
-		return "configs config files toml directory folder open main leader snippets glossary ime_rules prompts components workflows quickjump identities 配置文件 目录 文件夹 打开 书签 快跳"
+		return "configs config files toml directory folder open main leader snippets glossary ime_rules prompts components workflows quickjump 配置文件 目录 文件夹 打开 书签 快跳"
 	case "security":
 		return "security vault password secret secretref keychain ttl user-only audit metadata 1password bitwarden 安全 密码 保险库 密钥 引用 审计 元数据"
 	case "about":
@@ -975,8 +975,6 @@ func configFileDescription(kind config.ConfigFileKind) string {
 		return i18n.T("settings.configs.desc.workflows")
 	case config.FileQuickJump:
 		return pickLang(i18n.IsChinese(), "统一快跳书签（URL、目录与脚本）", "Unified Quick Jump bookmarks (URLs, paths, and scripts)")
-	case config.FileIdentities:
-		return i18n.T("settings.configs.desc.identities")
 	default:
 		return ""
 	}

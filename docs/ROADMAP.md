@@ -1,6 +1,6 @@
 # Clavis 推进路线（Single Source of Truth）
 
-> **权威基线**：`main` `3166819` + Wave 4 收口（2026-11-25）
+> **权威基线**：`clv/p5-foundation` `ca1460e`（2026-11-26）
 >
 > **状态口径**：本文件是 Clavis 全仓唯一的推进路线与阶段状态真源。历史规划与专项设计见 §5 文档索引；任何旧文档与本文件冲突时，以本文件与当前代码为准。
 
@@ -8,13 +8,13 @@
 
 ## 0. 一句话结论与 1.x 完成口径
 
-Clavis 的核心功能面（Launcher / 第二输入法 / 媒体剪贴板 / Security Vault / 区域截图标注 / 多协议 AI & Vision OCR / Herdr Agent 控制面 / 多语言模板库 / 多设备密文同步）已全部合入 `main`。**P0（安全与正确性止血）**、**P1（核心引擎、接线与 120Hz 性能收口）**、**P2（架构减债、i18n 守卫、守护生命周期与文档真源）** 与 **P3（统一 SQLite Schema 迁移、Bigram/学习合并、T5 模板平台与多设备密文同步）** 均已完成验收合入；当前处于 **P4（Windows Parity 收口、GitHub Actions CI/可复现打包与可选扩展）**，其中代码与自动化门禁逐步合入，**Windows 真机硬件签收**与 **macOS 交互式 A1–A16 GUI 手测矩阵**待机主在本地桌面会话中完成最终签收。
+Clavis 1.0 的范围是 **macOS 自用稳定版**。承诺面包含 Launcher、剪贴板、Security Vault、QuickJump、截图标注、已配置 profile 的 AI/OCR，以及带安全降级的 Herdr 控制面。输入法是 opt-in second-IME。当前仍受 race、真实权限和 macOS A1–A16 交互签收阻断，不能写成代码已达成或全链路已验收。Windows parity、用户同步闭环、P5 元数据层、Magpie 专页、ACP、独立 Assets Hub 和公开分发链路不属于 1.0 承诺。详见 [`docs/design/scope-1.0.md`](design/scope-1.0.md)。
 
 | 里程碑 | 状态 | 目标定义 | 验收门槛 |
 | --- | --- | --- | --- |
-| **1.0 自用稳定版** | ✅ 代码达成（⏳ 待 macOS A1–A16 交互签收） | macOS 日常主力启动器 + 第二输入法 + 截图/OCR/AI/Vault/Herdr 全链路可用，无已知安全/竞态/掉帧缺陷 | `CLV-P0` + `CLV-P1` + `CLV-P2` 全绿，单测与 `-race` 零回归，机主完成 A1–A16 GUI 实测 |
-| **1.1 跨设备与模板完善** | ✅ 已合入 `main` | 统一 SQLite 迁移框架、`MergeLearning` 合并、多语言模板库 UI、共享目录密文同步可用 | `CLV-P3` 全绿 + 双目录/双设备密文同步端到端验证 |
-| **1.2 工程与双平台收口** | 🔄 进行中（⏳ 待 Windows 真机签收） | Windows 桥接测试与真机校验闭环、GitHub Actions CI 与可复现 `ldflags` 打包落地 | `CLV-P4` 核心批次绿 + 三平台 `go vet`/CI & 打包产物校验 + Windows 实机手测签收 |
+| **1.0 自用稳定版** | 🔴 范围已冻结，验收阻断 | macOS 日常主力启动器、剪贴板、Vault、QuickJump、截图/OCR/AI 基础流和安全降级的 Herdr 控制面 | race 连续通过、权限引导完成、A1–A16 GUI 实测、真实 provider smoke、签名包安装验收 |
+| **1.1 跨设备与模板完善** | ⏳ 上线后补 | 用户同步初始化/配对/恢复码/冲突 UI、模板 catalog 和跨设备 E2E | 双目录/双设备端到端验证，Settings 不再只是只读状态 |
+| **1.2 工程与双平台收口** | ⏳ 延后 | Windows 真机 parity、跨平台硬件签收、可复现签名分发 | Windows 实机手测签收和平台包安装验收 |
 
 ---
 
@@ -25,7 +25,7 @@ Clavis 的核心功能面（Launcher / 第二输入法 / 媒体剪贴板 / Secur
 | 编号 | 决策内容 | 落地约束 |
 | --- | --- | --- |
 | **D1** | **多设备同步采用「共享目录密文同步」优先** | 基于 iCloud Drive / Dropbox / Syncthing 等用户自有同步盘读写加密信封（零服务端运维），密码学升级为 v2 双向可解模型后再视需要扩展 LAN/HTTP 传输；禁止明文落盘敏感数据。 |
-| **D2** | **彻底移除 IMK 死残留；冻结 `plugins` / `skills`；MCP 延至 Phase 4** | 删除 `cmd/clavis-imk/` 与零调用的 `internal/bridge/imk_ipc.go`（`imk_install.go` 仅保留至 `selfcheck.go` 解耦完成）；Clavis 坚持「第二输入法（Inline Hook）」定位；`internal/plugins/` 与 `internal/skills/` 进入冻结态不再扩新功能；MCP stdio 集成放入 `CLV-P4` 可选范围。 |
+| **D2** | **彻底移除 IMK 死残留；冻结 `plugins` / `skills`；MCP 可选且 ACP 不做** | 删除 `cmd/clavis-imk/` 与零调用的 `internal/bridge/imk_ipc.go`（`imk_install.go` 仅保留至 `selfcheck.go` 解耦完成）；Clavis 坚持「第二输入法（Inline Hook）」定位；`internal/plugins/` 与 `internal/skills/` 进入冻结态；MCP stdio 只保留为冻结的可选内部包，ACP 不新增。 |
 | **D3** | **1.x 坚持自用优先 + CI 与可靠打包** | 聚焦个人多设备效率与工程稳定性（GitHub CI、`ldflags` 版本注入、本地可复现打包），不引入 2.0 面向外部大众分发的签名公证/自动更新器/模板发布市场等纯维护负担。 |
 | **D4** | **Security Vault 密文隔离存储，与 `ai-keys.toml` 完全解耦** | Vault 密钥正文独立加密落盘至 `vault_secrets.enc`（AES-256-GCM，32 字节主密钥优先 OS Keychain、回退 `0600` `vault.key`），严禁混入明文 `ai-keys.toml`；Agent 与诊断路径永远只能观测元数据 `SecretRef` 与 `CopyReceipt`。 |
 
@@ -73,7 +73,7 @@ Clavis 的核心功能面（Launcher / 第二输入法 / 媒体剪贴板 / Secur
 | --- | --- | --- | --- |
 | `CLV-P3-1` | ✅ Completed | `84ea939` (`bcf8c6e`) | 统一 SQLite Schema 迁移框架（单库独立版本号、迁移前自动备份、单库事务与未知版本 fail-closed）、Bigram 冷启动快照与可交换 `MergeLearning` 合并（原计划 P3-1 + P3-2 合并落地，参见 `docs/backend/schema-migration.md` 与 `docs/design/ime-dictionary-architecture.md`） |
 | `CLV-P3-2` | ✅ Completed | `f3d1bc3` (`a1c7291`) | Template Platform T5：解锁多语言模板契约、激活设置页模板库管理 UI（`uiapp/settings_templates.go`）与 Prompt Composer 完整接线（参见 `docs/design/template-platform.md`） |
-| `CLV-P3-3` | ✅ Completed | `3166819` (`027d280`) | 多设备密文同步（D1）：密码学 v2 双向可解信封与 ADK 轮换加固、共享目录密文传输后端 `DirTransport`、`clavis sync` CLI 子命令与桌面端同步状态接线（参见 `docs/design/multi-device.md`） |
+| `CLV-P3-3` | 🟡 基础层已合入，用户闭环未验收 | `3166819` (`027d280`) | 密码学 v2、ADK 轮换、共享目录 `DirTransport`、`clavis sync` CLI 与只读状态接线已存在；初始化、配对、恢复码和冲突 UI 尚未形成 1.0 可用闭环 |
 
 ---
 
@@ -83,7 +83,7 @@ Clavis 的核心功能面（Launcher / 第二输入法 / 媒体剪贴板 / Secur
 | --- | --- | --- |
 | `CLV-P4-1` | 🔄 In Progress（代码推进中；⏳ 待 Windows 真机签收） | Windows Parity 收口与桥接测试：补齐 `internal/bridge/*_windows_test.go`、`internal/capture` 区域框选、交叉编译门禁与诊断能力对账（参见 `docs/windows-parity-audit.md`）；**真实 Windows 硬件手测签收待机主完成** |
 | `CLV-P4-2` | ✅ Completed（Wave 4 `clv/p4-ci-packaging`） | GitHub Actions 跨平台 CI（`.github/workflows/ci.yml`：三平台 `go vet`、`go test -race`、Windows 测试交叉编译、`--smoke-check` / `--self-check` / `clavis sync plan`）、`version.go` `-ldflags -X` 注入与单测、`scripts/package.sh` / `package-all.sh` / `version.sh` / `device-beat.sh` / `device-beat.ps1` 加固（含多平台 `clavis-cli` 打包、Linux `.tar.gz` 与 `.sha256` 清单）（D3） |
-| `CLV-P4-3` | 🔄 In Progress（Wave 4 并行交付中） | 可选扩展：`NotificationStore`（只读 DSH/飞书游标通知，参见 `docs/backend/notification-store.md`）、本地模型 C1 路由（参见 `docs/design/local-model-architecture.md`）、MCP stdio 集成（D2） |
+| `CLV-P4-3` | 🔄 可选扩展，非 1.0 | `NotificationStore`、本地模型 C1 路由和 MCP stdio 继续保持隔离。Magpie 专页、ACP 和通用多步 Agent 编排不进入路线。 |
 
 #### 硬件与人工签收待办（Pending Owner Hardware Verification）
 
@@ -100,6 +100,8 @@ Clavis 的核心功能面（Launcher / 第二输入法 / 媒体剪贴板 / Secur
 - **`internal/plugins` 与 `internal/skills` 扩展**：代码保持编译通过与冻结状态（D2），不再新增宿主扩展面。
 - **2.0 外部商业分发链路**：苹果公证、自动更新器、模板发布市场、团队云账号与实时 CRDT 协同不在 1.x 路线内（D3）。
 - **通用多步 Agent 编排**：超过单步/受控提示的复杂编排交由 `herdr` 独立处理，Clavis 仅提供发现、预览与显式确认控制面。
+- **ACP、Magpie 专页和身份中心**：当前没有可验收的 ACP 实现，Magpie 只使用通用 profile，`identities.toml` 只保留兼容配置。它们不属于 1.0 产品入口。
+- **P5 统一标签/注释系统与独立 Assets Hub**：P5 的 schema、纯函数和测试继续保留，直到有 runtime consumer 前不作为已交付用户能力；Assets 通过 Omnibox、Manage 和 Settings 访问。
 
 ---
 
@@ -119,9 +121,10 @@ Clavis 的核心功能面（Launcher / 第二输入法 / 媒体剪贴板 / Secur
 - **AI 工作台、OCR/翻译与续写**：[`docs/design/ai-workbench-spec.md`](design/ai-workbench-spec.md)
 - **视觉语言与空间 3D 规范**：[`docs/design/visual-language.md`](design/visual-language.md)
 - **模板平台（Phase 3 已落地）**：[`docs/design/template-platform.md`](design/template-platform.md)
-- **多设备同步（Phase 3 结合 D1 已落地）**：[`docs/design/multi-device.md`](design/multi-device.md)
+- **多设备同步（Phase 3 基础层已合入，用户闭环待补）**：[`docs/design/multi-device.md`](design/multi-device.md)
 - **SQLite 迁移契约（Phase 3 已落地）**：[`docs/backend/schema-migration.md`](backend/schema-migration.md)
 - **Windows 能力对账（Phase 4）**：[`docs/windows-parity-audit.md`](windows-parity-audit.md)
+- **1.0 范围真相**：[`docs/design/scope-1.0.md`](design/scope-1.0.md)
 
 ### 已取代 / 历史归档文档（顶部已标注状态横幅）
 - [`docs/design/security-vault-plan.md`](design/security-vault-plan.md)（已实现并由 `CLV-P0-1` 升级为 `vault_secrets.enc` AES-256-GCM）
