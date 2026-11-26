@@ -213,6 +213,29 @@ func (c *AppController) resolveAPIKey(_ context.Context) (string, error) {
 	return secrets.ResolveProfileAPIKey(c.SecretStore, profile)
 }
 
+func formatAIError(err error, profile config.AIProfile) string {
+	code := ai.ErrorCode(err)
+	if code == ai.ErrorCodeMissingAPIKey {
+		envVar := strings.TrimSpace(profile.APIKeyEnvVar)
+		if envVar == "" {
+			envVar = secrets.DefaultEnvVarForProvider(profile.Provider)
+		}
+		if envVar == "" {
+			envVar = "API_KEY"
+		}
+		provider := strings.TrimSpace(profile.Provider)
+		if provider == "" {
+			provider = "AI"
+		}
+		return fmt.Sprintf("[%s] %s", code, i18n.Tf("prompts.ai_missing_key", provider, envVar))
+	}
+	message := ai.SafeErrorMessage(err)
+	if message == "" {
+		message = "AI request failed"
+	}
+	return fmt.Sprintf("[%s] %s", code, message)
+}
+
 func convertChatHistory(turns []engine.ChatTurn) []ai.ChatMessage {
 	if len(turns) == 0 {
 		return nil
@@ -499,21 +522,7 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
-			errMsg := err.Error()
-			if errors.Is(err, secrets.ErrSecretNotFound) {
-				envVar := strings.TrimSpace(profCopy.APIKeyEnvVar)
-				if envVar == "" {
-					envVar = secrets.DefaultEnvVarForProvider(profCopy.Provider)
-				}
-				if envVar == "" {
-					envVar = "API_KEY"
-				}
-				provName := strings.TrimSpace(profCopy.Provider)
-				if provName == "" {
-					provName = "AI"
-				}
-				errMsg = i18n.Tf("prompts.ai_missing_key", provName, envVar)
-			}
+			errMsg := formatAIError(err, profCopy)
 			c.Dispatch(engine.Event{
 				Type:  engine.EventAIFailed,
 				Error: errMsg,
@@ -602,7 +611,7 @@ func (c *AppController) TestAIConnectionForProfile(ctx context.Context, profileI
 		reply.WriteString(delta)
 	})
 	if err != nil {
-		c.setAITestResult(AITestError, err.Error())
+		c.setAITestResult(AITestError, formatAIError(err, profCopy))
 		return err
 	}
 

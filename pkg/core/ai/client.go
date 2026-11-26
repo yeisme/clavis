@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -55,13 +57,96 @@ type ClientError struct {
 	Kind       string
 	StatusCode int
 	Message    string
+	cause      error
 }
 
 func (e *ClientError) Error() string {
-	if e.StatusCode > 0 {
-		return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Message)
+	if e == nil {
+		return ""
 	}
-	return e.Message
+	message := sanitizeProviderText(e.Message, "")
+	if e.StatusCode > 0 {
+		return fmt.Sprintf("HTTP %d: %s", e.StatusCode, message)
+	}
+	return message
+}
+
+func (e *ClientError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+const (
+	ErrorCodeOK            = "ok"
+	ErrorCodeCancelled     = "cancelled"
+	ErrorCodeTimeout       = "timeout"
+	ErrorCodeTransport     = "transport_error"
+	ErrorCodeMissingAPIKey = "missing_api_key"
+)
+
+// ErrorCode returns the stable runtime classification used by provider smoke
+// checks and UI diagnostics. It never exposes the underlying error text.
+func ErrorCode(err error) string {
+	if err == nil {
+		return ErrorCodeOK
+	}
+	var clientErr *ClientError
+	if errors.As(err, &clientErr) && clientErr != nil && clientErr.Kind != "" {
+		return clientErr.Kind
+	}
+	if errors.Is(err, context.Canceled) {
+		return ErrorCodeCancelled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ErrorCodeTimeout
+	}
+	return ErrorCodeTransport
+}
+
+// SafeErrorMessage returns a bounded provider error message suitable for UI or
+// diagnostics. It strips known credential formats and never includes a raw
+// response body beyond the bounded, sanitized text retained by ClientError.
+func SafeErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return sanitizeProviderText(err.Error(), "")
+}
+
+var providerSecretRE = regexp.MustCompile(`(?i)(?:bearer\s+|sk-[a-z0-9_-]{8,}|sk_(?:live|test)_[a-z0-9_-]{8,}|gh[pous]_[a-z0-9_]{8,}|github_pat_[a-z0-9_]{8,}|xox[bp]-[a-z0-9_-]{8,}|(?:api[_-]?key|secret[_-]?key|access[_-]?token|password|passwd|token)\s*[=:]\s*)[^\s"']+`)
+var providerQuerySecretRE = regexp.MustCompile(`(?i)([?&](?:api[_-]?key|key|token|access[_-]?token|authorization)=)[^&\s]+`)
+
+func sanitizeProviderText(message, secret string) string {
+	message = strings.TrimSpace(message)
+	if secret = strings.TrimSpace(secret); len(secret) >= 4 {
+		message = strings.ReplaceAll(message, secret, "[redacted]")
+	}
+	message = providerSecretRE.ReplaceAllString(message, "[redacted]")
+	message = providerQuerySecretRE.ReplaceAllString(message, `${1}[redacted]`)
+	runes := []rune(message)
+	if len(runes) > 512 {
+		message = string(runes[:512]) + "…"
+	}
+	return message
+}
+
+func transportError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return &ClientError{Kind: ErrorCodeTimeout, Message: "AI request timed out", cause: err}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return &ClientError{Kind: ErrorCodeTimeout, Message: "AI request timed out", cause: err}
+	}
+	return &ClientError{Kind: ErrorCodeTransport, Message: "AI provider request failed", cause: err}
 }
 
 // OpenAICompatibleClient streams completions from OpenAI-compatible, Anthropic, or Gemini endpoints.
@@ -205,7 +290,7 @@ func (c *OpenAICompatibleClient) BuildRequest(ctx context.Context, req Completio
 			envHint = "DEEPSEEK_API_KEY"
 		}
 		return nil, &ClientError{
-			Kind:    "missing_api_key",
+			Kind:    ErrorCodeMissingAPIKey,
 			Message: fmt.Sprintf("Missing API key for %s. Save one in Keychain or set %s.", profile.Provider, envHint),
 		}
 	}
@@ -463,9 +548,12 @@ func (c *OpenAICompatibleClient) StreamCompletionWithUsage(
 	req CompletionRequest,
 	onDelta func(delta string),
 ) (ProviderUsage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	startedAt := time.Now().UTC()
 	if err := ctx.Err(); err != nil {
-		return ProviderUsage{}, err
+		return ProviderUsage{}, transportError(ctx, err)
 	}
 	profile := c.resolveProfile(req)
 	keylessOK := IsKeylessAllowed(profile.Provider, profile.BaseURL)
@@ -473,17 +561,25 @@ func (c *OpenAICompatibleClient) StreamCompletionWithUsage(
 	var apiKey string
 	if c.APIKeyProvider == nil {
 		if !keylessOK {
-			return ProviderUsage{}, &ClientError{Kind: "missing_api_key", Message: "Missing API key provider"}
+			return ProviderUsage{}, &ClientError{Kind: ErrorCodeMissingAPIKey, Message: "Missing API key provider"}
 		}
 	} else {
 		key, err := c.APIKeyProvider(ctx)
-		if err != nil && !keylessOK {
-			return ProviderUsage{}, err
+		if err != nil {
+			if keylessOK {
+				key = ""
+			} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return ProviderUsage{}, transportError(ctx, err)
+			} else {
+				// Do not retain or unwrap the key-store error. Some keychain
+				// backends include account material in their diagnostic text.
+				return ProviderUsage{}, &ClientError{Kind: ErrorCodeMissingAPIKey, Message: "Missing API key"}
+			}
 		}
 		apiKey = key
 	}
 	if err := ctx.Err(); err != nil {
-		return ProviderUsage{}, err
+		return ProviderUsage{}, transportError(ctx, err)
 	}
 
 	httpReq, err := c.BuildRequest(ctx, req, apiKey)
@@ -498,13 +594,13 @@ func (c *OpenAICompatibleClient) StreamCompletionWithUsage(
 
 	resp, err := doer.Do(httpReq)
 	if err != nil {
-		return ProviderUsage{}, err
+		return ProviderUsage{}, transportError(ctx, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 65536))
-		msg := extractHTTPErrorMessage(errBytes, resp.StatusCode)
+		msg := sanitizeProviderText(extractHTTPErrorMessage(errBytes, resp.StatusCode), apiKey)
 		return ProviderUsage{}, &ClientError{
 			Kind:       "http_error",
 			StatusCode: resp.StatusCode,
@@ -519,7 +615,7 @@ func (c *OpenAICompatibleClient) StreamCompletionWithUsage(
 
 	for !didFinish {
 		if err := ctx.Err(); err != nil {
-			return usage, err
+			return usage, transportError(ctx, err)
 		}
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
@@ -535,7 +631,7 @@ func (c *OpenAICompatibleClient) StreamCompletionWithUsage(
 				case SSEUsage:
 					usage = ev.Usage
 				case SSEError:
-					return usage, &ClientError{Kind: "api_error", Message: ev.Text}
+					return usage, &ClientError{Kind: "api_error", Message: sanitizeProviderText(ev.Text, apiKey)}
 				}
 			}
 		}
@@ -543,7 +639,7 @@ func (c *OpenAICompatibleClient) StreamCompletionWithUsage(
 			if errors.Is(readErr, io.EOF) {
 				break
 			}
-			return usage, readErr
+			return usage, transportError(ctx, readErr)
 		}
 	}
 
@@ -559,13 +655,13 @@ func (c *OpenAICompatibleClient) StreamCompletionWithUsage(
 			case SSEUsage:
 				usage = ev.Usage
 			case SSEError:
-				return usage, &ClientError{Kind: "api_error", Message: ev.Text}
+				return usage, &ClientError{Kind: "api_error", Message: sanitizeProviderText(ev.Text, apiKey)}
 			}
 		}
 	}
 	if !didFinish {
 		if err := ctx.Err(); err != nil {
-			return usage, err
+			return usage, transportError(ctx, err)
 		}
 		// A clean transport EOF is not a completed streaming response. Treating
 		// truncated output as success lets callers persist and automate against
