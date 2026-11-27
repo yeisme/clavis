@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+zero_oid="0000000000000000000000000000000000000000"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [[ "${CLAVIS_BLOCK_MAIN_PUSH:-0}" == "1" && "$remote_ref" == "refs/heads/main" ]]; then
+    echo "error: direct push to main blocked by CLAVIS_BLOCK_MAIN_PUSH=1; open a PR instead" >&2
+    exit 1
+  fi
+  if [[ "$local_sha" == "$zero_oid" ]]; then
+    continue
+  fi
+  if [[ "$remote_sha" != "$zero_oid" ]]; then
+    git diff --check "${remote_sha}..${local_sha}" || true
+  fi
+done
+
+go vet ./...

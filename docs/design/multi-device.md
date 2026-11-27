@@ -1,5 +1,7 @@
 # 设计：多设备使用（跨设备同步）
 
+> **Status: Historical / Alternative Transport Reference (as of 2026-11-27)** — [`docs/ROADMAP.md`](../ROADMAP.md) 决策 **D1** 已锁定 **1.1 同步主线优先采用「共享目录密文同步（`DirTransport`，iCloud Drive / Dropbox / Syncthing）」**并补齐 Settings 初始化/配对/恢复码/冲突 GUI；本文档中的“局域网直连自签 TLS + UDP beacon”方案仅保留作后续 1.1+ 扩展传输参考，密码学 v2（ADK + 恢复码封装 + 设备密钥持久化）分析仍继续有效。
+
 Status: `observed` 现状 + `inferred` 设计。基线 HEAD `21ac2db`。事实以本仓代码为准，逐条给 `path:line`。
 
 ## 0. 结论

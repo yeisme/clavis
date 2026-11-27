@@ -1,7 +1,7 @@
 # Clavis 上线准备度深度 Review
 
 日期：2026-11-25
-仓库：`/Users/yeshugen/workspace/clavis`
+仓库：`<clavis checkout>`
 分支：`clv/p5-foundation`
 目标口径：macOS 自用稳定版 1.0。本文不把 Windows、公开分发、云账号和插件生态混进 1.0 承诺。
 

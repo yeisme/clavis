@@ -92,7 +92,7 @@
 ## 5. 怎么验（命令与本次真实输出）
 
 ```sh
-cd /Users/yeshugen/workspace/clavis && export PATH=/opt/homebrew/bin:$PATH && go test ./...
+cd <clavis checkout> && export PATH=/opt/homebrew/bin:$PATH && go test ./...
 ```
 本次输出：退出码 0，40 个包全部 `ok`，末尾为
 ```

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MSG_FILE="${1:?commit message file required}"
+msg="$(cat "$MSG_FILE")"
+subject="$(printf '%s\n' "$msg" | head -n 1 | tr -d '\r')"
+
+if [[ -z "${subject//[[:space:]]/}" || "$subject" == \#* ]]; then
+  echo "error: commit subject cannot be empty" >&2
+  exit 1
+fi
+
+task_lines="$(printf '%s\n' "$msg" | grep -E '^Task:[[:space:]]*' || true)"
+task_count="$(printf '%s\n' "$task_lines" | grep -c '^Task:' || true)"
+
+if (( task_count > 1 )); then
+  echo "error: duplicate Task: trailers in commit message" >&2
+  exit 1
+fi
+
+if (( task_count == 1 )); then
+  task_id="$(printf '%s\n' "$task_lines" | sed -E 's/^Task:[[:space:]]*//')"
+  if [[ ! "$task_id" =~ ^T-clavis-[A-Za-z0-9._-]+$ ]]; then
+    echo "error: invalid Task trailer '${task_id}' (expected Task: T-clavis-...)" >&2
+    exit 1
+  fi
+elif [[ "${CLAVIS_REQUIRE_TASK_TRAILER:-0}" == "1" ]]; then
+  echo "error: CLAVIS_REQUIRE_TASK_TRAILER=1 requires a 'Task: T-clavis-...' trailer" >&2
+  exit 1
+fi

@@ -1,0 +1,36 @@
+name: Nightly Stress
+
+on:
+  schedule:
+    - cron: "0 19 * * *" # 03:00 CST daily
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-stress-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-race-stress:
+    name: Nightly macOS Race & Shuffle Stress
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Full repository race suite
+        run: go test -race -count=1 ./...
+
+      - name: Shuffle stress on uiapp and watcher (x3)
+        run: |
+          for i in 1 2 3; do
+            echo "=== Shuffle iteration $i ==="
+            go test -race -shuffle=on -count=1 -v ./internal/watcher
+            go test -race -shuffle=on -count=1 ./uiapp
+          done

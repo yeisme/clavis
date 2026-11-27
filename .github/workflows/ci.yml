@@ -11,12 +11,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  vet-and-cross-compile:
-    name: Vet, Scripts & Cross-Compile
+  policy-and-cross-compile:
+    name: clavis / policy & cross-build-vet
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -24,25 +26,24 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Go vet (host, Windows, Linux, macOS)
-        run: |
-          go vet ./...
-          GOOS=windows GOARCH=amd64 go vet ./...
-          GOOS=linux GOARCH=amd64 go vet ./...
-          GOOS=darwin GOARCH=arm64 go vet ./...
-
-      - name: Cross-compile Windows bridge & capture test binaries
-        run: |
-          GOOS=windows GOARCH=amd64 go test -c -o /dev/null ./internal/bridge
-          GOOS=windows GOARCH=amd64 go test -c -o /dev/null ./internal/capture
-
       - name: Check whitespace and conflict markers
-        run: git diff --check
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^..HEAD
+          else
+            git diff --check
+          fi
 
-      - name: Validate shell script syntax
-        run: bash -n scripts/*.sh
+      - name: Validate shell scripts and git hooks syntax
+        run: |
+          find scripts -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+          if [ -d .githooks ]; then
+            find .githooks -type f -print0 | xargs -0 -n1 bash -n
+          fi
 
-      - name: Validate mygo.json manifest
+      - name: Validate mygo.json manifest and macOS usage descriptions
         run: |
           python3 -m json.tool mygo.json > /dev/null
           python3 - <<'PY'
@@ -50,11 +51,36 @@ jobs:
           data = json.load(open("mygo.json", encoding="utf-8"))
           for key in ("name", "slug", "identifier", "version"):
               assert isinstance(data.get(key), str) and data[key].strip(), f"missing or invalid mygo.json key: {key}"
+          plist = data.get("macos", {}).get("infoPlist", {})
+          for key in (
+              "NSAccessibilityUsageDescription",
+              "NSInputMonitoringUsageDescription",
+              "NSAppleEventsUsageDescription",
+              "NSScreenCaptureUsageDescription",
+          ):
+              assert isinstance(plist.get(key), str) and plist[key].strip(), f"missing macOS usage description: {key}"
           PY
 
-  test-macos:
-    name: Test (macOS)
+      - name: Cross-compile and vet (Linux, Windows, macOS)
+        run: |
+          go vet ./...
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go vet ./...
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build ./...
+          CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go vet ./...
+          CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build ./...
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go vet ./...
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ./...
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go vet ./...
+
+      - name: Cross-compile Windows bridge & capture test binaries
+        run: |
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go test -c -o /dev/null ./internal/bridge
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go test -c -o /dev/null ./internal/capture
+
+  macos-test:
+    name: clavis / macos-test
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -65,30 +91,33 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # plutil -lint only accepts property lists; mygo.json is plain JSON, so that command reported
-      # "Unexpected character { at line 1" and never passed. Use the same JSON check as the Linux job.
+      - name: Record runner environment
+        run: |
+          go version
+          uname -a
+          echo "SHA=$(git rev-parse HEAD)"
+
       - name: Validate mygo.json manifest
         run: python3 -m json.tool mygo.json > /dev/null
 
       - name: Run full test suite
         run: go test -count=1 ./...
 
-      - name: Run race detector on core & daemon packages
-        run: >-
-          go test -count=1 -race
-          ./internal/secrets/...
-          ./internal/storage/...
-          ./internal/sync/...
-          ./internal/daemon/...
-          ./pkg/core/...
-          ./cmd/clavis/...
-          .
-
-      - name: Smoke-check, self-check & sync plan
+      - name: Native build & vet
         run: |
-          go run . --smoke-check
-          go run . --self-check
-          go run ./cmd/clavis sync plan
+          go build ./...
+          go vet ./...
+
+      - name: Smoke-check, self-check & sync plan (isolated HOME)
+        run: |
+          ISOLATED_HOME="$(mktemp -d)"
+          GOPATH_VAL="$(go env GOPATH)"
+          GOMODCACHE_VAL="$(go env GOMODCACHE)"
+          GOCACHE_VAL="$(go env GOCACHE)"
+          trap 'rm -rf "$ISOLATED_HOME"' EXIT
+          HOME="$ISOLATED_HOME" GOPATH="$GOPATH_VAL" GOMODCACHE="$GOMODCACHE_VAL" GOCACHE="$GOCACHE_VAL" go run . --smoke-check
+          HOME="$ISOLATED_HOME" GOPATH="$GOPATH_VAL" GOMODCACHE="$GOMODCACHE_VAL" GOCACHE="$GOCACHE_VAL" go run . --self-check
+          HOME="$ISOLATED_HOME" GOPATH="$GOPATH_VAL" GOMODCACHE="$GOMODCACHE_VAL" GOCACHE="$GOCACHE_VAL" go run ./cmd/clavis sync plan
 
       - name: Verify -ldflags -X version injection
         run: |
@@ -97,6 +126,33 @@ jobs:
           echo "$ver_out"
           [[ "$ver_out" == *"0.2.0-ci"* ]]
           rm -f /tmp/clavis-ci-ver
+
+  macos-race:
+    name: clavis / macos-race
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run race detector across uiapp, watcher, core & daemon
+        run: |
+          go test -count=1 -race \
+            ./uiapp \
+            ./internal/watcher \
+            ./internal/secrets/... \
+            ./internal/storage/... \
+            ./internal/sync/... \
+            ./internal/daemon/... \
+            ./pkg/core/... \
+            ./cmd/clavis/... \
+            .
 
   test-windows:
     name: Test (Windows)
@@ -158,3 +214,26 @@ jobs:
           ./internal/sync/...
           ./internal/daemon/...
           ./cmd/clavis/...
+
+  required-summary:
+    name: clavis / required-checks
+    runs-on: ubuntu-latest
+    needs: [policy-and-cross-compile, macos-test, macos-race, test-linux]
+    if: always()
+    steps:
+      - name: Assert all required checks succeeded
+        run: |
+          echo "policy-and-cross-compile=${{ needs.policy-and-cross-compile.result }}"
+          echo "macos-test=${{ needs.macos-test.result }}"
+          echo "macos-race=${{ needs.macos-race.result }}"
+          echo "test-linux=${{ needs.test-linux.result }}"
+          for res in \
+            "${{ needs.policy-and-cross-compile.result }}" \
+            "${{ needs.macos-test.result }}" \
+            "${{ needs.macos-race.result }}" \
+            "${{ needs.test-linux.result }}"; do
+            if [ "$res" != "success" ]; then
+              echo "Required check did not succeed: $res"
+              exit 1
+            fi
+          done
