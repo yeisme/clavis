@@ -520,6 +520,21 @@ func TestCapsuleViewPhaseHiddenDoesNotTriggerOnRepaintLoop(t *testing.T) {
 		t.Fatalf("expected PhaseHidden after dismiss, got %s", ctrl.State().Phase)
 	}
 
+	// Dismiss itself repaints (it clears the hub surface), and that repaint may land after this point on a loaded
+	// machine. Zero the counter only once the repaints have gone quiet, otherwise the assertion below measures the
+	// dismiss instead of the PhaseHidden render it is meant to measure — which is what made this test pass locally
+	// and fail on CI.
+	waitUntil(t, 3*time.Second, func() bool {
+		mu.Lock()
+		before := repaints
+		mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+		mu.Lock()
+		after := repaints
+		mu.Unlock()
+		return before == after
+	}, "repaints after dismiss should settle before the counter is reset")
+
 	mu.Lock()
 	repaints = 0
 	mu.Unlock()
