@@ -117,3 +117,32 @@ func TestCLIExecutorDryRunAndCancel(t *testing.T) {
 		t.Fatalf("expected cancellation: %+v", got)
 	}
 }
+
+// TestResolveTrustedAcceptsMergedUsrLayout pins the Linux-only behaviour that kept CI red while the rest of
+// this file passed on macOS: Debian/Ubuntu make /bin a symlink to /usr/bin, so EvalSymlinks("/bin/echo")
+// returns "/usr/bin/echo". A strict real==clean rule rejects every system binary there.
+//
+// Skipped where /bin is a real directory (macOS, FreeBSD): there is nothing merged to accept, and asserting
+// the merged behaviour on those platforms would be asserting a fact about the host, not about this code.
+func TestResolveTrustedAcceptsMergedUsrLayout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permissions test")
+	}
+	real, err := filepath.EvalSymlinks("/bin/echo")
+	if err != nil {
+		t.Skip("/bin/echo not present")
+	}
+	if real == "/bin/echo" {
+		t.Skip("/bin is not a merged-usr symlink on this host")
+	}
+	for _, command := range []string{"/bin/echo", real} {
+		p := config.CLITrustedProfile{ID: "safe", Enabled: true, Commands: []string{command}}
+		got, err := actions.ResolveTrusted(p, command)
+		if err != nil {
+			t.Fatalf("ResolveTrusted(%q) = error %v, want a resolved path (merged-usr alias must be accepted)", command, err)
+		}
+		if got == "" {
+			t.Fatalf("ResolveTrusted(%q) returned an empty path", command)
+		}
+	}
+}

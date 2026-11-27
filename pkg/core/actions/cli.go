@@ -91,10 +91,32 @@ func ResolveTrusted(profile config.CLITrustedProfile, command string) (string, e
 		if err != nil || resolved != clean {
 			continue
 		}
-		// Reject symlink escapes: the configured path must resolve to itself.
+		// Reject symlink escapes, but accept a merged-/usr layout. Debian and Ubuntu make /bin a symlink to
+		// /usr/bin, so /bin/echo really is /usr/bin/echo there: a strict `real == clean` test rejects every
+		// system binary on Linux while passing on macOS, where /bin is a real directory. That difference is
+		// what kept the Linux CI red while the same tests were green locally.
+		//
+		// What still holds: the resolved path must name the SAME file the configured path names (so a profile
+		// cannot point at one binary and execute another), and the resolved path must pass
+		// secureExecutablePath. That second check is what actually rejects hostile locations: a link into
+		// /tmp resolves to /tmp/..., whose 1777 mode fails `stat.Mode()&0022 == 0`. The defence lives in the
+		// directory permissions, not in the identity of the link, which is why relaxing `real == clean` does
+		// not open a hole.
 		real, err := filepath.EvalSymlinks(clean)
-		if err != nil || real != clean {
+		if err != nil {
 			continue
+		}
+		if real != clean {
+			target, statErr := os.Stat(real)
+			if statErr != nil || !os.SameFile(info, target) {
+				continue
+			}
+			if !secureExecutablePath(real, target) {
+				continue
+			}
+			if resolvedReal, lookErr := exec.LookPath(real); lookErr != nil || resolvedReal != real {
+				continue
+			}
 		}
 		return resolved, nil
 	}
