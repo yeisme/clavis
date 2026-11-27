@@ -24,7 +24,7 @@ func TestWorkflowFeedbackReportsFailureAndTimeout(t *testing.T) {
 	if err := f.ctrl.ConfigStore.SaveAll(cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
-	f.ctrl.StateMachine.SetConfig(cfg)
+	f.ctrl.SetConfig(cfg)
 	results := make(chan automation.ExecutionResult, 2)
 	f.ctrl.OnWorkflowResult = func(_ string, result automation.ExecutionResult, _ error) { results <- result }
 	if err := f.ctrl.ExecuteWorkflow("failure", engine.CapsuleContext{}); err != nil {

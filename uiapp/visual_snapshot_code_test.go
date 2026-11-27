@@ -273,7 +273,7 @@ func renderCodeSnapshots(t *testing.T, dir, tag, mode string, lang i18n.Language
 	if err := f.ctrl.ConfigStore.SaveSnippets(cfg.Snippets); err != nil {
 		t.Fatalf("SaveSnippets: %v", err)
 	}
-	f.ctrl.StateMachine.SetConfig(f.ctrl.ConfigStore.Current())
+	f.ctrl.SetConfig(f.ctrl.ConfigStore.Current())
 	f.ctrl.OpenOmnibox(config.TabSnippets, "gotest")
 	shootClip("47-code-snippet")
 

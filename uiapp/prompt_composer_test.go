@@ -39,7 +39,7 @@ func TestPromptTemplateOmniboxAndSlotComposerFlow(t *testing.T) {
 	if err := f.ctrl.ConfigStore.SavePrompts(cfg.Prompts); err != nil {
 		t.Fatalf("SavePrompts: %v", err)
 	}
-	f.ctrl.StateMachine.SetConfig(f.ctrl.ConfigStore.Current())
+	f.ctrl.SetConfig(f.ctrl.ConfigStore.Current())
 
 	openedCount := 0
 	closedCount := 0
@@ -205,7 +205,7 @@ func TestInlineOptimizeDraftStreamingAndInject(t *testing.T) {
 	}
 	f.ctrl.Glossary = engine.NewGlossaryEngineFromConfig(cfg.Glossary)
 	f.ctrl.AIClient.GlossaryEngine = f.ctrl.Glossary
-	f.ctrl.StateMachine.SetConfig(f.ctrl.ConfigStore.Current())
+	f.ctrl.SetConfig(f.ctrl.ConfigStore.Current())
 
 	f.ctrl.OpenOmnibox(config.TabActions, "//write tests for clavis prompt engine")
 	tt := f.omniboxTester(t)

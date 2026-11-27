@@ -132,7 +132,7 @@ func TestSelectionBarPayloadAndDisabled(t *testing.T) {
 	if err := c.ConfigStore.SaveMain(cfg.Main); err != nil {
 		t.Fatal(err)
 	}
-	c.StateMachine.SetConfig(cfg)
+	c.SetConfig(cfg)
 	got = SelectionBarPayload{}
 	c.showSelectionQuickBar()
 	if got.Text != "" {

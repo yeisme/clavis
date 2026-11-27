@@ -28,7 +28,7 @@ func TestWorkflowExecutionUsesProductionDescriptorOutputSchema(t *testing.T) {
 	if err := f.ctrl.ConfigStore.SaveAll(cfg); err != nil {
 		t.Fatal(err)
 	}
-	f.ctrl.StateMachine.SetConfig(cfg)
+	f.ctrl.SetConfig(cfg)
 	f.ctrl.CLIExecutor = schemaCLIExecutor{}
 	f.ctrl.workflowRegistryOverride = func(cfg config.ClavisConfig) workflowActionRegistry {
 		registry := f.ctrl.workflowActionRegistry(cfg)
@@ -129,7 +129,7 @@ func TestWorkflowEnterRunsConfiguredSafeActionAndReportsResult(t *testing.T) {
 	if err := f.ctrl.ConfigStore.SaveAll(cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
-	f.ctrl.StateMachine.SetConfig(cfg)
+	f.ctrl.SetConfig(cfg)
 	var got automation.ExecutionResult
 	done := make(chan struct{}, 1)
 	f.ctrl.OnWorkflowResult = func(_ string, result automation.ExecutionResult, err error) {
@@ -169,7 +169,7 @@ func TestWorkflowResultCallbackCanCancelWorkflow(t *testing.T) {
 	if err := f.ctrl.ConfigStore.SaveAll(cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
-	f.ctrl.StateMachine.SetConfig(cfg)
+	f.ctrl.SetConfig(cfg)
 	callback := make(chan bool, 1)
 	f.ctrl.OnWorkflowResult = func(string, automation.ExecutionResult, error) {
 		// This used to deadlock because reportWorkflow held workflowLifecycleMu.
@@ -202,7 +202,7 @@ func TestWorkflowRequiredInputFailsBeforeProviderExecution(t *testing.T) {
 	if err := f.ctrl.ConfigStore.SaveAll(cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
-	f.ctrl.StateMachine.SetConfig(cfg)
+	f.ctrl.SetConfig(cfg)
 	if err := f.ctrl.ExecuteWorkflow("required", engine.CapsuleContext{}); err == nil || !strings.Contains(err.Error(), "required workflow input") {
 		t.Fatalf("ExecuteWorkflow error = %v", err)
 	}
@@ -218,7 +218,7 @@ func TestWorkflowContextCancellationReportsCanceledResult(t *testing.T) {
 	if err := f.ctrl.ConfigStore.SaveAll(cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
-	f.ctrl.StateMachine.SetConfig(cfg)
+	f.ctrl.SetConfig(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := f.ctrl.RunWorkflow(ctx, "cancel", engine.CapsuleContext{}); err != nil {
@@ -234,7 +234,7 @@ func TestCancelWorkflowSuppressesCompletionCallbackAndHUD(t *testing.T) {
 	if err := f.ctrl.ConfigStore.SaveAll(cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
-	f.ctrl.StateMachine.SetConfig(cfg)
+	f.ctrl.SetConfig(cfg)
 	callback := make(chan struct{}, 1)
 	f.ctrl.OnWorkflowResult = func(string, automation.ExecutionResult, error) { callback <- struct{}{} }
 	if err := f.ctrl.ExecuteWorkflow("cancelable", engine.CapsuleContext{}); err != nil {
@@ -260,7 +260,7 @@ func TestWorkflowShutdownSuppressesCompletionCallback(t *testing.T) {
 	if err := f.ctrl.ConfigStore.SaveAll(cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
-	f.ctrl.StateMachine.SetConfig(cfg)
+	f.ctrl.SetConfig(cfg)
 	callback := make(chan struct{}, 1)
 	f.ctrl.OnWorkflowResult = func(string, automation.ExecutionResult, error) { callback <- struct{}{} }
 	if err := f.ctrl.ExecuteWorkflow("shutdown", engine.CapsuleContext{}); err != nil {
@@ -288,7 +288,7 @@ func TestWorkflowReplaceOutputInjectsIntoActiveTarget(t *testing.T) {
 	if err := f.ctrl.ConfigStore.SaveAll(cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
-	f.ctrl.StateMachine.SetConfig(cfg)
+	f.ctrl.SetConfig(cfg)
 
 	f.ctrl.OpenOmnibox(config.TabActions, "replace")
 	f.ctrl.Dispatch(engine.Event{Type: engine.EventConfirmSelection})

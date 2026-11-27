@@ -15,7 +15,7 @@ func TestWorkflowPreviewIsSafeAndNonSensitive(t *testing.T) {
 		ID: "release", Name: "Release Notes", Description: "Prepare release notes", Enabled: true,
 		Steps: []config.WorkflowStep{{ID: "notes", Name: "Prepare notes", Action: "safe-action", Command: "secret-command", Input: "{{selection}}", Enabled: true}},
 	}}
-	f.ctrl.StateMachine.SetConfig(cfg)
+	f.ctrl.SetConfig(cfg)
 	f.ctrl.OpenOmnibox(config.TabActions, "release")
 	tt := f.omniboxTester(t)
 	if !tt.HasText("Release Notes") || !tt.HasText("Prepare release notes") || !tt.HasText("Prepare notes") {

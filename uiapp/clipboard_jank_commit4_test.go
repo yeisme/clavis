@@ -137,12 +137,12 @@ func TestClipboardPreview60LineCapAndExpandToggle(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name           string
-		lang           i18n.Language
-		wantExpand120  string
-		wantExpand300  string
-		wantCollapse   string
-		wantMoreAfter  string
+		name          string
+		lang          i18n.Language
+		wantExpand120 string
+		wantExpand300 string
+		wantCollapse  string
+		wantMoreAfter string
 	}{
 		{
 			name:          "en",
@@ -283,7 +283,7 @@ func TestWorkflowPreviewStepsBadgeRendered(t *testing.T) {
 			{ID: "s2", Name: "Test", Action: "test", Enabled: true},
 		},
 	}}
-	f.ctrl.StateMachine.SetConfig(cfg)
+	f.ctrl.SetConfig(cfg)
 	f.ctrl.OpenOmnibox(config.TabActions, "deploy-check")
 	tt := f.omniboxTester(t)
 
