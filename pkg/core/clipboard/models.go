@@ -21,6 +21,40 @@ type ClipboardItem struct {
 	Media
 }
 
+// ClipboardSummary carries a bounded preview (up to 512 chars) and metadata for fast virtual list scrolling.
+type ClipboardSummary struct {
+	ID               string    `json:"id"`
+	Preview          string    `json:"preview"`
+	ContentHash      string    `json:"contentHash"`
+	ContentTruncated bool      `json:"contentTruncated,omitempty"`
+	OverflowPath     string    `json:"overflowPath,omitempty"`
+	SourceBundleID   string    `json:"sourceBundleId,omitempty"`
+	SourceAppName    string    `json:"sourceAppName,omitempty"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
+	CopyCount        int       `json:"copyCount"`
+	IsPinned         bool      `json:"isPinned"`
+	Media
+}
+
+// ClipboardCursor identifies an exact keyset position in `(is_pinned DESC, updated_at_ns DESC, id ASC)` order.
+type ClipboardCursor struct {
+	IsPinned    bool   `json:"isPinned"`
+	UpdatedAtNs int64  `json:"updatedAtNs"`
+	ID          string `json:"id"`
+}
+
+// ClipboardQuerySpec expresses pushdown filters and keyset cursor pagination for SQLite queries.
+type ClipboardQuerySpec struct {
+	Text       string
+	Kind       Kind
+	AppNeedle  string
+	PinnedOnly bool
+	SinceNs    int64
+	Limit      int
+	Cursor     *ClipboardCursor
+}
+
 // Kind classifies a clipboard entry. The zero value means text.
 type Kind string
 

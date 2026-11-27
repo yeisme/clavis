@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -308,5 +310,133 @@ func TestSQLiteClipboardStore_ClearUnpinnedPreservesPinned(t *testing.T) {
 	}
 	if len(left) != 1 || left[0].ID != pinned.ID || !left[0].IsPinned {
 		t.Fatalf("expected only pinned item preserved, got %+v", left)
+	}
+}
+
+func TestSQLiteClipboardStore_OverflowTextAndGetContent(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	dbPath := filepath.Join(tmp, "app.db")
+	mediaDir := filepath.Join(tmp, "clipboard-media")
+	store, err := NewSQLiteClipboardStoreWithOptions(ctx, dbPath, clipboard.NewPrivacyFilter(), SQLiteClipboardStoreOptions{
+		MediaDir: mediaDir,
+	})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	large := strings.Repeat("INFO 2026-11-28 处理日志记录 request_id=abc123\n", 3000)
+	if len(large) <= clipboard.InlineTextMaxBytes {
+		t.Fatalf("test input too small: %d", len(large))
+	}
+	item, ok, err := store.Record(ctx, clipboard.CaptureCandidate{
+		Content:       large,
+		SourceAppName: "iTerm2",
+		Timestamp:     time.Now().UTC(),
+	})
+	if err != nil || !ok {
+		t.Fatalf("Record large text: ok=%v err=%v", ok, err)
+	}
+	if item.Content != large {
+		t.Fatalf("Record returned truncated content len=%d want %d", len(item.Content), len(large))
+	}
+
+	// Summary page only projects <=512 chars while flagging ContentTruncated=true.
+	summaries, _, err := store.ListSummaryPage(ctx, clipboard.ClipboardQuerySpec{Limit: 10})
+	if err != nil || len(summaries) != 1 {
+		t.Fatalf("ListSummaryPage: len=%d err=%v", len(summaries), err)
+	}
+	if !summaries[0].ContentTruncated || len([]rune(summaries[0].Preview)) > 512 || summaries[0].OverflowPath == "" {
+		t.Fatalf("unexpected summary projection: %+v", summaries[0])
+	}
+
+	// GetContent transparently rehydrates full >64 KiB text.
+	full, err := store.GetContent(ctx, item.ID)
+	if err != nil || full != large {
+		t.Fatalf("GetContent len=%d err=%v, want %d", len(full), err, len(large))
+	}
+
+	// Deduplication keeps overflow text and bumps CopyCount.
+	dup, ok, err := store.Record(ctx, clipboard.CaptureCandidate{
+		Content:       large,
+		SourceAppName: "Ghostty",
+		Timestamp:     time.Now().UTC().Add(time.Second),
+	})
+	if err != nil || !ok || dup.ID != item.ID || dup.CopyCount != 2 {
+		t.Fatalf("dedup large text failed: dup=%+v ok=%v err=%v", dup, ok, err)
+	}
+}
+
+func TestSQLiteClipboardStore_KeysetPaginationAndSQLFilters(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t, filepath.Join(t.TempDir(), "paged.db"), clipboard.NewPrivacyFilter())
+	base := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+
+	for i := 0; i < 25; i++ {
+		app := "Notes"
+		content := fmt.Sprintf("常规英语笔记 entry-%02d", i)
+		if i%3 == 0 {
+			app = "Terminal"
+			content = fmt.Sprintf("中文报错日志 /api/v1/orders/%02d 超时", i)
+		}
+		it, _, err := store.Record(ctx, clipboard.CaptureCandidate{
+			Content:       content,
+			SourceAppName: app,
+			Timestamp:     base.Add(time.Duration(i) * time.Minute),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 2 || i == 19 {
+			if err := store.Pin(ctx, it.ID, true); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	// Page across all 25 rows with limit=10: verify pinned first, zero duplicates, exact total=25.
+	var gotIDs []string
+	seen := map[string]bool{}
+	var cursor *clipboard.ClipboardCursor
+	for {
+		page, next, err := store.ListSummaryPage(ctx, clipboard.ClipboardQuerySpec{
+			Limit:  10,
+			Cursor: cursor,
+		})
+		if err != nil {
+			t.Fatalf("ListSummaryPage: %v", err)
+		}
+		for _, s := range page {
+			if seen[s.ID] {
+				t.Fatalf("duplicate ID %q across pages", s.ID)
+			}
+			seen[s.ID] = true
+			gotIDs = append(gotIDs, s.ID)
+		}
+		if next == nil {
+			break
+		}
+		cursor = next
+	}
+	if len(gotIDs) != 25 {
+		t.Fatalf("paged total=%d, want 25", len(gotIDs))
+	}
+
+	// SQL filter pushdown: CJK trigram + AppNeedle + PinnedOnly.
+	cjkMatches, _, err := store.ListSummaryPage(ctx, clipboard.ClipboardQuerySpec{
+		Text:      "报错日志",
+		AppNeedle: "term",
+		Limit:     20,
+	})
+	if err != nil || len(cjkMatches) != 9 {
+		t.Fatalf("CJK+App filter len=%d err=%v, want 9", len(cjkMatches), err)
+	}
+	pinnedOnly, _, err := store.ListSummaryPage(ctx, clipboard.ClipboardQuerySpec{
+		PinnedOnly: true,
+		Limit:      20,
+	})
+	if err != nil || len(pinnedOnly) != 2 {
+		t.Fatalf("PinnedOnly len=%d err=%v, want 2", len(pinnedOnly), err)
 	}
 }

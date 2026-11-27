@@ -29,9 +29,9 @@ const (
 
 const (
 	// AppSchemaVersion is the current PRAGMA user_version for the shared app database
-	// (clipboard_items + copy_count + FTS5 + learning/frecency/prompt/usage tables +
-	// entity_annotations + ai_conversations + ai_conversation_turns).
-	AppSchemaVersion = 4
+	// (clipboard_items + copy_count + overflow text metadata + FTS5/trigram + capture_assets +
+	// learning/frecency/prompt/usage tables + entity_annotations + ai_conversations + ai_conversation_turns).
+	AppSchemaVersion = 5
 	// SyncSchemaVersion is the current PRAGMA user_version for the sync database.
 	SyncSchemaVersion = 1
 	// DeviceStateSchemaVersion is the current PRAGMA user_version for the non-secret device state DB.
@@ -450,6 +450,49 @@ func ValidateSchema(ctx context.Context, db *sqlite.DB, kind DBKind, version int
 				return fmt.Errorf("%w: clipboard_items missing column %q for v%d", ErrIntegrityFailed, "copy_count", version)
 			}
 		}
+		if version >= 5 {
+			cols, err := tableColumns(ctx, db, "clipboard_items")
+			if err != nil {
+				return err
+			}
+			for _, col := range []string{"content_overflow_path", "content_truncated"} {
+				if _, ok := cols[col]; !ok {
+					return fmt.Errorf("%w: clipboard_items missing column %q for v%d", ErrIntegrityFailed, col, version)
+				}
+			}
+			if _, ok := tableSet["capture_assets"]; !ok {
+				return fmt.Errorf("%w: missing app v5 table %q", ErrIntegrityFailed, "capture_assets")
+			}
+			caCols, err := tableColumns(ctx, db, "capture_assets")
+			if err != nil {
+				return err
+			}
+			for _, col := range []string{"id", "kind", "file_path", "thumb_path", "mime", "width", "height", "duration_ms", "byte_size", "pinned", "created_at_ns"} {
+				if _, ok := caCols[col]; !ok {
+					return fmt.Errorf("%w: capture_assets missing column %q for v%d", ErrIntegrityFailed, col, version)
+				}
+			}
+			v5IdxRows, err := db.Query(ctx, `SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_clipboard_pin_updated_id','idx_clipboard_kind_updated','idx_clipboard_bundle_updated','idx_capture_assets_created')`)
+			if err != nil {
+				return fmt.Errorf("inspect v5 indexes: %w", err)
+			}
+			v5IdxSet := make(map[string]struct{}, len(v5IdxRows.Values))
+			for _, r := range v5IdxRows.Values {
+				if n := str(r, 0); n != "" {
+					v5IdxSet[n] = struct{}{}
+				}
+			}
+			for _, reqIdx := range []string{
+				"idx_clipboard_pin_updated_id",
+				"idx_clipboard_kind_updated",
+				"idx_clipboard_bundle_updated",
+				"idx_capture_assets_created",
+			} {
+				if _, ok := v5IdxSet[reqIdx]; !ok {
+					return fmt.Errorf("%w: missing app v5 index %q", ErrIntegrityFailed, reqIdx)
+				}
+			}
+		}
 		return nil
 
 	case DBKindDeviceState:
@@ -544,6 +587,21 @@ func runMigrationChain(ctx context.Context, db *sqlite.DB, kind DBKind, from, to
 				stmts = append(stmts, v4Stmts...)
 				applied = append(applied, "app:v3->v4")
 				if err := maybeFail(opts, "app.v3_to_v4.after_version"); err != nil {
+					postErr = err
+					stmts = append(stmts, failpointAbortStatement())
+				}
+			case 4:
+				if err := maybeFail(opts, "app.v4_to_v5.before_ddl"); err != nil {
+					return nil, fmt.Errorf("%w: %v", ErrMigrationFailed, err)
+				}
+				hasTrigram := SupportsFTS5Trigram(ctx, db)
+				v5Stmts, err := appV4ToV5Statements(ctx, db, from < 4, hasTrigram)
+				if err != nil {
+					return nil, err
+				}
+				stmts = append(stmts, v5Stmts...)
+				applied = append(applied, "app:v4->v5")
+				if err := maybeFail(opts, "app.v4_to_v5.after_version"); err != nil {
 					postErr = err
 					stmts = append(stmts, failpointAbortStatement())
 				}
@@ -758,6 +816,87 @@ func appV3ToV4Statements(ctx context.Context, db *sqlite.DB, creatingTableEarlie
 	return stmts, nil
 }
 
+// SupportsFTS5Trigram probes outside a transaction whether the bundled SQLite
+// FTS5 build compiles with the trigram tokenizer.
+func SupportsFTS5Trigram(ctx context.Context, db *sqlite.DB) bool {
+	if db == nil {
+		return false
+	}
+	if _, err := db.Execute(ctx, `CREATE VIRTUAL TABLE IF NOT EXISTS temp._clavis_trigram_probe USING fts5(x, tokenize='trigram')`); err != nil {
+		return false
+	}
+	_, _ = db.Execute(ctx, `DROP TABLE IF EXISTS temp._clavis_trigram_probe`)
+	return true
+}
+
+func appV4ToV5Statements(ctx context.Context, db *sqlite.DB, creatingTableEarlier bool, trigramSupported bool) ([]sqlite.Statement, error) {
+	cols, err := tableColumns(ctx, db, "clipboard_items")
+	if err != nil {
+		return nil, err
+	}
+	if len(cols) == 0 && !creatingTableEarlier {
+		return nil, fmt.Errorf("%w: clipboard_items table missing at app v4", ErrIntegrityFailed)
+	}
+	var stmts []sqlite.Statement
+	if _, exists := cols["content_overflow_path"]; !exists {
+		stmts = append(stmts, sqlite.Statement{
+			SQL: `ALTER TABLE clipboard_items ADD COLUMN content_overflow_path TEXT NOT NULL DEFAULT ''`,
+		})
+	}
+	if _, exists := cols["content_truncated"]; !exists {
+		stmts = append(stmts, sqlite.Statement{
+			SQL: `ALTER TABLE clipboard_items ADD COLUMN content_truncated INTEGER NOT NULL DEFAULT 0`,
+		})
+	}
+	stmts = append(stmts,
+		sqlite.Statement{SQL: `CREATE INDEX IF NOT EXISTS idx_clipboard_pin_updated_id ON clipboard_items(is_pinned DESC, updated_at_ns DESC, id ASC)`},
+		sqlite.Statement{SQL: `CREATE INDEX IF NOT EXISTS idx_clipboard_kind_updated ON clipboard_items(kind, updated_at_ns DESC)`},
+		sqlite.Statement{SQL: `CREATE INDEX IF NOT EXISTS idx_clipboard_bundle_updated ON clipboard_items(source_bundle_id, updated_at_ns DESC)`},
+		sqlite.Statement{SQL: `CREATE TABLE IF NOT EXISTS capture_assets (
+			id TEXT PRIMARY KEY,
+			kind TEXT NOT NULL,
+			file_path TEXT NOT NULL,
+			thumb_path TEXT NOT NULL DEFAULT '',
+			mime TEXT NOT NULL DEFAULT '',
+			width INTEGER NOT NULL DEFAULT 0,
+			height INTEGER NOT NULL DEFAULT 0,
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			byte_size INTEGER NOT NULL DEFAULT 0,
+			pinned INTEGER NOT NULL DEFAULT 0,
+			created_at_ns INTEGER NOT NULL
+		)`},
+		sqlite.Statement{SQL: `CREATE INDEX IF NOT EXISTS idx_capture_assets_created ON capture_assets(created_at_ns DESC)`},
+	)
+	if trigramSupported {
+		stmts = append(stmts,
+			sqlite.Statement{SQL: `CREATE VIRTUAL TABLE IF NOT EXISTS clipboard_fts_trigram USING fts5(
+				content,
+				source_app_name,
+				content='clipboard_items',
+				content_rowid='rowid',
+				tokenize='trigram'
+			)`},
+			sqlite.Statement{SQL: `CREATE TRIGGER IF NOT EXISTS clipboard_items_trigram_ai AFTER INSERT ON clipboard_items BEGIN
+				INSERT INTO clipboard_fts_trigram(rowid, content, source_app_name)
+				VALUES (new.rowid, new.content, new.source_app_name);
+			END`},
+			sqlite.Statement{SQL: `CREATE TRIGGER IF NOT EXISTS clipboard_items_trigram_ad AFTER DELETE ON clipboard_items BEGIN
+				INSERT INTO clipboard_fts_trigram(clipboard_fts_trigram, rowid, content, source_app_name)
+				VALUES ('delete', old.rowid, old.content, old.source_app_name);
+			END`},
+			sqlite.Statement{SQL: `CREATE TRIGGER IF NOT EXISTS clipboard_items_trigram_au AFTER UPDATE OF content, source_app_name ON clipboard_items BEGIN
+				INSERT INTO clipboard_fts_trigram(clipboard_fts_trigram, rowid, content, source_app_name)
+				VALUES ('delete', old.rowid, old.content, old.source_app_name);
+				INSERT INTO clipboard_fts_trigram(rowid, content, source_app_name)
+				VALUES (new.rowid, new.content, new.source_app_name);
+			END`},
+			sqlite.Statement{SQL: `INSERT INTO clipboard_fts_trigram(clipboard_fts_trigram) VALUES ('rebuild')`},
+		)
+	}
+	stmts = append(stmts, sqlite.Statement{SQL: `PRAGMA user_version = 5`})
+	return stmts, nil
+}
+
 func syncV0ToV1Statements() []sqlite.Statement {
 	return []sqlite.Statement{
 		{SQL: `CREATE TABLE IF NOT EXISTS sync_accounts (account_id TEXT PRIMARY KEY, credential BLOB NOT NULL, sequence INTEGER NOT NULL DEFAULT 0)`},
@@ -785,7 +924,7 @@ type columnInfo struct {
 func tableColumns(ctx context.Context, db *sqlite.DB, table string) (map[string]columnInfo, error) {
 	// Strict whitelist prevents any SQL injection through PRAGMA table_info.
 	switch table {
-	case "clipboard_items", "sync_device_state", "entity_annotations", "ai_conversations", "ai_conversation_turns":
+	case "clipboard_items", "sync_device_state", "entity_annotations", "ai_conversations", "ai_conversation_turns", "capture_assets":
 	default:
 		return nil, fmt.Errorf("%w: unexpected table inspection %q", ErrIntegrityFailed, table)
 	}

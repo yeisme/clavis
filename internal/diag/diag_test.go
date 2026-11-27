@@ -344,3 +344,60 @@ func TestBuildDoctorReportDetectsEnvAPIKeyWithoutKeysFile(t *testing.T) {
 		t.Fatalf("BuildDoctorReport must stay read-only, cfgDir stat err=%v", err)
 	}
 }
+
+func TestBackupRestoreIncludesOverflowTextBlobs(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	cfgDir := filepath.Join(base, "src-cfg")
+	dataDir := filepath.Join(base, "src-data")
+	mediaDir := filepath.Join(dataDir, "clipboard-media")
+	backupDir := filepath.Join(base, "bak")
+	dstCfg := filepath.Join(base, "dst-cfg")
+	dstData := filepath.Join(base, "dst-data")
+
+	store := config.NewConfigStore(cfgDir)
+	if _, err := store.LoadOrInitialize(); err != nil {
+		t.Fatal(err)
+	}
+	clipStore, err := storage.NewSQLiteClipboardStoreWithOptions(ctx, filepath.Join(dataDir, "clipboard.db"), clipboard.NewPrivacyFilter(), storage.SQLiteClipboardStoreOptions{
+		MediaDir: mediaDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	large := strings.Repeat("2026-11-28T00:00:00Z BACKUP_OVERFLOW_TEST 日志\n", 3000)
+	item, ok, err := clipStore.Record(ctx, clipboard.CaptureCandidate{Content: large})
+	if err != nil || !ok {
+		t.Fatalf("Record large: ok=%v err=%v", ok, err)
+	}
+	if err := clipStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := CreateBackup(ctx, BackupOptions{
+		ConfigDir: cfgDir,
+		DataDir:   dataDir,
+		OutDir:    backupDir,
+	}); err != nil {
+		t.Fatalf("CreateBackup: %v", err)
+	}
+	if _, err := RestoreBackup(ctx, RestoreOptions{
+		BackupDir: backupDir,
+		ConfigDir: dstCfg,
+		DataDir:   dstData,
+	}); err != nil {
+		t.Fatalf("RestoreBackup: %v", err)
+	}
+
+	restored, err := storage.NewSQLiteClipboardStoreWithOptions(ctx, filepath.Join(dstData, "clipboard.db"), clipboard.NewPrivacyFilter(), storage.SQLiteClipboardStoreOptions{
+		MediaDir: filepath.Join(dstData, "clipboard-media"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	got, err := restored.GetContent(ctx, item.ID)
+	if err != nil || got != large {
+		t.Fatalf("restored overflow len=%d err=%v, want %d", len(got), err, len(large))
+	}
+}

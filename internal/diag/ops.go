@@ -219,6 +219,21 @@ func CreateBackup(ctx context.Context, opts BackupOptions) (BackupResult, error)
 		})
 	}
 
+	// Include >64 KiB overflow text blobs so large clipboard entries restore losslessly.
+	overflowDir := filepath.Join(dataDir, "clipboard-media", "text")
+	if entries, err := os.ReadDir(overflowDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".txt.gz") {
+				continue
+			}
+			srcPath := filepath.Join(overflowDir, entry.Name())
+			rel := filepath.ToSlash(filepath.Join("clipboard-media", "text", entry.Name()))
+			if err := copyRegular("data", srcPath, rel); err != nil {
+				return BackupResult{}, err
+			}
+		}
+	}
+
 	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return BackupResult{}, err

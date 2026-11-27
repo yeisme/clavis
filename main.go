@@ -492,7 +492,7 @@ func (a *desktopApp) start() {
 		// A database from an earlier launch: not a first run (planOnboarding).
 		_, statErr := os.Stat(dbPath)
 		hadData = statErr == nil
-		if s, openErr := storage.NewSQLiteClipboardStoreFromConfig(ctx, dbPath, cfg.Main.Clipboard); openErr == nil {
+		if s, openErr := storage.NewSQLiteClipboardStoreWithOptions(ctx, dbPath, clipboard.NewPrivacyFilterFromConfig(cfg.Main.Clipboard), storage.SQLiteClipboardStoreOptions{MediaDir: mediaStore.Dir}); openErr == nil {
 			sqliteStore = s
 			clipStore = s
 			_, _ = s.PruneExpired(ctx, cfg.Main.Clipboard.RetentionDays, cfg.Main.Clipboard.MaxHistoryItems)

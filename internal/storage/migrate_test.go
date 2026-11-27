@@ -29,7 +29,7 @@ func TestMigrateAppFreshDB(t *testing.T) {
 	if report.Kind != DBKindApp || report.From != 0 || report.To != AppSchemaVersion || report.ReadOnly {
 		t.Fatalf("unexpected report: %+v", report)
 	}
-	if len(report.Applied) != 4 || report.Applied[0] != "app:v0->v1" || report.Applied[1] != "app:v1->v2" || report.Applied[2] != "app:v2->v3" || report.Applied[3] != "app:v3->v4" {
+	if len(report.Applied) != 5 || report.Applied[0] != "app:v0->v1" || report.Applied[1] != "app:v1->v2" || report.Applied[2] != "app:v2->v3" || report.Applied[3] != "app:v3->v4" || report.Applied[4] != "app:v4->v5" {
 		t.Fatalf("unexpected applied steps: %v", report.Applied)
 	}
 	if report.BackupPath != "" || report.ManifestPath != "" {
@@ -89,13 +89,13 @@ func TestMigrateAppV3ToV4CopyCountAndRollback(t *testing.T) {
 		t.Fatalf("expected rollback to user_version=3, got %d", ver)
 	}
 
-	// Clean upgrade v3 -> v4.
+	// Clean upgrade v3 -> v5.
 	report, err := Migrate(ctx, db, DBKindApp, MigrationOptions{})
 	if err != nil {
-		t.Fatalf("Migrate v3->v4 failed: %v", err)
+		t.Fatalf("Migrate v3->v5 failed: %v", err)
 	}
-	if report.From != 3 || report.To != 4 || len(report.Applied) != 1 || report.Applied[0] != "app:v3->v4" {
-		t.Fatalf("unexpected v3->v4 report: %+v", report)
+	if report.From != 3 || report.To != AppSchemaVersion || len(report.Applied) != 2 || report.Applied[0] != "app:v3->v4" || report.Applied[1] != "app:v4->v5" {
+		t.Fatalf("unexpected v3->v%d report: %+v", AppSchemaVersion, report)
 	}
 	rows, err := db.Query(ctx, `SELECT copy_count FROM clipboard_items WHERE id='v3-item'`)
 	if err != nil || len(rows.Values) != 1 || int64val(rows.Values[0], 0) != 1 {
@@ -229,7 +229,7 @@ func TestMigrateAppV1ToV2AndIdempotentRerun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("v1->v%d Migrate: %v", AppSchemaVersion, err)
 	}
-	if first.From != 1 || first.To != AppSchemaVersion || len(first.Applied) != 3 || first.Applied[0] != "app:v1->v2" || first.Applied[1] != "app:v2->v3" || first.Applied[2] != "app:v3->v4" {
+	if first.From != 1 || first.To != AppSchemaVersion || len(first.Applied) != 4 || first.Applied[0] != "app:v1->v2" || first.Applied[1] != "app:v2->v3" || first.Applied[2] != "app:v3->v4" || first.Applied[3] != "app:v4->v5" {
 		t.Fatalf("unexpected v1->v%d report: %+v", AppSchemaVersion, first)
 	}
 	wantBackup := fmt.Sprintf("%s.pre-migrate-v1-to-v%d.bak", dbPath, AppSchemaVersion)
@@ -617,7 +617,7 @@ func TestMigrateAppV2ToV3AndIdempotentRerun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("v2->v3 Migrate: %v", err)
 	}
-	if first.From != 2 || first.To != AppSchemaVersion || len(first.Applied) != 2 || first.Applied[0] != "app:v2->v3" || first.Applied[1] != "app:v3->v4" {
+	if first.From != 2 || first.To != AppSchemaVersion || len(first.Applied) != 3 || first.Applied[0] != "app:v2->v3" || first.Applied[1] != "app:v3->v4" || first.Applied[2] != "app:v4->v5" {
 		t.Fatalf("unexpected v2->v%d report: %+v", AppSchemaVersion, first)
 	}
 	wantV2Backup := fmt.Sprintf("%s.pre-migrate-v2-to-v%d.bak", dbPath, AppSchemaVersion)
@@ -886,4 +886,96 @@ func TestMigrateFailpointRollbackSurvivesReopen(t *testing.T) {
 	if report, err := Migrate(ctx, db, DBKindApp, MigrationOptions{AllowCreate: true}); err != nil || report.From != 2 || report.To != AppSchemaVersion {
 		t.Fatalf("recovery after reopened rollback report=%+v err=%v", report, err)
 	}
+}
+
+func TestMigrateAppV4ToV5AndFailpointRollback(t *testing.T) {
+	ctx := context.Background()
+	seedV4 := func(t *testing.T, db *sqlite.DB) {
+		t.Helper()
+		var stmts []sqlite.Statement
+		stmts = append(stmts, appV0ToV1Statements()...)
+		v2, err := appV1ToV2Statements(ctx, db, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stmts = append(stmts, v2...)
+		stmts = append(stmts, appV2ToV3Statements()...)
+		v4, err := appV3ToV4Statements(ctx, db, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stmts = append(stmts, v4...)
+		if _, err := db.Transaction(ctx, stmts); err != nil {
+			t.Fatalf("seed v4 db: %v", err)
+		}
+	}
+
+	for _, step := range []string{"app.v4_to_v5.before_ddl", "app.v4_to_v5.after_version"} {
+		t.Run("rollback_"+step, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "rollback-v4.db")
+			db, err := sqlite.Open(ctx, dbPath, sqlite.OpenOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			seedV4(t, db)
+			if _, err := db.Execute(ctx, `INSERT INTO clipboard_items(id,content,content_hash,source_bundle_id,source_app_name,created_at_ns,updated_at_ns,is_pinned,kind,byte_size,copy_count) VALUES('v4-row','中文原始文本','hv4','','Notes',10,20,0,'text',18,3)`); err != nil {
+				t.Fatal(err)
+			}
+			injected := errors.New("injected failpoint: " + step)
+			_, err = Migrate(ctx, db, DBKindApp, MigrationOptions{
+				AllowCreate: true,
+				Failpoint: func(s string) error {
+					if s == step {
+						return injected
+					}
+					return nil
+				},
+			})
+			if !errors.Is(err, ErrMigrationFailed) {
+				t.Fatalf("expected ErrMigrationFailed, got %v", err)
+			}
+			if got, err := CurrentSchemaVersion(ctx, db); err != nil || got != 4 {
+				t.Fatalf("version after rollback=%d err=%v, want 4", got, err)
+			}
+			if tables, err := listUserTables(ctx, db); err == nil {
+				for _, tbl := range tables {
+					if tbl == "capture_assets" {
+						t.Fatal("capture_assets leaked across v4->v5 rollback")
+					}
+				}
+			}
+		})
+	}
+
+	t.Run("upgrade_v4_to_v5_and_reopen", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "upgrade-v4.db")
+		db, err := sqlite.Open(ctx, dbPath, sqlite.OpenOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seedV4(t, db)
+		if _, err := db.Execute(ctx, `INSERT INTO clipboard_items(id,content,content_hash,source_bundle_id,source_app_name,created_at_ns,updated_at_ns,is_pinned,kind,byte_size,copy_count) VALUES('v4-ok','Clavis 剪贴板检索测试','hv4-ok','','Notes',10,20,1,'text',25,2)`); err != nil {
+			t.Fatal(err)
+		}
+		report, err := Migrate(ctx, db, DBKindApp, MigrationOptions{AllowCreate: true})
+		if err != nil {
+			t.Fatalf("Migrate v4->v5: %v", err)
+		}
+		if report.From != 4 || report.To != 5 || len(report.Applied) != 1 || report.Applied[0] != "app:v4->v5" {
+			t.Fatalf("unexpected report: %+v", report)
+		}
+		if err := ValidateSchema(ctx, db, DBKindApp, AppSchemaVersion); err != nil {
+			t.Fatalf("ValidateSchema v5: %v", err)
+		}
+		trigramSupported := SupportsFTS5Trigram(ctx, db)
+		t.Logf("SQLite FTS5 trigram supported = %v", trigramSupported)
+		if trigramSupported {
+			rows, err := db.Query(ctx, `SELECT ci.id FROM clipboard_fts_trigram f JOIN clipboard_items ci ON ci.rowid=f.rowid WHERE clipboard_fts_trigram MATCH '"剪贴板"'`)
+			if err != nil || len(rows.Values) != 1 || str(rows.Values[0], 0) != "v4-ok" {
+				t.Fatalf("trigram query after v4->v5 upgrade failed: rows=%v err=%v", rows.Values, err)
+			}
+		}
+		_ = db.Close()
+	})
 }
