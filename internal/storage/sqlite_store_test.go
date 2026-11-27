@@ -99,6 +99,12 @@ func TestSQLiteClipboardStore_DedupPreservesPin(t *testing.T) {
 	if dup.ID != first.ID {
 		t.Fatalf("expected dedup to keep ID %q, got %q", first.ID, dup.ID)
 	}
+	if first.CopyCount != 1 || dup.CopyCount != 2 {
+		t.Fatalf("expected CopyCount 1 -> 2 on dedup, got first=%d dup=%d", first.CopyCount, dup.CopyCount)
+	}
+	if !dup.CreatedAt.Equal(t1) || !dup.UpdatedAt.Equal(t2) {
+		t.Fatalf("expected CreatedAt=%v UpdatedAt=%v, got CreatedAt=%v UpdatedAt=%v", t1, t2, dup.CreatedAt, dup.UpdatedAt)
+	}
 	if !dup.IsPinned {
 		t.Fatal("expected dedup to preserve IsPinned=true")
 	}
@@ -268,5 +274,39 @@ func TestSQLiteClipboardStore_PruneExpiredAndMaxItemsAndPersistence(t *testing.T
 	afterClear, err := reopened.Recent(ctx, 10)
 	if err != nil || len(afterClear) != 0 {
 		t.Fatalf("expected empty after Clear, got len=%d err=%v", len(afterClear), err)
+	}
+}
+
+func TestSQLiteClipboardStore_ClearUnpinnedPreservesPinned(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "unpinned.db"), clipboard.NewPrivacyFilter())
+	ctx := context.Background()
+
+	pinned, _, err := store.Record(ctx, clipboard.CaptureCandidate{Content: "keep-pinned"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Pin(ctx, pinned.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Record(ctx, clipboard.CaptureCandidate{Content: "drop-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Record(ctx, clipboard.CaptureCandidate{Content: "drop-2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := store.ClearUnpinned(ctx)
+	if err != nil {
+		t.Fatalf("ClearUnpinned failed: %v", err)
+	}
+	if removed != 2 {
+		t.Fatalf("removed = %d, want 2", removed)
+	}
+	left, err := store.Recent(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 || left[0].ID != pinned.ID || !left[0].IsPinned {
+		t.Fatalf("expected only pinned item preserved, got %+v", left)
 	}
 }

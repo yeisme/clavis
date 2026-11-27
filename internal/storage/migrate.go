@@ -29,9 +29,9 @@ const (
 
 const (
 	// AppSchemaVersion is the current PRAGMA user_version for the shared app database
-	// (clipboard_items + FTS5 + learning/frecency/prompt/usage tables +
+	// (clipboard_items + copy_count + FTS5 + learning/frecency/prompt/usage tables +
 	// entity_annotations + ai_conversations + ai_conversation_turns).
-	AppSchemaVersion = 3
+	AppSchemaVersion = 4
 	// SyncSchemaVersion is the current PRAGMA user_version for the sync database.
 	SyncSchemaVersion = 1
 	// DeviceStateSchemaVersion is the current PRAGMA user_version for the non-secret device state DB.
@@ -441,6 +441,15 @@ func ValidateSchema(ctx context.Context, db *sqlite.DB, kind DBKind, version int
 				}
 			}
 		}
+		if version >= 4 {
+			cols, err := tableColumns(ctx, db, "clipboard_items")
+			if err != nil {
+				return err
+			}
+			if _, ok := cols["copy_count"]; !ok {
+				return fmt.Errorf("%w: clipboard_items missing column %q for v%d", ErrIntegrityFailed, "copy_count", version)
+			}
+		}
 		return nil
 
 	case DBKindDeviceState:
@@ -521,6 +530,20 @@ func runMigrationChain(ctx context.Context, db *sqlite.DB, kind DBKind, from, to
 				stmts = append(stmts, appV2ToV3Statements()...)
 				applied = append(applied, "app:v2->v3")
 				if err := maybeFail(opts, "app.v2_to_v3.after_version"); err != nil {
+					postErr = err
+					stmts = append(stmts, failpointAbortStatement())
+				}
+			case 3:
+				if err := maybeFail(opts, "app.v3_to_v4.before_ddl"); err != nil {
+					return nil, fmt.Errorf("%w: %v", ErrMigrationFailed, err)
+				}
+				v4Stmts, err := appV3ToV4Statements(ctx, db, from < 3)
+				if err != nil {
+					return nil, err
+				}
+				stmts = append(stmts, v4Stmts...)
+				applied = append(applied, "app:v3->v4")
+				if err := maybeFail(opts, "app.v3_to_v4.after_version"); err != nil {
 					postErr = err
 					stmts = append(stmts, failpointAbortStatement())
 				}
@@ -715,6 +738,24 @@ func appV2ToV3Statements() []sqlite.Statement {
 			ON ai_conversation_turns(conversation_id, turn_index ASC)`},
 		{SQL: `PRAGMA user_version = 3`},
 	}
+}
+
+func appV3ToV4Statements(ctx context.Context, db *sqlite.DB, creatingTableEarlier bool) ([]sqlite.Statement, error) {
+	cols, err := tableColumns(ctx, db, "clipboard_items")
+	if err != nil {
+		return nil, err
+	}
+	if len(cols) == 0 && !creatingTableEarlier {
+		return nil, fmt.Errorf("%w: clipboard_items table missing at app v3", ErrIntegrityFailed)
+	}
+	var stmts []sqlite.Statement
+	if _, exists := cols["copy_count"]; !exists {
+		stmts = append(stmts, sqlite.Statement{
+			SQL: `ALTER TABLE clipboard_items ADD COLUMN copy_count INTEGER NOT NULL DEFAULT 1`,
+		})
+	}
+	stmts = append(stmts, sqlite.Statement{SQL: `PRAGMA user_version = 4`})
+	return stmts, nil
 }
 
 func syncV0ToV1Statements() []sqlite.Statement {

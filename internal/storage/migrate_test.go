@@ -29,7 +29,7 @@ func TestMigrateAppFreshDB(t *testing.T) {
 	if report.Kind != DBKindApp || report.From != 0 || report.To != AppSchemaVersion || report.ReadOnly {
 		t.Fatalf("unexpected report: %+v", report)
 	}
-	if len(report.Applied) != 3 || report.Applied[0] != "app:v0->v1" || report.Applied[1] != "app:v1->v2" || report.Applied[2] != "app:v2->v3" {
+	if len(report.Applied) != 4 || report.Applied[0] != "app:v0->v1" || report.Applied[1] != "app:v1->v2" || report.Applied[2] != "app:v2->v3" || report.Applied[3] != "app:v3->v4" {
 		t.Fatalf("unexpected applied steps: %v", report.Applied)
 	}
 	if report.BackupPath != "" || report.ManifestPath != "" {
@@ -45,6 +45,63 @@ func TestMigrateAppFreshDB(t *testing.T) {
 	if err := ValidateSchema(ctx, db, DBKindApp, AppSchemaVersion); err != nil {
 		t.Fatalf("ValidateSchema failed: %v", err)
 	}
+}
+
+func TestMigrateAppV3ToV4CopyCountAndRollback(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "app_v3.db")
+
+	db, err := sqlite.Open(ctx, dbPath, sqlite.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed a valid v3 database (prior to copy_count).
+	var stmts []sqlite.Statement
+	stmts = append(stmts, appV0ToV1Statements()...)
+	v2, err := appV1ToV2Statements(ctx, db, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmts = append(stmts, v2...)
+	stmts = append(stmts, appV2ToV3Statements()...)
+	stmts = append(stmts, sqlite.Statement{
+		SQL:  `INSERT INTO clipboard_items (id, content, content_hash, source_bundle_id, source_app_name, created_at_ns, updated_at_ns, is_pinned, kind, byte_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'text', ?)`,
+		Args: []any{"v3-item", "hello v3", "hash-v3", "com.apple.Notes", "Notes", int64(1000), int64(2000), int64(0), int64(8)},
+	})
+	if _, err := db.Transaction(ctx, stmts); err != nil {
+		t.Fatalf("seed v3 db: %v", err)
+	}
+
+	// Inject failpoint during v3->v4 and verify rollback preserves user_version=3 and backup.
+	_, err = Migrate(ctx, db, DBKindApp, MigrationOptions{
+		Failpoint: func(step string) error {
+			if step == "app.v3_to_v4.after_version" {
+				return errors.New("injected v4 abort")
+			}
+			return nil
+		},
+	})
+	if !errors.Is(err, ErrMigrationFailed) {
+		t.Fatalf("expected ErrMigrationFailed on failpoint, got %v", err)
+	}
+	if ver, _ := CurrentSchemaVersion(ctx, db); ver != 3 {
+		t.Fatalf("expected rollback to user_version=3, got %d", ver)
+	}
+
+	// Clean upgrade v3 -> v4.
+	report, err := Migrate(ctx, db, DBKindApp, MigrationOptions{})
+	if err != nil {
+		t.Fatalf("Migrate v3->v4 failed: %v", err)
+	}
+	if report.From != 3 || report.To != 4 || len(report.Applied) != 1 || report.Applied[0] != "app:v3->v4" {
+		t.Fatalf("unexpected v3->v4 report: %+v", report)
+	}
+	rows, err := db.Query(ctx, `SELECT copy_count FROM clipboard_items WHERE id='v3-item'`)
+	if err != nil || len(rows.Values) != 1 || int64val(rows.Values[0], 0) != 1 {
+		t.Fatalf("expected migrated copy_count=1, rows=%v err=%v", rows.Values, err)
+	}
+	_ = db.Close()
 }
 
 func TestMigrateAppLegacyV0UpgradeWithBackupManifestAndWAL(t *testing.T) {
@@ -172,7 +229,7 @@ func TestMigrateAppV1ToV2AndIdempotentRerun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("v1->v%d Migrate: %v", AppSchemaVersion, err)
 	}
-	if first.From != 1 || first.To != AppSchemaVersion || len(first.Applied) != 2 || first.Applied[0] != "app:v1->v2" || first.Applied[1] != "app:v2->v3" {
+	if first.From != 1 || first.To != AppSchemaVersion || len(first.Applied) != 3 || first.Applied[0] != "app:v1->v2" || first.Applied[1] != "app:v2->v3" || first.Applied[2] != "app:v3->v4" {
 		t.Fatalf("unexpected v1->v%d report: %+v", AppSchemaVersion, first)
 	}
 	wantBackup := fmt.Sprintf("%s.pre-migrate-v1-to-v%d.bak", dbPath, AppSchemaVersion)
@@ -560,25 +617,26 @@ func TestMigrateAppV2ToV3AndIdempotentRerun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("v2->v3 Migrate: %v", err)
 	}
-	if first.From != 2 || first.To != 3 || len(first.Applied) != 1 || first.Applied[0] != "app:v2->v3" {
-		t.Fatalf("unexpected v2->v3 report: %+v", first)
+	if first.From != 2 || first.To != AppSchemaVersion || len(first.Applied) != 2 || first.Applied[0] != "app:v2->v3" || first.Applied[1] != "app:v3->v4" {
+		t.Fatalf("unexpected v2->v%d report: %+v", AppSchemaVersion, first)
 	}
-	assertSameFilePath(t, first.BackupPath, dbPath+".pre-migrate-v2-to-v3.bak")
-	assertSameFilePath(t, first.ManifestPath, dbPath+".pre-migrate-v2-to-v3.bak.manifest.json")
+	wantV2Backup := fmt.Sprintf("%s.pre-migrate-v2-to-v%d.bak", dbPath, AppSchemaVersion)
+	assertSameFilePath(t, first.BackupPath, wantV2Backup)
+	assertSameFilePath(t, first.ManifestPath, wantV2Backup+".manifest.json")
 	manifest, err := VerifyBackup(first.ManifestPath)
 	if err != nil {
-		t.Fatalf("VerifyBackup v2->v3: %v", err)
+		t.Fatalf("VerifyBackup v2->v%d: %v", AppSchemaVersion, err)
 	}
-	if manifest.FromVersion != 2 || manifest.ToVersion != 3 {
-		t.Fatalf("unexpected v2->v3 manifest: %+v", manifest)
+	if manifest.FromVersion != 2 || manifest.ToVersion != AppSchemaVersion {
+		t.Fatalf("unexpected v2->v%d manifest: %+v", AppSchemaVersion, manifest)
 	}
 	if !manifest.WALCheckpointed {
 		t.Fatal("v2 WAL migration manifest did not record a WAL checkpoint")
 	}
 	assertJournalMode(t, ctx, db, "wal")
 
-	if err := ValidateSchema(ctx, db, DBKindApp, 3); err != nil {
-		t.Fatalf("ValidateSchema v3: %v", err)
+	if err := ValidateSchema(ctx, db, DBKindApp, AppSchemaVersion); err != nil {
+		t.Fatalf("ValidateSchema v%d: %v", AppSchemaVersion, err)
 	}
 	rows, err := db.Query(ctx, `SELECT content FROM clipboard_items WHERE id='v2-row'`)
 	if err != nil || len(rows.Values) != 1 || str(rows.Values[0], 0) != "wal payload" {
@@ -590,20 +648,20 @@ func TestMigrateAppV2ToV3AndIdempotentRerun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("idempotent v3 rerun: %v", err)
 	}
-	if second.From != 3 || second.To != 3 || len(second.Applied) != 0 || second.BackupPath != "" {
-		t.Fatalf("unexpected v3 rerun report: %+v", second)
+	if second.From != AppSchemaVersion || second.To != AppSchemaVersion || len(second.Applied) != 0 || second.BackupPath != "" {
+		t.Fatalf("unexpected v%d rerun report: %+v", AppSchemaVersion, second)
 	}
 	if second.SchemaHash != first.SchemaHash {
-		t.Fatalf("schema hash drifted on v3 rerun: %s vs %s", second.SchemaHash, first.SchemaHash)
+		t.Fatalf("schema hash drifted on rerun: %s vs %s", second.SchemaHash, first.SchemaHash)
 	}
 
-	// AppSchemaVersion + 1 (v4) must be rejected read-only.
-	if _, err := db.Execute(ctx, `PRAGMA user_version = 4`); err != nil {
+	// AppSchemaVersion + 1 must be rejected read-only.
+	if _, err := db.Execute(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, AppSchemaVersion+1)); err != nil {
 		t.Fatal(err)
 	}
 	tooNew, err := Migrate(ctx, db, DBKindApp, MigrationOptions{})
 	if !errors.Is(err, ErrSchemaTooNew) || !tooNew.ReadOnly {
-		t.Fatalf("expected ErrSchemaTooNew for v4, got report=%+v err=%v", tooNew, err)
+		t.Fatalf("expected ErrSchemaTooNew for v%d, got report=%+v err=%v", AppSchemaVersion+1, tooNew, err)
 	}
 }
 
@@ -660,8 +718,8 @@ func TestMigrateAppV2ToV3FailpointRollback(t *testing.T) {
 			if err != nil {
 				t.Fatalf("recovery Migrate v2->v3: %v", err)
 			}
-			if report.From != 2 || report.To != 3 {
-				t.Fatalf("unexpected v2->v3 recovery report: %+v", report)
+			if report.From != 2 || report.To != AppSchemaVersion {
+				t.Fatalf("unexpected v2->v%d recovery report: %+v", AppSchemaVersion, report)
 			}
 		})
 	}
@@ -825,7 +883,7 @@ func TestMigrateFailpointRollbackSurvivesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if report, err := Migrate(ctx, db, DBKindApp, MigrationOptions{AllowCreate: true}); err != nil || report.From != 2 || report.To != 3 {
+	if report, err := Migrate(ctx, db, DBKindApp, MigrationOptions{AllowCreate: true}); err != nil || report.From != 2 || report.To != AppSchemaVersion {
 		t.Fatalf("recovery after reopened rollback report=%+v err=%v", report, err)
 	}
 }

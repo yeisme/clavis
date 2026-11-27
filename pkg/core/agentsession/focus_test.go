@@ -104,7 +104,7 @@ func TestHerdrFocuserFocusTimeoutIsObservable(t *testing.T) {
 }
 
 func TestHerdrFocuserParsesWrappedResultEnvelopeAndFocusPane(t *testing.T) {
-	wrapped := `{"id":"cli:agent:list","result":{"agents":[{"agent":"agy","agent_session":{"agent":"agy","kind":"id","source":"herdr:antigravity_cli","value":"ff81383b-733e-49bd-95e2-37a5a0bdecfd"},"agent_status":"idle","cwd":"/Users/yeshugen/workspace/clavis","display_agent":"agy","focused":true,"name":"clavis-main","pane_id":"w4:pB","tab_id":"w4:t2","workspace_id":"w4"}]},"type":"agent_list"}`
+	wrapped := `{"id":"cli:agent:list","result":{"agents":[{"agent":"agy","agent_session":{"agent":"agy","kind":"id","source":"herdr:antigravity_cli","value":"ff81383b-733e-49bd-95e2-37a5a0bdecfd"},"agent_status":"idle","cwd":"/Users/example/workspace/clavis","display_agent":"agy","focused":true,"name":"clavis-main","pane_id":"w4:pB","tab_id":"w4:t2","workspace_id":"w4"}]},"type":"agent_list"}`
 	fake := &fakeFocusExecutor{list: []byte(wrapped)}
 	h := NewHerdrFocuserWithExecutor(fake)
 

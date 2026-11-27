@@ -16,6 +16,7 @@ type ClipboardItem struct {
 	SourceAppName  string    `json:"sourceAppName,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt      time.Time `json:"updatedAt"`
+	CopyCount      int       `json:"copyCount"`
 	IsPinned       bool      `json:"isPinned"`
 	Media
 }
@@ -139,6 +140,12 @@ type Store interface {
 // monotonically increasing mutation generation counter for incremental sync.
 type GenerationTracker interface {
 	Generation() uint64
+}
+
+// UnpinnedClearer is optionally implemented by Store backends to clear unpinned
+// history items while strictly preserving pinned items.
+type UnpinnedClearer interface {
+	ClearUnpinned(ctx context.Context) (int, error)
 }
 
 // File/video entries store their paths newline-joined in MediaPath (paths cannot contain '\n'

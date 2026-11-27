@@ -68,6 +68,10 @@ func (s *MemoryStore) Record(ctx context.Context, candidate CaptureCandidate) (*
 	if existingID, ok := s.byHash[hash]; ok {
 		item := s.items[existingID]
 		item.UpdatedAt = now
+		if item.CopyCount < 1 {
+			item.CopyCount = 1
+		}
+		item.CopyCount++
 		if candidate.SourceBundleID != "" {
 			item.SourceBundleID = candidate.SourceBundleID
 		}
@@ -92,6 +96,7 @@ func (s *MemoryStore) Record(ctx context.Context, candidate CaptureCandidate) (*
 		SourceAppName:  candidate.SourceAppName,
 		CreatedAt:      now,
 		UpdatedAt:      now,
+		CopyCount:      1,
 		IsPinned:       false,
 		Media:          candidate.Media,
 	}
@@ -194,6 +199,27 @@ func (s *MemoryStore) Clear(ctx context.Context) error {
 		s.generation.Add(1)
 	}
 	return nil
+}
+
+// ClearUnpinned removes all non-pinned items while preserving pinned entries.
+func (s *MemoryStore) ClearUnpinned(ctx context.Context) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	removed := 0
+	for id, item := range s.items {
+		if !item.IsPinned {
+			delete(s.byHash, item.ContentHash)
+			delete(s.items, id)
+			removed++
+		}
+	}
+	if removed > 0 {
+		s.generation.Add(1)
+	}
+	return removed, nil
 }
 
 func (s *MemoryStore) PruneExpired(ctx context.Context, retentionDays int, maxItems int) (int, error) {

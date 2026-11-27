@@ -165,7 +165,7 @@ func (s *SQLiteClipboardStore) initSchema(ctx context.Context, dbPath string) er
 
 // itemColumns is the column list every item query selects, in rowToItem order.
 const itemColumns = `id, content, content_hash, source_bundle_id, source_app_name, created_at_ns, updated_at_ns, is_pinned,
-	kind, media_path, media_mime, width, height, blob_sha, thumb_path, byte_size, duration_ms`
+	kind, media_path, media_mime, width, height, blob_sha, thumb_path, byte_size, duration_ms, copy_count`
 
 // ciItemColumns is itemColumns qualified with the "ci." alias for FTS joins.
 var ciItemColumns = qualifyColumns("ci.", itemColumns)
@@ -292,20 +292,26 @@ func (s *SQLiteClipboardStore) Record(ctx context.Context, candidate clipboard.C
 			newMedia = clipboard.MergeMediaMetadata(newMedia, candidate.Media)
 		}
 
+		if existing.CopyCount < 1 {
+			existing.CopyCount = 1
+		}
+		newCopyCount := existing.CopyCount + 1
 		if _, err := s.db.Execute(ctx,
 			`UPDATE clipboard_items
 			 SET updated_at_ns = ?, source_bundle_id = ?, source_app_name = ?,
 				 kind = ?, media_path = ?, media_mime = ?, width = ?, height = ?,
-				 blob_sha = ?, thumb_path = ?, byte_size = ?, duration_ms = ?
+				 blob_sha = ?, thumb_path = ?, byte_size = ?, duration_ms = ?,
+				 copy_count = ?
 			 WHERE id = ?`,
 			nowNs, newBundleID, newAppName, kindOrText(newMedia.Kind), newMedia.MediaPath,
 			newMedia.MediaMime, newMedia.Width, newMedia.Height, newMedia.BlobSHA,
-			newMedia.ThumbPath, newMedia.ByteSize, newMedia.DurationMs, existing.ID,
+			newMedia.ThumbPath, newMedia.ByteSize, newMedia.DurationMs, newCopyCount, existing.ID,
 		); err != nil {
 			return nil, false, fmt.Errorf("update deduplicated clipboard item: %w", err)
 		}
 
 		existing.UpdatedAt = now
+		existing.CopyCount = newCopyCount
 		existing.SourceBundleID = newBundleID
 		existing.SourceAppName = newAppName
 		existing.Media = newMedia
@@ -316,8 +322,8 @@ func (s *SQLiteClipboardStore) Record(ctx context.Context, candidate clipboard.C
 	id := newItemID(nowNs)
 	if _, err := s.db.Execute(ctx,
 		`INSERT INTO clipboard_items (id, content, content_hash, source_bundle_id, source_app_name, created_at_ns, updated_at_ns, is_pinned,
-			kind, media_path, media_mime, width, height, blob_sha, thumb_path, byte_size, duration_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			kind, media_path, media_mime, width, height, blob_sha, thumb_path, byte_size, duration_ms, copy_count)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
 		id, candidate.Content, hash, candidate.SourceBundleID, candidate.SourceAppName, nowNs, nowNs,
 		kindOrText(candidate.Kind), candidate.MediaPath, candidate.MediaMime, candidate.Width, candidate.Height,
 		candidate.BlobSHA, candidate.ThumbPath, candidate.ByteSize, candidate.DurationMs,
@@ -333,6 +339,7 @@ func (s *SQLiteClipboardStore) Record(ctx context.Context, candidate clipboard.C
 		SourceAppName:  candidate.SourceAppName,
 		CreatedAt:      now,
 		UpdatedAt:      now,
+		CopyCount:      1,
 		IsPinned:       false,
 		Media:          candidate.Media,
 	}
@@ -506,6 +513,23 @@ func (s *SQLiteClipboardStore) Clear(ctx context.Context) error {
 	return nil
 }
 
+// ClearUnpinned deletes all non-pinned entries while strictly preserving pinned items.
+func (s *SQLiteClipboardStore) ClearUnpinned(ctx context.Context) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.Execute(ctx, `DELETE FROM clipboard_items WHERE is_pinned = 0`)
+	if err != nil {
+		return 0, fmt.Errorf("clear unpinned clipboard items: %w", err)
+	}
+	s.generation.Add(1)
+	return int(res.Changes), nil
+}
+
 func (s *SQLiteClipboardStore) PruneExpired(ctx context.Context, retentionDays int, maxItems int) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -587,6 +611,10 @@ func rowToItem(row []any) clipboard.ClipboardItem {
 		}
 		return 0
 	}
+	copyCount := int(num(17))
+	if copyCount < 1 {
+		copyCount = 1
+	}
 	return clipboard.ClipboardItem{
 		ID:             str(0),
 		Content:        str(1),
@@ -595,6 +623,7 @@ func rowToItem(row []any) clipboard.ClipboardItem {
 		SourceAppName:  str(4),
 		CreatedAt:      time.Unix(0, num(5)).UTC(),
 		UpdatedAt:      time.Unix(0, num(6)).UTC(),
+		CopyCount:      copyCount,
 		IsPinned:       num(7) != 0,
 		Media: clipboard.Media{
 			Kind:       textKindToZero(clipboard.Kind(str(8))),
