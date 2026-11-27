@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 )
 
@@ -19,15 +18,16 @@ import (
 func TestMain(m *testing.M) {
 	previous, hadPrevious := os.LookupEnv("TMPDIR")
 
-	// umask first: Linux CI runs with 002 (giving 775 directories) while macOS runs with 022. os.MkdirTemp asks
-	// for 0700, but the umask can only widen nothing and narrow everything -- 002 does not widen 0700 -- so the
-	// real problem is elsewhere: t.TempDir() creates its own subdirectories with 0777&^umask, which is 0775 under
-	// 002 and therefore group-writable. Setting the umask here makes every directory this package's tests create
-	// private, on both platforms, without touching the production guard.
-	previousUmask := syscall.Umask(0o077)
-	_ = previousUmask // process-wide for the rest of the run; restored implicitly when the test binary exits
-
-	base, err := os.MkdirTemp("", "clavis-storage-tests-")
+	// The base must NOT live under /tmp. mkdirPrivate walks every existing ancestor of the database path and rejects
+	// any that is group/world-writable, and /tmp is 1777 on Linux -- so a TMPDIR under /tmp fails no matter what
+	// permissions the directories below it have. $HOME is 0700+ on both platforms, which is what the guard wants to
+	// see. TestMain puts the base there and points TMPDIR at it.
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		fmt.Fprintf(os.Stderr, "storage tests: cannot resolve a home directory for the private temp base: %v\n", err)
+		os.Exit(1)
+	}
+	base, err := os.MkdirTemp(home, "clavis-storage-tests-")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "storage tests: cannot create a private temp base: %v\n", err)
 		os.Exit(1)
