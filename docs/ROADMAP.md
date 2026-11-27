@@ -1,6 +1,6 @@
 # Clavis 推进路线（Single Source of Truth）
 
-> **权威基线**：`clv/p5-foundation` `ca1460e`（2026-11-26）
+> **权威基线**：`main` `6c6e1aa`（2026-11-27，推进 Wave 1–6 macOS 主力产品化闭环）
 >
 > **状态口径**：本文件是 Clavis 全仓唯一的推进路线与阶段状态真源。历史规划与专项设计见 §5 文档索引；任何旧文档与本文件冲突时，以本文件与当前代码为准。
 
@@ -8,7 +8,7 @@
 
 ## 0. 一句话结论与 1.x 完成口径
 
-Clavis 1.0 的范围是 **macOS 自用稳定版**。承诺面包含 Launcher、剪贴板、Security Vault、QuickJump、截图标注、已配置 profile 的 AI/OCR，以及带安全降级的 Herdr 控制面。输入法是 opt-in second-IME。当前仍受 race、真实权限和 macOS A1–A16 交互签收阻断，不能写成代码已达成或全链路已验收。Windows parity、用户同步闭环、P5 元数据层、Magpie 专页、ACP、独立 Assets Hub 和公开分发链路不属于 1.0 承诺。详见 [`docs/design/scope-1.0.md`](design/scope-1.0.md)。
+Clavis 1.0 的范围是 **macOS 主力稳定版**。承诺面包含 Launcher、剪贴板、Security Vault、QuickJump、截图标注、已配置 profile 的 AI/OCR，以及带安全降级的 Herdr 控制面；输入法保持 opt-in second-IME。**Wave 1（CI/CD 护栏 + 本地稳定签名升级流）与 Wave 2（移除 `⌘9 Assets Hub`、默认 `liquid_glass`、现代 macOS 图标、文档真源统一）已优先推进**，后续按 Wave 3（Maccy 剪贴板 4 阶段重构）→ Wave 4（设置中心与浮层 29 项 UX 契约清零）→ Wave 5（Spotlight 文件搜索 + 首启 + 自运维诊断/备份/卸载）→ Wave 6（稳定签名包 + 真实 provider smoke + macOS A1–A16 真机签收）闭环。Windows parity（CI `continue-on-error` 保留可移植信号）、用户同步闭环（坚持 D1 共享目录密文同步）、P5 元数据层、Magpie 专页、ACP、独立 Assets Hub 和公开分发/自动更新链路不属于 1.0 承诺。详见 [`docs/design/scope-1.0.md`](design/scope-1.0.md)。
 
 | 里程碑 | 状态 | 目标定义 | 验收门槛 |
 | --- | --- | --- | --- |

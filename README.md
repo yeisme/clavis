@@ -75,17 +75,30 @@ All desktop targets compile with zero CGo dependencies:
 
 ### Test & Vet
 
+See [`docs/CI.md`](docs/CI.md) for full CI workflow details and troubleshooting.
+
 ```bash
+# Quick local pre-commit check (whitespace, vet, core/storage/sync/watcher/CLI)
+make test-fast
+
+# Full PR parity check (all tests, -race incl. uiapp/watcher, 3-OS vet/cross-build)
+make ci-pr
+
 # Run all unit and UI tests (including headless ui.NewTester frames)
 go test -count=1 ./...
 
-# Race detector verification across core, internal bridges/storage, and UI controller
-go test -count=1 -race ./pkg/... ./internal/... ./uiapp/...
+# Race detector verification across core, internal bridges/storage, watcher, and UI controller
+make ci-race
+```
 
-# Static verification across macOS, Windows, and Linux targets
-go vet ./...
-GOOS=windows GOARCH=amd64 go vet ./...
-GOOS=linux GOARCH=amd64 go vet ./...
+### Local Signing & Safe `/Applications` Install (macOS)
+
+```bash
+# One-time setup: create local "Clavis Local Signing" cert so upgrades keep macOS TCC permissions
+make setup-signing
+
+# Build, sign, back up existing /Applications/Clavis.app, swap, verify, and relaunch
+make install-local
 ```
 
 ### Run, Smoke Check & Self-Check
@@ -141,13 +154,13 @@ language = "auto"       # auto follows macOS/Windows/Linux UI language
 animations = "auto"     # auto | full | reduced | off
 
 # Spatial look (see docs/design/visual-language.md)
-visual_preset = "spatial_3d"  # classic | liquid_glass | spatial_3d
-stage_intensity = 0.7         # 0 flattens the geometry, keeps the materials; 1 is full
-oblique_rows = true           # fan each result row; false keeps every row parallel
-glass_clarity = 0.18          # 0..1, how much the vibrancy shows through
+visual_preset = "liquid_glass" # classic | liquid_glass | spatial_3d
+stage_intensity = 0.7          # 0 flattens the geometry, keeps the materials; 1 is full
+oblique_rows = false           # fan each result row; false keeps every row parallel
+glass_clarity = 0.18           # 0..1, how much the vibrancy shows through
 ```
 
-`auto` language uses the system preference; `auto` animation mode respects the platform Reduce Motion preference. `visual_preset` picks flat `classic`, planar `liquid_glass`, or default `spatial_3d`, and all appearance controls are live in **Settings → General → Appearance**. Design contract lives in [`docs/design/visual-language.md`](docs/design/visual-language.md).
+`auto` language uses the system preference; `auto` animation mode respects the platform Reduce Motion preference. `visual_preset` picks flat `classic`, default `liquid_glass`, or `spatial_3d`, and all appearance controls are live in **Settings → General → Appearance**. Design contract lives in [`docs/design/visual-language.md`](docs/design/visual-language.md).
 
 ## Omnibox Prefix Quick-Routing
 

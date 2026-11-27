@@ -1,10 +1,10 @@
 # Clavis 1.0 范围真相
 
-日期：2026-11-26
-目标：macOS 自用稳定版 1.0
-状态：范围冻结，发布仍受运行时验收阻断
+日期：2026-11-27（基线 `main` `6c6e1aa`）
+目标：macOS 主力稳定版 1.0
+状态：范围冻结，正在按 Wave 1–6 收口打磨与验收
 
-这份文档定义用户在 README、Settings 和 ROADMAP 里能看到的 1.0 承诺。代码里已经存在的基础库、测试 fixture 和跨平台构建目标继续保留，但没有通过真实环境验收的能力不写成 ready。
+这份文档定义用户在 README、Settings 和 ROADMAP 里能看到的 1.0 承诺。代码里已经存在的基础库、测试 fixture 和跨平台构建目标继续保留，但没有通过真实环境验收的能力不写成 ready。Wave 2 起代码已正式落实 `⌘9 Assets Hub` 入口移除与默认 `liquid_glass` 收敛（底层 MediaStore / Vault / Templates 完整保留）。
 
 ## 1.0 承诺
 
