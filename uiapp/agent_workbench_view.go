@@ -151,11 +151,11 @@ func (a *AppController) renderAgentWorkbenchBand(c *ui.Context, theme *ui.Theme)
 	refreshing := a.agentRefreshing()
 	zh := i18n.IsChinese()
 
-	ui.Row(c).Key("agent-workbench-band").Label("agent-workbench-band").FillWidth().Padding(space2, space0).Gap(space4).AlignItems(ui.Center).Children(func() {
+	ui.Row(c).Key("agent-workbench-band").Label("agent-workbench-band").FillWidth().Wrap().Padding(space2, space0).Gap(space2).AlignItems(ui.Center).Children(func() {
 		laneChip := func(lane agentLaneKind, label string, dotColor ui.Color, showDot bool) {
 			selected := activeLane == lane
-			btn := ui.ButtonBase(c).Key("agent-lane:" + string(lane)).Label(label).
-				Padding(space2, space6).Radius(radiusChip).FocusRing(false).Shrink(0)
+			btn := ui.ButtonBase(c).Key("agent-lane:"+string(lane)).Label(label).
+				Padding(space2, space4).Radius(radiusChip).FocusRing(false).Shrink(0)
 			fg := secondaryInk(theme)
 			if selected {
 				btn.Background(selectionFill(theme)).Border(space1, selectionEdge(theme))

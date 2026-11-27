@@ -3,226 +3,25 @@ package uiapp
 import (
 	"context"
 	"fmt"
-	"reflect"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/egoist/mygo/ui"
+	internaldiag "github.com/yeisme/clavis/internal/diag"
 	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/i18n"
 )
 
-// Settings section indices. The first five mirror SettingsTab so that
-// OpenSettings(SettingsTabAI) and friends select the matching section; the
-// extended sections continue past them.
-const (
-	settingsSectionGeneral     = int(SettingsTabGeneral)
-	settingsSectionAI          = int(SettingsTabAI)
-	settingsSectionIMEKeymap   = int(SettingsTabIMEKeymap)
-	settingsSectionPermissions = int(SettingsTabPermissions)
-	settingsSectionConfigs     = int(SettingsTabConfigs)
-	settingsSectionLeader      = 5
-	settingsSectionSnippets    = 6
-	settingsSectionGlossary    = 7
-	settingsSectionWorkflows   = 8
-	settingsSectionAppearance  = 9
-	settingsSectionClipboard   = 10
-	settingsSectionAbout       = 11
-	settingsSectionSecurity    = 12
-	settingsSectionTemplates   = 13
-)
-
-// settingsSectionMeta describes one navigation rail entry.
-type settingsSectionMeta struct {
-	Index    int
-	Key      string
-	Label    string
-	Icon     string
-	Hint     string
-	Settings SettingsTab
-	Group    string
-}
-
-type settingsGroupMeta struct {
-	Key   string
-	Label string
-}
-
-func settingsGroups() []settingsGroupMeta {
-	return []settingsGroupMeta{
-		{Key: "input", Label: i18n.T("settings.group.input")},
-		{Key: "productivity", Label: i18n.T("settings.group.productivity")},
-		{Key: "intelligence", Label: i18n.T("settings.group.intelligence")},
-		{Key: "system", Label: i18n.T("settings.group.system")},
-		{Key: "about", Label: i18n.T("settings.group.about")},
-	}
-}
-
-// settingsSections returns the ordered navigation rail entries.
-func settingsSections() []settingsSectionMeta {
-	return []settingsSectionMeta{
-		{settingsSectionGeneral, "triggers", i18n.T("settings.section.general"), "bolt", i18n.T("settings.section.general.hint"), SettingsTabGeneral, "input"},
-		{settingsSectionIMEKeymap, "ime-keymap", i18n.T("settings.section.ime"), "keyboard", i18n.T("settings.section.ime.hint"), SettingsTabIMEKeymap, "input"},
-		{settingsSectionLeader, "leader", i18n.T("settings.section.leader"), "command", i18n.T("settings.section.leader.hint"), SettingsTabGeneral, "input"},
-		{settingsSectionSnippets, "snippets", i18n.T("omnibox.tab.snippets"), "text.badge.plus", i18n.T("settings.section.snippets.hint"), SettingsTabGeneral, "productivity"},
-		{settingsSectionGlossary, "glossary", i18n.T("settings.section.glossary"), "character.book.closed", i18n.T("settings.section.glossary.hint"), SettingsTabGeneral, "productivity"},
-		{settingsSectionWorkflows, "workflows", i18n.T("settings.section.workflows"), "wand.and.stars", i18n.T("settings.section.workflows.hint"), SettingsTabGeneral, "productivity"},
-		{settingsSectionAI, "ai", i18n.T("settings.section.ai"), "sparkles", i18n.T("settings.section.ai.hint"), SettingsTabAI, "intelligence"},
-		{settingsSectionPermissions, "permissions", i18n.T("settings.section.permissions"), "gearshape", i18n.T("settings.section.permissions.hint"), SettingsTabPermissions, "system"},
-		{settingsSectionConfigs, "configs", i18n.T("settings.section.configs"), "folder", i18n.T("settings.section.configs.hint"), SettingsTabConfigs, "system"},
-	}
-}
-
-func settingsNavigationSections() []settingsSectionMeta {
-	sections := append([]settingsSectionMeta(nil), settingsSections()...)
-	sections = append(sections[:6], append([]settingsSectionMeta{
-		{settingsSectionTemplates, "templates", i18n.T("settings.section.templates"), "doc.text", i18n.T("settings.section.templates.hint"), SettingsTabGeneral, "productivity"},
-		{settingsSectionClipboard, "clipboard", i18n.T("settings.section.clipboard"), "doc.on.clipboard", i18n.T("settings.section.clipboard.hint"), SettingsTabGeneral, "productivity"},
-	}, sections[6:]...)...)
-	sections = append(sections,
-		settingsSectionMeta{settingsSectionAppearance, "appearance", i18n.T("settings.section.appearance"), "paintbrush", i18n.T("settings.section.appearance.hint"), SettingsTabGeneral, "system"},
-		settingsSectionMeta{settingsSectionSecurity, "security", pickLang(i18n.IsChinese(), "安全", "Security"), "lock.rotation", pickLang(i18n.IsChinese(), "密码与密钥引用、只读元数据与 User-Only TTL 复制", "SecretRefs, metadata-only index & User-Only TTL copy"), SettingsTabGeneral, "system"},
-		settingsSectionMeta{settingsSectionAbout, "about", i18n.T("settings.section.about"), "info.circle", i18n.T("settings.section.about.hint"), SettingsTabGeneral, "about"},
-	)
-	for i := range sections {
-		switch sections[i].Key {
-		case "general", "ime-keymap", "leader":
-			sections[i].Group = "input"
-		case "snippets", "glossary", "templates", "clipboard", "workflows":
-			sections[i].Group = "productivity"
-		case "ai":
-			sections[i].Group = "intelligence"
-		case "appearance", "permissions", "configs", "security":
-			sections[i].Group = "system"
-		case "about":
-			sections[i].Group = "about"
-		}
-	}
-	return sections
-}
-
-// settingsSectionMetaFor resolves the metadata of a section index.
-func settingsSectionMetaFor(index int) settingsSectionMeta {
-	for _, meta := range settingsNavigationSections() {
-		if meta.Index == index {
-			return meta
-		}
-	}
-	return settingsNavigationSections()[0]
-}
-
-// normalizeSettingsSection clamps an unknown section index to the first one.
-func normalizeSettingsSection(index int) int {
-	for _, meta := range settingsNavigationSections() {
-		if meta.Index == index {
-			return index
-		}
-	}
-	return settingsSectionGeneral
-}
-
-// settingsSectionKey returns the navigation rail key of a section index.
-func settingsSectionKey(index int) string {
-	return settingsSectionMetaFor(index).Key
-}
-
-// settingsSectionFromKey resolves a navigation rail key to its section index.
-func settingsSectionFromKey(key string) (int, bool) {
-	if key == "general" {
-		return settingsSectionGeneral, true
-	}
-	for _, meta := range settingsNavigationSections() {
-		if meta.Key == key {
-			return meta.Index, true
-		}
-	}
-	return 0, false
-}
-
-// setSettingsSection records the section chosen in the navigation rail.
-func (a *AppController) setSettingsSection(index int) {
-	a.mu.Lock()
-	a.uiState.settingsTabIdx = index
-	a.mu.Unlock()
-}
-
-func (a *AppController) requestSettingsSection(index int) {
-	se := a.settingsEditor()
-	if seGet(se, func(s *settingsEditorState) bool { return s.leavePrompt }) {
-		return
-	}
-	if a.settingsDraftDirty() {
-		seSet(se, func(s *settingsEditorState) { s.pendingSection, s.leavePrompt = index, true })
-		return
-	}
-	a.setSettingsSection(index)
-}
-
 func (a *AppController) settingsDraftDirty() bool {
-	state := seGet(a.settingsEditor(), func(s *settingsEditorState) struct {
-		snippetIsNew, glossaryIsNew, workflowLoaded, workflowIsNew              bool
-		snippetSelected, glossarySelected, workflowOriginalID, workflowSelected string
-		snippetDraft                                                            config.SnippetItem
-		glossaryDraft                                                           config.GlossaryTerm
-		workflowDraft                                                           config.Workflow
-		leaderNewKey, leaderNewLabel                                            string
-	} {
-		return struct {
-			snippetIsNew, glossaryIsNew, workflowLoaded, workflowIsNew              bool
-			snippetSelected, glossarySelected, workflowOriginalID, workflowSelected string
-			snippetDraft                                                            config.SnippetItem
-			glossaryDraft                                                           config.GlossaryTerm
-			workflowDraft                                                           config.Workflow
-			leaderNewKey, leaderNewLabel                                            string
-		}{s.snippetIsNew, s.glossaryIsNew, s.workflowLoaded, s.workflowIsNew, s.snippetSelected, s.glossarySelected, s.workflowOriginalID, s.workflowSelected, s.snippetDraft, s.glossaryDraft, s.workflowDraft, s.leaderNewKey, s.leaderNewLabel}
-	})
-	cfg := a.ConfigStore.Current()
-	if state.snippetIsNew || state.snippetSelected != "" {
-		var saved config.SnippetItem
-		found := false
-		for _, item := range cfg.Snippets.Items {
-			if item.ID == state.snippetSelected {
-				saved, found = item, true
-				break
-			}
-		}
-		if state.snippetIsNew || !found || !reflect.DeepEqual(saved, state.snippetDraft) {
-			return true
-		}
-	}
-	if state.glossaryIsNew || state.glossarySelected != "" {
-		var saved config.GlossaryTerm
-		found := false
-		for _, item := range cfg.Glossary.Terms {
-			if item.Term == state.glossarySelected {
-				saved, found = item, true
-				break
-			}
-		}
-		if state.glossaryIsNew || !found || !reflect.DeepEqual(saved, state.glossaryDraft) {
-			return true
-		}
-	}
-	if state.workflowLoaded || state.workflowIsNew {
-		var saved config.Workflow
-		found := false
-		for _, item := range cfg.Workflows.Workflows {
-			if item.ID == state.workflowOriginalID || item.ID == state.workflowSelected {
-				saved, found = item, true
-				break
-			}
-		}
-		if state.workflowIsNew || !found || !reflect.DeepEqual(cloneWorkflow(saved), normalizeWorkflow(state.workflowDraft)) {
-			return true
-		}
-	}
-	return state.leaderNewKey != "" || state.leaderNewLabel != ""
+	return a.anySettingsPageDirty()
 }
 
 // SettingsView renders the native Clavis Settings visual configuration center.
 func (a *AppController) SettingsView(c *ui.Context) {
+	a.syncDocumentEdited()
 	cfg := a.Config()
 	theme := resolveAppearanceTheme(c, cfg.Main.Appearance.Theme)
 	c.SetTheme(theme)
@@ -232,73 +31,168 @@ func (a *AppController) SettingsView(c *ui.Context) {
 	// reading the keychain here, every frame and under a.mu, hung Clavis at
 	// launch (see refreshAPIKeySource).
 	a.mu.Lock()
-	selectedTab := a.uiState.settingsTabIdx
-	statusMsg := a.settingsStatus
+	selectedPage := a.uiState.settingsPage
 	apiKeySource := a.apiKeySource
 	aiTestStatus := a.aiTestStatus
 	aiTestMsg := a.aiTestMessage
 	a.mu.Unlock()
-	query := seGet(a.settingsEditor(), func(s *settingsEditorState) string { return s.railQuery })
+	se := a.settingsEditor()
 	diag := a.Diagnostics()
 
-	section := normalizeSettingsSection(selectedTab)
+	pageKey := normalizeSettingsPageKey(selectedPage)
 
-	applyTextLocale(ui.Row(c).Fill().Background(theme.Background)).Children(func() {
-		a.renderSettingsSidebar(c, section, cfg, query)
+	if c.Shortcut(primaryMod(), ui.KeyF) {
+		seSet(se, func(s *settingsEditorState) { s.searchFocusRequested = true })
+	}
+	groups := settingsGroups()
+	groupKeys := []ui.Key{ui.Key1, ui.Key2, ui.Key3, ui.Key4, ui.Key5}
+	for i, gk := range groupKeys {
+		if i < len(groups) && c.Shortcut(primaryMod(), gk) {
+			if firstPage, ok := settingsFirstPageInGroup(groups[i].Key); ok {
+				a.setSettingsPage(firstPage)
+				pageKey = firstPage
+			}
+			break
+		}
+	}
+
+	query := seGet(se, func(s *settingsEditorState) string { return s.railQuery })
+
+	root := applyTextLocale(ui.Row(c).Fill().Background(theme.Background))
+	var searchFocused bool
+	root.Children(func() {
+		// Non-tab-stop focus sink so empty Esc in Search can unfocus without making
+		// the root container itself a focus ancestor or Tab stop.
+		ui.Box(c).Key("settings-focus-sink").Width(0).Height(0).Bind(&se.blurHandle).TabStop(false).FocusRing(false)
+		searchFocused = a.renderSettingsSidebar(c, pageKey, cfg, query)
 		ui.Box(c).Width(space1).FillHeight().Background(hairline(theme))
-		ui.Column(c).FillHeight().Grow(1).Padding(space6, space10).Gap(space6).Children(func() {
-			a.renderSettingsPaneHeader(c, theme, section, statusMsg)
-			ui.Scroll(c).FillWidth().Grow(1).Children(func() {
-				ui.Column(c).FillWidth().Gap(space6).Children(func() {
-					a.renderSettingsSection(c, theme, cfg, section, apiKeySource, aiTestStatus, aiTestMsg, diag)
+		ui.Column(c).FillHeight().Grow(1).Padding(space6, space10).Gap(space4).Children(func() {
+			a.renderSettingsPaneHeader(c, theme, pageKey)
+			a.renderSettingsFailureBanners(c, theme, pageKey)
+			ui.Scroll(c).Key("settings-scroll:" + pageKey).FillWidth().Grow(1).Children(func() {
+				ui.Column(c).FillWidth().Children(func() {
+					topAnchor := ui.Box(c).Key("settings-scroll-top:" + pageKey).Height(0).FillWidth()
+					if seGet(se, func(s *settingsEditorState) bool {
+						if !s.pendingScrollTop {
+							return false
+						}
+						s.pendingScrollTop = false
+						return true
+					}) {
+						topAnchor.ScrollIntoView(ui.ScrollIntoViewOptions{Block: ui.ScrollStart})
+					}
+					ui.Column(c).FillWidth().Gap(space6).Children(func() {
+						a.renderSettingsSection(c, theme, cfg, pageKey, apiKeySource, aiTestStatus, aiTestMsg, diag)
+					})
 				})
 			})
 		})
 	})
+	recording := seGet(se, func(s *settingsEditorState) bool { return s.recordingShortcut != "" })
+	if !searchFocused && !recording && c.Shortcut(0, ui.KeyEscape) {
+		a.handleSettingsRootEscape()
+	}
 }
 
-// renderSettingsSidebar draws the navigation rail of sections.
-func (a *AppController) renderSettingsSidebar(c *ui.Context, section int, cfg config.ClavisConfig, query string) {
+// renderSettingsSidebar draws the fixed search box and scrollable navigation rail,
+// reporting whether the search field holds keyboard focus.
+func (a *AppController) renderSettingsSidebar(c *ui.Context, pageKey string, cfg config.ClavisConfig, query string) bool {
 	theme := resolveAppearanceTheme(c, cfg.Main.Appearance.Theme)
-	selected := settingsSectionKey(section)
+	se := a.settingsEditor()
+	selected := normalizeSettingsPageKey(pageKey)
+	searchFocused := false
 	// The sidebar is the elevated gray layer beside the white (or #1C1C1E)
 	// content pane — opaque, like every reading surface; glass is for
 	// floating panels only.
-	ui.Column(c).Width(railWidth).FillHeight().Padding(cardPadY, space8).Gap(space4).Background(theme.Surface).Children(func() {
-		ui.Text(c, i18n.T("settings.center")).FontSize(typeLabel).FontWeight(600).TextColor(theme.TextMuted).Padding(space8, space4).SingleLine()
+	ui.Column(c).Width(railWidth).FillHeight().Padding(space8, space8).Gap(space4).Background(theme.Surface).Children(func() {
+		ui.Text(c, i18n.T("settings.center")).FontSize(typeLabel).FontWeight(600).TextColor(theme.TextMuted).Padding(space4, space4).SingleLine()
 		search := query
-		input := ui.TextInput(c.Key("settings-search"), &search).Placeholder(i18n.T("settings.search.placeholder")).FillWidth()
-		if input.Changed() {
-			seSet(a.settingsEditor(), func(s *settingsEditorState) { s.railQuery = search })
-			q := strings.ToLower(strings.TrimSpace(search))
-			for _, candidate := range settingsNavigationSections() {
-				if settingsSectionMatches(candidate, q, cfg) {
-					a.setSettingsSection(candidate.Index)
-					break
-				}
+		input := ui.TextInput(c.Key("settings-search"), &search).
+			Bind(&se.searchHandle).
+			Placeholder(i18n.T("settings.search.placeholder")).
+			Label(i18n.T("settings.search.placeholder")).
+			Search().
+			FillWidth()
+		if seGet(se, func(s *settingsEditorState) bool {
+			if !s.searchFocusRequested {
+				return false
 			}
+			s.searchFocusRequested = false
+			return true
+		}) {
+			se.searchHandle.RequestFocus(c)
 		}
-		q := strings.ToLower(strings.TrimSpace(search))
-		ui.Scroll(c).Key("settings-rail-scroll").FillWidth().Grow(1).MinHeight(space0).Children(func() {
-			ui.Column(c).FillWidth().Gap(space4).Children(func() {
-				lastGroup := ""
-				for _, meta := range settingsNavigationSections() {
-					item := meta
-					if q != "" && !settingsSectionMatches(item, q, cfg) {
-						continue
+		searchFocused = input.Focused()
+		input.OnTextKey(func(k ui.TextKey) bool {
+			qTrim := strings.TrimSpace(k.Text())
+			switch {
+			case k.Key == ui.KeyEscape && k.Mods == 0:
+				if k.Text() != "" {
+					k.SetText("")
+					seSet(se, func(s *settingsEditorState) {
+						s.railQuery = ""
+						s.searchSelectedIdx = 0
+					})
+				} else {
+					se.blurHandle.RequestFocus(c)
+				}
+				return true
+			case k.Key == ui.KeyDown && k.Mods == 0 && qTrim != "":
+				results := settingsSearchQuery(k.Text(), cfg)
+				if len(results) > 0 {
+					limit := min(len(results), 50)
+					seSet(se, func(s *settingsEditorState) {
+						s.searchSelectedIdx = (s.searchSelectedIdx + 1) % limit
+					})
+				}
+				return true
+			case k.Key == ui.KeyUp && k.Mods == 0 && qTrim != "":
+				results := settingsSearchQuery(k.Text(), cfg)
+				if len(results) > 0 {
+					limit := min(len(results), 50)
+					seSet(se, func(s *settingsEditorState) {
+						s.searchSelectedIdx = (s.searchSelectedIdx - 1 + limit) % limit
+					})
+				}
+				return true
+			case k.Key == ui.KeyEnter && k.Mods == 0 && qTrim != "":
+				results := settingsSearchQuery(k.Text(), cfg)
+				if len(results) > 0 {
+					limit := min(len(results), 50)
+					idx := seGet(se, func(s *settingsEditorState) int { return s.searchSelectedIdx })
+					if idx < 0 || idx >= limit {
+						idx = 0
 					}
+					a.jumpToSettingsSearchResult(c, cfg, results[idx])
+				}
+				return true
+			}
+			return false
+		})
+		if input.Changed() {
+			seSet(se, func(s *settingsEditorState) {
+				s.railQuery = search
+				s.searchSelectedIdx = 0
+			})
+		}
+
+		ui.Scroll(c).Key("settings-rail-scroll").FillWidth().Grow(1).MinHeight(space0).Children(func() {
+			ui.Column(c).FillWidth().Gap(space2).Children(func() {
+				if strings.TrimSpace(search) != "" {
+					a.renderSettingsSearchResults(c, theme, cfg, search)
+					return
+				}
+				lastGroup := ""
+				for _, meta := range settingsPages() {
+					item := meta
 					if item.Group != lastGroup {
-						for _, group := range settingsGroups() {
-							if group.Key == item.Group {
-								ui.Text(c.Key("settings-rail-group:"+group.Key), group.Label).FontSize(typeMeta).FontWeight(600).TextColor(theme.TextMuted).Padding(space8, space4).SingleLine()
-								break
-							}
-						}
+						ui.Text(c.Key("settings-rail-group:"+item.Group), settingsGroupLabel(item.Group)).
+							FontSize(typeMeta).FontWeight(600).TextColor(theme.TextMuted).Padding(space4, space4, space2, space4).SingleLine()
 						lastGroup = item.Group
 					}
 					active := item.Key == selected
-					row := ui.ButtonBase(c).Key("settings-rail:"+item.Key).FillWidth().Height(controlHeight).
-						Padding(space4, space8).Radius(radiusRow).Gap(space8).AlignItems(ui.Center).FocusRing(false)
+					row := ui.ButtonBase(c).Key("settings-rail:"+item.Key).FillWidth().Height(28).
+						Padding(space2, space8).Radius(radiusRow).Gap(space8).AlignItems(ui.Center).FocusRing(false)
 					if active {
 						row = kitInteractive(c, theme, row, interactionState{Selected: true}, motionProfiles[animationOff])
 					} else if row.Hovered() {
@@ -310,177 +204,87 @@ func (a *AppController) renderSettingsSidebar(c *ui.Context, section int, cfg co
 						if active {
 							label.FontWeight(600)
 						}
-						if badge := settingsSectionBadge(item.Index, cfg); badge != "" {
+						if badge := settingsPageBadge(item.Key, cfg); badge != "" {
 							ui.Text(c, badge).FontSize(typeMeta).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+						}
+						if a.hasFailureForPage(item.Key) {
+							ui.Box(c).Key("settings-rail-error-dot:" + item.Key).Label("settings-rail-error-dot:" + item.Key).Shrink(0).Children(func() {
+								kitStatusDot(c, theme.Danger, false)
+							})
+						} else if a.settingsPageDirty(item.Key) {
+							ui.Box(c).Key("settings-rail-dirty-dot:" + item.Key).Label("settings-rail-dirty-dot:" + item.Key).Shrink(0).Children(func() {
+								kitStatusDot(c, theme.Accent, false)
+							})
 						}
 					})
 					if row.Clicked() {
-						if index, ok := settingsSectionFromKey(item.Key); ok {
-							a.requestSettingsSection(index)
-						}
+						a.setSettingsPage(item.Key)
 					}
 				}
 			})
 		})
-		se := a.settingsEditor()
-		if seGet(se, func(s *settingsEditorState) bool { return s.leavePrompt }) {
-			ui.Row(c).Key("settings-draft-warning").FillWidth().Gap(space4).Children(func() {
-				ui.Text(c, i18n.T("settings.draft.unsaved")).FontSize(typeMeta).TextColor(theme.TextMuted).Grow(1)
-				if ui.Button(c, i18n.T("settings.draft.keep_editing")).Clicked() {
-					seSet(se, func(s *settingsEditorState) { s.leavePrompt = false })
-				}
-				if ui.PrimaryButton(c, i18n.T("settings.draft.discard")).Clicked() {
-					pending := seGet(se, func(s *settingsEditorState) int { return s.pendingSection })
-					seSet(se, func(s *settingsEditorState) { *s = settingsEditorState{} })
-					a.setSettingsSection(pending)
-				}
-			})
-		}
 	})
+	return searchFocused
 }
 
-func settingsSectionKeywords(key string) string {
-	switch key {
-	case "triggers", "general":
-		return "general triggers leader_key double_tap_key double_tap_interval_ms leader_reveal_delay_ms capsule_shortcut clipboard_shortcut screenshot_shortcut snippet_expansion_enabled snippet_backspace_undo capture hotkey shortcut reload 常规 触发 引导键 双击 胶囊快捷键 剪贴板快捷键 截图快捷键 截图标注 快捷键 截图 剪贴板 代码片段 展开 撤销 重载"
-	case "ime-keymap":
-		return "ime keymap input method engine pinyin user_words ime_rules remap tap_hold_threshold_ms input_engine_toggle_shortcut layer caps lock escape hyper ascii native chinese english 输入法 键位 映射 词库 用户词 拼音 规则 层 切换"
-	case "leader":
-		return "leader tree key which-key menu submenu node action hotkey shortcut 引导键 按键树 菜单 子菜单 节点 动作"
-	case "snippets":
-		return "snippets text expansion trigger template inline expand abbrev 代码片段 文本展开 触发词 模板 缩写"
-	case "glossary":
-		return "glossary terms lexicon alias canonical domain dictionary terminology 术语 术语表 词库 别名 规范 领域 词典"
-	case "clipboard":
-		return "clipboard history retention_days max_history_items media_capture media_quota_mb excluded_bundle_ids privacy filter sensitive ttl pasteboard 剪贴板 历史 保留 天数 上限 媒体 配额 隐私 过滤 排除 敏感"
-	case "workflows":
-		return "workflows automation pipeline step action schedule trigger macro 工作流 自动化 步骤 流程 编排 宏"
-	case "templates":
-		return i18n.T("settings.section.templates.keywords")
-	case "ai":
-		return "ai model provider profile api_key keychain secretref vision ocr translate endpoint base_url timeout temperature stream anthropic openai gemini deepseek 模型 接口 密钥 视觉 识图 翻译 端点 连接 测试"
-	case "appearance":
-		return "appearance theme dark light system language animations show_key_hints show_preview_pane capsule_width max_visible_results corner_radius hud_duration_ms spatial visual_preset stage_intensity oblique_rows glass_clarity shader 外观 主题 深色 浅色 语言 动画 预览 胶囊 宽度 圆角 空间 玻璃 着色器"
-	case "permissions":
-		return "permissions diagnostics accessibility input_monitoring screen_recording secure_input monitor recovery hook validation health 权限 诊断 辅助功能 输入监控 录屏 屏幕录制 安全输入 校验 健康"
-	case "configs":
-		return "configs config files toml directory folder open main leader snippets glossary ime_rules prompts components workflows quickjump 配置文件 目录 文件夹 打开 书签 快跳"
-	case "security":
-		return "security vault password secret secretref keychain ttl user-only audit metadata 1password bitwarden 安全 密码 保险库 密钥 引用 审计 元数据"
-	case "about":
-		return "about version sync account device cloud local status 关于 版本 同步 账号 设备 云端 本地 状态"
-	default:
-		return ""
+// renderSettingsPaneHeader draws the section caption and optional per-page status pill.
+func (a *AppController) renderSettingsPaneHeader(c *ui.Context, theme *ui.Theme, pageKey string) {
+	meta, ok := settingsPageByKey(pageKey)
+	if !ok {
+		meta = settingsPages()[0]
 	}
-}
-
-func settingsSectionMatches(meta settingsSectionMeta, query string, _ config.ClavisConfig) bool {
-	compact := func(value string) string {
-		value = strings.ToLower(value)
-		return strings.NewReplacer("_", "", "-", "", " ", "").Replace(value)
-	}
-	haystack := compact(strings.Join([]string{meta.Key, meta.Label, meta.Hint, settingsSectionKeywords(meta.Key)}, " "))
-	return strings.Contains(haystack, compact(query))
-}
-
-func settingsStatusIsFailure(status string) bool {
-	status = strings.ToLower(status)
-	return strings.Contains(status, "failed") || strings.Contains(status, "error") || strings.Contains(status, "失败") || strings.Contains(status, "错误")
-}
-
-// settingsSectionBadge returns the short count badge of a section.
-func settingsSectionBadge(index int, cfg config.ClavisConfig) string {
-	switch index {
-	case settingsSectionIMEKeymap:
-		return fmt.Sprintf("%d", len(cfg.IMERules.Rules))
-	case settingsSectionLeader:
-		return fmt.Sprintf("%d", len(cfg.Leader.Nodes))
-	case settingsSectionSnippets:
-		return fmt.Sprintf("%d", len(cfg.Snippets.Items))
-	case settingsSectionGlossary:
-		return fmt.Sprintf("%d", len(cfg.Glossary.Terms))
-	case settingsSectionWorkflows:
-		return fmt.Sprintf("%d", len(cfg.Workflows.Workflows))
-	case settingsSectionTemplates:
-		return fmt.Sprintf("%d", len(cfg.Prompts.Items))
-	case settingsSectionAI:
-		return fmt.Sprintf("%d", len(cfg.Main.AI.Profiles))
-	case settingsSectionClipboard:
-		return fmt.Sprintf("%d", len(cfg.Main.Clipboard.ExcludedBundleIDs))
-	case settingsSectionConfigs:
-		return fmt.Sprintf("%d", len(config.AllConfigFileKinds()))
-	}
-	return ""
-}
-
-// renderSettingsPaneHeader draws the section caption and the status pill.
-func (a *AppController) renderSettingsPaneHeader(c *ui.Context, theme *ui.Theme, section int, statusMsg string) {
-	meta := settingsSectionMetaFor(section)
-	groupLabel := meta.Group
-	for _, group := range settingsGroups() {
-		if group.Key == meta.Group {
-			groupLabel = group.Label
-			break
-		}
-	}
-	// A plain row rather than kitHeaderBar: the pane header sits directly under
-	// the window's title bar and must not add the bar's own padding. The height
-	// stays deliberately tight so the first card of every section is reachable
-	// without scrolling at the window's default size.
-	ui.Row(c).FillWidth().Height(controlHeight).Gap(space8).AlignItems(ui.Center).Children(func() {
+	groupLabel := settingsGroupLabel(meta.Group)
+	notice, hasNotice := a.pageNotice(meta.Key)
+	ui.Row(c).FillWidth().MinHeight(controlHeight).Gap(space8).AlignItems(ui.Center).Children(func() {
 		renderSemanticIcon(c, meta.Icon, IconSize16, secondaryInk(theme))
-		ui.Column(c).Gap(space1).Grow(1).Children(func() {
-			ui.Text(c, groupLabel+" / "+meta.Label).FontSize(typeTitle).FontWeight(600).TextColor(theme.Text).SingleLine()
-			ui.Text(c, meta.Hint).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+		ui.Column(c).Gap(0).Grow(1).MinWidth(0).Children(func() {
+			ui.Text(c, groupLabel+" / "+meta.Label).FontSize(typeTitle).FontWeight(600).TextColor(theme.Text).Wrap()
+			ui.Text(c, meta.Hint).FontSize(typeMeta).TextColor(theme.TextMuted).Wrap()
 		})
-		if statusMsg != "" {
-			if settingsStatusIsFailure(statusMsg) {
-				settingsBanner(c, theme.Danger, statusMsg)
-			} else {
-				kitStatusPill(c, theme, statusMsg, chipNeutral)
-			}
+		if hasNotice && notice.Text != "" {
+			kitStatusPill(c, theme, notice.Text, notice.Tone)
 		}
 	})
 	kitDivider(c, theme)
 }
 
-// renderSettingsSection dispatches to the renderer of the section selected.
+// renderSettingsSection dispatches to the renderer of the active settings page.
 func (a *AppController) renderSettingsSection(
 	c *ui.Context,
 	theme *ui.Theme,
 	cfg config.ClavisConfig,
-	section int,
+	pageKey string,
 	apiKeySource secrets.APIKeySource,
 	aiTestStatus AITestStatus,
 	aiTestMsg string,
 	diag DiagnosticsSnapshot,
 ) {
-	switch section {
-	case settingsSectionIMEKeymap:
+	switch normalizeSettingsPageKey(pageKey) {
+	case "ime-keymap":
 		a.renderIMEKeymapSection(c, theme, cfg)
-	case settingsSectionLeader:
+	case "leader":
 		a.renderLeaderSection(c, theme, cfg)
-	case settingsSectionSnippets:
+	case "snippets":
 		a.renderSnippetsSection(c, theme, cfg)
-	case settingsSectionGlossary:
+	case "glossary":
 		a.renderGlossarySection(c, theme, cfg)
-	case settingsSectionWorkflows:
+	case "workflows":
 		a.renderWorkflowsSection(c, theme, cfg)
-	case settingsSectionTemplates:
+	case "templates":
 		a.renderSettingsTemplatesSection(c, theme, cfg)
-	case settingsSectionClipboard:
+	case "clipboard":
 		a.renderSettingsClipboardSection(c, theme, cfg)
-	case settingsSectionAppearance:
+	case "appearance":
 		a.renderSettingsAppearanceSection(c, theme, cfg)
-	case settingsSectionSecurity:
+	case "security":
 		a.renderSettingsSecuritySection(c, theme)
-	case settingsSectionAbout:
+	case "about":
 		a.renderSettingsAboutSection(c, theme)
-	case settingsSectionAI:
+	case "ai":
 		a.renderSettingsAISection(c, theme, cfg, apiKeySource, aiTestStatus, aiTestMsg)
-	case settingsSectionPermissions:
+	case "permissions":
 		a.renderSettingsPermissionsSection(c, theme, diag)
-	case settingsSectionConfigs:
+	case "configs":
 		a.renderSettingsConfigsSection(c, theme)
 	default:
 		a.renderSettingsGeneralSection(c, theme, cfg)
@@ -511,26 +315,22 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 	keys := triggerKeyOptions(runtime.GOOS)
 
 	settingsSourceCard(c, theme, i18n.T("settings.card.trigger"), "[trigger]", func() {
-		if v, changed := settingSelectRow(c, theme, i18n.T("settings.trigger.leader_key"), "leader_key",
-			i18n.T("settings.trigger.leader_key_help"), keys, trigger.LeaderKey, 180); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.LeaderKey = v })
-		}
-		if v, changed := settingSelectRow(c, theme, i18n.T("settings.trigger.double_tap_key"), "double_tap_key",
-			i18n.T("settings.trigger.double_tap_key_help"), keys, trigger.DoubleTapKey, 180); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.DoubleTapKey = v })
-		}
+		a.immediateSelectRow(c, theme, "triggers", i18n.T("settings.trigger.leader_key"), "leader_key",
+			i18n.T("settings.trigger.leader_key_help"), keys, trigger.LeaderKey, 180,
+			func(m *config.MainConfig, v string) { m.Trigger.LeaderKey = v })
+		a.immediateSelectRow(c, theme, "triggers", i18n.T("settings.trigger.double_tap_key"), "double_tap_key",
+			i18n.T("settings.trigger.double_tap_key_help"), keys, trigger.DoubleTapKey, 180,
+			func(m *config.MainConfig, v string) { m.Trigger.DoubleTapKey = v })
 		ui.Grid(c).Columns(2).GapX(space16).GapY(space4).FillWidth().Children(func() {
-			if v, changed := settingNumberRow(c, theme, i18n.T("settings.trigger.double_tap_interval"), "double_tap_interval_ms", "",
-				float64(trigger.DoubleTapIntervalMs), 100, 800, 10, "ms"); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.DoubleTapIntervalMs = int(v) })
-			}
+			a.immediateNumberRow(c, theme, "triggers", i18n.T("settings.trigger.double_tap_interval"), "double_tap_interval_ms", "",
+				float64(trigger.DoubleTapIntervalMs), 100, 800, 10, "ms",
+				func(m *config.MainConfig, v float64) { m.Trigger.DoubleTapIntervalMs = int(v) })
 			// Which-key pause: the Leader menu shows only if no key follows
 			// within this delay (0 shows it at once).
-			if v, changed := settingNumberRow(c, theme, i18n.T("settings.trigger.leader_reveal_delay"), "leader_reveal_delay_ms",
+			a.immediateNumberRow(c, theme, "triggers", i18n.T("settings.trigger.leader_reveal_delay"), "leader_reveal_delay_ms",
 				i18n.T("settings.trigger.leader_reveal_delay_help"),
-				float64(trigger.LeaderRevealDelayMs), 0, config.MaxLeaderRevealDelayMs, 20, "ms"); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.LeaderRevealDelayMs = int(v) })
-			}
+				float64(trigger.LeaderRevealDelayMs), 0, config.MaxLeaderRevealDelayMs, 20, "ms",
+				func(m *config.MainConfig, v float64) { m.Trigger.LeaderRevealDelayMs = int(v) })
 		})
 
 		settingsCardDivider(c, theme)
@@ -541,29 +341,25 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 			i18n.T("settings.trigger.clipboard_shortcut"), trigger.ClipboardShortcut,
 			func(m *config.MainConfig, v string) { m.Trigger.ClipboardShortcut = v })
 		a.renderShortcutEditor(c, theme, se, "screenshot_shortcut", "alt+shift+a",
-			pickLang(i18n.IsChinese(), "截图快捷键", "Screenshot Shortcut"), trigger.ScreenshotShortcut,
+			i18n.T("settings.section.triggers.screenshot_shortcut"), trigger.ScreenshotShortcut,
 			func(m *config.MainConfig, v string) { m.Trigger.ScreenshotShortcut = v })
 
 		settingsCardDivider(c, theme)
-		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.trigger.snippet_expansion"),
-			"snippet_expansion_enabled", "", trigger.SnippetExpansionEnabled); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.SnippetExpansionEnabled = v })
-		}
-		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.trigger.snippet_backspace_undo"),
-			"snippet_backspace_undo", "", trigger.SnippetBackspaceUndo); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Trigger.SnippetBackspaceUndo = v })
-		}
+		a.immediateSwitchRow(c, theme, "triggers", i18n.T("settings.trigger.snippet_expansion"),
+			"snippet_expansion_enabled", "", trigger.SnippetExpansionEnabled,
+			func(m *config.MainConfig, v bool) { m.Trigger.SnippetExpansionEnabled = v })
+		a.immediateSwitchRow(c, theme, "triggers", i18n.T("settings.trigger.snippet_backspace_undo"),
+			"snippet_backspace_undo", "", trigger.SnippetBackspaceUndo,
+			func(m *config.MainConfig, v bool) { m.Trigger.SnippetBackspaceUndo = v })
 	})
 
-	a.mu.Lock()
-	statusMsg := a.settingsStatus
-	a.mu.Unlock()
+	notice, hasNotice := a.pageNotice("triggers")
 	ui.Row(c).FillWidth().Gap(10).AlignItems(ui.Center).Children(func() {
 		if ui.PrimaryButton(c, i18n.T("common.reload")).Clicked() {
 			a.ReloadConfig()
 		}
-		if statusMsg != "" {
-			ui.Text(c, statusMsg).FontSize(typeLabel).TextColor(theme.TextMuted)
+		if hasNotice && notice.Text != "" {
+			ui.Text(c, notice.Text).FontSize(typeLabel).TextColor(theme.TextMuted)
 		}
 	})
 }
@@ -571,65 +367,52 @@ func (a *AppController) renderSettingsGeneralSection(c *ui.Context, theme *ui.Th
 func (a *AppController) renderSettingsAppearanceCard(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
 	appearance := cfg.Main.Appearance
 	settingsSourceCard(c, theme, i18n.T("settings.card.appearance"), "[appearance]", func() {
-		if v, changed := settingChoiceRow(c, theme, i18n.T("settings.appearance.theme"), "theme", "",
-			themeOptions(), appearance.Theme); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.Theme = v })
-		}
-		if v, changed := settingChoiceRow(c, theme, i18n.T("settings.appearance.language"), "language", "",
-			languageOptions(), appearance.Language); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.Language = v })
-		}
-		if v, changed := settingChoiceRow(c, theme, i18n.T("settings.appearance.animations"), "animations", "",
-			animationOptions(), appearance.Animations); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.Animations = v })
-		}
+		a.immediateChoiceRow(c, theme, "appearance", i18n.T("settings.appearance.theme"), "theme", "",
+			themeOptions(), appearance.Theme, func(m *config.MainConfig, v string) { m.Appearance.Theme = v })
+		a.immediateChoiceRow(c, theme, "appearance", i18n.T("settings.appearance.language"), "language", "",
+			languageOptions(), appearance.Language, func(m *config.MainConfig, v string) { m.Appearance.Language = v })
+		a.immediateChoiceRow(c, theme, "appearance", i18n.T("settings.appearance.animations"), "animations", "",
+			animationOptions(), appearance.Animations, func(m *config.MainConfig, v string) { m.Appearance.Animations = v })
 
 		settingsCardDivider(c, theme)
 		ui.Grid(c).Columns(2).GapX(space16).GapY(space4).FillWidth().Children(func() {
-			if v, changed := settingSwitchRow(c, theme, i18n.T("settings.appearance.key_hints"), "show_key_hints", "",
-				appearance.ShowKeyHints); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.ShowKeyHints = v })
-			}
-			if v, changed := settingSwitchRow(c, theme, i18n.T("settings.appearance.preview_pane"), "show_preview_pane", "",
-				appearance.ShowPreviewPane); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.ShowPreviewPane = v })
-			}
-			if v, changed := settingNumberRow(c, theme, i18n.T("settings.appearance.capsule_width"), "capsule_width", "",
-				appearance.CapsuleWidth, 400, 1200, 20, "px"); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.CapsuleWidth = v })
-			}
-			if v, changed := settingNumberRow(c, theme, i18n.T("settings.appearance.max_visible_results"), "max_visible_results", "",
-				float64(appearance.MaxVisibleResults), minVisibleResults, maxVisibleResults, 1, ""); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.MaxVisibleResults = int(v) })
-			}
-			if v, changed := settingNumberRow(c, theme, i18n.T("settings.appearance.corner_radius"), "corner_radius", "",
-				appearance.CornerRadius, 0, 32, 2, "px"); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.CornerRadius = v })
-			}
-			if v, changed := settingNumberRow(c, theme, i18n.T("settings.appearance.hud_duration"), "hud_duration_ms", "",
-				float64(appearance.HUDDurationMs), 200, 5000, 100, "ms"); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.HUDDurationMs = int(v) })
-			}
+			a.immediateSwitchRow(c, theme, "appearance", i18n.T("settings.appearance.key_hints"), "show_key_hints", "",
+				appearance.ShowKeyHints, func(m *config.MainConfig, v bool) { m.Appearance.ShowKeyHints = v })
+			a.immediateSwitchRow(c, theme, "appearance", i18n.T("settings.appearance.preview_pane"), "show_preview_pane", "",
+				appearance.ShowPreviewPane, func(m *config.MainConfig, v bool) { m.Appearance.ShowPreviewPane = v })
+			a.immediateNumberRow(c, theme, "appearance", i18n.T("settings.appearance.capsule_width"), "capsule_width", "",
+				appearance.CapsuleWidth, 400, 1200, 20, "px",
+				func(m *config.MainConfig, v float64) { m.Appearance.CapsuleWidth = v })
+			a.immediateNumberRow(c, theme, "appearance", i18n.T("settings.appearance.max_visible_results"), "max_visible_results", "",
+				float64(appearance.MaxVisibleResults), minVisibleResults, maxVisibleResults, 1, "",
+				func(m *config.MainConfig, v float64) { m.Appearance.MaxVisibleResults = int(v) })
+			se := a.settingsEditor()
+			ui.Column(c).FillWidth().Gap(space2).Children(func() {
+				if a.immediateNumberRow(c, theme, "appearance", i18n.T("settings.appearance.corner_radius"), "corner_radius", "",
+					appearance.CornerRadius, 0, 32, 2, "px",
+					func(m *config.MainConfig, v float64) { m.Appearance.CornerRadius = v }) {
+					seSet(se, func(s *settingsEditorState) { s.cornerRadiusChanged = true })
+				}
+				if seGet(se, func(s *settingsEditorState) bool { return s.cornerRadiusChanged }) {
+					settingsHint(c, theme, i18n.T("settings.appearance.corner_radius_restart"))
+				}
+			})
+			a.immediateNumberRow(c, theme, "appearance", i18n.T("settings.appearance.hud_duration"), "hud_duration_ms", "",
+				float64(appearance.HUDDurationMs), 200, 5000, 100, "ms",
+				func(m *config.MainConfig, v float64) { m.Appearance.HUDDurationMs = int(v) })
 		})
 
 		settingsCardDivider(c, theme)
 		ui.Text(c, i18n.T("settings.appearance.spatial_look")).FontSize(typeMeta).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
-		if v, changed := settingChoiceRow(c, theme, i18n.T("settings.appearance.visual_preset"), "visual_preset", "",
-			visualPresetOptions(), appearance.VisualPreset); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.VisualPreset = v })
-		}
-		if v, changed := settingSliderRow(c, theme, i18n.T("settings.appearance.stage_intensity"), "stage_intensity", "",
-			appearance.StageIntensity, 0, 1, 0.05); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.StageIntensity = config.NormalizeStageIntensity(v) })
-		}
-		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.appearance.oblique_rows"), "oblique_rows", "",
-			appearance.ObliqueRows); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.ObliqueRows = v })
-		}
-		if v, changed := settingSliderRow(c, theme, i18n.T("settings.appearance.glass_clarity"), "glass_clarity", "",
-			appearance.GlassClarity, 0, 1, 0.05); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.GlassClarity = v })
-		}
+		a.immediateChoiceRow(c, theme, "appearance", i18n.T("settings.appearance.visual_preset"), "visual_preset", "",
+			visualPresetOptions(), appearance.VisualPreset, func(m *config.MainConfig, v string) { m.Appearance.VisualPreset = v })
+		a.immediateSliderRow(c, theme, "appearance", i18n.T("settings.appearance.stage_intensity"), "stage_intensity", "",
+			appearance.StageIntensity, 0, 1, 0.05,
+			func(m *config.MainConfig, v float64) { m.Appearance.StageIntensity = config.NormalizeStageIntensity(v) })
+		a.immediateSwitchRow(c, theme, "appearance", i18n.T("settings.appearance.oblique_rows"), "oblique_rows", "",
+			appearance.ObliqueRows, func(m *config.MainConfig, v bool) { m.Appearance.ObliqueRows = v })
+		a.immediateSliderRow(c, theme, "appearance", i18n.T("settings.appearance.glass_clarity"), "glass_clarity", "",
+			appearance.GlassClarity, 0, 1, 0.05, func(m *config.MainConfig, v float64) { m.Appearance.GlassClarity = v })
 	})
 }
 
@@ -675,48 +458,67 @@ func (a *AppController) renderAIKeychainCard(
 		a.mu.Lock()
 		draft := a.uiState.apiKeyDraft
 		a.mu.Unlock()
-		keyInput := ui.TextInput(c, &draft).
-			Password().
-			Placeholder(i18n.T("settings.ai.key_placeholder")).
-			Label(i18n.T("settings.ai.key_label")).
-			FillWidth()
-		if keyInput.Changed() {
-			a.mu.Lock()
-			a.uiState.apiKeyDraft = draft
-			a.mu.Unlock()
-		}
+		keyRow := ui.Column(c).Key("settings-field:ai:api_key").FillWidth().Gap(space4)
+		keyRow.Children(func() {
+			keyInput := ui.TextInput(c, &draft).
+				Password().
+				Placeholder(i18n.T("settings.ai.key_placeholder")).
+				Label(i18n.T("settings.ai.key_label")).
+				FillWidth()
+			if keyInput.Changed() {
+				a.mu.Lock()
+				a.uiState.apiKeyDraft = draft
+				a.mu.Unlock()
+			}
+		})
+		a.applyFieldAnchor(c, theme, a.Config(), keyRow, "ai", "api_key")
 
 		a.mu.Lock()
 		currentDraft := a.uiState.apiKeyDraft
 		a.mu.Unlock()
 
-		ui.Row(c).FillWidth().Wrap().Gap(space8).AlignItems(ui.Center).Children(func() {
-			if ui.PrimaryButton(c, i18n.T("settings.ai.save_key")).Disabled(strings.TrimSpace(currentDraft) == "").Clicked() {
-				_ = a.SaveAPIKey(currentDraft)
-			}
-			if ui.Button(c, i18n.T("settings.ai.clear_key")).Clicked() {
-				_ = a.DeleteAPIKey()
-			}
-			svc := c.Services()
-			testLabel := i18n.T("settings.ai.test_connection")
-			if testStatus == AITestLoading {
-				if i18n.IsChinese() {
-					testLabel = "测试中…"
-				} else {
-					testLabel = "Testing…"
+		se := a.settingsEditor()
+		confirmClear := seGet(se, func(s *settingsEditorState) bool { return s.apiKeyConfirmDelete })
+		if confirmClear {
+			kitDeleteConfirmRow(c, theme, "api-key-delete-confirm",
+				i18n.Tf("settings.delete.confirm_api_key", activeProfile.ID),
+				i18n.T("settings.delete.confirm_action"),
+				i18n.T("settings.delete.cancel"),
+				func() { seSet(se, func(s *settingsEditorState) { s.apiKeyConfirmDelete = false }) },
+				func() {
+					seSet(se, func(s *settingsEditorState) { s.apiKeyConfirmDelete = false })
+					_ = a.DeleteAPIKey()
+				},
+			)
+		} else {
+			ui.Row(c).FillWidth().Wrap().Gap(space8).AlignItems(ui.Center).Children(func() {
+				if ui.PrimaryButton(c, i18n.T("settings.ai.save_key")).Disabled(strings.TrimSpace(currentDraft) == "").Clicked() {
+					_ = a.SaveAPIKey(currentDraft)
 				}
-			}
-			profID := activeProfile.ID
-			if ui.Button(c, testLabel).Disabled(testStatus == AITestLoading).Clicked() {
-				go func() {
-					_ = a.TestAIConnectionForProfile(context.Background(), profID)
-					svc.Invalidate()
-				}()
-			}
-			if testStatus == AITestLoading {
-				kitStatusDot(c, kitStateLoadingColor(theme), true)
-			}
-		})
+				if ui.Button(c, i18n.T("settings.ai.clear_key")).Clicked() {
+					seSet(se, func(s *settingsEditorState) { s.apiKeyConfirmDelete = true })
+				}
+				svc := c.Services()
+				testLabel := i18n.T("settings.ai.test_connection")
+				if testStatus == AITestLoading {
+					if i18n.IsChinese() {
+						testLabel = "测试中…"
+					} else {
+						testLabel = "Testing…"
+					}
+				}
+				profID := activeProfile.ID
+				if ui.Button(c, testLabel).Disabled(testStatus == AITestLoading).Clicked() {
+					go func() {
+						_ = a.TestAIConnectionForProfile(context.Background(), profID)
+						svc.Invalidate()
+					}()
+				}
+				if testStatus == AITestLoading {
+					kitStatusDot(c, kitStateLoadingColor(theme), true)
+				}
+			})
+		}
 
 		if testMsg != "" {
 			if testStatus == AITestError {
@@ -784,7 +586,7 @@ func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *u
 			settingsKeyValueRow(c, theme, i18n.T("settings.diag.secure_input"), yesNo(secureInput))
 			settingsKeyValueRow(c, theme, i18n.T("settings.diag.monitor"), yesNo(strconv.FormatBool(diag.MonitorRunning)))
 			if screenState := strings.TrimSpace(diag.Permissions.Details["screenRecording"]); screenState != "" {
-				settingsKeyValueRow(c, theme, i18n.T("settings.perm.screen_recording"), screenState)
+				settingsKeyValueRow(c, theme, i18n.T("settings.perm.screen_recording"), localizedPermissionDetail(screenState))
 			}
 			settingsKeyValueRow(c, theme, i18n.T("settings.diag.recovery"), fmt.Sprintf("%d", diag.RecoveryCount))
 			settingsKeyValueRow(c, theme, i18n.T("settings.diag.input_source"), activeIME)
@@ -792,17 +594,35 @@ func (a *AppController) renderSettingsPermissionsSection(c *ui.Context, theme *u
 				settingsKeyValueRow(c, theme, i18n.T("settings.diag.ime_error"), diag.LastIMEError)
 			}
 			if v := diag.Permissions.Details["mouseHook"]; v != "" {
-				settingsKeyValueRow(c, theme, i18n.T("settings.diag.mouse_hook"), v)
+				settingsKeyValueRow(c, theme, i18n.T("settings.diag.mouse_hook"), yesNo(v))
 			}
 			if v := diag.Permissions.Details["hookError"]; v != "" {
 				settingsKeyValueRow(c, theme, i18n.T("settings.diag.hook_error"), v)
 			}
+			if crashPath, modAt, ok := internaldiag.HasRecentCrash(a.effectiveLogDir()); ok {
+				settingsKeyValueRow(c, theme, i18n.T("settings.diag.recent_crash"), filepath.Base(crashPath)+" · "+modAt.Local().Format("2006-01-02 15:04"))
+			}
 
-			ui.Row(c).FillWidth().Gap(8).Children(func() {
+			ui.Row(c).FillWidth().Wrap().Gap(space8).Children(func() {
 				svc := c.Services()
 				if ui.Button(c, i18n.T("settings.diag.refresh")).Clicked() {
 					go func() {
 						_, _ = a.RefreshPermissions(context.Background())
+						svc.Invalidate()
+					}()
+				}
+				if ui.Button(c, i18n.T("settings.diag.export_bundle")).Key("diag-export-bundle").Clicked() {
+					go func() {
+						_, _ = a.ExportDiagnosticBundle()
+						svc.Invalidate()
+					}()
+				}
+				if ui.Button(c, i18n.T("settings.diag.open_logs")).Key("diag-open-logs").Clicked() {
+					_ = a.OpenLogsDirectory()
+				}
+				if ui.Button(c, i18n.T("settings.diag.backup_now")).Key("diag-backup-now").Clicked() {
+					go func() {
+						_, _ = a.BackupConfigAndData()
 						svc.Invalidate()
 					}()
 				}
@@ -909,23 +729,31 @@ func renderPermStateRow(
 		if ui.Button(c, i18n.T("settings.perm.prompt")).Key("prompt:"+label).Clicked() && onPrompt != nil {
 			onPrompt()
 		}
-		if ui.Button(c, i18n.T("settings.perm.open_settings")).Key("settings:"+label).Clicked() && onOpenSettings != nil {
-			onOpenSettings()
+		if !granted && !notRequired {
+			if ui.Button(c, i18n.T("settings.perm.open_settings")).Key("settings:"+label).Clicked() && onOpenSettings != nil {
+				onOpenSettings()
+			}
 		}
 	})
 }
 
-// yesNo shows a "true"/"false" diagnostic as Yes or No; other values (a
-// platform detail) show as they are.
-func boolGauge(v bool) float32 {
-	if v {
-		return 1
+func localizedPermissionDetail(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "granted", "allowed":
+		return i18n.T("settings.perm.granted")
+	case "denied", "not_granted":
+		return i18n.T("settings.perm.not_granted")
+	case "not_required":
+		return i18n.T("settings.perm.not_required")
+	case "unknown", "unsupported":
+		return i18n.T("settings.perm.unknown")
+	default:
+		return yesNo(state)
 	}
-	return 0
 }
 
 func yesNo(v string) string {
-	switch v {
+	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "true":
 		return i18n.T("common.yes")
 	case "false":
@@ -1026,7 +854,8 @@ func (a *AppController) renderShortcutEditor(
 	apply func(m *config.MainConfig, v string),
 ) {
 	recording := seGet(se, func(s *settingsEditorState) bool { return s.recordingShortcut == field })
-	ui.Row(c).Key("shortcut-row:"+field).FillWidth().Gap(space12).AlignItems(ui.Center).Padding(space2, 0).Children(func() {
+	row := ui.Row(c).Key("settings-field:triggers:"+field).FillWidth().Gap(space12).AlignItems(ui.Center).Padding(space2, 0)
+	row.Children(func() {
 		name := settingRowName(c, theme, title, settingCaption(field, current), "")
 		shortcut := current
 		in := ui.TextInput(c.Key("shortcut-input:"+field), &shortcut).
@@ -1038,7 +867,7 @@ func (a *AppController) renderShortcutEditor(
 		if in.Changed() {
 			normalized := normalizeShortcutText(shortcut)
 			if normalized != "" && normalized != current {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { apply(m, normalized) })
+				_ = a.updateMainConfigField(c, "triggers", field, title, func(m *config.MainConfig) { apply(m, normalized) })
 			}
 		}
 		if recording {
@@ -1064,7 +893,7 @@ func (a *AppController) renderShortcutEditor(
 						return true
 					}
 					seSet(se, func(s *settingsEditorState) { s.recordingShortcut = "" })
-					_ = a.UpdateMainConfig(func(m *config.MainConfig) { apply(m, combo) })
+					_ = a.updateMainConfigField(c, "triggers", field, title, func(m *config.MainConfig) { apply(m, combo) })
 					return true
 				})
 			box.Children(func() {
@@ -1076,5 +905,7 @@ func (a *AppController) renderShortcutEditor(
 		} else if ui.Button(c.Key("shortcut-record:"+field), i18n.T("settings.trigger.record")).Shrink(0).Clicked() {
 			seSet(se, func(s *settingsEditorState) { s.recordingShortcut = field })
 		}
+		renderFieldSavedBadge(c, theme, se, settingsFieldID("triggers", field))
 	})
+	a.applyFieldAnchor(c, theme, a.Config(), row, "triggers", field)
 }

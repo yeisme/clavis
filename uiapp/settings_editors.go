@@ -28,6 +28,12 @@ type settingsEditorState struct {
 	pendingSection int
 	leavePrompt    bool
 
+	// Per-page header notices, persistent write failures, and inline field saved feedback.
+	notices     map[string]settingsNotice
+	failures    map[string]settingsFailure
+	failureKeys []string
+	fieldSaved  map[string]time.Time
+
 	// recordingShortcut names the trigger field ("capsule_shortcut" or
 	// "clipboard_shortcut") whose recorder waits for the next modifier+key chord.
 	recordingShortcut string
@@ -38,25 +44,37 @@ type settingsEditorState struct {
 	myWordError string
 
 	// leader tree editor.
-	leaderSelected []string
-	leaderDraft    config.LeaderNode
-	leaderLoaded   bool
-	leaderError    string
-	leaderNewKey   string
-	leaderNewLabel string
-	leaderChildKey string
-	leaderChildLbl string
+	leaderSelected      []string
+	leaderDraft         config.LeaderNode
+	leaderLoaded        bool
+	leaderError         string
+	leaderNewKey        string
+	leaderNewLabel      string
+	leaderChildKey      string
+	leaderChildLbl      string
+	leaderConfirmDelete bool
+	leaderPendingSwitch bool
+	leaderPendingPath   []string
+	leaderFocusNewKey   bool
 
 	// snippets master-detail editor.
-	snippetQuery    string
-	snippetSelected string
-	snippetIsNew    bool
-	snippetDraft    config.SnippetItem
+	snippetQuery         string
+	snippetSelected      string
+	snippetIsNew         bool
+	snippetDraft         config.SnippetItem
+	snippetConfirmDelete bool
+	snippetPendingSwitch bool
+	snippetPendingID     string
+	snippetPendingNew    bool
 
 	// glossary master-detail editor.
-	glossarySelected string
-	glossaryIsNew    bool
-	glossaryDraft    config.GlossaryTerm
+	glossarySelected      string
+	glossaryIsNew         bool
+	glossaryDraft         config.GlossaryTerm
+	glossaryConfirmDelete bool
+	glossaryPendingSwitch bool
+	glossaryPendingTerm   string
+	glossaryPendingNew    bool
 
 	// workflows master-detail editor. The draft is always a deep clone of the
 	// stored workflow, so editing it never mutates the last valid config.
@@ -70,9 +88,19 @@ type settingsEditorState struct {
 	// workflowConfirmDelete gates the destructive Delete Workflow action: the
 	// first click only asks, and Cancel leaves the stored config untouched.
 	workflowConfirmDelete bool
+	workflowPendingSwitch bool
+	workflowPendingID     string
+	workflowPendingNew    bool
 
-	// AI profile editor.
-	aiDraftProfile config.AIProfile
+	// AI profile editor & Keychain delete confirm.
+	aiDraftProfile         config.AIProfile
+	aiProfileConfirmDelete string
+	apiKeyConfirmDelete    bool
+
+	// Local prompt template unsaved switch guard.
+	promptPendingSwitch bool
+	promptPendingID     string
+	promptPendingNew    bool
 
 	// keymap remap form.
 	remapFrom string
@@ -82,6 +110,21 @@ type settingsEditorState struct {
 
 	// clipboard exclusions form.
 	clipExcludeDraft string
+
+	// transient notice flags & empty-state CTA focus requests.
+	cornerRadiusChanged bool
+	imeFocusNewTarget   bool
+
+	// Settings navigation & search state (P3-A).
+	blurHandle           ui.Handle
+	searchHandle         ui.Handle
+	searchSelectedIdx    int
+	searchFocusRequested bool
+	pendingScrollTop     bool
+	pendingScrollField   string
+	highlightField       string
+	highlightUntil       time.Time
+	lastScrollAnimated   bool
 
 	// async-cached OS input sources for renderIMEConfig (avoids blocking TIS IPC on every frame).
 	imeHasCurrent bool
@@ -339,28 +382,23 @@ func (a *AppController) renderKeymapControls(c *ui.Context, theme *ui.Theme, cfg
 	keymap := cfg.Main.Keymap
 
 	settingsSourceCard(c, theme, i18n.T("settings.card.keymap"), "[keymap]", func() {
-		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.keymap.enabled"), "enabled", "", keymap.Enabled); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.Enabled = v })
-		}
-		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.keymap.nav_layer"), "nav_layer_enabled", "", keymap.NavLayerEnabled); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.NavLayerEnabled = v })
-		}
-		if v, changed := settingNumberRow(c, theme, i18n.T("settings.keymap.tap_hold_threshold"), "tap_hold_threshold_ms",
-			i18n.T("settings.keymap.tap_hold_threshold_help"), float64(keymap.TapHoldThresholdMs), 80, 500, 10, "ms"); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.TapHoldThresholdMs = int(v) })
-		}
+		a.immediateSwitchRow(c, theme, "ime-keymap", i18n.T("settings.keymap.enabled"), "keymap.enabled", "", keymap.Enabled,
+			func(m *config.MainConfig, v bool) { m.Keymap.Enabled = v })
+		a.immediateSwitchRow(c, theme, "ime-keymap", i18n.T("settings.keymap.nav_layer"), "nav_layer_enabled", "", keymap.NavLayerEnabled,
+			func(m *config.MainConfig, v bool) { m.Keymap.NavLayerEnabled = v })
+		a.immediateNumberRow(c, theme, "ime-keymap", i18n.T("settings.keymap.tap_hold_threshold"), "tap_hold_threshold_ms",
+			i18n.T("settings.keymap.tap_hold_threshold_help"), float64(keymap.TapHoldThresholdMs), 80, 500, 10, "ms",
+			func(m *config.MainConfig, v float64) { m.Keymap.TapHoldThresholdMs = int(v) })
 		capsSelectW := float32(104)
 		if settingsNarrowCard(c) {
 			capsSelectW = 0
 		}
-		if v, changed := settingSelectRow(c, theme, i18n.T("settings.keymap.caps_lock_tap"), "caps_lock_tap", "",
-			capsLockActionOptions(), keymap.CapsLockTap, capsSelectW); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.CapsLockTap = v })
-		}
-		if v, changed := settingSelectRow(c, theme, i18n.T("settings.keymap.caps_lock_hold"), "caps_lock_hold", "",
-			capsLockActionOptions(), keymap.CapsLockHold, capsSelectW); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Keymap.CapsLockHold = v })
-		}
+		a.immediateSelectRow(c, theme, "ime-keymap", i18n.T("settings.keymap.caps_lock_tap"), "caps_lock_tap", "",
+			capsLockActionOptions(), keymap.CapsLockTap, capsSelectW,
+			func(m *config.MainConfig, v string) { m.Keymap.CapsLockTap = v })
+		a.immediateSelectRow(c, theme, "ime-keymap", i18n.T("settings.keymap.caps_lock_hold"), "caps_lock_hold", "",
+			capsLockActionOptions(), keymap.CapsLockHold, capsSelectW,
+			func(m *config.MainConfig, v string) { m.Keymap.CapsLockHold = v })
 
 		settingsCardDivider(c, theme)
 		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
@@ -534,25 +572,18 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 	}
 
 	settingsSourceCard(c, theme, i18n.T("settings.card.ime"), "[ime]", func() {
-		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.ime.enabled"), "enabled", "", imeCfg.Enabled); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.Enabled = v })
-		}
-		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.ime.lock_ascii"), "lock_ascii_on_leader",
-			i18n.T("settings.ime.lock_ascii_help"), imeCfg.LockASCIIOnLeader); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.LockASCIIOnLeader = v })
-		}
-		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.ime.floating_pill"), "show_floating_pill", "",
-			imeCfg.ShowFloatingPill); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.ShowFloatingPill = v })
-		}
-		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.ime.indicator_hud"), "show_indicator_hud", "",
-			imeCfg.ShowIndicatorHUD); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.ShowIndicatorHUD = v })
-		}
-		if v, changed := settingNumberRow(c, theme, i18n.T("settings.ime.switch_delay"), "switch_delay_ms",
-			i18n.T("settings.ime.switch_delay_help"), float64(imeCfg.SwitchDelayMs), 0, 500, 10, "ms"); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.SwitchDelayMs = int(v) })
-		}
+		a.immediateSwitchRow(c, theme, "ime-keymap", i18n.T("settings.ime.enabled"), "ime.enabled", "", imeCfg.Enabled,
+			func(m *config.MainConfig, v bool) { m.IME.Enabled = v })
+		a.immediateSwitchRow(c, theme, "ime-keymap", i18n.T("settings.ime.lock_ascii"), "lock_ascii_on_leader",
+			i18n.T("settings.ime.lock_ascii_help"), imeCfg.LockASCIIOnLeader,
+			func(m *config.MainConfig, v bool) { m.IME.LockASCIIOnLeader = v })
+		a.immediateSwitchRow(c, theme, "ime-keymap", i18n.T("settings.ime.floating_pill"), "show_floating_pill", "",
+			imeCfg.ShowFloatingPill, func(m *config.MainConfig, v bool) { m.IME.ShowFloatingPill = v })
+		a.immediateSwitchRow(c, theme, "ime-keymap", i18n.T("settings.ime.indicator_hud"), "show_indicator_hud", "",
+			imeCfg.ShowIndicatorHUD, func(m *config.MainConfig, v bool) { m.IME.ShowIndicatorHUD = v })
+		a.immediateNumberRow(c, theme, "ime-keymap", i18n.T("settings.ime.switch_delay"), "switch_delay_ms",
+			i18n.T("settings.ime.switch_delay_help"), float64(imeCfg.SwitchDelayMs), 0, 500, 10, "ms",
+			func(m *config.MainConfig, v float64) { m.IME.SwitchDelayMs = int(v) })
 
 		settingsCardDivider(c, theme)
 		if hasCurrent {
@@ -571,10 +602,8 @@ func (a *AppController) renderIMEConfig(c *ui.Context, theme *ui.Theme, cfg conf
 				options[i].label = i18n.T("settings.option.none")
 			}
 		}
-		if v, changed := settingSelectRow(c, theme, i18n.T("settings.ime.default_source"), "default_input_source_id", "",
-			options, imeCfg.DefaultInputSourceID, 0); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.IME.DefaultInputSourceID = v })
-		}
+		a.immediateSelectRow(c, theme, "ime-keymap", i18n.T("settings.ime.default_source"), "default_input_source_id", "",
+			options, imeCfg.DefaultInputSourceID, 0, func(m *config.MainConfig, v string) { m.IME.DefaultInputSourceID = v })
 		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 			ui.Spacer(c)
 			refreshLabel := pickLang(i18n.IsChinese(), "刷新输入源", "Refresh Input Sources")
@@ -631,8 +660,22 @@ func (a *AppController) renderIMERuleForm(c *ui.Context, theme *ui.Theme) {
 		modeDraft = config.IMEModeASCII
 	}
 
-	draftInput := func(value *string, label, placeholder string, grow float32, store func(string)) {
-		in := ui.TextInput(c, value).Placeholder(placeholder).Label(label).Grow(grow).MinWidth(0)
+	focusTarget := seGet(a.settingsEditor(), func(s *settingsEditorState) bool {
+		if !s.imeFocusNewTarget {
+			return false
+		}
+		s.imeFocusNewTarget = false
+		return true
+	})
+	draftInput := func(key string, focus bool, value *string, label, placeholder string, grow float32, store func(string)) {
+		ctx := c
+		if key != "" {
+			ctx = c.Key(key)
+		}
+		in := ui.TextInput(ctx, value).Placeholder(placeholder).Label(label).Grow(grow).MinWidth(0)
+		if focus {
+			in.Focus()
+		}
 		if in.Changed() {
 			v := *value
 			a.mu.Lock()
@@ -642,26 +685,26 @@ func (a *AppController) renderIMERuleForm(c *ui.Context, theme *ui.Theme) {
 	}
 	if settingsNarrowCard(c) {
 		ui.Column(c).FillWidth().Gap(space6).Children(func() {
-			draftInput(&targetDraft, i18n.T("settings.ime.rule_target"), i18n.T("settings.ime.rule_target_ph"), 1,
+			draftInput("ime-rule-target-input", focusTarget, &targetDraft, i18n.T("settings.ime.rule_target"), i18n.T("settings.ime.rule_target_ph"), 1,
 				func(v string) { a.uiState.imeRuleTargetDraft = v })
-			draftInput(&urlDraft, i18n.T("settings.ime.url_pattern"), i18n.T("settings.ime.url_pattern_ph"), 1,
+			draftInput("", false, &urlDraft, i18n.T("settings.ime.url_pattern"), i18n.T("settings.ime.url_pattern_ph"), 1,
 				func(v string) { a.uiState.imeRuleURLDraft = v })
-			draftInput(&titleDraft, i18n.T("settings.ime.title_pattern"), i18n.T("settings.ime.title_pattern_ph"), 1,
+			draftInput("", false, &titleDraft, i18n.T("settings.ime.title_pattern"), i18n.T("settings.ime.title_pattern_ph"), 1,
 				func(v string) { a.uiState.imeRuleTitleDraft = v })
-			draftInput(&sourceDraft, i18n.T("settings.ime.source_id"), i18n.T("settings.ime.source_id_ph"), 1,
+			draftInput("", false, &sourceDraft, i18n.T("settings.ime.source_id"), i18n.T("settings.ime.source_id_ph"), 1,
 				func(v string) { a.uiState.imeRuleSourceDraft = v })
 		})
 	} else {
 		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
-			draftInput(&targetDraft, i18n.T("settings.ime.rule_target"), i18n.T("settings.ime.rule_target_ph"), 3,
+			draftInput("ime-rule-target-input", focusTarget, &targetDraft, i18n.T("settings.ime.rule_target"), i18n.T("settings.ime.rule_target_ph"), 3,
 				func(v string) { a.uiState.imeRuleTargetDraft = v })
-			draftInput(&urlDraft, i18n.T("settings.ime.url_pattern"), i18n.T("settings.ime.url_pattern_ph"), 2,
+			draftInput("", false, &urlDraft, i18n.T("settings.ime.url_pattern"), i18n.T("settings.ime.url_pattern_ph"), 2,
 				func(v string) { a.uiState.imeRuleURLDraft = v })
 		})
 		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
-			draftInput(&titleDraft, i18n.T("settings.ime.title_pattern"), i18n.T("settings.ime.title_pattern_ph"), 2,
+			draftInput("", false, &titleDraft, i18n.T("settings.ime.title_pattern"), i18n.T("settings.ime.title_pattern_ph"), 2,
 				func(v string) { a.uiState.imeRuleTitleDraft = v })
-			draftInput(&sourceDraft, i18n.T("settings.ime.source_id"), i18n.T("settings.ime.source_id_ph"), 3,
+			draftInput("", false, &sourceDraft, i18n.T("settings.ime.source_id"), i18n.T("settings.ime.source_id_ph"), 3,
 				func(v string) { a.uiState.imeRuleSourceDraft = v })
 		})
 	}
@@ -797,7 +840,14 @@ func (a *AppController) renderIMERulesCard(c *ui.Context, theme *ui.Theme, cfg c
 		settingsCardDivider(c, theme)
 		rules := cfg.IMERules.Rules
 		if len(rules) == 0 {
-			kitEmptyState(c, theme, "keyboard", i18n.T("settings.ime.no_rules"), "")
+			kitEmptyStateWithAction(
+				c, theme, "keyboard",
+				i18n.T("settings.ime.no_rules"),
+				i18n.T("settings.empty.ime_rules.body"),
+				i18n.T("settings.empty.ime_rules.cta"),
+				"empty-cta:ime-rules",
+				func() { seSet(a.settingsEditor(), func(s *settingsEditorState) { s.imeFocusNewTarget = true }) },
+			)
 			return
 		}
 		for i := len(rules) - 1; i >= 0; i-- {
@@ -850,7 +900,7 @@ func (a *AppController) renderIMERulesCard(c *ui.Context, theme *ui.Theme, cfg c
 // updateAIProfile applies mutate to the profile with id and persists it,
 // keeping the flat [ai] fields of the active profile in sync.
 func (a *AppController) updateAIProfile(id string, mutate func(p *config.AIProfile)) {
-	_ = a.UpdateMainConfig(func(m *config.MainConfig) {
+	_ = a.updateMainConfigField(nil, "ai", "ai.profiles."+id, i18n.T("settings.card.profile_config"), func(m *config.MainConfig) {
 		for i := range m.AI.Profiles {
 			if m.AI.Profiles[i].ID != id {
 				continue
@@ -1208,16 +1258,42 @@ func (a *AppController) renderLeaderSection(c *ui.Context, theme *ui.Theme, cfg 
 
 	ui.Grid(c).Columns(settingsTwoColumns(c)).Gap(10).FillWidth().Children(func() {
 		settingsEditorCard(c, theme, i18n.Tf("settings.leader.card_title", len(cfg.Leader.Nodes)), func() {
-			a.renderLeaderTree(c, theme, cfg.Leader.Nodes, nil, selectedPath)
+			if len(cfg.Leader.Nodes) == 0 {
+				kitEmptyStateWithAction(
+					c, theme, "command",
+					i18n.T("settings.empty.leader.title"),
+					i18n.T("settings.empty.leader.body"),
+					i18n.T("settings.empty.leader.cta"),
+					"empty-cta:leader",
+					func() { seSet(se, func(s *settingsEditorState) { s.leaderFocusNewKey = true }) },
+				)
+			} else {
+				a.renderLeaderTree(c, theme, cfg, cfg.Leader.Nodes, nil, selectedPath)
+			}
 
 			settingsDivider(c)
 			ui.Text(c, i18n.T("settings.leader.new_root")).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine()
 			newKey := seGet(se, func(s *settingsEditorState) string { return s.leaderNewKey })
 			newLabel := seGet(se, func(s *settingsEditorState) string { return s.leaderNewLabel })
+			focusNewKey := seGet(se, func(s *settingsEditorState) bool {
+				if !s.leaderFocusNewKey {
+					return false
+				}
+				s.leaderFocusNewKey = false
+				return true
+			})
 			ui.Row(c).FillWidth().Gap(6).AlignItems(ui.End).Children(func() {
 				ui.Column(c).Gap(2).Width(60).Children(func() {
-					if v, changed := settingsTextInput(c, i18n.T("settings.leader.new_key"), "z", newKey); changed {
-						seSet(se, func(s *settingsEditorState) { s.leaderNewKey = v })
+					val := newKey
+					in := ui.TextInput(c.Key("leader-new-key-input"), &val).
+						Label(i18n.T("settings.leader.new_key")).
+						Placeholder("z").
+						FillWidth()
+					if focusNewKey {
+						in.Focus()
+					}
+					if in.Changed() {
+						seSet(se, func(s *settingsEditorState) { s.leaderNewKey = val })
 					}
 				})
 				ui.Column(c).Gap(2).Grow(1).Children(func() {
@@ -1237,12 +1313,13 @@ func (a *AppController) renderLeaderSection(c *ui.Context, theme *ui.Theme, cfg 
 			}
 		})
 
-		settingsEditorCard(c, theme, i18n.T("settings.leader.node_editor"), func() {
+		nodeDirty := a.leaderNodeDirty(cfg)
+		settingsEditorCardWithDirty(c, theme, i18n.T("settings.leader.node_editor"), nodeDirty, "leader-editor-dirty-dot", func() {
 			if len(selectedPath) == 0 {
 				settingsHint(c, theme, i18n.T("settings.leader.select_node"))
 				return
 			}
-			a.renderLeaderNodeEditor(c, theme, cfg, selectedPath)
+			a.renderLeaderNodeEditor(c, theme, cfg, selectedPath, nodeDirty)
 		})
 	})
 }
@@ -1251,6 +1328,7 @@ func (a *AppController) renderLeaderSection(c *ui.Context, theme *ui.Theme, cfg 
 func (a *AppController) renderLeaderTree(
 	c *ui.Context,
 	theme *ui.Theme,
+	cfg config.ClavisConfig,
 	nodes []config.LeaderNode,
 	prefix []string,
 	selected []string,
@@ -1272,16 +1350,24 @@ func (a *AppController) renderLeaderTree(
 			ui.Text(c, string(node.Action.Type)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
 		})
 		if row.Clicked() {
-			seSet(se, func(s *settingsEditorState) {
-				s.leaderSelected = path
-				s.leaderDraft = node
-				s.leaderDraft.Action = cloneLeaderAction(node.Action)
-				s.leaderLoaded = true
-				s.leaderError = ""
-			})
+			if !isSelected && a.leaderNodeDirty(cfg) {
+				seSet(se, func(s *settingsEditorState) {
+					s.leaderPendingSwitch = true
+					s.leaderPendingPath = append([]string(nil), path...)
+				})
+			} else {
+				seSet(se, func(s *settingsEditorState) {
+					s.leaderSelected = path
+					s.leaderDraft = node
+					s.leaderDraft.Action = cloneLeaderAction(node.Action)
+					s.leaderLoaded = true
+					s.leaderError = ""
+					s.leaderConfirmDelete = false
+				})
+			}
 		}
 		if node.Action.Type == config.ActionGroup {
-			a.renderLeaderTree(c, theme, node.Action.Children, path, selected)
+			a.renderLeaderTree(c, theme, cfg, node.Action.Children, path, selected)
 		}
 	}
 }
@@ -1292,9 +1378,45 @@ func (a *AppController) renderLeaderNodeEditor(
 	theme *ui.Theme,
 	cfg config.ClavisConfig,
 	path []string,
+	nodeDirty bool,
 ) {
 	se := a.settingsEditor()
 	draft := seGet(se, func(s *settingsEditorState) config.LeaderNode { return s.leaderDraft })
+	se.mu.Lock()
+	pendingSwitch := se.leaderPendingSwitch
+	pendingPath := append([]string(nil), se.leaderPendingPath...)
+	se.mu.Unlock()
+	if pendingSwitch {
+		name := editorEntityName(draft.Label, draft.Key)
+		applyPending := func() {
+			seSet(se, func(s *settingsEditorState) {
+				s.leaderPendingSwitch = false
+				s.leaderPendingPath = nil
+				s.leaderConfirmDelete = false
+				if targetNode, ok := findLeaderNode(a.ConfigStore.Current().Leader.Nodes, pendingPath); ok {
+					s.leaderSelected = pendingPath
+					s.leaderDraft = targetNode
+					s.leaderDraft.Action = cloneLeaderAction(targetNode.Action)
+					s.leaderLoaded = true
+					s.leaderError = ""
+				}
+			})
+		}
+		kitUnsavedSwitchBanner(c, theme, "leader-unsaved-switch", name,
+			func() {
+				if a.saveLeaderNodeWithFeedback(c, path) {
+					applyPending()
+				}
+			},
+			applyPending,
+			func() {
+				seSet(se, func(s *settingsEditorState) {
+					s.leaderPendingSwitch = false
+					s.leaderPendingPath = nil
+				})
+			},
+		)
+	}
 
 	settingsInlineRow(c, theme, i18n.T("settings.field.key"), settingsFieldLabelWidth, func() {
 		if v, changed := settingsTextInput(c, i18n.T("settings.leader.node_key"), "k", draft.Key); changed {
@@ -1441,21 +1563,37 @@ func (a *AppController) renderLeaderNodeEditor(
 	}
 
 	settingsDivider(c)
-	ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-		if ui.PrimaryButton(c, i18n.T("settings.leader.save_node")).Clicked() {
-			a.saveLeaderNode(path)
+	confirmingDelete := seGet(se, func(s *settingsEditorState) bool { return s.leaderConfirmDelete })
+	if confirmingDelete {
+		nodeName := editorEntityName(draft.Label, draft.Key)
+		prompt := settingsConfirmPromptForFile(nodeName, config.FileLeader)
+		if nChildren := len(draft.Action.Children); nChildren > 0 {
+			prompt = i18n.Tf("settings.delete.confirm_leader_children", nodeName, nChildren, string(config.FileLeader))
 		}
-		if ui.Button(c, i18n.T("settings.leader.move_up")).Clicked() {
-			a.moveLeaderSelection(-1)
-		}
-		if ui.Button(c, i18n.T("settings.leader.move_down")).Clicked() {
-			a.moveLeaderSelection(1)
-		}
-		ui.Spacer(c)
-		if ui.Button(c, i18n.T("settings.leader.delete_node")).Clicked() {
-			a.deleteLeaderSelection()
-		}
-	})
+		kitDeleteConfirmRow(c, theme, "leader-delete-confirm", prompt,
+			i18n.T("settings.delete.confirm_action"),
+			i18n.T("settings.delete.cancel"),
+			func() { seSet(se, func(s *settingsEditorState) { s.leaderConfirmDelete = false }) },
+			a.deleteLeaderSelection,
+		)
+	} else {
+		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
+			if ui.PrimaryButton(c, i18n.T("settings.leader.save_node")).Disabled(!nodeDirty).Clicked() {
+				_ = a.saveLeaderNodeWithFeedback(c, path)
+			}
+			if ui.Button(c, i18n.T("settings.leader.move_up")).Clicked() {
+				a.moveLeaderSelection(-1)
+			}
+			if ui.Button(c, i18n.T("settings.leader.move_down")).Clicked() {
+				a.moveLeaderSelection(1)
+			}
+			ui.Spacer(c)
+			if ui.Button(c, i18n.T("settings.leader.delete_node")).Clicked() {
+				seSet(se, func(s *settingsEditorState) { s.leaderConfirmDelete = true })
+			}
+			renderFieldSavedBadge(c, theme, se, settingsFieldID("leader", "save"))
+		})
+	}
 }
 
 // addLeaderNode appends the drafted node under parentPath and persists it.
@@ -1503,12 +1641,16 @@ func (a *AppController) addLeaderNode(parentPath []string) {
 
 // saveLeaderNode validates and persists the drafted node at path.
 func (a *AppController) saveLeaderNode(path []string) {
+	_ = a.saveLeaderNodeWithFeedback(nil, path)
+}
+
+func (a *AppController) saveLeaderNodeWithFeedback(c *ui.Context, path []string) bool {
 	se := a.settingsEditor()
 	draft := seGet(se, func(s *settingsEditorState) config.LeaderNode { return s.leaderDraft })
 	draft.Key = strings.TrimSpace(draft.Key)
 	if draft.Key == "" {
 		seSet(se, func(s *settingsEditorState) { s.leaderError = "A node key is required." })
-		return
+		return false
 	}
 	cfg := a.ConfigStore.Current()
 	parentPath := path[:max(len(path)-1, 0)]
@@ -1516,18 +1658,21 @@ func (a *AppController) saveLeaderNode(path []string) {
 		seSet(se, func(s *settingsEditorState) {
 			s.leaderError = i18n.Tf("settings.leader.err_duplicate_key", draft.Key)
 		})
-		return
+		return false
 	}
 	nodes := replaceLeaderNode(cfg.Leader.Nodes, path, draft)
 	if err := a.SaveLeaderConfig(config.LeaderConfig{Nodes: nodes}); err != nil {
-		return
+		return false
 	}
 	newPath := append(append([]string(nil), parentPath...), draft.Key)
 	seSet(se, func(s *settingsEditorState) {
 		s.leaderError = ""
 		s.leaderSelected = newPath
 		s.leaderLoaded = false
+		s.leaderConfirmDelete = false
 	})
+	a.markFieldSaved(c, settingsFieldID("leader", "save"))
+	return true
 }
 
 // moveLeaderSelection moves the selected node one sibling up or down.
@@ -1561,6 +1706,7 @@ func (a *AppController) deleteLeaderSelection() {
 		s.leaderSelected = nil
 		s.leaderLoaded = false
 		s.leaderError = ""
+		s.leaderConfirmDelete = false
 	})
 }
 
@@ -1595,7 +1741,36 @@ func (a *AppController) renderSnippetsSection(c *ui.Context, theme *ui.Theme, cf
 	}
 
 	ui.Grid(c).Columns(settingsTwoColumns(c)).Gap(10).FillWidth().Children(func() {
+		startNewSnippet := func() {
+			seSet(se, func(s *settingsEditorState) {
+				s.snippetIsNew = true
+				s.snippetSelected = ""
+				s.snippetDraft = config.SnippetItem{WordBoundary: true, AppBundleIDs: []string{}, ProcessNames: []string{}}
+				s.snippetConfirmDelete = false
+			})
+		}
 		settingsEditorCard(c, theme, i18n.Tf("settings.snippets.card_title", len(items)), func() {
+			if len(items) == 0 {
+				kitEmptyStateWithAction(
+					c, theme, "text.badge.plus",
+					i18n.T("omnibox.empty.snippets"),
+					i18n.T("settings.empty.snippets.body"),
+					i18n.T("settings.snippets.new_snippet"),
+					"empty-cta:snippets",
+					func() {
+						if a.snippetPageDirty(cfg) {
+							seSet(se, func(s *settingsEditorState) {
+								s.snippetPendingSwitch = true
+								s.snippetPendingNew = true
+								s.snippetPendingID = ""
+							})
+							return
+						}
+						startNewSnippet()
+					},
+				)
+				return
+			}
 			query := seGet(se, func(s *settingsEditorState) string { return s.snippetQuery })
 			search := ui.SearchField(c, &query).Label(i18n.T("omnibox.placeholder.snippets")).Placeholder(i18n.T("omnibox.placeholder.snippets")).FillWidth()
 			if search.Changed() {
@@ -1603,11 +1778,15 @@ func (a *AppController) renderSnippetsSection(c *ui.Context, theme *ui.Theme, cf
 			}
 			ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 				if ui.PrimaryButton(c, i18n.T("settings.snippets.new_snippet")).Clicked() {
-					seSet(se, func(s *settingsEditorState) {
-						s.snippetIsNew = true
-						s.snippetSelected = ""
-						s.snippetDraft = config.SnippetItem{WordBoundary: true, AppBundleIDs: []string{}, ProcessNames: []string{}}
-					})
+					if a.snippetPageDirty(cfg) {
+						seSet(se, func(s *settingsEditorState) {
+							s.snippetPendingSwitch = true
+							s.snippetPendingNew = true
+							s.snippetPendingID = ""
+						})
+					} else {
+						startNewSnippet()
+					}
 				}
 				settingsHint(c, theme, i18n.T("settings.snippets.select_item"))
 			})
@@ -1619,26 +1798,75 @@ func (a *AppController) renderSnippetsSection(c *ui.Context, theme *ui.Theme, cf
 					continue
 				}
 				matches++
-				row := settingsListRow(c, theme, "snippet:"+item.ID, item.ID == selected)
+				row := settingsListRow(c, theme, "snippet:"+item.ID, !isNew && item.ID == selected)
 				row.Children(func() {
 					ui.Text(c, item.Trigger).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Shrink(0)
 					ui.Text(c, item.Description).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().Grow(1).MinWidth(0)
 				})
 				if row.Clicked() {
-					seSet(se, func(s *settingsEditorState) {
-						s.snippetIsNew = false
-						s.snippetSelected = item.ID
-						s.snippetDraft = item
-					})
+					if isNew || item.ID != selected {
+						if a.snippetPageDirty(cfg) {
+							seSet(se, func(s *settingsEditorState) {
+								s.snippetPendingSwitch = true
+								s.snippetPendingNew = false
+								s.snippetPendingID = item.ID
+							})
+						} else {
+							seSet(se, func(s *settingsEditorState) {
+								s.snippetIsNew = false
+								s.snippetSelected = item.ID
+								s.snippetDraft = item
+								s.snippetConfirmDelete = false
+							})
+						}
+					}
 				}
 			}
 			if matches == 0 {
-				kitEmptyState(c, theme, "text.badge.plus", i18n.T("omnibox.empty.snippets"), "")
+				kitEmptyState(c, theme, "text.badge.plus", i18n.T("omnibox.empty.snippets"), i18n.T("settings.empty.snippets.body"))
 			}
 		})
 
-		settingsEditorCard(c, theme, i18n.T("settings.snippets.editor"), func() {
+		snippetDirty := a.snippetPageDirty(cfg)
+		settingsEditorCardWithDirty(c, theme, i18n.T("settings.snippets.editor"), snippetDirty, "snippet-editor-dirty-dot", func() {
 			draft := seGet(se, func(s *settingsEditorState) config.SnippetItem { return s.snippetDraft })
+			se.mu.Lock()
+			pendingSwitch := se.snippetPendingSwitch
+			pendingNew := se.snippetPendingNew
+			pendingID := se.snippetPendingID
+			se.mu.Unlock()
+			if pendingSwitch {
+				name := editorEntityName(draft.Trigger, nonEmptyOr(draft.ID, i18n.T("settings.snippets.new_snippet")))
+				applyPending := func() {
+					seSet(se, func(s *settingsEditorState) {
+						s.snippetPendingSwitch = false
+						s.snippetConfirmDelete = false
+						if pendingNew {
+							s.snippetIsNew = true
+							s.snippetSelected = ""
+							s.snippetDraft = config.SnippetItem{WordBoundary: true, AppBundleIDs: []string{}, ProcessNames: []string{}}
+							return
+						}
+						for _, it := range items {
+							if it.ID == pendingID {
+								s.snippetIsNew = false
+								s.snippetSelected = it.ID
+								s.snippetDraft = it
+								return
+							}
+						}
+					})
+				}
+				kitUnsavedSwitchBanner(c, theme, "snippet-unsaved-switch", name,
+					func() {
+						if a.saveSnippetDraftWithFeedback(c) {
+							applyPending()
+						}
+					},
+					applyPending,
+					func() { seSet(se, func(s *settingsEditorState) { s.snippetPendingSwitch = false }) },
+				)
+			}
 			settingsInlineRow(c, theme, i18n.T("settings.field.id"), settingsFieldLabelWidth, func() {
 				if v, changed := settingsTextInput(c, i18n.T("settings.snippets.id"), "my-snippet", draft.ID); changed {
 					seSet(se, func(s *settingsEditorState) { s.snippetDraft.ID = v })
@@ -1704,27 +1932,43 @@ func (a *AppController) renderSnippetsSection(c *ui.Context, theme *ui.Theme, cf
 					ui.Text(c, rendered.RenderedText).FontSize(typeLabel).TextColor(theme.Text)
 				})
 
-			ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-				if ui.PrimaryButton(c, i18n.T("settings.snippets.save")).Clicked() {
-					a.saveSnippetDraft()
-				}
-				if ui.Button(c, i18n.T("settings.snippets.delete")).Disabled(seGet(se, func(s *settingsEditorState) bool { return s.snippetIsNew })).Clicked() {
-					a.deleteSnippetDraft()
-				}
-			})
+			if seGet(se, func(s *settingsEditorState) bool { return s.snippetConfirmDelete }) {
+				targetName := editorEntityName(draft.Trigger, nonEmptyOr(selected, draft.ID))
+				kitDeleteConfirmRow(c, theme, "snippet-delete-confirm",
+					settingsConfirmPromptForFile(targetName, config.FileSnippets),
+					i18n.T("settings.delete.confirm_action"),
+					i18n.T("settings.delete.cancel"),
+					func() { seSet(se, func(s *settingsEditorState) { s.snippetConfirmDelete = false }) },
+					a.deleteSnippetDraft,
+				)
+			} else {
+				ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
+					if ui.PrimaryButton(c, i18n.T("settings.snippets.save")).Disabled(!snippetDirty).Clicked() {
+						_ = a.saveSnippetDraftWithFeedback(c)
+					}
+					if ui.Button(c, i18n.T("settings.snippets.delete")).Disabled(seGet(se, func(s *settingsEditorState) bool { return s.snippetIsNew || s.snippetSelected == "" })).Clicked() {
+						seSet(se, func(s *settingsEditorState) { s.snippetConfirmDelete = true })
+					}
+					renderFieldSavedBadge(c, theme, se, settingsFieldID("snippets", "save"))
+				})
+			}
 		})
 	})
 }
 
 // saveSnippetDraft persists the drafted snippet into snippets.toml.
 func (a *AppController) saveSnippetDraft() {
+	_ = a.saveSnippetDraftWithFeedback(nil)
+}
+
+func (a *AppController) saveSnippetDraftWithFeedback(c *ui.Context) bool {
 	se := a.settingsEditor()
 	draft := seGet(se, func(s *settingsEditorState) config.SnippetItem { return s.snippetDraft })
 	draft.ID = strings.TrimSpace(draft.ID)
 	draft.Trigger = strings.TrimSpace(draft.Trigger)
 	if draft.ID == "" || draft.Trigger == "" {
-		a.setSettingsStatus(i18n.T("settings.snippets.err_required"))
-		return
+		a.setPageNotice("snippets", i18n.T("settings.snippets.err_required"), chipWarning)
+		return false
 	}
 	if draft.AppBundleIDs == nil {
 		draft.AppBundleIDs = []string{}
@@ -1747,13 +1991,16 @@ func (a *AppController) saveSnippetDraft() {
 		items = append(items, draft)
 	}
 	if err := a.SaveSnippetsConfig(config.SnippetsConfig{Items: items}); err != nil {
-		return
+		return false
 	}
 	seSet(se, func(s *settingsEditorState) {
 		s.snippetIsNew = false
 		s.snippetSelected = draft.ID
 		s.snippetDraft = draft
+		s.snippetConfirmDelete = false
 	})
+	a.markFieldSaved(c, settingsFieldID("snippets", "save"))
+	return true
 }
 
 // deleteSnippetDraft removes the selected snippet from snippets.toml.
@@ -1774,6 +2021,7 @@ func (a *AppController) deleteSnippetDraft() {
 		s.snippetIsNew = false
 		s.snippetSelected = ""
 		s.snippetDraft = config.SnippetItem{}
+		s.snippetConfirmDelete = false
 	})
 }
 
@@ -1796,42 +2044,122 @@ func (a *AppController) renderGlossarySection(c *ui.Context, theme *ui.Theme, cf
 		})
 	}
 
-	settingsEditorCard(c, theme, i18n.Tf("settings.glossary.card_title", len(terms)), func() {
-		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
-			if ui.PrimaryButton(c, i18n.T("settings.glossary.new_term")).Clicked() {
-				seSet(se, func(s *settingsEditorState) {
-					s.glossaryIsNew = true
-					s.glossarySelected = ""
-					s.glossaryDraft = config.GlossaryTerm{Aliases: []string{}}
-				})
-			}
-			settingsHint(c, theme, i18n.T("settings.glossary.select_term"))
+	glossaryDirty := a.glossaryPageDirty(cfg)
+	startNewGlossary := func() {
+		seSet(se, func(s *settingsEditorState) {
+			s.glossaryIsNew = true
+			s.glossarySelected = ""
+			s.glossaryDraft = config.GlossaryTerm{Aliases: []string{}}
+			s.glossaryConfirmDelete = false
 		})
-		settingsDivider(c)
+	}
+	settingsEditorCardWithDirty(c, theme, i18n.Tf("settings.glossary.card_title", len(terms)), glossaryDirty, "glossary-editor-dirty-dot", func() {
 		if len(terms) == 0 {
-			kitEmptyState(c, theme, "character.book.closed", i18n.T("omnibox.empty.glossary"), "")
-		}
-		for _, term := range terms {
-			t := term
-			row := settingsListRow(c, theme, "glossary:"+t.Term, t.Term == selected)
-			row.Children(func() {
-				ui.Text(c, t.Term).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Shrink(0)
-				ui.Text(c, strings.Join(t.Aliases, ", ")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().Grow(1).MinWidth(0)
-				if t.Category != "" {
-					chip(c, theme, "", t.Category, chipNeutral).Shrink(0)
+			kitEmptyStateWithAction(
+				c, theme, "character.book.closed",
+				i18n.T("omnibox.empty.glossary"),
+				i18n.T("settings.empty.glossary.body"),
+				i18n.T("settings.glossary.new_term"),
+				"empty-cta:glossary",
+				func() {
+					if a.glossaryPageDirty(cfg) {
+						seSet(se, func(s *settingsEditorState) {
+							s.glossaryPendingSwitch = true
+							s.glossaryPendingNew = true
+							s.glossaryPendingTerm = ""
+						})
+						return
+					}
+					startNewGlossary()
+				},
+			)
+		} else {
+			ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
+				if ui.PrimaryButton(c, i18n.T("settings.glossary.new_term")).Clicked() {
+					if a.glossaryPageDirty(cfg) {
+						seSet(se, func(s *settingsEditorState) {
+							s.glossaryPendingSwitch = true
+							s.glossaryPendingNew = true
+							s.glossaryPendingTerm = ""
+						})
+					} else {
+						startNewGlossary()
+					}
 				}
+				settingsHint(c, theme, i18n.T("settings.glossary.select_term"))
 			})
-			if row.Clicked() {
-				seSet(se, func(s *settingsEditorState) {
-					s.glossaryIsNew = false
-					s.glossarySelected = t.Term
-					s.glossaryDraft = t
+			settingsDivider(c)
+			for _, term := range terms {
+				t := term
+				row := settingsListRow(c, theme, "glossary:"+t.Term, !isNew && t.Term == selected)
+				row.Children(func() {
+					ui.Text(c, t.Term).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine().Shrink(0)
+					ui.Text(c, strings.Join(t.Aliases, ", ")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine().Grow(1).MinWidth(0)
+					if t.Category != "" {
+						chip(c, theme, "", t.Category, chipNeutral).Shrink(0)
+					}
 				})
+				if row.Clicked() {
+					if isNew || t.Term != selected {
+						if a.glossaryPageDirty(cfg) {
+							seSet(se, func(s *settingsEditorState) {
+								s.glossaryPendingSwitch = true
+								s.glossaryPendingNew = false
+								s.glossaryPendingTerm = t.Term
+							})
+						} else {
+							seSet(se, func(s *settingsEditorState) {
+								s.glossaryIsNew = false
+								s.glossarySelected = t.Term
+								s.glossaryDraft = t
+								s.glossaryConfirmDelete = false
+							})
+						}
+					}
+				}
 			}
 		}
 
 		settingsDivider(c)
 		draft := seGet(se, func(s *settingsEditorState) config.GlossaryTerm { return s.glossaryDraft })
+		se.mu.Lock()
+		pendingSwitch := se.glossaryPendingSwitch
+		pendingNew := se.glossaryPendingNew
+		pendingTerm := se.glossaryPendingTerm
+		se.mu.Unlock()
+		if pendingSwitch {
+			name := editorEntityName(draft.Term, i18n.T("settings.glossary.new_term"))
+			applyPending := func() {
+				seSet(se, func(s *settingsEditorState) {
+					s.glossaryPendingSwitch = false
+					s.glossaryConfirmDelete = false
+					if pendingNew {
+						s.glossaryIsNew = true
+						s.glossarySelected = ""
+						s.glossaryDraft = config.GlossaryTerm{Aliases: []string{}}
+						return
+					}
+					for _, t := range terms {
+						if t.Term == pendingTerm {
+							s.glossaryIsNew = false
+							s.glossarySelected = t.Term
+							s.glossaryDraft = t
+							return
+						}
+					}
+				})
+			}
+			kitUnsavedSwitchBanner(c, theme, "glossary-unsaved-switch", name,
+				func() {
+					if a.saveGlossaryDraftWithFeedback(c) {
+						applyPending()
+					}
+				},
+				applyPending,
+				func() { seSet(se, func(s *settingsEditorState) { s.glossaryPendingSwitch = false }) },
+			)
+		}
+		draft = seGet(se, func(s *settingsEditorState) config.GlossaryTerm { return s.glossaryDraft })
 		settingsInlineRow(c, theme, i18n.T("settings.field.term"), settingsFieldLabelWidth, func() {
 			if v, changed := settingsTextInput(c, i18n.T("settings.glossary.term"), "Kubernetes", draft.Term); changed {
 				seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Term = v })
@@ -1852,25 +2180,41 @@ func (a *AppController) renderGlossarySection(c *ui.Context, theme *ui.Theme, cf
 				seSet(se, func(s *settingsEditorState) { s.glossaryDraft.Hint = v })
 			}
 		})
-		ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-			if ui.PrimaryButton(c, i18n.T("settings.glossary.save")).Clicked() {
-				a.saveGlossaryDraft()
-			}
-			if ui.Button(c, i18n.T("settings.glossary.delete")).Disabled(seGet(se, func(s *settingsEditorState) bool { return s.glossaryIsNew })).Clicked() {
-				a.deleteGlossaryDraft()
-			}
-		})
+		if seGet(se, func(s *settingsEditorState) bool { return s.glossaryConfirmDelete }) {
+			targetName := editorEntityName(selected, draft.Term)
+			kitDeleteConfirmRow(c, theme, "glossary-delete-confirm",
+				settingsConfirmPromptForFile(targetName, config.FileGlossary),
+				i18n.T("settings.delete.confirm_action"),
+				i18n.T("settings.delete.cancel"),
+				func() { seSet(se, func(s *settingsEditorState) { s.glossaryConfirmDelete = false }) },
+				a.deleteGlossaryDraft,
+			)
+		} else {
+			ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
+				if ui.PrimaryButton(c, i18n.T("settings.glossary.save")).Disabled(!glossaryDirty).Clicked() {
+					_ = a.saveGlossaryDraftWithFeedback(c)
+				}
+				if ui.Button(c, i18n.T("settings.glossary.delete")).Disabled(seGet(se, func(s *settingsEditorState) bool { return s.glossaryIsNew || s.glossarySelected == "" })).Clicked() {
+					seSet(se, func(s *settingsEditorState) { s.glossaryConfirmDelete = true })
+				}
+				renderFieldSavedBadge(c, theme, se, settingsFieldID("glossary", "save"))
+			})
+		}
 	})
 }
 
 // saveGlossaryDraft persists the drafted glossary term.
 func (a *AppController) saveGlossaryDraft() {
+	_ = a.saveGlossaryDraftWithFeedback(nil)
+}
+
+func (a *AppController) saveGlossaryDraftWithFeedback(c *ui.Context) bool {
 	se := a.settingsEditor()
 	draft := seGet(se, func(s *settingsEditorState) config.GlossaryTerm { return s.glossaryDraft })
 	draft.Term = strings.TrimSpace(draft.Term)
 	if draft.Term == "" {
-		a.setSettingsStatus(i18n.T("settings.glossary.err_required"))
-		return
+		a.setPageNotice("glossary", i18n.T("settings.glossary.err_required"), chipWarning)
+		return false
 	}
 	if draft.Category == "" {
 		draft.Category = "general"
@@ -1893,13 +2237,16 @@ func (a *AppController) saveGlossaryDraft() {
 		terms = append(terms, draft)
 	}
 	if err := a.SaveGlossaryConfig(config.GlossaryConfig{Terms: terms}); err != nil {
-		return
+		return false
 	}
 	seSet(se, func(s *settingsEditorState) {
 		s.glossaryIsNew = false
 		s.glossarySelected = draft.Term
 		s.glossaryDraft = draft
+		s.glossaryConfirmDelete = false
 	})
+	a.markFieldSaved(c, settingsFieldID("glossary", "save"))
+	return true
 }
 
 // deleteGlossaryDraft removes the selected glossary term.
@@ -1920,6 +2267,7 @@ func (a *AppController) deleteGlossaryDraft() {
 		s.glossaryIsNew = false
 		s.glossarySelected = ""
 		s.glossaryDraft = config.GlossaryTerm{}
+		s.glossaryConfirmDelete = false
 	})
 }
 
@@ -1929,29 +2277,23 @@ func (a *AppController) renderClipboardCard(c *ui.Context, theme *ui.Theme, cfg 
 	clip := cfg.Main.Clipboard
 
 	settingsSourceCard(c, theme, i18n.T("settings.card.clipboard"), "[clipboard]", func() {
-		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.clipboard.enabled"), "enabled", "", clip.Enabled); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.Enabled = v })
-		}
-		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.clipboard.ignore_concealed"), "ignore_concealed_types",
-			i18n.T("settings.clipboard.ignore_concealed_help"), clip.IgnoreConcealedTypes); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.IgnoreConcealedTypes = v })
-		}
-		if v, changed := settingNumberRow(c, theme, i18n.T("settings.clipboard.max_items"), "max_history_items", "",
-			float64(clip.MaxHistoryItems), 10, 2000, 10, ""); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.MaxHistoryItems = int(v) })
-		}
-		if v, changed := settingNumberRow(c, theme, i18n.T("settings.clipboard.retention"), "retention_days", "",
-			float64(clip.RetentionDays), 1, 365, 1, i18n.T("common.days")); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.RetentionDays = int(v) })
-		}
-		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.clipboard.media_capture"), "media_capture",
-			i18n.T("settings.clipboard.media_capture_help"), clip.MediaCapture); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.MediaCapture = v })
-		}
-		if v, changed := settingNumberRow(c, theme, i18n.T("settings.clipboard.media_quota"), "media_quota_mb",
-			i18n.T("settings.clipboard.media_quota_help"), float64(clip.MediaQuotaMB), 64, 4096, 64, "MB"); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.MediaQuotaMB = int(v) })
-		}
+		a.immediateSwitchRow(c, theme, "clipboard", i18n.T("settings.clipboard.enabled"), "enabled", "", clip.Enabled,
+			func(m *config.MainConfig, v bool) { m.Clipboard.Enabled = v })
+		a.immediateSwitchRow(c, theme, "clipboard", i18n.T("settings.clipboard.ignore_concealed"), "ignore_concealed_types",
+			i18n.T("settings.clipboard.ignore_concealed_help"), clip.IgnoreConcealedTypes,
+			func(m *config.MainConfig, v bool) { m.Clipboard.IgnoreConcealedTypes = v })
+		a.immediateNumberRow(c, theme, "clipboard", i18n.T("settings.clipboard.max_items"), "max_history_items", "",
+			float64(clip.MaxHistoryItems), 10, 2000, 10, "",
+			func(m *config.MainConfig, v float64) { m.Clipboard.MaxHistoryItems = int(v) })
+		a.immediateNumberRow(c, theme, "clipboard", i18n.T("settings.clipboard.retention"), "retention_days", "",
+			float64(clip.RetentionDays), 1, 365, 1, i18n.T("common.days"),
+			func(m *config.MainConfig, v float64) { m.Clipboard.RetentionDays = int(v) })
+		a.immediateSwitchRow(c, theme, "clipboard", i18n.T("settings.clipboard.media_capture"), "media_capture",
+			i18n.T("settings.clipboard.media_capture_help"), clip.MediaCapture,
+			func(m *config.MainConfig, v bool) { m.Clipboard.MediaCapture = v })
+		a.immediateNumberRow(c, theme, "clipboard", i18n.T("settings.clipboard.media_quota"), "media_quota_mb",
+			i18n.T("settings.clipboard.media_quota_help"), float64(clip.MediaQuotaMB), 64, 4096, 64, "MB",
+			func(m *config.MainConfig, v float64) { m.Clipboard.MediaQuotaMB = int(v) })
 
 		settingsCardDivider(c, theme)
 		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {

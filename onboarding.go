@@ -111,6 +111,7 @@ func (a *desktopApp) showOnboarding() {
 		return
 	}
 	a.onboardingOpen.Store(true)
+	a.recordExternalReturnTarget()
 	go mygo.RunOnMain(func() {
 		mygo.App.Show()
 		win.Show()
@@ -164,7 +165,11 @@ func (a *desktopApp) watchPermissions(ctx context.Context) {
 			continue
 		}
 		st, err := br.Permissions(ctx)
-		if err != nil || known && st.Accessibility == last.Accessibility && st.InputMonitoring == last.InputMonitoring {
+		if err != nil || known &&
+			st.Accessibility == last.Accessibility &&
+			st.InputMonitoring == last.InputMonitoring &&
+			st.ScreenRecording == last.ScreenRecording &&
+			st.Details["screenRecording"] == last.Details["screenRecording"] {
 			continue
 		}
 		last, known = st, true

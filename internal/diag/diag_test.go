@@ -322,3 +322,25 @@ func TestRunUninstallDryRunAndPurgeWithBackup(t *testing.T) {
 		t.Fatalf("pre-purge backup manifest missing: %v", err)
 	}
 }
+
+func TestBuildDoctorReportDetectsEnvAPIKeyWithoutKeysFile(t *testing.T) {
+	base := t.TempDir()
+	cfgDir := filepath.Join(base, "cfg")
+	dataDir := filepath.Join(base, "data")
+	logDir := filepath.Join(base, "logs")
+	t.Setenv("DEEPSEEK_API_KEY", "sk-diag-env-dummy-key")
+	report := BuildDoctorReport(context.Background(), DoctorOptions{
+		ConfigDir: cfgDir,
+		DataDir:   dataDir,
+		LogDir:    logDir,
+		PermissionsProbe: func(context.Context) (host.PermissionStatus, error) {
+			return host.PermissionStatus{Accessibility: true, InputMonitoring: true, ScreenRecording: true, Granted: true}, nil
+		},
+	})
+	if report.AI.KeySource != string(secrets.KeySourceEnv) {
+		t.Fatalf("KeySource = %q, want %q", report.AI.KeySource, secrets.KeySourceEnv)
+	}
+	if _, err := os.Stat(cfgDir); !os.IsNotExist(err) {
+		t.Fatalf("BuildDoctorReport must stay read-only, cfgDir stat err=%v", err)
+	}
+}

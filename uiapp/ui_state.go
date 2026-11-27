@@ -13,9 +13,10 @@ import (
 // has the focus, a double click puts it back). The percentage is the
 // list's share; the limits keep both panes usable.
 const (
-	defaultPreviewListPercent float32 = 38 // the preview takes 62%
-	minPreviewListPercent     float32 = 35 // the list keeps at least 35%
-	maxPreviewListPercent     float32 = 75 // the preview keeps at least 25%
+	defaultPreviewListPercent          float32 = 38 // the preview takes 62%
+	defaultClipboardPreviewListPercent float32 = 42 // Clipboard balanced workbench split (42:58)
+	minPreviewListPercent              float32 = 35 // the list keeps at least 35%
+	maxPreviewListPercent              float32 = 75 // the preview keeps at least 25%
 )
 
 // clampPreviewListPercent bounds a split percentage; zero, NaN or anything
@@ -37,7 +38,8 @@ const uiStateFileName = "ui-state.json"
 const uiStateSaveDelay = 500 * time.Millisecond
 
 type persistedUIState struct {
-	PreviewListPercent float32 `json:"previewListPercent,omitempty"`
+	PreviewListPercent     float32 `json:"previewListPercent,omitempty"`
+	ClipboardSplitReversed bool    `json:"clipboardSplitReversed,omitempty"`
 }
 
 type uiPersistState struct {
@@ -65,18 +67,43 @@ func (c *AppController) uiStatePathLocked() string {
 func (c *AppController) previewListPercent() float32 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.uiPersist.loaded {
-		c.uiPersist.loaded = true
-		if path := c.uiStatePathLocked(); path != "" {
-			if data, err := os.ReadFile(path); err == nil {
-				var st persistedUIState
-				if json.Unmarshal(data, &st) == nil {
-					c.uiPersist.state = st
-				}
+	c.loadUIStateLocked()
+	return clampPreviewListPercent(c.uiPersist.state.PreviewListPercent)
+}
+
+func (c *AppController) previewListPercentForTab(tab string) float32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.loadUIStateLocked()
+	if c.uiPersist.state.PreviewListPercent <= 0 || math.IsNaN(float64(c.uiPersist.state.PreviewListPercent)) {
+		if tab == "clipboard" {
+			return defaultClipboardPreviewListPercent
+		}
+		return defaultPreviewListPercent
+	}
+	return clampPreviewListPercent(c.uiPersist.state.PreviewListPercent)
+}
+
+func (c *AppController) clipboardSplitReversed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.loadUIStateLocked()
+	return c.uiPersist.state.ClipboardSplitReversed
+}
+
+func (c *AppController) loadUIStateLocked() {
+	if c.uiPersist.loaded {
+		return
+	}
+	c.uiPersist.loaded = true
+	if path := c.uiStatePathLocked(); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			var st persistedUIState
+			if json.Unmarshal(data, &st) == nil {
+				c.uiPersist.state = st
 			}
 		}
 	}
-	return clampPreviewListPercent(c.uiPersist.state.PreviewListPercent)
 }
 
 // setPreviewListPercent records a move of the divider and schedules the

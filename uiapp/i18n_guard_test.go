@@ -57,7 +57,6 @@ var i18nDebtBaseline = map[string]i18nFileDebt{
 	"ai_center_view.go":        {pickLangCalls: 0, rawChineseLiterals: 28},
 	"ai_usage_view.go":         {pickLangCalls: 0, rawChineseLiterals: 4},
 	"annotate_view.go":         {pickLangCalls: 15, rawChineseLiterals: 15},
-	"assets_hub_view.go":       {pickLangCalls: 11, rawChineseLiterals: 11},
 	"capsule_preview.go":       {pickLangCalls: 11, rawChineseLiterals: 28},
 	"capsule_view.go":          {pickLangCalls: 3, rawChineseLiterals: 8},
 	"clipboard_actions.go":     {pickLangCalls: 13, rawChineseLiterals: 13},
@@ -83,7 +82,7 @@ var i18nDebtBaseline = map[string]i18nFileDebt{
 	"settings_rows.go":         {pickLangCalls: 0, rawChineseLiterals: 7},
 	"settings_sync.go":         {pickLangCalls: 24, rawChineseLiterals: 24},
 	"settings_view.go":         {pickLangCalls: 4, rawChineseLiterals: 22},
-	"tab_registry.go":          {pickLangCalls: 0, rawChineseLiterals: 3},
+	"tab_registry.go":          {pickLangCalls: 0, rawChineseLiterals: 2},
 	"vault_assets_view.go":     {pickLangCalls: 22, rawChineseLiterals: 22},
 }
 

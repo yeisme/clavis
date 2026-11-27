@@ -87,7 +87,6 @@ func TestControllerLifecycleCloseReleasesSubStatesAndBitmaps(t *testing.T) {
 		t.Fatalf("StartImageOCR: %v", err)
 	}
 	ctrl.SetHubSurface(HubSurfaceManage)
-	ctrl.setAssetsSubTab(assetsSubVault)
 	capsuleUI.setPreviewVisible(ctrl, true)
 
 	// Arm a pending HUD timer and original-image debounce timer.
@@ -103,9 +102,6 @@ func TestControllerLifecycleCloseReleasesSubStatesAndBitmaps(t *testing.T) {
 	}
 	if ctrl.ActiveHubSurface() != HubSurfaceNone {
 		t.Fatalf("hub surface = %q after Close(), want none", ctrl.ActiveHubSurface())
-	}
-	if ctrl.assetsSubTab() != assetsSubMedia {
-		t.Fatalf("assets sub-tab = %v after Close(), want media", ctrl.assetsSubTab())
 	}
 	if imgs := ctrl.consumeOCRImages(); len(imgs) != 0 {
 		t.Fatalf("OCR images not released after Close(): %d", len(imgs))
@@ -221,8 +217,6 @@ func TestControllerLifecycleConcurrentSubStateAccessAndClose(t *testing.T) {
 			for range 50 {
 				ctrl.SetHubSurface(HubSurfaceStats)
 				_ = ctrl.ActiveHubSurface()
-				ctrl.setAssetsSubTab(assetsSubPinned)
-				_ = ctrl.assetsSubTab()
 				capsuleUI.setPreviewVisible(ctrl, id%2 == 0)
 				_ = capsuleUI.previewFor(ctrl, false)
 				ctrl.SetMediaSearchQuery("q")

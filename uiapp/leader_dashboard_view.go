@@ -347,9 +347,8 @@ func (a *AppController) renderLeaderQuickTools(c *ui.Context, theme *ui.Theme) {
 		tool("leader-tool-translate", i18n.T("leader.tool.translate"), func() {
 			a.StartTranslation(a.State().Context.SelectedText, "")
 		})
-		tool("leader-tool-assets", i18n.T("leader.tool.assets"), func() {
-			a.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions})
-			a.SetHubSurface(HubSurfaceAssets)
+		tool("leader-tool-clipboard", i18n.T("omnibox.tab.clipboard"), func() {
+			a.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabClipboard})
 		})
 	})
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"image"
+	"image/color"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -147,4 +148,35 @@ func countOpaquePixels(img *image.RGBA) int {
 		}
 	}
 	return n
+}
+
+func TestAppIconFollowsMacOSGrayscaleAndSystemBluePalette(t *testing.T) {
+	raw := GenerateAppIconPNG(512)
+	img, err := png.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode 512x512 icon: %v", err)
+	}
+	blueDots := 0
+	for y := range 512 {
+		for x := range 512 {
+			c := color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
+			if c.A < 32 {
+				continue
+			}
+			// Reject warm amber/gold spark pixels.
+			if c.R > 210 && c.G > 140 && c.B < 100 {
+				t.Fatalf("unexpected warm amber/gold pixel at (%d,%d): %+v", x, y, c)
+			}
+			// Reject purple/indigo gradient pixels.
+			if int(c.B) > int(c.R)+40 && c.R > 40 && c.G < c.R {
+				t.Fatalf("unexpected purple/indigo gradient pixel at (%d,%d): %+v", x, y, c)
+			}
+			if c.B > 220 && c.G > 110 && c.G < 160 && c.R < 35 {
+				blueDots++
+			}
+		}
+	}
+	if blueDots == 0 {
+		t.Fatal("expected #0A84FF system-blue indicator dot pixels in redesigned app icon")
+	}
 }

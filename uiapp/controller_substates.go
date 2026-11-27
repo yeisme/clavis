@@ -16,7 +16,6 @@ import (
 // and cached state.
 type controllerSubStates struct {
 	hubSurface       CapsuleHubSurface
-	assetsSub        assetsSubTab
 	manageSync       *manageSyncState
 	vaultUI          *vaultViewState
 	clipKeyMgr       *clipboardKeyManagerState
@@ -113,24 +112,6 @@ func (c *AppController) toggleHubSurfaceState(surface CapsuleHubSurface) Capsule
 	c.subStates.hubSurface = next
 	c.subStateMu.Unlock()
 	return next
-}
-
-func (c *AppController) assetsSubTabState() assetsSubTab {
-	if c == nil {
-		return assetsSubMedia
-	}
-	c.subStateMu.Lock()
-	defer c.subStateMu.Unlock()
-	return c.subStates.assetsSub
-}
-
-func (c *AppController) setAssetsSubTabState(tab assetsSubTab) {
-	if c == nil {
-		return
-	}
-	c.subStateMu.Lock()
-	c.subStates.assetsSub = tab
-	c.subStateMu.Unlock()
 }
 
 func (c *AppController) manageSyncStateFor() *manageSyncState {

@@ -238,6 +238,7 @@ type capsuleUIState struct {
 	previewVisible    bool
 	actionMenuOpen    bool
 	actionMenuIdx     int
+	actionMenuQuery   string
 	followUpComposing bool
 	aiStepsExpanded   bool
 	aiReviseOpen      bool
@@ -265,6 +266,7 @@ func (s *capsuleEphemeralStore) reset(ctrl *AppController) {
 	st.previewVisible = false
 	st.actionMenuOpen = false
 	st.actionMenuIdx = 0
+	st.actionMenuQuery = ""
 	st.followUpComposing = false
 	st.aiStepsExpanded = false
 	st.aiReviseOpen = false
@@ -486,6 +488,30 @@ func (s *capsuleEphemeralStore) setActionMenuShown(ctrl *AppController, open boo
 	st.actionMenuOpen = open
 	if !open {
 		st.actionMenuIdx = 0
+		st.actionMenuQuery = ""
+	}
+}
+
+func (s *capsuleEphemeralStore) actionMenuQuery(ctrl *AppController) string {
+	if ctrl == nil {
+		return ""
+	}
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.actionMenuQuery
+}
+
+func (s *capsuleEphemeralStore) setActionMenuQuery(ctrl *AppController, q string) {
+	if ctrl == nil {
+		return
+	}
+	st := ctrl.capsuleUIStateFor()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.actionMenuQuery != q {
+		st.actionMenuQuery = q
+		st.actionMenuIdx = 0
 	}
 }
 
@@ -572,8 +598,35 @@ func (a *AppController) toggleOmniboxActionMenu() {
 	open := capsuleUI.actionMenuShown(a)
 	capsuleUI.setActionMenuShown(a, !open)
 	if !open {
+		capsuleUI.setActionMenuQuery(a, "")
 		capsuleUI.setActionMenuSelection(a, 0)
 	}
+}
+
+func (a *AppController) filteredActionMenuSpecs(item engine.OmniboxItem) []engine.OmniboxActionSpec {
+	specs := engine.AvailableItemActionsWithConfig(item, a.Config())
+	q := strings.ToLower(strings.TrimSpace(capsuleUI.actionMenuQuery(a)))
+	if q == "" {
+		return specs
+	}
+	out := make([]engine.OmniboxActionSpec, 0, len(specs))
+	for _, sp := range specs {
+		if strings.Contains(strings.ToLower(sp.Label), q) ||
+			strings.Contains(strings.ToLower(sp.ID), q) ||
+			strings.Contains(strings.ToLower(sp.Shortcut), q) {
+			out = append(out, sp)
+		}
+	}
+	return out
+}
+
+func (a *AppController) triggerOmniboxActionSpec(item engine.OmniboxItem, actionID string) {
+	capsuleUI.setActionMenuShown(a, false)
+	if item.Kind == engine.ItemClipboardEntry && actionID == "delete" {
+		a.RequestSoftDeleteClipboardItem(item)
+		return
+	}
+	a.Dispatch(engine.Event{Type: engine.EventExecuteItemAction, ActionID: actionID})
 }
 
 // selectedOmniboxItem returns the currently selected Omnibox row, if any.
@@ -626,71 +679,78 @@ func adaptActionShortcut(shortcut string) string {
 // It returns true when the key belongs to the menu. Escape closes only the
 // menu, never the Capsule.
 func (a *AppController) handleActionMenuKey(key ui.Key, mods ui.Modifiers, state engine.State) bool {
-	if mods != 0 || !a.omniboxActionMenuOpen(state) {
+	if !a.omniboxActionMenuOpen(state) {
 		return false
 	}
 	item, ok := selectedOmniboxItem(state)
 	if !ok {
 		return false
 	}
-	specs := engine.AvailableItemActions(item)
-	if len(specs) == 0 {
+	specs := a.filteredActionMenuSpecs(item)
+	if mods != 0 && mods != ui.Ctrl {
 		return false
 	}
-	switch key {
-	case ui.KeyEscape:
+	switch {
+	case key == ui.KeyEscape && mods == 0:
 		capsuleUI.setActionMenuShown(a, false)
 		return true
-	case ui.KeyUp:
+	case (key == ui.KeyUp && mods == 0) || (key == ui.KeyP && mods == ui.Ctrl):
 		capsuleUI.moveActionMenuSelection(a, -1, len(specs))
 		return true
-	case ui.KeyDown:
+	case (key == ui.KeyDown && mods == 0) || (key == ui.KeyN && mods == ui.Ctrl):
 		capsuleUI.moveActionMenuSelection(a, 1, len(specs))
 		return true
-	case ui.KeyEnter:
+	case key == ui.KeyEnter && mods == 0:
+		if len(specs) == 0 {
+			return true
+		}
 		idx := capsuleUI.actionMenuSelection(a)
 		if idx < 0 || idx >= len(specs) {
 			idx = 0
 		}
-		spec := specs[idx]
-		capsuleUI.setActionMenuShown(a, false)
-		a.Dispatch(engine.Event{Type: engine.EventExecuteItemAction, ActionID: spec.ID})
+		a.triggerOmniboxActionSpec(item, specs[idx].ID)
 		return true
 	default:
 		return false
 	}
 }
 
-// renderOmniboxActionMenu renders the elevated contextual action palette for
-// the selected Omnibox row (toggled with ⌘K / Ctrl+K or the footer button).
+// renderOmniboxActionMenu renders the floating opaque bottom-right action
+// palette for the selected Omnibox row (zero vertical list shift).
 func (a *AppController) renderOmniboxActionMenu(c *ui.Context, theme *ui.Theme, state engine.State) {
 	item, ok := selectedOmniboxItem(state)
 	if !ok {
 		capsuleUI.setActionMenuShown(a, false)
 		return
 	}
-	specs := engine.AvailableItemActions(item)
-	if len(specs) == 0 {
+	allSpecs := engine.AvailableItemActionsWithConfig(item, a.Config())
+	if len(allSpecs) == 0 {
 		capsuleUI.setActionMenuShown(a, false)
 		return
 	}
+	specs := a.filteredActionMenuSpecs(item)
 	idx := capsuleUI.actionMenuSelection(a)
 	if idx < 0 || idx >= len(specs) {
 		idx = 0
 		capsuleUI.setActionMenuSelection(a, idx)
 	}
 
-	card := ui.Column(c).
-		FillWidth().
-		Padding(space6, space8).
-		Gap(3).
+	popover := ui.Column(c).
+		Key("omnibox-action-menu").
+		Absolute().
+		Bottom(space32+space8).
+		Right(space14).
+		Width(260).
+		MaxHeight(340).
+		Padding(space8).
+		Gap(space4).
 		Radius(radiusCard).
 		Background(theme.Background).
-		Border(1, withAlpha(theme.Accent, alphaHalf)).
-		Shadow(0, 10, 24, 0, ui.RGBA(0, 0, 0, 0.3))
+		Border(1, hairline(theme)).
+		Shadow(0, 12, 28, 0, ui.RGBA(0, 0, 0, 0.34))
 
-	card.Children(func() {
-		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
+	popover.Children(func() {
+		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 			renderSemanticIcon(c, "command", 11, theme.Accent)
 			ui.Text(c, i18n.T("omnibox.tab.actions")).FontSize(typeMeta).FontWeight(700).TextColor(theme.Text).SingleLine()
 			ui.Spacer(c)
@@ -700,37 +760,59 @@ func (a *AppController) renderOmniboxActionMenu(c *ui.Context, theme *ui.Theme, 
 				SingleLine()
 		})
 
-		for i, spec := range specs {
-			specIdx := i
-			action := spec
-			row := ui.ButtonBase(c).
-				Key(fmt.Sprintf("action-menu:%s", action.ID)).
-				FillWidth().
-				Padding(space4, space8).
-				Radius(radiusChip).
-				FocusRing(false)
-			if specIdx == idx {
-				row.Background(withAlpha(theme.Accent, alphaSubtle)).
-					Border(1, withAlpha(theme.Accent, alphaHalf))
+		query := capsuleUI.actionMenuQuery(a)
+		searchInput := ui.TextInput(c, &query).
+			Search().
+			AutoFocus().
+			FillWidth().
+			FontSize(typeMeta).
+			Placeholder(i18n.T("clipboard.action_menu.search_ph"))
+		searchInput.HandleInput(func(ev ui.InputEvent) bool {
+			if ev.Kind != ui.InputKeyDown {
+				return false
 			}
-			row.Children(func() {
-				ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-					renderSemanticIcon(c, "chevron.right", 10, theme.TextMuted)
-					ui.Text(c, action.Label).FontSize(typeLabel).TextColor(theme.Text).SingleLine().Grow(1)
-					if action.Shortcut != "" {
-						ui.Text(c, adaptActionShortcut(action.Shortcut)).
-							FontSize(typeMicro).
-							FontWeight(600).
-							TextColor(theme.TextMuted).
-							SingleLine()
-					}
-				})
-			})
-			if row.Clicked() {
-				capsuleUI.setActionMenuShown(a, false)
-				a.Dispatch(engine.Event{Type: engine.EventExecuteItemAction, ActionID: action.ID})
-			}
+			return a.handleActionMenuKey(ev.Key, ev.Mods, a.currentOmniboxState(state))
+		})
+		if searchInput.Changed() {
+			capsuleUI.setActionMenuQuery(a, query)
 		}
+
+		kitDivider(c, theme)
+
+		ui.Scroll(c).FillWidth().Grow(1).Children(func() {
+			ui.Column(c).FillWidth().Gap(space2).Children(func() {
+				for i, spec := range specs {
+					specIdx := i
+					action := spec
+					row := ui.ButtonBase(c).
+						Key(fmt.Sprintf("action-menu:%s", action.ID)).
+						FillWidth().
+						Padding(space4, space8).
+						Radius(radiusChip).
+						FocusRing(false)
+					if specIdx == idx {
+						row.Background(rowSelectionFill(theme)).
+							Border(1, selectionEdge(theme))
+					}
+					row.Children(func() {
+						ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+							renderSemanticIcon(c, "chevron.right", 10, theme.TextMuted)
+							ui.Text(c, action.Label).FontSize(typeLabel).TextColor(theme.Text).SingleLine().Grow(1)
+							if action.Shortcut != "" {
+								ui.Text(c, adaptActionShortcut(action.Shortcut)).
+									FontSize(typeMicro).
+									FontWeight(600).
+									TextColor(theme.TextMuted).
+									SingleLine()
+							}
+						})
+					})
+					if row.Clicked() {
+						a.triggerOmniboxActionSpec(item, action.ID)
+					}
+				}
+			})
+		})
 	})
 }
 
@@ -775,12 +857,11 @@ func (a *AppController) renderOmniboxPreviewCard(
 		clipPreview = &entry
 	}
 
-	card := ui.Column(c).FillWidth().Padding(space0, space0).Gap(space6).Background(ui.Transparent).Children(func() {
-		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
+	card := ui.Column(c).FillWidth().Padding(space0, space0).Gap(space6).Background(contentSurface(theme)).Children(func() {
+		ui.Row(c).FillWidth().Height(34).Gap(space6).AlignItems(ui.Center).Children(func() {
 			// Neutral: the card's title icon is a label, not a selection.
 			renderSemanticIcon(c, previewIcon(item), typeLabel, secondaryInk(theme))
 			ui.Text(c, i18n.T("preview.title")).FontSize(typeMeta).FontWeight(700).TextColor(theme.Text).SingleLine()
-			ui.Spacer(c)
 			if clipPreview != nil {
 				if kind := clipPreview.contentKind; kind != previewKindPlain {
 					lbl := "MD"
@@ -801,7 +882,47 @@ func (a *AppController) renderOmniboxPreviewCard(
 					}
 				}
 			}
-			ui.Text(c, previewKindLabel(item)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+			ui.Spacer(c)
+			if item.Kind == engine.ItemClipboardEntry {
+				hdrIconBtn := func(key, iconName, tip string, active bool, fn func()) {
+					b := ui.ButtonBase(c).Key(key).Label(i18n.T("preview.title")+": "+tip).Tooltip(tip).Size(space24, space24).Center().Radius(radius4).FocusRing(false).Shrink(0)
+					ink := secondaryInk(theme)
+					if active {
+						b.Background(rowSelectionFill(theme)).Border(space1, selectionEdge(theme))
+						ink = theme.Accent
+					} else if b.Hovered() {
+						b.Background(tileFill(theme))
+					}
+					b.Children(func() {
+						renderSemanticIcon(c, iconName, 13, ink)
+					})
+					if b.Clicked() && fn != nil {
+						fn()
+					}
+				}
+				hdrIconBtn("preview-hdr-copy", "doc.on.doc", i18n.T("engine.action.copy_clipboard"), false, func() {
+					capsuleUI.setActionMenuShown(a, false)
+					a.Dispatch(engine.Event{Type: engine.EventExecuteItemAction, ActionID: "copy"})
+				})
+				pinned := item.KeyHint == engine.KeyHintPinned
+				pinTip := i18n.T("engine.action.pin")
+				if pinned {
+					pinTip = i18n.T("engine.action.unpin")
+				}
+				hdrIconBtn("preview-hdr-pin", "pin.fill", pinTip, pinned, func() {
+					capsuleUI.setActionMenuShown(a, false)
+					a.Dispatch(engine.Event{Type: engine.EventTogglePinSelectedClipboardItem})
+				})
+				hdrIconBtn("preview-hdr-delete", "trash", i18n.T("engine.action.delete_history"), false, func() {
+					capsuleUI.setActionMenuShown(a, false)
+					a.RequestSoftDeleteClipboardItem(item)
+				})
+				hdrIconBtn("preview-hdr-more", "ellipsis", i18n.T("omnibox.tab.actions"), a.omniboxActionMenuOpen(state), func() {
+					a.toggleOmniboxActionMenu()
+				})
+			} else {
+				ui.Text(c, previewKindLabel(item)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+			}
 		})
 		kitDivider(c, theme)
 		// Text scrolls inside the card. Media does not: its canvas gives up
@@ -811,6 +932,7 @@ func (a *AppController) renderOmniboxPreviewCard(
 		if m := item.ClipboardMedia; m != nil && m.IsMedia() {
 			ui.Column(c).FillWidth().Grow(1).MinHeight(0).Gap(space4).Children(func() {
 				a.renderOmniboxPreviewBodyWithCache(c, theme, state, item, clipPreview, clipRawMode, clipExpanded)
+				a.renderClipboardMetadataFooter(c, theme, item)
 				a.renderPreviewQuickCopyBar(c, theme, item)
 				a.renderPreviewActionHints(c, theme, item)
 			})
@@ -819,6 +941,9 @@ func (a *AppController) renderOmniboxPreviewCard(
 		ui.Scroll(c).FillWidth().Grow(1).Children(func() {
 			ui.Column(c).FillWidth().Gap(space4).Children(func() {
 				a.renderOmniboxPreviewBodyWithCache(c, theme, state, item, clipPreview, clipRawMode, clipExpanded)
+				if item.Kind == engine.ItemClipboardEntry {
+					a.renderClipboardMetadataFooter(c, theme, item)
+				}
 				a.renderPreviewQuickCopyBar(c, theme, item)
 				a.renderPreviewActionHints(c, theme, item)
 			})
@@ -887,7 +1012,7 @@ func (a *AppController) renderOmniboxPreviewBodyWithCache(
 			})
 		}
 		if entry.hasSwatch {
-			renderColorPreviewCard(c, theme, content, entry.swatchColor)
+			a.renderColorPreviewCard(c, theme, content, entry.swatchColor)
 			return
 		}
 		omitted := entry.hidden
@@ -1040,6 +1165,22 @@ func (a *AppController) renderOmniboxPreviewBodyWithCache(
 			renderPreviewLines(c, theme, item.AppPath, 4)
 		}
 
+	case engine.ItemFile:
+		ui.Text(c, item.Title).FontSize(typeBody).FontWeight(700).TextColor(theme.Text).SingleLine()
+		if f := item.File; f != nil {
+			renderPreviewLines(c, theme, f.Path, 4)
+			var meta []string
+			if !f.IsDir && f.SizeBytes >= 0 {
+				meta = append(meta, fmt.Sprintf("%s: %s", i18n.T("engine.file.size"), humanBytes(f.SizeBytes)))
+			}
+			if f.ModTimeUnix > 0 {
+				meta = append(meta, fmt.Sprintf("%s: %s", i18n.T("engine.file.modified"), time.Unix(f.ModTimeUnix, 0).Format("2006-01-02 15:04")))
+			}
+			if len(meta) > 0 {
+				ui.Text(c, strings.Join(meta, " · ")).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine()
+			}
+		}
+
 	default:
 		renderPreviewLines(c, theme, item.Subtitle, 8)
 	}
@@ -1089,7 +1230,7 @@ func (a *AppController) renderPreviewQuickCopyBar(c *ui.Context, theme *ui.Theme
 	ui.Row(c).Key("preview-copy-bar").FillWidth().Wrap().Gap(space4).AlignItems(ui.Center).Children(func() {
 		for _, act := range actions {
 			aCopy := act
-			b := ui.ButtonBase(c).Key("preview-copy-" + aCopy.id).Label(aCopy.label).
+			b := ui.ButtonBase(c).Key("preview-copy-"+aCopy.id).Label(aCopy.label).
 				Padding(space2, space6).Radius(radius4).Background(tileFill(theme)).Border(space1, hairline(theme)).FocusRing(false)
 			b.Children(func() {
 				ui.Text(c, aCopy.label).FontSize(typeMicro).FontWeight(600).TextColor(secondaryInk(theme)).SingleLine()
@@ -1151,7 +1292,7 @@ func previewBadge(c *ui.Context, theme *ui.Theme, iconName, label string, _ bool
 	})
 }
 
-func renderColorPreviewCard(c *ui.Context, theme *ui.Theme, raw string, col ui.Color) {
+func (a *AppController) renderColorPreviewCard(c *ui.Context, theme *ui.Theme, raw string, col ui.Color) {
 	ui.Box(c).FillWidth().Height(88).Radius(radiusCard).Background(col).Border(space1, hairline(theme))
 	hexStr := strings.ToUpper(strings.TrimSpace(raw))
 	rgbStr := fmt.Sprintf("rgb(%d, %d, %d)", col.R, col.G, col.B)
@@ -1161,15 +1302,109 @@ func renderColorPreviewCard(c *ui.Context, theme *ui.Theme, raw string, col ui.C
 	h, s, l := colorToHSL(col)
 	hslStr := fmt.Sprintf("hsl(%d°, %d%%, %d%%)", h, s, l)
 	kitInsetWell(c, theme, func() {
-		colorFormatRow := func(label, value string) {
+		colorFormatRow := func(key, label, value string) {
+			btn := ui.ButtonBase(c).Key(key).Label(label+":"+value).FillWidth().Padding(space2, space4).Radius(radius4).FocusRing(false)
+			if btn.Hovered() {
+				btn.Background(tileFill(theme))
+			}
+			btn.Children(func() {
+				ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+					ui.Text(c, label).Width(36).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
+					ui.Text(c, value).Font("monospace").FontSize(typeMeta).TextColor(theme.Text).SingleLine().Grow(1)
+					renderSemanticIcon(c, "doc.on.doc", 11, theme.TextMuted)
+				})
+			})
+			if btn.Clicked() {
+				a.copyColorPreviewValue(value)
+			}
+		}
+		colorFormatRow("preview-color-hex", "HEX", hexStr)
+		colorFormatRow("preview-color-rgb", "RGB", rgbStr)
+		colorFormatRow("preview-color-hsl", "HSL", hslStr)
+	})
+}
+
+func (a *AppController) renderClipboardMetadataFooter(c *ui.Context, theme *ui.Theme, item engine.OmniboxItem) {
+	now := clipboardClock().In(time.Local)
+	sourceApp := strings.TrimSpace(item.ClipboardSourceApp)
+	if sourceApp == "" {
+		sourceApp = i18n.T("clipboard.meta.unknown_app")
+	}
+	var specs string
+	if m := item.ClipboardMedia; m != nil && m.IsMedia() {
+		var parts []string
+		if m.Width > 0 && m.Height > 0 {
+			parts = append(parts, fmt.Sprintf("%d×%d", m.Width, m.Height))
+		}
+		if len(m.FilePaths) > 1 {
+			parts = append(parts, i18n.Tf("clipboard.meta.specs_files", len(m.FilePaths), formatClipboardBytes(m.ByteSize)))
+		} else {
+			if m.Mime != "" {
+				parts = append(parts, m.Mime)
+			}
+			if m.ByteSize > 0 {
+				parts = append(parts, formatClipboardBytes(m.ByteSize))
+			}
+		}
+		specs = strings.Join(parts, " · ")
+	} else {
+		chars := utf8.RuneCountInString(item.ClipboardContent)
+		lines := max(1, clipboardLineCount(item.ClipboardContent))
+		specs = i18n.Tf("clipboard.meta.specs_text", chars, lines, formatClipboardBytes(int64(len(item.ClipboardContent))))
+	}
+
+	firstAt := item.ClipboardFirstCopiedAt
+	if firstAt.IsZero() {
+		firstAt = item.ClipboardCopiedAt
+	}
+	lastAt := item.ClipboardCopiedAt
+	lastText := "—"
+	if !lastAt.IsZero() {
+		lastText = relativeCopyTime(lastAt, now)
+		if item.ClipboardCopyCount > 1 {
+			lastText += " · " + i18n.Tf("clipboard.meta.copy_count", item.ClipboardCopyCount)
+		}
+	}
+
+	kitInsetWell(c, theme, func() {
+		metaRow := func(label string, value func()) {
 			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, label).Width(36).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine()
-				ui.Text(c, value).Font("monospace").FontSize(typeMeta).TextColor(theme.Text).SingleLine().Grow(1)
+				ui.Text(c, label).Width(72).FontSize(typeMicro).FontWeight(600).TextColor(theme.TextMuted).SingleLine().Shrink(0)
+				value()
 			})
 		}
-		colorFormatRow("HEX", hexStr)
-		colorFormatRow("RGB", rgbStr)
-		colorFormatRow("HSL", hslStr)
+		metaRow(i18n.T("clipboard.meta.source_app"), func() {
+			if appName := strings.TrimSpace(item.ClipboardSourceApp); appName != "" {
+				b := ui.ButtonBase(c).Key("preview-meta-source-app").Label("app:"+appName).Padding(space1, space6).Radius(radiusPill).
+					Background(tileFill(theme)).Border(space1, hairline(theme)).FocusRing(false)
+				b.Children(func() {
+					ui.Text(c, appName).FontSize(typeMicro).FontWeight(600).TextColor(theme.Accent).SingleLine()
+				})
+				if b.Clicked() {
+					tok := "app:" + appName
+					if strings.ContainsRune(appName, ' ') {
+						tok = fmt.Sprintf("app:%q", appName)
+					}
+					a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: tok})
+					a.uiState.searchHandle.RequestFocus(c)
+				}
+			} else {
+				ui.Text(c, sourceApp).FontSize(typeMicro).TextColor(theme.Text).SingleLine()
+			}
+		})
+		if specs != "" {
+			metaRow(i18n.T("clipboard.meta.specs"), func() {
+				ui.Text(c, specs).FontSize(typeMicro).FontFeatures("tnum").TextColor(theme.Text).SingleLine().Shrink(1)
+			})
+		}
+		if !firstAt.IsZero() {
+			metaRow(i18n.T("clipboard.meta.first_copied"), func() {
+				ui.Text(c, firstAt.In(time.Local).Format("2006-01-02 15:04")).FontSize(typeMicro).FontFeatures("tnum").TextColor(theme.Text).SingleLine()
+			})
+		}
+		metaRow(i18n.T("clipboard.meta.last_copied"), func() {
+			ui.Text(c, lastText).FontSize(typeMicro).FontFeatures("tnum").TextColor(theme.Text).SingleLine().Shrink(1)
+		})
 	})
 }
 
@@ -1390,6 +1625,11 @@ func previewKindLabel(item engine.OmniboxItem) string {
 		return i18n.T("preview.kind.app")
 	case engine.ItemWorkflow:
 		return "Workflow"
+	case engine.ItemFile:
+		if item.File != nil && item.File.IsDir {
+			return i18n.T("engine.file.folder")
+		}
+		return i18n.T("engine.file.file")
 	default:
 		return i18n.T("preview.kind.item")
 	}
@@ -1414,6 +1654,11 @@ func previewIcon(item engine.OmniboxItem) string {
 		return "keyboard"
 	case engine.ItemWorkflow:
 		return "arrow.triangle.branch"
+	case engine.ItemFile:
+		if item.File != nil && item.File.IsDir {
+			return "folder"
+		}
+		return "doc"
 	default:
 		return fallbackActionIcon(item.Icon, item.Title, item.Subtitle)
 	}

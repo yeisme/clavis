@@ -11,11 +11,13 @@ import (
 )
 
 const (
-	defaultCapsuleWidth  = 680
-	minCapsuleWidth      = 420
-	maxCapsuleWidth      = 960
-	defaultCornerRadius  = 16.0
-	defaultHUDDurationMs = 1400
+	defaultCapsuleWidth      = 680
+	clipboardWorkbenchWidth  = 800
+	clipboardWorkbenchHeight = 560
+	minCapsuleWidth          = 420
+	maxCapsuleWidth          = 960
+	defaultCornerRadius      = 16.0
+	defaultHUDDurationMs     = 1400
 
 	// Omnibox result rows the panel sizes for; Settings offers the same
 	// range, so every value the stepper allows changes the panel.
@@ -88,11 +90,16 @@ func PreferredCapsuleSize(phase engine.CapsulePhase, appearance config.Appearanc
 	}
 }
 
-// PreferredCapsuleSizeForState computes Capsule dimensions taking multi-turn AI history into account.
+// PreferredCapsuleSizeForState computes Capsule dimensions taking multi-turn AI history and Clipboard workbench into account.
 func PreferredCapsuleSizeForState(state engine.State, appearance config.AppearanceConfig) (width, height int) {
 	w, h := PreferredCapsuleSize(state.Phase, appearance)
 	if state.Phase == engine.PhaseOmnibox && state.OmniboxTab == config.TabClipboard {
-		h += int(clipboardStatsBandHeight)
+		if w < clipboardWorkbenchWidth {
+			w = clipboardWorkbenchWidth
+		}
+		if h < clipboardWorkbenchHeight {
+			h = clipboardWorkbenchHeight
+		}
 	}
 	if state.Phase == engine.PhaseAIStreaming && len(state.AIHistory) > 0 && h < 580 {
 		h = 580

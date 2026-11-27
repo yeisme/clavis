@@ -313,7 +313,4 @@ func renderHubSnapshots(t *testing.T, dir, suffix string, lang i18n.Language, da
 	_ = f.ctrl.UpdateMainConfig(func(m *config.MainConfig) { m.Clipboard.MaxHistoryItems = 500 })
 	f.ctrl.SetHubSurface(HubSurfaceManage)
 	hubSnapshotShoot(t, dir, "31-hub-manage-"+suffix, f.ctrl.CapsuleView, w, h, dark, nil)
-
-	f.ctrl.SetHubSurface(HubSurfaceAssets)
-	hubSnapshotShoot(t, dir, "32-hub-assets-"+suffix, f.ctrl.CapsuleView, w, h, dark, nil)
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/engine"
@@ -38,6 +39,7 @@ type mediaPreviewState struct {
 	lastX, lastY float32
 	focused      bool
 	loading      bool
+	loadingSince time.Time
 	failed       bool
 	generation   uint64
 }
@@ -282,7 +284,10 @@ func (a *AppController) renderClipboardMediaCanvas(c *ui.Context, theme *ui.Them
 		}
 		if bmp == nil {
 			if p.loading {
-				ui.Text(c, i18n.T("preview.media.loading")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+				// Grace period (0..120ms): avoid flashing "Loading..." text while decoding finishes fast.
+				if !p.loadingSince.IsZero() && time.Since(p.loadingSince) >= 120*time.Millisecond {
+					ui.Text(c, i18n.T("preview.media.loading")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+				}
 			} else {
 				ui.Text(c, i18n.T("preview.media.unavailable")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 			}
@@ -320,8 +325,12 @@ func (a *AppController) requestOriginalBitmap(path string, p *mediaPreviewState)
 	bmp, ok := a.cachedOriginalBitmap(path)
 	if ok {
 		p.loading = false
+		p.loadingSince = time.Time{}
 		p.failed = bmp == nil
 		return bmp
+	}
+	if !p.loading {
+		p.loadingSince = time.Now()
 	}
 	p.loading = true
 	a.scheduleOriginalBitmap(path)

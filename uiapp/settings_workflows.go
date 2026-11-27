@@ -246,17 +246,20 @@ func (a *AppController) selectWorkflowDraft(item config.Workflow) {
 // so the Omnibox and the workflow runner see the new configuration at once.
 func (a *AppController) saveWorkflowsConfig(workflowsCfg config.WorkflowsConfig) error {
 	if err := a.ConfigStore.SaveWorkflows(workflowsCfg); err != nil {
-		a.setSettingsStatus(i18n.Tf("settings.status.save_workflows_failed", err))
+		a.recordSaveFailure("workflows", config.FileWorkflows, "workflows", i18n.T("settings.section.workflows"), err, func() {
+			_ = a.saveWorkflowsConfig(workflowsCfg)
+		})
 		return err
 	}
+	a.clearSaveFailure(config.FileWorkflows, "")
 	updated := a.ConfigStore.Current()
 	a.mu.Lock()
 	if a.StateMachine != nil {
 		a.StateMachine.SetConfig(updated)
 	}
-	a.settingsStatus = i18n.Tf("settings.status.workflows_saved", len(updated.Workflows.Workflows))
 	onRepaint := a.OnRepaint
 	a.mu.Unlock()
+	a.setPageNotice("workflows", i18n.Tf("settings.status.workflows_saved", len(updated.Workflows.Workflows)), chipSuccess)
 	if onRepaint != nil {
 		onRepaint()
 	}
@@ -286,22 +289,51 @@ func (a *AppController) validateWorkflowStepActions(workflow config.Workflow) er
 	return nil
 }
 
-// saveWorkflowDraft persists the drafted workflow. A validation error is shown
-// in the editor and leaves the last valid config untouched.
-func (a *AppController) saveWorkflowDraft() {
+func (a *AppController) requestNewWorkflowDraft(cfg config.ClavisConfig) {
+	se := a.settingsEditor()
+	if a.workflowPageDirty(cfg) {
+		seSet(se, func(s *settingsEditorState) {
+			s.workflowPendingSwitch = true
+			s.workflowPendingNew = true
+			s.workflowPendingID = ""
+		})
+		return
+	}
+	a.newWorkflowDraft()
+}
+
+func (a *AppController) requestSelectWorkflowDraft(cfg config.ClavisConfig, item config.Workflow) {
+	se := a.settingsEditor()
+	curSelected := seGet(se, func(s *settingsEditorState) string { return s.workflowSelected })
+	curIsNew := seGet(se, func(s *settingsEditorState) bool { return s.workflowIsNew })
+	if !curIsNew && curSelected == item.ID {
+		return
+	}
+	if a.workflowPageDirty(cfg) {
+		seSet(se, func(s *settingsEditorState) {
+			s.workflowPendingSwitch = true
+			s.workflowPendingNew = false
+			s.workflowPendingID = item.ID
+		})
+		return
+	}
+	a.selectWorkflowDraft(item)
+}
+
+func (a *AppController) saveWorkflowDraftWithFeedback(c *ui.Context) bool {
 	se := a.settingsEditor()
 	draft := normalizeWorkflow(seGet(se, func(s *settingsEditorState) config.Workflow { return s.workflowDraft }))
 	if draft.ID == "" {
 		msg := i18n.T("settings.workflows.err_id_required")
 		seSet(se, func(s *settingsEditorState) { s.workflowError = msg })
-		a.setSettingsStatus(msg)
-		return
+		a.setPageNotice("workflows", msg, chipWarning)
+		return false
 	}
 	if err := a.validateWorkflowStepActions(draft); err != nil {
 		msg := err.Error()
 		seSet(se, func(s *settingsEditorState) { s.workflowError = msg })
-		a.setSettingsStatus(msg)
-		return
+		a.setPageNotice("workflows", msg, chipWarning)
+		return false
 	}
 	original := seGet(se, func(s *settingsEditorState) string { return s.workflowOriginalID })
 	isNew := seGet(se, func(s *settingsEditorState) bool { return s.workflowIsNew })
@@ -322,7 +354,7 @@ func (a *AppController) saveWorkflowDraft() {
 	if err := a.saveWorkflowsConfig(next); err != nil {
 		msg := err.Error()
 		seSet(se, func(s *settingsEditorState) { s.workflowError = msg })
-		return
+		return false
 	}
 	// Keep editing a private clone: the store now owns the saved slices.
 	stored := cloneWorkflow(draft)
@@ -335,6 +367,12 @@ func (a *AppController) saveWorkflowDraft() {
 		s.workflowLoaded = true
 		s.workflowConfirmDelete = false
 	})
+	a.markFieldSaved(c, settingsFieldID("workflows", "save"))
+	return true
+}
+
+func (a *AppController) saveWorkflowDraft() {
+	_ = a.saveWorkflowDraftWithFeedback(nil)
 }
 
 // requestDeleteWorkflow arms the inline confirmation instead of deleting the
@@ -489,16 +527,24 @@ func (a *AppController) renderWorkflowsSection(c *ui.Context, theme *ui.Theme, c
 	}
 	ui.Grid(c).Columns(columns).Gap(10).FillWidth().Children(func() {
 		settingsEditorCard(c, theme, i18n.Tf("settings.workflows.card_title", len(workflows)), func() {
+			if len(workflows) == 0 {
+				kitEmptyStateWithAction(
+					c, theme, "wand.and.stars",
+					i18n.T("settings.workflows.empty"),
+					i18n.T("settings.empty.workflows.body"),
+					i18n.T("settings.workflows.new_workflow"),
+					"empty-cta:workflows",
+					func() { a.requestNewWorkflowDraft(cfg) },
+				)
+				return
+			}
 			ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 				if ui.PrimaryButton(c, i18n.T("settings.workflows.new_workflow")).Clicked() {
-					a.newWorkflowDraft()
+					a.requestNewWorkflowDraft(cfg)
 				}
 				settingsHint(c, theme, i18n.T("settings.workflows.select_workflow"))
 			})
 			settingsDivider(c)
-			if len(workflows) == 0 {
-				kitEmptyState(c, theme, "wand.and.stars", i18n.T("settings.workflows.empty"), "")
-			}
 			for i := range workflows {
 				item := workflows[i]
 				row := settingsListRow(c, theme, "workflow:"+item.ID, !isNew && item.ID == selected)
@@ -515,17 +561,18 @@ func (a *AppController) renderWorkflowsSection(c *ui.Context, theme *ui.Theme, c
 					ui.Text(c, fmt.Sprintf("%d", len(item.Steps))).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine().Shrink(0)
 				})
 				if row.Clicked() {
-					a.selectWorkflowDraft(item)
+					a.requestSelectWorkflowDraft(cfg, item)
 				}
 			}
 		})
 
-		settingsEditorCard(c, theme, i18n.T("settings.workflows.editor"), func() {
+		dirty := a.workflowPageDirty(cfg)
+		settingsEditorCardWithDirty(c, theme, i18n.T("settings.workflows.editor"), dirty, "workflow-editor-dirty-dot", func() {
 			if !active {
 				settingsHint(c, theme, i18n.T("settings.workflows.select_workflow"))
 				return
 			}
-			a.renderWorkflowEditor(c, theme)
+			a.renderWorkflowEditor(c, theme, cfg, dirty)
 		})
 	})
 
@@ -535,9 +582,39 @@ func (a *AppController) renderWorkflowsSection(c *ui.Context, theme *ui.Theme, c
 }
 
 // renderWorkflowEditor draws the fields of the drafted workflow.
-func (a *AppController) renderWorkflowEditor(c *ui.Context, theme *ui.Theme) {
+func (a *AppController) renderWorkflowEditor(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig, dirty bool) {
 	se := a.settingsEditor()
-	draft := seGet(se, func(s *settingsEditorState) config.Workflow { return s.workflowDraft })
+	se.mu.Lock()
+	pendingSwitch := se.workflowPendingSwitch
+	pendingNew := se.workflowPendingNew
+	pendingID := se.workflowPendingID
+	draft := cloneWorkflow(se.workflowDraft)
+	se.mu.Unlock()
+	if pendingSwitch {
+		name := editorEntityName(draft.Name, nonEmptyOr(draft.ID, i18n.T("settings.workflows.new_workflow")))
+		applyPending := func() {
+			seSet(se, func(s *settingsEditorState) { s.workflowPendingSwitch = false })
+			if pendingNew {
+				a.newWorkflowDraft()
+				return
+			}
+			for _, wf := range cfg.Workflows.Workflows {
+				if wf.ID == pendingID {
+					a.selectWorkflowDraft(wf)
+					return
+				}
+			}
+		}
+		kitUnsavedSwitchBanner(c, theme, "workflow-unsaved-switch", name,
+			func() {
+				if a.saveWorkflowDraftWithFeedback(c) {
+					applyPending()
+				}
+			},
+			applyPending,
+			func() { seSet(se, func(s *settingsEditorState) { s.workflowPendingSwitch = false }) },
+		)
+	}
 
 	settingsInlineRow(c, theme, i18n.T("settings.field.id"), settingsFieldLabelWidth, func() {
 		if v, changed := settingsTextInput(c, i18n.T("settings.workflows.id"), "summarize-selection", draft.ID); changed {
@@ -611,28 +688,27 @@ func (a *AppController) renderWorkflowEditor(c *ui.Context, theme *ui.Theme) {
 		if target == "" {
 			target = draft.ID
 		}
-		kitErrorBanner(c, theme, i18n.Tf("settings.workflows.delete_confirm", target))
+		kitDeleteConfirmRow(c, theme, "workflow-delete-confirm",
+			i18n.Tf("settings.workflows.delete_confirm", target),
+			i18n.T("settings.workflows.confirm_delete"),
+			i18n.T("settings.workflows.delete_cancel"),
+			a.cancelDeleteWorkflow,
+			a.deleteWorkflowDraft,
+		)
+	} else {
+		settingsDivider(c)
 		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
-			if ui.Button(c, i18n.T("settings.workflows.confirm_delete")).Clicked() {
-				a.deleteWorkflowDraft()
+			if ui.PrimaryButton(c, i18n.T("settings.workflows.save")).Disabled(!dirty).Clicked() {
+				_ = a.saveWorkflowDraftWithFeedback(c)
 			}
-			if ui.Button(c, i18n.T("settings.workflows.delete_cancel")).Clicked() {
-				a.cancelDeleteWorkflow()
+			if ui.Button(c, i18n.T("settings.workflows.delete")).
+				Disabled(seGet(se, func(s *settingsEditorState) bool { return s.workflowIsNew })).
+				Clicked() {
+				a.requestDeleteWorkflow()
 			}
+			renderFieldSavedBadge(c, theme, se, settingsFieldID("workflows", "save"))
 		})
 	}
-
-	settingsDivider(c)
-	ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
-		if ui.PrimaryButton(c, i18n.T("settings.workflows.save")).Clicked() {
-			a.saveWorkflowDraft()
-		}
-		if !confirming && ui.Button(c, i18n.T("settings.workflows.delete")).
-			Disabled(seGet(se, func(s *settingsEditorState) bool { return s.workflowIsNew })).
-			Clicked() {
-			a.requestDeleteWorkflow()
-		}
-	})
 }
 
 // renderWorkflowStepsCard draws the step list of the drafted workflow and the

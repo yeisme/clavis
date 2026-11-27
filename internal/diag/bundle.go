@@ -199,10 +199,12 @@ func buildAISummary(cfg config.ClavisConfig, cfgDir string) AISummary {
 	active := cfg.Main.AI.ActiveProfile()
 	keySrc := secrets.KeySourceNone
 	keysPath := secrets.DefaultKeysPath(cfgDir)
-	if _, err := os.Stat(keysPath); err == nil {
-		if resolved, resolveErr := secrets.NewFileStore(keysPath).ResolveAPIKeySource(active.KeychainAccount); resolveErr == nil {
-			keySrc = resolved
-		}
+	envVar := strings.TrimSpace(active.APIKeyEnvVar)
+	if envVar == "" {
+		envVar = secrets.DefaultEnvVar
+	}
+	if resolved, resolveErr := secrets.NewFileStore(keysPath).ResolveAPIKeySourceWithEnv(active.KeychainAccount, envVar); resolveErr == nil {
+		keySrc = resolved
 	}
 	hosts := make([]string, 0, len(cfg.Main.AI.Profiles))
 	seen := map[string]bool{}

@@ -425,10 +425,6 @@ func vaultUIState(c *AppController) *vaultViewState {
 	return c.vaultUIStateFor()
 }
 
-func (a *AppController) renderVaultAssetsView(c *ui.Context, theme *ui.Theme) {
-	a.renderVaultBody(c, theme, false)
-}
-
 func (a *AppController) renderVaultBody(c *ui.Context, theme *ui.Theme, inlineInScroll bool) {
 	zh := i18n.IsChinese()
 	st := vaultUIState(a)
@@ -483,11 +479,11 @@ func (a *AppController) renderVaultBody(c *ui.Context, theme *ui.Theme, inlineIn
 
 						if r.State != secrets.SecretStateRevoked {
 							copyLbl := pickLang(zh, "TTL 复制", "Copy")
-							if ui.Button(c, copyLbl).Key("vault-copy-" + r.ID).Label(copyLbl).Padding(space2, space8).Clicked() {
+							if ui.Button(c, copyLbl).Key("vault-copy-"+r.ID).Label(copyLbl).Padding(space2, space8).Clicked() {
 								_, _ = a.VaultUserCopy(r.ID)
 							}
 							revLbl := pickLang(zh, "吊销", "Revoke")
-							if ui.Button(c, revLbl).Key("vault-revoke-" + r.ID).Label(revLbl).Padding(space2, space8).Clicked() {
+							if ui.Button(c, revLbl).Key("vault-revoke-"+r.ID).Label(revLbl).Padding(space2, space8).Clicked() {
 								_ = a.VaultRevoke(r.ID)
 							}
 						}

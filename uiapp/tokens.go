@@ -188,6 +188,12 @@ const (
 const (
 	rowIconTile float32 = 26
 	rowIconSize float32 = 15
+	// Compact & comfortable clipboard workbench metrics.
+	clipboardCompactTextRowHeight  float32 = 32
+	clipboardCompactImageRowHeight float32 = 46
+	clipboardComfortableRowHeight  float32 = 42
+	clipboardCompactIconSize       float32 = 18
+	clipboardCompactGap            float32 = 2
 	// rowLeadingSlot is the square every row's leading glyph sits in, so
 	// titles align: thumbnails and swatches fill it, icon tiles centre in it.
 	rowLeadingSlot float32 = space32

@@ -197,10 +197,17 @@ func (c *AppController) SelectAIProfile(id string) error {
 	}
 	c.aiTestStatus = AITestIdle
 	c.aiTestMessage = ""
-	c.settingsStatus = i18n.Tf("settings.status.active_profile", profile.Name)
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
 
+	if saveErr != nil {
+		c.recordSaveFailure("ai", config.FileMain, "ai.active_profile_id", i18n.T("settings.ai.active_profile"), saveErr, func() {
+			_ = c.SelectAIProfile(id)
+		})
+	} else {
+		c.clearSaveFailure(config.FileMain, "ai.active_profile_id")
+		c.setPageNotice("ai", i18n.Tf("settings.status.active_profile", profile.Name), chipNeutral)
+	}
 	c.refreshAPIKeySource()
 	if onRepaint != nil {
 		onRepaint()
@@ -325,6 +332,11 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 	regCtx, done := c.ensureRuntime().Begin(runtimecoord.AIStream, "AI stream")
 	ctx, timeoutCancel := context.WithTimeout(regCtx, timeout)
 	c.mu.Lock()
+	brForOrigin := c.Bridge
+	c.mu.Unlock()
+	originBundle, originProc := resolveAIOriginTarget(ctx, brForOrigin, eff.Context)
+
+	c.mu.Lock()
 	if c.aiCancel != nil {
 		c.aiCancel()
 		if c.aiDone != nil {
@@ -344,6 +356,8 @@ func (c *AppController) startAIStream(eff engine.Effect) {
 	gen := c.aiGen
 	c.aiDone = done
 	c.aiCancel = timeoutCancel
+	c.aiOriginBundleID = originBundle
+	c.aiOriginProcess = originProc
 	hasClient := c.AIClient != nil
 	var streamClient ai.OpenAICompatibleClient
 	if hasClient {
@@ -648,15 +662,15 @@ func (c *AppController) SaveAPIKey(apiKey string) error {
 		acct = c.ConfigStore.Current().Main.AI.KeychainAccount
 	}
 	if err := c.SecretStore.SaveKey(acct, apiKey); err != nil {
-		c.setSettingsStatus(i18n.Tf("settings.status.save_api_key_failed", err))
+		c.setPageNotice("ai", i18n.Tf("settings.status.save_api_key_failed", err), chipWarning)
 		return err
 	}
 	c.refreshAPIKeySource()
 	c.mu.Lock()
-	c.settingsStatus = i18n.T("settings.status.api_key_saved")
 	c.uiState.apiKeyDraft = ""
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
+	c.setPageNotice("ai", i18n.T("settings.status.api_key_saved"), chipSuccess)
 	if onRepaint != nil {
 		onRepaint()
 	}
@@ -674,14 +688,14 @@ func (c *AppController) DeleteAPIKey() error {
 		acct = c.ConfigStore.Current().Main.AI.KeychainAccount
 	}
 	if err := c.SecretStore.DeleteKey(acct); err != nil && !errors.Is(err, secrets.ErrSecretNotFound) {
-		c.setSettingsStatus(i18n.Tf("settings.status.delete_api_key_failed", err))
+		c.setPageNotice("ai", i18n.Tf("settings.status.delete_api_key_failed", err), chipWarning)
 		return err
 	}
 	c.refreshAPIKeySource()
 	c.mu.Lock()
-	c.settingsStatus = i18n.T("settings.status.api_key_cleared")
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
+	c.setPageNotice("ai", i18n.T("settings.status.api_key_cleared"), chipNeutral)
 	if onRepaint != nil {
 		onRepaint()
 	}

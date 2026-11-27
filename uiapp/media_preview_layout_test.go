@@ -98,7 +98,7 @@ func TestMediaPreviewToolbarSaysFitOnce(t *testing.T) {
 
 func TestMediaPreviewSpecFrameKeepsWideImageReadable(t *testing.T) {
 	f, _, _ := mediaPreviewFixture(t)
-	const width, height = 720, 536
+	width, height := PreferredCapsuleSizeForState(f.ctrl.State(), f.ctrl.Config().Main.Appearance)
 	tt := ui.NewTester(f.ctrl.CapsuleView, width, height)
 	tt.Frame()
 	tt.Advance(2 * time.Second)
@@ -109,9 +109,9 @@ func TestMediaPreviewSpecFrameKeepsWideImageReadable(t *testing.T) {
 	}
 	got := float32(width) - handle - space8
 	if got < 420 {
-		t.Fatalf("720×536 preview net width = %.0fpt, want at least 420pt", got)
+		t.Fatalf("%d×%d preview net width = %.0fpt, want at least 420pt", width, height, got)
 	}
-	t.Logf("720×536 preview divider %.1fpt, preview net width %.0fpt", handle, got)
+	t.Logf("%d×%d preview divider %.1fpt, preview net width %.0fpt", width, height, handle, got)
 }
 
 // mediaPreviewFixture opens the clipboard tab with an image entry chosen and
@@ -226,11 +226,14 @@ func TestClipboardThumbnailsFillTheLeadingSlot(t *testing.T) {
 	if lo < 0 || hi-lo+1 < int(rowLeadingSlot)-2 {
 		t.Fatalf("thumbnail drawn %dpx wide (x %d..%d), want ~%vpx", hi-lo+1, lo, hi, rowLeadingSlot)
 	}
-	// Title start: first text-colored pixel right of the slot, upper half.
+	// Title start: first text-colored pixel right of the leading slot.
+	// Compact single-line text rows (~32pt) center their glyphs vertically,
+	// whereas stacked media rows (~46pt) place their title in the upper half,
+	// so scanning the full interior vertically compares the actual rendered X.
 	titleX := func(row ui.Rect) int {
 		ink := ui.LightTheme().Text
 		for x := int(row.X) + int(rowLeadingSlot); x < int(row.X+row.W); x++ {
-			for yy := int(row.Y) + 4; yy < int(row.Y+row.H/2); yy++ {
+			for yy := int(row.Y) + 4; yy < int(row.Y+row.H)-4; yy++ {
 				if colorClose(rgbaAt(img, x, yy), ink) {
 					return x
 				}

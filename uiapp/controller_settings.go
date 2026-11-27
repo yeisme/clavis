@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -12,7 +13,9 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/yeisme/clavis/internal/bridge"
+	"github.com/yeisme/clavis/internal/diag"
 	"github.com/yeisme/clavis/pkg/core/ai"
+	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/host"
@@ -29,17 +32,6 @@ const (
 	SettingsTabPermissions
 	SettingsTabConfigs
 )
-
-// SettingsTabNames returns the ordered display names for the 5 Settings tabs.
-func SettingsTabNames() []string {
-	return []string{
-		i18n.T("settings.tab.general"),
-		i18n.T("settings.tab.ai"),
-		i18n.T("settings.tab.ime"),
-		i18n.T("settings.tab.permissions"),
-		i18n.T("settings.tab.configs"),
-	}
-}
 
 // imeSwitchTimeout bounds the cross-process work done when Clavis moves the system input
 // source. It is deliberately short: this runs off the input path but still in response to a
@@ -173,10 +165,10 @@ func (c *AppController) bindAppIMERule(eff engine.Effect, state engine.State) {
 	updated := c.ConfigStore.Current()
 	c.mu.Lock()
 	c.StateMachine.SetConfig(updated)
-	c.settingsStatus = notice
 	br := c.Bridge
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
+	c.setPageNotice("ime-keymap", notice, chipNeutral)
 
 	if br != nil {
 		br.UpdateIMEConfig(updated.Main.IME, updated.IMERules)
@@ -643,44 +635,61 @@ func (c *AppController) handleInternalSettingCommand(args []string) {
 		} else {
 			c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.T("hud.config_reload_failed")})
 		}
+		return
 	case "open-config-dir":
 		if err := c.OpenConfigDirectory(); err != nil {
 			c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: i18n.Tf("hud.open_folder_failed", err)})
 		}
+		return
 	case "ai":
 		c.OpenSettings(SettingsTabAI)
+		return
 	case "ime", "keymap", "ime-keymap":
 		c.OpenSettings(SettingsTabIMEKeymap)
+		return
 	case "permissions":
 		c.OpenSettings(SettingsTabPermissions)
+		return
 	case "configs":
 		c.OpenSettings(SettingsTabConfigs)
-	case "security", "vault":
-		c.OpenSettingsSection(settingsSectionSecurity)
-	case "templates", "prompts":
-		c.OpenSettingsSection(settingsSectionTemplates)
-	default:
-		c.OpenSettings(SettingsTabGeneral)
+		return
 	}
+	if sub != "" {
+		if c.OpenSettingsPage(sub) {
+			return
+		}
+	}
+	c.OpenSettings(SettingsTabGeneral)
 }
 
 // OpenSettings selects the requested settings tab and invokes OnOpenSettings.
 func (c *AppController) OpenSettings(tab SettingsTab) {
-	c.OpenSettingsSection(int(tab))
+	c.mu.Lock()
+	lastVisited := c.uiState.settingsPage
+	c.mu.Unlock()
+	target := settingsPageForTab(tab, lastVisited)
+	c.openSettingsPageWithTab(target, tab)
 }
 
-// OpenSettingsSection opens the settings center directly on a specific navigation rail section.
-func (c *AppController) OpenSettingsSection(section int) {
-	target := normalizeSettingsSection(section)
-	meta := settingsSectionMetaFor(target)
+// OpenSettingsPage opens the settings center directly on the page matching key (or legacy alias).
+func (c *AppController) OpenSettingsPage(key string) bool {
+	resolved, ok := resolveSettingsPageKey(key)
+	if !ok {
+		return false
+	}
+	c.openSettingsPageWithTab(resolved, settingsTabForPage(resolved))
+	return true
+}
+
+func (c *AppController) openSettingsPageWithTab(pageKey string, tab SettingsTab) {
+	c.setSettingsPage(pageKey)
 	c.mu.Lock()
-	c.uiState.settingsTabIdx = target
 	fn := c.OnOpenSettings
 	onRepaint := c.OnRepaint
 	closed := c.closed
 	c.mu.Unlock()
 	if fn != nil {
-		fn(meta.Settings)
+		fn(tab)
 	}
 	if onRepaint != nil {
 		onRepaint()
@@ -701,19 +710,48 @@ func (c *AppController) OpenSettingsSection(section int) {
 	}()
 }
 
-func (c *AppController) setSettingsStatus(msg string) {
-	c.mu.Lock()
-	c.settingsStatus = msg
-	onRepaint := c.OnRepaint
-	c.mu.Unlock()
-	if onRepaint != nil {
-		onRepaint()
+// setSettingsPage switches the active settings page by canonical key or alias.
+func (c *AppController) setSettingsPage(key string) bool {
+	resolved, ok := resolveSettingsPageKey(key)
+	if !ok {
+		return false
 	}
+	c.mu.Lock()
+	prev := c.uiState.settingsPage
+	c.uiState.settingsPage = resolved
+	c.mu.Unlock()
+	prevKey := normalizeSettingsPageKey(prev)
+	if prevKey != resolved {
+		c.clearPageNotice(prevKey)
+		seSet(c.settingsEditor(), func(s *settingsEditorState) {
+			s.pendingScrollTop = true
+		})
+	}
+	return true
 }
 
 // UpdateMainConfig mutates and persists config.toml via ConfigStore.SaveMain,
 // then propagates keymap and IME updates to the host bridge.
 func (c *AppController) UpdateMainConfig(mutate func(main *config.MainConfig)) error {
+	pageKey := c.currentSettingsPageKey()
+	err := c.updateMainConfigInner(mutate, pageKey, "main", i18n.T("settings.configs.desc.main"), false)
+	if err != nil {
+		c.recordSaveFailure(pageKey, config.FileMain, "config.toml", i18n.T("settings.configs.desc.main"), err, func() {
+			_ = c.UpdateMainConfig(mutate)
+		})
+		return err
+	}
+	c.clearSaveFailure(config.FileMain, "config.toml")
+	return nil
+}
+
+func (c *AppController) updateMainConfigInner(
+	mutate func(main *config.MainConfig),
+	pageKey string,
+	fieldKey string,
+	fieldLabel string,
+	emitHeaderNotice bool,
+) error {
 	if mutate == nil {
 		return nil
 	}
@@ -722,19 +760,23 @@ func (c *AppController) UpdateMainConfig(mutate func(main *config.MainConfig)) e
 	mutate(&mainCfg)
 
 	if err := c.ConfigStore.SaveMain(mainCfg); err != nil {
-		c.setSettingsStatus(i18n.Tf("settings.status.save_failed", err))
+		if emitHeaderNotice {
+			c.setPageNotice(pageKey, i18n.Tf("settings.status.save_failed", err), chipWarning)
+		}
 		return err
 	}
 
 	updated := c.ConfigStore.Current()
 	SetCandidateAppearance(updated.Main.Appearance)
 	SetCandidateStyle(updated.Main.InputEngine.Style)
+	if pf, ok := c.ClipboardStore.(interface{ SetPrivacyFilter(clipboard.PrivacyFilter) }); ok {
+		pf.SetPrivacyFilter(clipboard.NewPrivacyFilterFromConfig(updated.Main.Clipboard))
+	}
 	c.mu.Lock()
 	c.StateMachine.SetConfig(updated)
 	if c.AIClient != nil {
 		c.AIClient.Config = updated.Main.AI
 	}
-	c.settingsStatus = i18n.T("settings.status.saved")
 	br := c.Bridge
 	onRepaint := c.OnRepaint
 	onLanguageChange := c.OnLanguageChange
@@ -742,6 +784,9 @@ func (c *AppController) UpdateMainConfig(mutate func(main *config.MainConfig)) e
 	langChanged := syncAppearanceLanguage(updated)
 	c.mu.Unlock()
 
+	if emitHeaderNotice {
+		c.setPageNotice(pageKey, i18n.T("settings.status.saved"), chipSuccess)
+	}
 	c.refreshAPIKeySource()
 	if br != nil {
 		br.UpdateKeymapConfig(updated.Main.Keymap)
@@ -811,9 +856,12 @@ func (c *AppController) AddIMERule(rule config.IMERule) error {
 	rulesCfg.Rules = append(append([]config.IMERule(nil), rulesCfg.Rules...), rule)
 
 	if err := c.ConfigStore.SaveIMERules(rulesCfg); err != nil {
-		c.setSettingsStatus(i18n.Tf("settings.status.add_ime_rule_failed", err))
+		c.recordSaveFailure("ime-keymap", config.FileIMERules, "ime_rules", i18n.T("settings.card.ime_rules"), err, func() {
+			_ = c.SaveIMERulesConfig(rulesCfg)
+		})
 		return err
 	}
+	c.clearSaveFailure(config.FileIMERules, "")
 
 	updated := c.ConfigStore.Current()
 	c.mu.Lock()
@@ -822,10 +870,10 @@ func (c *AppController) AddIMERule(rule config.IMERule) error {
 	c.uiState.imeRuleURLDraft = ""
 	c.uiState.imeRuleTitleDraft = ""
 	c.uiState.imeRuleSourceDraft = ""
-	c.settingsStatus = i18n.T("settings.status.ime_rule_added")
 	br := c.Bridge
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
+	c.setPageNotice("ime-keymap", i18n.T("settings.status.ime_rule_added"), chipSuccess)
 
 	if br != nil {
 		br.UpdateIMEConfig(updated.Main.IME, updated.IMERules)
@@ -852,17 +900,20 @@ func (c *AppController) DeleteIMERule(index int) error {
 	rulesCfg := config.IMERulesConfig{Rules: rules}
 
 	if err := c.ConfigStore.SaveIMERules(rulesCfg); err != nil {
-		c.setSettingsStatus(i18n.Tf("settings.status.delete_ime_rule_failed", err))
+		c.recordSaveFailure("ime-keymap", config.FileIMERules, "ime_rules", i18n.T("settings.card.ime_rules"), err, func() {
+			_ = c.SaveIMERulesConfig(rulesCfg)
+		})
 		return err
 	}
+	c.clearSaveFailure(config.FileIMERules, "")
 
 	updated := c.ConfigStore.Current()
 	c.mu.Lock()
 	c.StateMachine.SetConfig(updated)
-	c.settingsStatus = i18n.T("settings.status.ime_rule_deleted")
 	br := c.Bridge
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
+	c.setPageNotice("ime-keymap", i18n.T("settings.status.ime_rule_deleted"), chipNeutral)
 
 	if br != nil {
 		br.UpdateIMEConfig(updated.Main.IME, updated.IMERules)
@@ -876,15 +927,18 @@ func (c *AppController) DeleteIMERule(index int) error {
 // SaveLeaderConfig persists leader.toml, refreshes the state machine, and repaints.
 func (c *AppController) SaveLeaderConfig(leaderCfg config.LeaderConfig) error {
 	if err := c.ConfigStore.SaveLeader(leaderCfg); err != nil {
-		c.setSettingsStatus(i18n.Tf("settings.status.save_leader_failed", err))
+		c.recordSaveFailure("leader", config.FileLeader, "leader", i18n.T("settings.section.leader"), err, func() {
+			_ = c.SaveLeaderConfig(leaderCfg)
+		})
 		return err
 	}
+	c.clearSaveFailure(config.FileLeader, "")
 	updated := c.ConfigStore.Current()
 	c.mu.Lock()
 	c.StateMachine.SetConfig(updated)
-	c.settingsStatus = i18n.Tf("settings.status.leader_saved", len(updated.Leader.Nodes))
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
+	c.setPageNotice("leader", i18n.Tf("settings.status.leader_saved", len(updated.Leader.Nodes)), chipSuccess)
 	if onRepaint != nil {
 		onRepaint()
 	}
@@ -894,18 +948,21 @@ func (c *AppController) SaveLeaderConfig(leaderCfg config.LeaderConfig) error {
 // SaveSnippetsConfig persists snippets.toml, hot-reloads the snippet engine, and repaints.
 func (c *AppController) SaveSnippetsConfig(snippetsCfg config.SnippetsConfig) error {
 	if err := c.ConfigStore.SaveSnippets(snippetsCfg); err != nil {
-		c.setSettingsStatus(i18n.Tf("settings.status.save_snippets_failed", err))
+		c.recordSaveFailure("snippets", config.FileSnippets, "snippets", i18n.T("omnibox.tab.snippets"), err, func() {
+			_ = c.SaveSnippetsConfig(snippetsCfg)
+		})
 		return err
 	}
+	c.clearSaveFailure(config.FileSnippets, "")
 	updated := c.ConfigStore.Current()
 	c.mu.Lock()
 	c.StateMachine.SetConfig(updated)
 	if c.Snippets != nil {
 		c.Snippets.UpdateSnippets(updated.Snippets.Items)
 	}
-	c.settingsStatus = i18n.Tf("settings.status.snippets_saved", len(updated.Snippets.Items))
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
+	c.setPageNotice("snippets", i18n.Tf("settings.status.snippets_saved", len(updated.Snippets.Items)), chipSuccess)
 	if onRepaint != nil {
 		onRepaint()
 	}
@@ -915,9 +972,12 @@ func (c *AppController) SaveSnippetsConfig(snippetsCfg config.SnippetsConfig) er
 // SaveGlossaryConfig persists glossary.toml, hot-reloads the glossary and AI client engines, and repaints.
 func (c *AppController) SaveGlossaryConfig(glossaryCfg config.GlossaryConfig) error {
 	if err := c.ConfigStore.SaveGlossary(glossaryCfg); err != nil {
-		c.setSettingsStatus(i18n.Tf("settings.status.save_glossary_failed", err))
+		c.recordSaveFailure("glossary", config.FileGlossary, "glossary", i18n.T("settings.section.glossary"), err, func() {
+			_ = c.SaveGlossaryConfig(glossaryCfg)
+		})
 		return err
 	}
+	c.clearSaveFailure(config.FileGlossary, "")
 	updated := c.ConfigStore.Current()
 	c.mu.Lock()
 	c.StateMachine.SetConfig(updated)
@@ -925,9 +985,9 @@ func (c *AppController) SaveGlossaryConfig(glossaryCfg config.GlossaryConfig) er
 	if c.AIClient != nil {
 		c.AIClient.GlossaryEngine = c.Glossary
 	}
-	c.settingsStatus = i18n.Tf("settings.status.glossary_saved", len(updated.Glossary.Terms))
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
+	c.setPageNotice("glossary", i18n.Tf("settings.status.glossary_saved", len(updated.Glossary.Terms)), chipSuccess)
 	if onRepaint != nil {
 		onRepaint()
 	}
@@ -937,15 +997,18 @@ func (c *AppController) SaveGlossaryConfig(glossaryCfg config.GlossaryConfig) er
 // SavePromptsConfig persists prompts.toml, refreshes the state machine, and repaints.
 func (c *AppController) SavePromptsConfig(promptsCfg config.PromptsConfig) error {
 	if err := c.ConfigStore.SavePrompts(promptsCfg); err != nil {
-		c.setSettingsStatus(i18n.Tf("settings.status.save_prompts_failed", err))
+		c.recordSaveFailure("templates", config.FilePrompts, "prompts", i18n.T("settings.section.templates"), err, func() {
+			_ = c.SavePromptsConfig(promptsCfg)
+		})
 		return err
 	}
+	c.clearSaveFailure(config.FilePrompts, "")
 	updated := c.ConfigStore.Current()
 	c.mu.Lock()
 	c.StateMachine.SetConfig(updated)
-	c.settingsStatus = i18n.Tf("settings.status.prompts_saved", len(updated.Prompts.Items))
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
+	c.setPageNotice("templates", i18n.Tf("settings.status.prompts_saved", len(updated.Prompts.Items)), chipSuccess)
 	if onRepaint != nil {
 		onRepaint()
 	}
@@ -955,16 +1018,19 @@ func (c *AppController) SavePromptsConfig(promptsCfg config.PromptsConfig) error
 // SaveIMERulesConfig persists ime-rules.toml, refreshes the state machine, and updates the host bridge.
 func (c *AppController) SaveIMERulesConfig(imeRulesCfg config.IMERulesConfig) error {
 	if err := c.ConfigStore.SaveIMERules(imeRulesCfg); err != nil {
-		c.setSettingsStatus(i18n.Tf("settings.status.save_ime_rules_failed", err))
+		c.recordSaveFailure("ime-keymap", config.FileIMERules, "ime_rules", i18n.T("settings.card.ime_rules"), err, func() {
+			_ = c.SaveIMERulesConfig(imeRulesCfg)
+		})
 		return err
 	}
+	c.clearSaveFailure(config.FileIMERules, "")
 	updated := c.ConfigStore.Current()
 	c.mu.Lock()
 	c.StateMachine.SetConfig(updated)
-	c.settingsStatus = i18n.Tf("settings.status.ime_rules_saved", len(updated.IMERules.Rules))
 	br := c.Bridge
 	onRepaint := c.OnRepaint
 	c.mu.Unlock()
+	c.setPageNotice("ime-keymap", i18n.Tf("settings.status.ime_rules_saved", len(updated.IMERules.Rules)), chipSuccess)
 	if br != nil {
 		br.UpdateIMEConfig(updated.Main.IME, updated.IMERules)
 	}
@@ -1034,19 +1100,22 @@ func (c *AppController) ReloadConfig() bool {
 			c.resolveAPIKey,
 		)
 		c.AIClient.UsageRecorder = c.aiUsageRecorder
-		c.settingsStatus = i18n.T("hud.config_reloaded")
 		br = c.Bridge
-	} else {
-		errs := c.ConfigStore.LastErrors()
-		c.settingsStatus = i18n.Tf("settings.status.reload_failed", len(errs))
 	}
+	errs := c.ConfigStore.LastErrors()
 	onRepaint := c.OnRepaint
 	onLanguageChange := c.OnLanguageChange
 	langChanged := syncAppearanceLanguage(cfg)
 	c.mu.Unlock()
 
 	if ok {
+		c.setPageNotice("configs", i18n.T("hud.config_reloaded"), chipSuccess)
+		c.setPageNotice("triggers", i18n.T("hud.config_reloaded"), chipSuccess)
 		c.refreshAPIKeySource()
+	} else {
+		msg := i18n.Tf("settings.status.reload_failed", len(errs))
+		c.setPageNotice("configs", msg, chipWarning)
+		c.setPageNotice("triggers", msg, chipWarning)
 	}
 	if ok && br != nil {
 		br.UpdateKeymapConfig(cfg.Main.Keymap)
@@ -1136,6 +1205,84 @@ func (c *AppController) OpenConfigDirectory() error {
 // OpenConfigFile opens one of the 5 TOML configuration files.
 func (c *AppController) OpenConfigFile(kind config.ConfigFileKind) error {
 	return c.openLocalPath(filepath.Join(c.ConfigStore.Directory(), string(kind)))
+}
+
+func (c *AppController) effectiveDataDir() string {
+	if c != nil && strings.TrimSpace(c.dataDir) != "" {
+		return c.dataDir
+	}
+	return diag.DefaultDataDir()
+}
+
+func (c *AppController) effectiveLogDir() string {
+	if c != nil && strings.TrimSpace(c.logDir) != "" {
+		return c.logDir
+	}
+	return diag.DefaultLogDir()
+}
+
+// OpenLogsDirectory ensures LogDir exists and opens it in the OS file manager.
+func (c *AppController) OpenLogsDirectory() error {
+	logDir := c.effectiveLogDir()
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		c.setPageNotice("permissions", i18n.Tf("settings.diag.action_failed", err), chipDanger)
+		return err
+	}
+	if err := c.openLocalPath(logDir); err != nil {
+		c.setPageNotice("permissions", i18n.Tf("settings.diag.action_failed", err), chipDanger)
+		return err
+	}
+	return nil
+}
+
+// ExportDiagnosticBundle writes a scrubbed diagnostic archive and reveals it.
+func (c *AppController) ExportDiagnosticBundle() (string, error) {
+	cfgDir := c.ConfigStore.Directory()
+	dataDir := c.effectiveDataDir()
+	logDir := c.effectiveLogDir()
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		c.setPageNotice("permissions", i18n.Tf("settings.diag.action_failed", err), chipDanger)
+		return "", err
+	}
+	snap := c.Diagnostics()
+	res, err := diag.ExportDiagnosticBundle(c.lifeCtx(), diag.BundleOptions{
+		ConfigDir: cfgDir,
+		DataDir:   dataDir,
+		LogDir:    logDir,
+		PermissionsProbe: func(context.Context) (host.PermissionStatus, error) {
+			return snap.Permissions, nil
+		},
+	})
+	if err != nil {
+		c.setPageNotice("permissions", i18n.Tf("settings.diag.action_failed", err), chipDanger)
+		return "", err
+	}
+	c.setPageNotice("permissions", i18n.Tf("settings.diag.bundle_exported", filepath.Base(res.OutputPath)), chipSuccess)
+	c.RevealLocalPath(res.OutputPath)
+	return res.OutputPath, nil
+}
+
+// BackupConfigAndData creates a WAL-safe checksummed backup directory and reveals it.
+func (c *AppController) BackupConfigAndData() (string, error) {
+	cfgDir := c.ConfigStore.Directory()
+	dataDir := c.effectiveDataDir()
+	backupRoot := filepath.Join(dataDir, "backups")
+	if strings.TrimSpace(c.dataDir) == "" && strings.TrimSpace(cfgDir) != "" {
+		backupRoot = filepath.Join(cfgDir, "backups")
+	}
+	outDir := filepath.Join(backupRoot, "backup-"+time.Now().UTC().Format("20060102-150405"))
+	res, err := diag.CreateBackup(c.lifeCtx(), diag.BackupOptions{
+		ConfigDir: cfgDir,
+		DataDir:   dataDir,
+		OutDir:    outDir,
+	})
+	if err != nil {
+		c.setPageNotice("permissions", i18n.Tf("settings.diag.action_failed", err), chipDanger)
+		return "", err
+	}
+	c.setPageNotice("permissions", i18n.Tf("settings.diag.backup_created", filepath.Base(res.BackupDir)), chipSuccess)
+	c.RevealLocalPath(res.BackupDir)
+	return res.BackupDir, nil
 }
 
 func (c *AppController) openLocalPath(path string) error {

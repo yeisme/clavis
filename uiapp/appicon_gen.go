@@ -10,12 +10,12 @@ import (
 	"sync"
 )
 
-// GenerateAppIconPNG renders a high-craft macOS squircle application icon at size x size
+// GenerateAppIconPNG renders a modern macOS squircle application icon at size x size
 // (defaulting to 512x512 when size <= 0) using 2x2 supersampled anti-aliasing:
-//   - Deep indigo-to-cobalt gradient squircle background with ambient radial glow
-//   - Subtle inner rim highlight
-//   - Tactile inner keycap frame with a luminous ⌘ (Command) motif
-//   - Warm amber/gold & cyan AI spark stars in the upper-right corner
+//   - Neutral dark graphite grayscale squircle background (no purple/indigo gradients)
+//   - Subtle inner 1px hairline rim highlight
+//   - Recessed tactile keycap frame with a centered crisp #F5F5F7 ⌘ (Command) motif
+//   - Single restrained #0A84FF system-blue indicator dot in the upper-right keycap corner
 func GenerateAppIconPNG(size int) []byte {
 	if size <= 0 {
 		size = 512
@@ -70,96 +70,68 @@ func sampleAppIcon(u, v, aa float64) (r, g, b, a float64) {
 		return 0, 0, 0, 0
 	}
 
-	// 2. Deep indigo-to-cobalt diagonal gradient background
+	// 2. Neutral macOS dark graphite grayscale background (#2C2C2E -> #1A1A1C)
 	tGrad := clampUnit((u + v + 1.64) / 3.28)
-	bgR := lerp(0.09, 0.20, tGrad)
-	bgG := lerp(0.08, 0.36, tGrad)
-	bgB := lerp(0.26, 0.82, tGrad)
+	baseVal := lerp(44.0/255.0, 26.0/255.0, tGrad)
+	topSheen := clampUnit(0.5-v*0.5) * 0.025
+	bgVal := clampUnit(baseVal + topSheen)
+	bgR, bgG, bgB := bgVal, bgVal, bgVal
 
-	// Ambient cyan/indigo glow near center-bottom-right
-	distGlow := math.Hypot(u-0.18, v-0.20)
-	glow := math.Exp(-distGlow * distGlow * 2.8)
-	bgR = lerp(bgR, 0.28, glow*0.35)
-	bgG = lerp(bgG, 0.52, glow*0.42)
-	bgB = lerp(bgB, 0.96, glow*0.45)
-
-	// Warm ambient halo around the upper-right AI spark
-	distSparkHalo := math.Hypot(u-0.27, v+0.27)
-	sparkHalo := math.Exp(-distSparkHalo * distSparkHalo * 7.5)
-	bgR = lerp(bgR, 0.98, sparkHalo*0.28)
-	bgG = lerp(bgG, 0.72, sparkHalo*0.24)
-	bgB = lerp(bgB, 0.24, sparkHalo*0.12)
-
-	// 3. Recessed inner keycap well & beveled frame
-	dKeycap := sdRoundedRect(u, v+0.01, 0.54, 0.54, 0.21)
+	// 3. Recessed tactile keycap well & neutral 1px hairline bevel
+	dKeycap := sdRoundedRect(u, v+0.01, 0.56, 0.56, 0.22)
 	keycapFill := smoothCoverage(dKeycap, aa)
 	if keycapFill > 0 {
-		// Darker glass keycap top surface with subtle vertical sheen
-		capGrad := clampUnit((v + 0.55) / 1.10)
-		capR := lerp(0.14, 0.07, capGrad)
-		capG := lerp(0.18, 0.10, capGrad)
-		capB := lerp(0.38, 0.24, capGrad)
-		bgR = lerp(bgR, capR, keycapFill*0.62)
-		bgG = lerp(bgG, capG, keycapFill*0.62)
-		bgB = lerp(bgB, capB, keycapFill*0.62)
+		capGrad := clampUnit((v + 0.56) / 1.12)
+		capVal := lerp(56.0/255.0, 34.0/255.0, capGrad)
+		bgR = lerp(bgR, capVal, keycapFill*0.86)
+		bgG = lerp(bgG, capVal, keycapFill*0.86)
+		bgB = lerp(bgB, capVal, keycapFill*0.86)
 	}
 
-	// Keycap rim stroke (brighter along top-left bevel)
-	dKeycapRing := math.Abs(dKeycap) - 0.014
+	// Keycap rim stroke (subtle neutral top-left highlight)
+	dKeycapRing := math.Abs(dKeycap) - 0.012
 	keycapRingAlpha := smoothCoverage(dKeycapRing, aa)
 	if keycapRingAlpha > 0 {
 		bevelLight := clampUnit(0.65 - 0.45*(u+v))
-		bgR = lerp(bgR, lerp(0.45, 0.85, bevelLight), keycapRingAlpha*0.65)
-		bgG = lerp(bgG, lerp(0.60, 0.92, bevelLight), keycapRingAlpha*0.65)
-		bgB = lerp(bgB, 1.0, keycapRingAlpha*0.75)
+		rimVal := lerp(0.26, 0.72, bevelLight)
+		bgR = lerp(bgR, rimVal, keycapRingAlpha*0.38)
+		bgG = lerp(bgG, rimVal, keycapRingAlpha*0.38)
+		bgB = lerp(bgB, rimVal, keycapRingAlpha*0.38)
 	}
 
-	// 4. Stylized ⌘ (Command) motif centered slightly lower-left inside the keycap
-	cx, cy := u+0.06, v-0.06
-	dCmd := sdCommandSymbol(cx, cy, 0.125, 0.068, 0.034)
+	// 4. Centered crisp #F5F5F7 ⌘ (Command) motif
+	dCmd := sdCommandSymbol(u, v+0.01, 0.135, 0.072, 0.036)
 	cmdAlpha := smoothCoverage(dCmd, aa)
 	if cmdAlpha > 0 {
-		cmdTint := clampUnit((cy + 0.25) / 0.50)
-		cmdR := lerp(0.98, 0.82, cmdTint)
-		cmdG := lerp(0.99, 0.93, cmdTint)
-		cmdB := 1.00
-		bgR = lerp(bgR, cmdR, cmdAlpha)
-		bgG = lerp(bgG, cmdG, cmdAlpha)
-		bgB = lerp(bgB, cmdB, cmdAlpha)
+		cmdTint := clampUnit((v + 0.28) / 0.56)
+		cmdVal := lerp(248.0/255.0, 232.0/255.0, cmdTint)
+		bgR = lerp(bgR, cmdVal, cmdAlpha)
+		bgG = lerp(bgG, cmdVal, cmdAlpha)
+		bgB = lerp(bgB, clampUnit(cmdVal+0.01), cmdAlpha)
 	}
 
-	// 5. Secondary cyan AI spark star (upper-mid right)
-	dCyanStar := sdFourPointStar(u-0.11, v+0.34, 0.075, 0.022)
-	cyanAlpha := smoothCoverage(dCyanStar, aa)
-	if cyanAlpha > 0 {
-		bgR = lerp(bgR, 0.45, cyanAlpha)
-		bgG = lerp(bgG, 0.90, cyanAlpha)
-		bgB = lerp(bgB, 1.00, cyanAlpha)
+	// 5. Single restrained #0A84FF system-blue indicator dot in upper-right keycap corner
+	dDot := math.Hypot(u-0.31, v+0.30) - 0.068
+	dDotRing := math.Abs(dDot) - 0.014
+	if dotRingAlpha := smoothCoverage(dDotRing, aa); dotRingAlpha > 0 {
+		bgR = lerp(bgR, 24.0/255.0, dotRingAlpha*0.65)
+		bgG = lerp(bgG, 24.0/255.0, dotRingAlpha*0.65)
+		bgB = lerp(bgB, 26.0/255.0, dotRingAlpha*0.65)
+	}
+	if dotAlpha := smoothCoverage(dDot, aa); dotAlpha > 0 {
+		bgR = lerp(bgR, 10.0/255.0, dotAlpha)
+		bgG = lerp(bgG, 132.0/255.0, dotAlpha)
+		bgB = lerp(bgB, 255.0/255.0, dotAlpha)
 	}
 
-	// 6. Primary warm amber/gold AI spark star in the upper-right corner
-	sx, sy := u-0.28, v+0.26
-	dGoldStar := sdFourPointStar(sx, sy, 0.165, 0.048)
-	goldAlpha := smoothCoverage(dGoldStar, aa)
-	if goldAlpha > 0 {
-		coreDist := math.Hypot(sx, sy) / 0.165
-		coreT := clampUnit(coreDist)
-		starR := 1.00
-		starG := lerp(0.97, 0.74, coreT)
-		starB := lerp(0.78, 0.18, coreT)
-		bgR = lerp(bgR, starR, goldAlpha)
-		bgG = lerp(bgG, starG, goldAlpha)
-		bgB = lerp(bgB, starB, goldAlpha)
-	}
-
-	// 7. Outer squircle inner rim highlight
-	dOuterRim := math.Abs(dOuter+0.012) - 0.010
+	// 6. Outer squircle subtle neutral hairline rim highlight
+	dOuterRim := math.Abs(dOuter+0.012) - 0.009
 	rimAlpha := smoothCoverage(dOuterRim, aa) * outerAlpha
 	if rimAlpha > 0 {
 		rimLight := clampUnit(0.75 - 0.45*(u+v))
-		bgR = lerp(bgR, 0.90, rimAlpha*0.38*rimLight)
-		bgG = lerp(bgG, 0.95, rimAlpha*0.42*rimLight)
-		bgB = lerp(bgB, 1.00, rimAlpha*0.50*rimLight)
+		bgR = lerp(bgR, 0.94, rimAlpha*0.24*rimLight)
+		bgG = lerp(bgG, 0.94, rimAlpha*0.24*rimLight)
+		bgB = lerp(bgB, 0.96, rimAlpha*0.24*rimLight)
 	}
 
 	return clampUnit(bgR), clampUnit(bgG), clampUnit(bgB), outerAlpha

@@ -16,7 +16,6 @@ import (
 	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/pkg/core/clipboard"
 	"github.com/yeisme/clavis/pkg/core/config"
-	"github.com/yeisme/clavis/pkg/core/engine"
 )
 
 // widePNG is a solid 16:9 image in a color nothing else in the UI uses, so
@@ -110,8 +109,8 @@ func TestPreviewSplitDragsClampsResetsAndPersists(t *testing.T) {
 	if !ok {
 		t.Fatal("no divider handle (resize cursor) between the list and the preview")
 	}
-	if got := share(hx); got < defaultPreviewListPercent-3 || got > defaultPreviewListPercent+3 {
-		t.Fatalf("default divider at %.1f%% of the body, want ~%v%%", got, defaultPreviewListPercent)
+	if got := share(hx); got < defaultClipboardPreviewListPercent-3 || got > defaultClipboardPreviewListPercent+3 {
+		t.Fatalf("default divider at %.1f%% of the body, want ~%v%%", got, defaultClipboardPreviewListPercent)
 	}
 	defaultW := drawnImageWidth(tt, hx)
 	if defaultW == 0 {
@@ -161,18 +160,18 @@ func TestPreviewSplitDragsClampsResetsAndPersists(t *testing.T) {
 	tt.ClickAt(hx, y)
 	tt.ClickAt(hx, y)
 	tt.Frame()
-	if got := f.ctrl.previewListPercent(); got != defaultPreviewListPercent {
-		t.Fatalf("double click: list %.1f%%, want the default %v%%", got, defaultPreviewListPercent)
+	if got := f.ctrl.previewListPercent(); got != defaultClipboardPreviewListPercent {
+		t.Fatalf("double click: list %.1f%%, want the default %v%%", got, defaultClipboardPreviewListPercent)
 	}
 
-	hx, ok = splitHandleX(tt, y, int(x0)+int(total*0.25), int(x0)+int(total*0.55))
+	hx, ok = splitHandleX(tt, y, int(x0)+int(total*0.25), int(x0)+int(total*0.60))
 	if !ok {
 		t.Fatal("divider handle lost after double-click reset")
 	}
-	drag(hx, x0+total*0.45)
+	drag(hx, x0+total*0.50)
 	want := f.ctrl.previewListPercent()
-	if want == defaultPreviewListPercent {
-		t.Fatalf("expected final drag to move split from default %.1f%%", defaultPreviewListPercent)
+	if want == defaultClipboardPreviewListPercent {
+		t.Fatalf("expected final drag to move split from default %.1f%%", defaultClipboardPreviewListPercent)
 	}
 	statePath := filepath.Join(f.ctrl.ConfigStore.Directory(), uiStateFileName)
 	waitUntil(t, 5*time.Second, func() bool {
@@ -201,7 +200,7 @@ func TestPreviewSplitDragsClampsResetsAndPersists(t *testing.T) {
 	if got := again.previewListPercent(); got != want {
 		t.Fatalf("a new controller starts at %.1f%%, want the saved %v%%", got, want)
 	}
-	t.Logf("default %.0f%%: image %dpx wide; clamps 35/75: image %dpx (preview 65%%) vs %dpx (25%%); saved %.1f%%", defaultPreviewListPercent, defaultW, wideW, narrowW, want)
+	t.Logf("default %.0f%%: image %dpx wide; clamps 35/75: image %dpx (preview 65%%) vs %dpx (25%%); saved %.1f%%", defaultClipboardPreviewListPercent, defaultW, wideW, narrowW, want)
 }
 
 func TestClampPreviewListPercent(t *testing.T) {
@@ -254,11 +253,12 @@ func TestPreviewDividerHoverAndDragStatesRenderWithSpecCursor(t *testing.T) {
 			break
 		}
 	}
-	tt := f.omniboxTester(t)
-	w, h := PreferredCapsuleSize(engine.PhaseOmnibox, f.ctrl.Config().Main.Appearance)
+	w, h := PreferredCapsuleSizeForState(f.ctrl.State(), f.ctrl.Config().Main.Appearance)
+	tt := ui.NewTester(f.ctrl.CapsuleView, w, h)
+	tt.Frame()
 	y := float32(h) / 2
 	x0, total := space14, float32(w)-2*space14
-	x := x0 + total*defaultPreviewListPercent/100
+	x := x0 + total*defaultClipboardPreviewListPercent/100
 	tt.Move(x, y)
 	tt.Frame()
 	if tt.Cursor() != ui.CursorResizeEW {

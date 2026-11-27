@@ -598,24 +598,24 @@ func renderSnapshotMatrix(t *testing.T, dir, suffix string, dark bool, preset, m
 		t.Fatalf("seed workflows: %v", err)
 	}
 	for _, sec := range []struct {
-		name  string
-		index int
+		name string
+		page string
 	}{
-		{"16-settings-permissions-telemetry", settingsSectionPermissions},
-		{"12-settings-glossary-clipboard", settingsSectionGlossary},
-		{"13-settings-leader", settingsSectionLeader},
-		{"14-settings-snippets", settingsSectionSnippets},
-		{"15-settings-ai", settingsSectionAI},
-		{"17-settings-configs", settingsSectionConfigs},
-		{"19-settings-workflows", settingsSectionWorkflows},
+		{"16-settings-permissions-telemetry", "permissions"},
+		{"12-settings-glossary-clipboard", "glossary"},
+		{"13-settings-leader", "leader"},
+		{"14-settings-snippets", "snippets"},
+		{"15-settings-ai", "ai"},
+		{"17-settings-configs", "configs"},
+		{"19-settings-workflows", "workflows"},
 	} {
-		f.ctrl.setSettingsSection(sec.index)
+		f.ctrl.setSettingsPage(sec.page)
 		shoot(sec.name, f.ctrl.SettingsView, 960, 900, 1.5, nil)
 	}
 
 	// Password / Security Vault UI snapshots: metadata-only list plus locked, missing, denied states.
 	if _, err := f.ctrl.VaultPutSecret("snap-vault-1", "clavis.prod.db", "Production DB", secrets.SecretKindPassword, "snap-secret-never-rendered"); err == nil {
-		f.ctrl.setSettingsSection(settingsSectionSecurity)
+		f.ctrl.setSettingsPage("security")
 		shoot("22-settings-security", f.ctrl.SettingsView, 960, 900, 1.5, nil)
 		st := vaultUIState(f.ctrl)
 		st.mu.Lock()

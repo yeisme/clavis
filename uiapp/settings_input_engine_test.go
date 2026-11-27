@@ -49,7 +49,7 @@ func TestFuzzyRuleSpellingsAndToggle(t *testing.T) {
 func TestInputEngineCardPersistsAndGates(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
 	tt := ui.NewTester(ctrl.SettingsView, 960, 1600)
-	ctrl.setSettingsSection(settingsSectionIMEKeymap)
+	ctrl.setSettingsPage("ime-keymap")
 	tt.Frame()
 	if ctrl.Config().Main.InputEngine.Enabled {
 		t.Skip("the default config enables the input engine; the gate test needs it off")

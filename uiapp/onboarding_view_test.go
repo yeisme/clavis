@@ -271,3 +271,69 @@ func TestOnboardingLeaderPicker(t *testing.T) {
 		t.Error("after a new key the check should wait for it, naming it")
 	}
 }
+
+func TestOnboardingStep4OptionalLaunchAgentAndAI(t *testing.T) {
+	prevLang := i18n.Current()
+	defer i18n.SetLanguage(prevLang)
+
+	for _, lang := range []i18n.Language{i18n.English, i18n.Chinese} {
+		i18n.SetLanguage(lang)
+		ctrl, br, _, _ := newTestController(t, nil)
+		setMockPerms(t, ctrl, br, true, true)
+		if err := ctrl.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		launchOn := false
+		finished := 0
+		var setCalls []bool
+		var openedTabs []SettingsTab
+		ctrl.OnOpenSettings = func(tab SettingsTab) { openedTabs = append(openedTabs, tab) }
+		ctrl.SetOnboardingHooks(OnboardingHooks{
+			Finish:               func() { finished++ },
+			LaunchAgentInstalled: func() bool { return launchOn },
+			SetLaunchAgent: func(enabled bool) error {
+				setCalls = append(setCalls, enabled)
+				launchOn = enabled
+				return nil
+			},
+		})
+
+		tt := onboardingTester(ctrl, "darwin")
+		if !tt.HasText(i18n.T("onboarding.step.ready")) {
+			t.Fatalf("lang=%s missing Step 4 title: %v", lang, tt.Texts())
+		}
+		if !tt.HasText(i18n.T("onboarding.ready.launch_off")) {
+			t.Fatalf("lang=%s missing Launch Off pill: %v", lang, tt.Texts())
+		}
+
+		// Step 4 stays non-blocking even without API key or LaunchAgent.
+		if err := tt.Click(i18n.T("onboarding.footer.start")); err != nil || finished != 1 {
+			t.Fatalf("lang=%s Get Started blocked or failed: err=%v finished=%d", lang, err, finished)
+		}
+
+		// Scroll down to Step 4 and toggle Launch at Login.
+		tt.Move(300, 360)
+		tt.Scroll(300, 360, 0, 500)
+		tt.Frame()
+		if err := tt.Click(i18n.T("onboarding.ready.launch_agent")); err != nil {
+			t.Fatalf("lang=%s toggle LaunchAgent: %v (texts=%v)", lang, err, tt.Texts())
+		}
+		tt.Frame()
+		if len(setCalls) != 1 || !setCalls[0] || !launchOn {
+			t.Fatalf("lang=%s SetLaunchAgent calls=%v launchOn=%v", lang, setCalls, launchOn)
+		}
+		if !tt.HasText(i18n.T("onboarding.ready.launch_on")) {
+			t.Fatalf("lang=%s missing Launch On pill after toggle", lang)
+		}
+
+		// Configure AI Key opens Settings directly on AI page.
+		if err := tt.Click(i18n.T("onboarding.ready.ai_configure")); err != nil {
+			t.Fatalf("lang=%s click Configure AI Key: %v", lang, err)
+		}
+		tt.Frame()
+		if ctrl.currentSettingsPageKey() != "ai" || len(openedTabs) == 0 || openedTabs[len(openedTabs)-1] != SettingsTabAI {
+			t.Fatalf("lang=%s Configure AI Key routed to page=%q tabs=%v", lang, ctrl.currentSettingsPageKey(), openedTabs)
+		}
+	}
+}

@@ -93,7 +93,7 @@ func TestDefaultGeneratorIdempotencyAndValidity(t *testing.T) {
 
 func TestUnifiedInputSchemas(t *testing.T) {
 	cfg := config.DefaultMainConfig()
-	if cfg.InputEngine.Enabled || cfg.InputEngine.CandidateCount != 7 || cfg.Appearance.VisualPreset != "spatial_3d" || cfg.Daemon.MaxMemoryMB != 64 {
+	if cfg.InputEngine.Enabled || cfg.InputEngine.CandidateCount != 7 || cfg.Appearance.VisualPreset != "liquid_glass" || cfg.Daemon.MaxMemoryMB != 64 {
 		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
 	cfg.InputEngine.Mode = "invalid"
@@ -113,6 +113,52 @@ func TestUnifiedInputSchemas(t *testing.T) {
 	}
 	if _, err := config.DecodeComponentsConfig(c.Encode()); err != nil {
 		t.Fatalf("component roundtrip: %v", err)
+	}
+}
+
+func TestClipboardWorkbenchConfigRoundTripAndValidation(t *testing.T) {
+	cfg := config.DefaultMainConfig()
+	if cfg.Clipboard.EnterAction != "paste" ||
+		cfg.Clipboard.RowDensity != "compact" ||
+		cfg.Clipboard.PinPlacement != "top" ||
+		cfg.Clipboard.SelectionStyle != "accent_bar" {
+		t.Fatalf("unexpected clipboard workbench defaults: %+v", cfg.Clipboard)
+	}
+
+	cfg.Clipboard.EnterAction = "copy"
+	cfg.Clipboard.RowDensity = "comfortable"
+	cfg.Clipboard.PinPlacement = "bottom"
+	cfg.Clipboard.SelectionStyle = "maccy_solid"
+
+	decoded, err := config.DecodeMainConfig(cfg.Encode())
+	if err != nil {
+		t.Fatalf("DecodeMainConfig failed: %v", err)
+	}
+	if decoded.Clipboard.EnterAction != "copy" ||
+		decoded.Clipboard.RowDensity != "comfortable" ||
+		decoded.Clipboard.PinPlacement != "bottom" ||
+		decoded.Clipboard.SelectionStyle != "maccy_solid" {
+		t.Fatalf("roundtrip mismatch: %+v", decoded.Clipboard)
+	}
+	if issues := config.ValidateMain(decoded); len(issues) != 0 {
+		t.Fatalf("expected 0 issues for valid clipboard workbench config, got %+v", issues)
+	}
+
+	bad := config.DefaultMainConfig()
+	bad.Clipboard.EnterAction = "unknown"
+	bad.Clipboard.RowDensity = "dense"
+	bad.Clipboard.PinPlacement = "side"
+	bad.Clipboard.SelectionStyle = "neon"
+	issues := config.ValidateMain(bad)
+	for _, key := range []string{
+		"clipboard.enter_action",
+		"clipboard.row_density",
+		"clipboard.pin_placement",
+		"clipboard.selection_style",
+	} {
+		if !hasIssue(issues, key, config.SeverityWarning) {
+			t.Fatalf("expected warning issue for %s, got %+v", key, issues)
+		}
 	}
 }
 

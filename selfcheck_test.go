@@ -31,6 +31,12 @@ func TestRunSelfCheckReadOnlyOnMissingAndEmptyConfigDir(t *testing.T) {
 		if !strings.Contains(text, "input method mode: inline-hook (second-IME") {
 			t.Fatalf("expected second-IME inline-hook mode line in self-check output:\n%s", text)
 		}
+		if !strings.Contains(text, "logs dir:") {
+			t.Fatalf("expected logs dir line in self-check output:\n%s", text)
+		}
+		if strings.Contains(text, "permissions: accessibility=") && !strings.Contains(text, "screen-recording=") {
+			t.Fatalf("expected screen-recording status in permissions line:\n%s", text)
+		}
 		cfgDir := filepath.Join(fakeHome, ".config", "clavis")
 		if _, err := os.Stat(cfgDir); !os.IsNotExist(err) {
 			t.Fatalf("self-check must not create missing config dir %s, stat err=%v", cfgDir, err)
@@ -60,6 +66,12 @@ func TestRunSelfCheckReadOnlyOnMissingAndEmptyConfigDir(t *testing.T) {
 		}
 		if !strings.Contains(text, "input method mode: inline-hook (second-IME") {
 			t.Fatalf("expected second-IME inline-hook mode line in self-check output:\n%s", text)
+		}
+		if !strings.Contains(text, "logs dir:") {
+			t.Fatalf("expected logs dir line in self-check output:\n%s", text)
+		}
+		if strings.Contains(text, "permissions: accessibility=") && !strings.Contains(text, "screen-recording=") {
+			t.Fatalf("expected screen-recording status in permissions line:\n%s", text)
 		}
 		entries, err := os.ReadDir(cfgDir)
 		if err != nil {
@@ -110,6 +122,44 @@ func TestRunSelfCheckReadOnlyOnMissingAndEmptyConfigDir(t *testing.T) {
 		}
 		if len(entries) != 1 || entries[0].Name() != string(config.FileMain) {
 			t.Fatalf("self-check must not create missing sibling files, entries=%v", entries)
+		}
+	})
+
+	t.Run("reports recent crash log when present without writing config", func(t *testing.T) {
+		fakeHome := t.TempDir()
+		logDir := t.TempDir()
+		t.Setenv("HOME", fakeHome)
+		t.Setenv("USERPROFILE", fakeHome)
+		t.Setenv("CLAVIS_LOG_DIR", logDir)
+		crashFile := filepath.Join(logDir, "crash-latest.log")
+		if err := os.WriteFile(crashFile, []byte("panic: sample crash\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := runSelfCheck(&out); err != nil {
+			t.Fatalf("runSelfCheck: %v", err)
+		}
+		if !strings.Contains(out.String(), "recent crash log: "+crashFile) {
+			t.Fatalf("expected recent crash log in self-check output:\n%s", out.String())
+		}
+	})
+
+	t.Run("reports env AI key source without ai-keys.toml and stays read-only", func(t *testing.T) {
+		fakeHome := t.TempDir()
+		t.Setenv("HOME", fakeHome)
+		t.Setenv("USERPROFILE", fakeHome)
+		t.Setenv("CLAVIS_LOG_DIR", t.TempDir())
+		t.Setenv("DEEPSEEK_API_KEY", "sk-selfcheck-env-dummy-key")
+		var out bytes.Buffer
+		if err := runSelfCheck(&out); err != nil {
+			t.Fatalf("runSelfCheck: %v", err)
+		}
+		if !strings.Contains(out.String(), "ai key source: env (DEEPSEEK_API_KEY)") {
+			t.Fatalf("expected env AI key source in self-check output:\n%s", out.String())
+		}
+		cfgDir := filepath.Join(fakeHome, ".config", "clavis")
+		if _, err := os.Stat(cfgDir); !os.IsNotExist(err) {
+			t.Fatalf("self-check created config dir unexpectedly: err=%v", err)
 		}
 	})
 }

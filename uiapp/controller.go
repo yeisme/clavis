@@ -39,6 +39,8 @@ type MCPManager interface {
 // Options configures an AppController.
 type Options struct {
 	ConfigStore              *config.ConfigStore
+	DataDir                  string
+	LogDir                   string
 	ClipboardStore           clipboard.Store
 	ClipboardSearcher        ClipboardSearcher
 	AIUsageDaily             AIUsageDailyReader
@@ -55,6 +57,7 @@ type Options struct {
 	OpenPath                 func(path string) error
 	OpenExternal             func(rawURL string) error
 	RevealPath               func(path string) error
+	FileSearcher             func(ctx context.Context, query string) ([]engine.FileMatch, error)
 	HerdrExecutor            agentsession.CommandExecutor
 	Vault                    *secrets.Vault
 	Capturer                 capture.Capturer
@@ -62,6 +65,7 @@ type Options struct {
 	OnPresentPhase           func(phase engine.CapsulePhase)
 	OnHide                   func()
 	OnOpenSettings           func(tab SettingsTab)
+	OnDocumentEdited         func(edited bool)
 	OnOpenPromptComposer     func()
 	OnClosePromptComposer    func()
 	OnShowAnnotateWindow     func()
@@ -113,7 +117,7 @@ type uiViewState struct {
 	sourceExpanded         bool
 	followUpQuery          string
 	apiKeyDraft            string
-	settingsTabIdx         int
+	settingsPage           string
 	imeRuleTargetDraft     string
 	imeRuleURLDraft        string
 	imeRuleTitleDraft      string
@@ -123,6 +127,10 @@ type uiViewState struct {
 	// search is the view state of the search fields (search_keys.go).
 	search        searchFieldState
 	agentSelected int
+
+	// Clipboard workbench focus mode & inline clear-all confirm.
+	clipboardFocusMode    bool
+	clipboardClearConfirm bool
 
 	// aiReview caches the diff of an AI rewrite against its source and the
 	// view the user picked (see ai_review.go).
@@ -183,6 +191,8 @@ type AppController struct {
 	lifeCancel  context.CancelFunc
 
 	ConfigStore       *config.ConfigStore
+	dataDir           string
+	logDir            string
 	StateMachine      *engine.StateMachine
 	ClipboardStore    clipboard.Store
 	ClipboardSearcher ClipboardSearcher
@@ -207,10 +217,12 @@ type AppController struct {
 	OpenPath                 func(path string) error
 	OpenExternal             func(rawURL string) error
 	RevealPath               func(path string) error
+	FileSearcher             func(ctx context.Context, query string) ([]engine.FileMatch, error)
 	OnRepaint                func()
 	OnPresentPhase           func(phase engine.CapsulePhase)
 	OnHide                   func()
 	OnOpenSettings           func(tab SettingsTab)
+	OnDocumentEdited         func(edited bool)
 	OnOpenPromptComposer     func()
 	OnClosePromptComposer    func()
 	OnShowAnnotateWindow     func()
@@ -269,13 +281,15 @@ type AppController struct {
 	vaultAudit    *secrets.MemoryAuditSink
 	vaultMetaPath string
 
-	aiCancel      context.CancelFunc
-	aiDone        func()
-	runtime       *runtimecoord.Registry
-	runtimeCtx    context.Context
-	runtimeCancel context.CancelFunc
-	aiGen         uint64
-	transform     *inplaceSession
+	aiCancel         context.CancelFunc
+	aiDone           func()
+	runtime          *runtimecoord.Registry
+	runtimeCtx       context.Context
+	runtimeCancel    context.CancelFunc
+	aiGen            uint64
+	aiOriginBundleID string
+	aiOriginProcess  string
+	transform        *inplaceSession
 
 	// Workflow cancellation and lifecycle guards. A controller owns at most one
 	// active workflow run; starting or stopping another run invalidates the old
@@ -309,6 +323,11 @@ type AppController struct {
 	clipDone   chan struct{}
 	clipGen    atomic.Uint64
 
+	// Delayed soft-delete state (5s Undo toast before SQLite/MediaStore delete)
+	clipDeleteMu         sync.Mutex
+	clipPendingDelete    clipboardPendingDelete
+	clipDeleteUndoWindow time.Duration
+
 	// Generation-based incremental clipboard mirror sync state
 	clipSyncMu       sync.Mutex
 	clipSynced       bool
@@ -326,20 +345,30 @@ type AppController struct {
 	clipSearchDebounce time.Duration
 	clipSearchCancel   context.CancelFunc
 
+	// Debounced async Spotlight/file search state
+	fileBaseCtx        context.Context
+	fileBaseCancel     context.CancelFunc
+	fileSearchSeq      atomic.Uint64
+	fileSearchMu       sync.Mutex
+	fileSearchTimer    *time.Timer
+	fileSearchTimerSeq uint64
+	fileSearchDebounce time.Duration
+	fileSearchCancel   context.CancelFunc
+
 	// Runtime diagnostics & settings status
-	apiKeySource      secrets.APIKeySource
-	permissionStatus  host.PermissionStatus
-	monitorRunning    bool
-	recoveryCount     int
-	activeInputSource host.InputSourceInfo
-	inputEngineASCII  bool
-	lastIMEError      string
-	cachedBundleID    string
-	cachedProcessName string
-	cachedAppName     string
-	settingsStatus    string
-	aiTestStatus      AITestStatus
-	aiTestMessage     string
+	apiKeySource       secrets.APIKeySource
+	permissionStatus   host.PermissionStatus
+	monitorRunning     bool
+	recoveryCount      int
+	activeInputSource  host.InputSourceInfo
+	inputEngineASCII   bool
+	lastIMEError       string
+	cachedBundleID     string
+	cachedProcessName  string
+	cachedAppName      string
+	lastDocumentEdited bool
+	aiTestStatus       AITestStatus
+	aiTestMessage      string
 
 	aiUsageMu             sync.RWMutex
 	aiUsageDays           []AIUsageDay
@@ -427,12 +456,15 @@ func NewAppController(opts Options) *AppController {
 	}
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	clipBaseCtx, clipBaseCancel := context.WithCancel(lifeCtx)
+	fileBaseCtx, fileBaseCancel := context.WithCancel(lifeCtx)
 	runtimeCtx, runtimeCancel := context.WithCancel(lifeCtx)
 
 	c := &AppController{
 		lifeContext:              lifeCtx,
 		lifeCancel:               lifeCancel,
 		ConfigStore:              cfgStore,
+		dataDir:                  strings.TrimSpace(opts.DataDir),
+		logDir:                   strings.TrimSpace(opts.LogDir),
 		StateMachine:             sm,
 		ClipboardStore:           clipStore,
 		ClipboardSearcher:        clipSearcher,
@@ -449,11 +481,13 @@ func NewAppController(opts Options) *AppController {
 		OpenPath:                 opts.OpenPath,
 		OpenExternal:             opts.OpenExternal,
 		RevealPath:               opts.RevealPath,
+		FileSearcher:             opts.FileSearcher,
 		herdrExecutor:            herdrExec,
 		OnRepaint:                opts.OnRepaint,
 		OnPresentPhase:           opts.OnPresentPhase,
 		OnHide:                   opts.OnHide,
 		OnOpenSettings:           opts.OnOpenSettings,
+		OnDocumentEdited:         opts.OnDocumentEdited,
 		OnOpenPromptComposer:     opts.OnOpenPromptComposer,
 		OnClosePromptComposer:    opts.OnClosePromptComposer,
 		OnShowAnnotateWindow:     opts.OnShowAnnotateWindow,
@@ -480,6 +514,9 @@ func NewAppController(opts Options) *AppController {
 		clipBaseCtx:              clipBaseCtx,
 		clipBaseCancel:           clipBaseCancel,
 		clipSearchDebounce:       defaultClipboardSearchDebounce,
+		fileBaseCtx:              fileBaseCtx,
+		fileBaseCancel:           fileBaseCancel,
+		fileSearchDebounce:       defaultFileSearchDebounce,
 		aiTestStatus:             AITestIdle,
 		runtime:                  runtimecoord.NewRegistry(runtimeCtx),
 		runtimeCtx:               runtimeCtx,
@@ -619,10 +656,17 @@ func (c *AppController) Close() {
 		selectionHide()
 	}
 
+	c.FlushPendingClipboardDelete()
+
 	cancelSeq := c.clipSearchSeq.Add(1)
 	c.cancelClipboardSearch(cancelSeq)
 	if c.clipBaseCancel != nil {
 		c.clipBaseCancel()
+	}
+	cancelFileSeq := c.fileSearchSeq.Add(1)
+	c.cancelFileSearch(cancelFileSeq)
+	if c.fileBaseCancel != nil {
+		c.fileBaseCancel()
 	}
 
 	c.clipMu.Lock()
@@ -968,6 +1012,45 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 			cancelSearchSeq = c.clipSearchSeq.Add(1)
 		}
 	}
+	var fileSearchSeq uint64
+	var fileSearchQuery string
+	var fileSearchImmediate bool
+	var cancelFileSeq uint64
+	if c.FileSearcher != nil {
+		if next.Phase == engine.PhaseOmnibox && next.OmniboxTab == config.TabActions {
+			trimmedNext := strings.TrimSpace(next.OmniboxQuery)
+			trimmedPrev := strings.TrimSpace(prev.OmniboxQuery)
+			needle, explicit, fileOK := engine.ParseFileSearchQuery(trimmedNext)
+			nonFileCount := 0
+			for _, it := range next.OmniboxItems {
+				if it.Kind != engine.ItemFile && it.Kind != engine.ItemAIMode {
+					nonFileCount++
+				}
+			}
+			wantFileSearch := fileOK && (needle != "" || strings.HasPrefix(trimmedNext, "~")) && (explicit || nonFileCount < 5)
+			if !wantFileSearch {
+				if prev.Phase == engine.PhaseOmnibox && prev.OmniboxTab == config.TabActions && trimmedPrev != "" {
+					cancelFileSeq = c.fileSearchSeq.Add(1)
+				}
+			} else if ev.Type == engine.EventOpenOmnibox || ev.Type == engine.EventSwitchTab {
+				fileSearchSeq = c.fileSearchSeq.Add(1)
+				fileSearchQuery = trimmedNext
+				fileSearchImmediate = true
+			} else if (ev.Type == engine.EventUpdateQuery || ev.Type == engine.EventBackspace) &&
+				(prev.Phase != engine.PhaseOmnibox || prev.OmniboxTab != config.TabActions || trimmedNext != trimmedPrev) {
+				fileSearchSeq = c.fileSearchSeq.Add(1)
+				fileSearchQuery = trimmedNext
+			}
+		} else if prev.Phase == engine.PhaseOmnibox && prev.OmniboxTab == config.TabActions {
+			cancelFileSeq = c.fileSearchSeq.Add(1)
+		}
+	}
+
+	if prev.Phase == engine.PhaseOmnibox && prev.OmniboxTab == config.TabClipboard &&
+		(next.Phase != engine.PhaseOmnibox || next.OmniboxTab != config.TabClipboard) {
+		c.uiState.clipboardFocusMode = false
+		c.uiState.clipboardClearConfirm = false
+	}
 	enteredAgent := next.Phase == engine.PhaseOmnibox && next.OmniboxTab == config.TabAgent &&
 		(ev.Type == engine.EventOpenOmnibox || prev.Phase != engine.PhaseOmnibox || prev.OmniboxTab != config.TabAgent)
 	c.mu.Unlock()
@@ -984,6 +1067,12 @@ func (c *AppController) Dispatch(ev engine.Event) []engine.Effect {
 	}
 	if searchSeq != 0 {
 		c.scheduleClipboardSearch(searchSeq, searchQuery, searchImmediate)
+	}
+	if cancelFileSeq != 0 {
+		c.cancelFileSearch(cancelFileSeq)
+	}
+	if fileSearchSeq != 0 {
+		c.scheduleFileSearch(fileSearchSeq, fileSearchQuery, fileSearchImmediate)
 	}
 
 	if prev.Phase != engine.PhaseLeader && next.Phase == engine.PhaseLeader {
@@ -1102,6 +1191,19 @@ func (c *AppController) ShowToastOrHUD(message string) {
 	c.Dispatch(engine.Event{Type: engine.EventShowHUD, Message: msg})
 }
 
+// notifyInPlace surfaces a transient notice without transitioning an active
+// Capsule phase (e.g. PhaseOmnibox -> PhaseHUD).
+func (c *AppController) notifyInPlace(message string) {
+	msg := strings.TrimSpace(message)
+	if msg == "" {
+		return
+	}
+	if c.hasPillSink() {
+		c.showPillNotice(msg, nil)
+	}
+	c.triggerRepaint()
+}
+
 func stopKindLabel(kind runtimecoord.Kind) string {
 	switch kind {
 	case runtimecoord.AIStream, runtimecoord.AISuggestion, runtimecoord.AIConnectionTest:
@@ -1205,18 +1307,19 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 		}
 
 	case engine.EffectApplyAIOutput:
-		c.injectTextAsync(eff.Text, 0, 0)
+		c.injectAIOutputAsync(eff.Text)
 
 	case engine.EffectPasteClipboardItem:
 		itemID := eff.ClipboardID
+		pOpts := pasteOptions{keepOpen: eff.KeepOpen}
 		if eff.ClipboardMedia != nil && eff.ClipboardMedia.IsMedia() {
-			c.pasteClipboardMediaAsync(*eff.ClipboardMedia, func() {
+			c.pasteClipboardMediaAsyncWithOptions(*eff.ClipboardMedia, pOpts, func() {
 				if itemID != "" {
 					c.recordItemUse("clipboard:" + itemID)
 				}
 			})
 		} else {
-			c.pasteClipboardTextAsync(eff.ClipboardContent, func() {
+			c.pasteClipboardTextAsyncWithOptions(eff.ClipboardContent, pOpts, func() {
 				if itemID != "" {
 					c.recordItemUse("clipboard:" + itemID)
 				}
@@ -1375,6 +1478,24 @@ func (c *AppController) executeEffect(eff engine.Effect, state engine.State) {
 			}
 			c.OpenPromptComposer(*eff.PromptTemplate, appCtx)
 		}
+
+	case engine.EffectBlockClipboardApp:
+		targetID := strings.TrimSpace(eff.BundleID)
+		if targetID == "" {
+			targetID = strings.TrimSpace(eff.Text)
+		}
+		if targetID == "" {
+			return
+		}
+		c.blockClipboardApp(targetID, strings.TrimSpace(eff.Text))
+
+	case engine.EffectSaveClipboardAsSnippet:
+		c.openClipboardContentAsSnippet(eff.Text)
+
+	case engine.EffectOpenInTerminal:
+		if target := strings.TrimSpace(eff.Text); target != "" {
+			c.openDirectoryInTerminal(target)
+		}
 	}
 }
 
@@ -1509,6 +1630,7 @@ func (c *AppController) HandleTriggerEvent(ev host.TriggerEvent) {
 	switch ev.Kind {
 	case host.TriggerLeaderKey, host.TriggerDoubleTap:
 		c.noteOnboardingLeader()
+		c.setClipboardFocusMode(false)
 		ctx := c.lifeCtx()
 		c.syncClipboardEntries(ctx)
 		if len(c.State().InstalledApps) == 0 {
@@ -1530,6 +1652,7 @@ func (c *AppController) HandleTriggerEvent(ev host.TriggerEvent) {
 		go c.showSelectionQuickBar()
 
 	case host.TriggerCapsuleToggle:
+		c.setClipboardFocusMode(false)
 		phase := c.State().Phase
 		if phase == engine.PhaseLeader || phase == engine.PhaseOmnibox || phase == engine.PhaseAIStreaming {
 			c.Dispatch(engine.Event{Type: engine.EventDismiss})
@@ -1548,10 +1671,12 @@ func (c *AppController) HandleTriggerEvent(ev host.TriggerEvent) {
 		})
 
 	case host.TriggerClipboardToggle:
-		// Maccy-style: the dedicated hotkey jumps straight to Clipboard History; pressing it again
-		// while that tab is showing closes the Capsule.
+		// Maccy-style: the dedicated hotkey jumps straight to Clipboard History
+		// in Focus Mode (hides 6-tab chrome, assigns ⌘1..9 to rows); pressing it
+		// again while that tab is showing closes the Capsule.
 		state := c.State()
 		if state.Phase == engine.PhaseOmnibox && state.OmniboxTab == config.TabClipboard {
+			c.setClipboardFocusMode(false)
 			c.Dispatch(engine.Event{Type: engine.EventDismiss})
 			return
 		}
@@ -1560,6 +1685,7 @@ func (c *AppController) HandleTriggerEvent(ev host.TriggerEvent) {
 		if len(c.State().InstalledApps) == 0 {
 			c.SyncInstalledApps(ctx)
 		}
+		c.setClipboardFocusMode(true)
 		capCtx := c.resolveTriggerContext(ev.Context)
 		c.Dispatch(engine.Event{
 			Type:    engine.EventOpenOmnibox,

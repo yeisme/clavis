@@ -157,24 +157,21 @@ func TestSecurityVaultManagementEntryMetadataOnlyAndTTLCopy(t *testing.T) {
 	if *openCount != 1 {
 		t.Fatalf("expected OnOpenSettings once, got %d", *openCount)
 	}
-	ctrl.mu.Lock()
-	selectedSection := ctrl.uiState.settingsTabIdx
-	ctrl.mu.Unlock()
-	if selectedSection != settingsSectionSecurity {
-		t.Fatalf("selected settings section = %d, want settingsSectionSecurity (%d)", selectedSection, settingsSectionSecurity)
+	if got := ctrl.currentSettingsPageKey(); got != "security" {
+		t.Fatalf("selected settings page = %q, want %q", got, "security")
 	}
 
 	// Also verify settings search matches Security section via security/vault/安全/密码.
-	var secMeta settingsSectionMeta
-	for _, meta := range settingsNavigationSections() {
-		if meta.Index == settingsSectionSecurity {
-			secMeta = meta
-			break
-		}
-	}
 	for _, q := range []string{"安全", "security", "vault", "password"} {
-		if !settingsSectionMatches(secMeta, q, ctrl.Config()) {
-			t.Fatalf("settingsSectionMatches failed for query %q", q)
+		matched := false
+		for _, res := range settingsSearchQuery(q, ctrl.Config()) {
+			if res.PageKey == "security" {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Fatalf("settingsSearchQuery failed to match security for query %q", q)
 		}
 	}
 
@@ -254,7 +251,7 @@ func TestSecurityVaultAgentBlockedAndRevokeDenied(t *testing.T) {
 		t.Fatalf("VaultCopyAs(ActorAutomation) = %v, want ErrAgentForbidden", err)
 	}
 
-	ctrl.OpenSettingsSection(settingsSectionSecurity)
+	ctrl.OpenSettingsPage("security")
 	tt := ui.NewTester(ctrl.SettingsView, 960, 820)
 	tt.Frame()
 	if !tt.HasText("Denied") || !tt.HasText(secrets.CopyErrorAgentForbidden) {

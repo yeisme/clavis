@@ -260,6 +260,56 @@ func TestWatchPermissionsRetriesOnChange(t *testing.T) {
 	<-done
 }
 
+func TestWatchPermissionsDetectsScreenRecordingChange(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfgStore := config.NewConfigStore(t.TempDir())
+	if _, err := cfgStore.LoadOrInitialize(); err != nil {
+		t.Fatal(err)
+	}
+	br := &permBridge{perms: host.PermissionStatus{
+		Accessibility:   true,
+		InputMonitoring: true,
+		ScreenRecording: false,
+		Details:         map[string]string{"screenRecording": "denied"},
+	}}
+	ctrl := uiapp.NewAppController(uiapp.Options{
+		ConfigStore:     cfgStore,
+		ClipboardStore:  clipboard.NewMemoryStore(clipboard.NewPrivacyFilter()),
+		SecretStore:     secrets.NewMemoryAPIKeyStore(),
+		Bridge:          br,
+		ClipboardWriter: func(string) {},
+	})
+	defer ctrl.Close()
+	a := newDesktopApp()
+	a.mu.Lock()
+	a.ctx, a.cancel, a.controller, a.hostBridge = ctx, cancel, ctrl, br
+	a.mu.Unlock()
+	a.onboardingOpen.Store(true)
+	defer func(d time.Duration) { permissionWatchInterval = d }(permissionWatchInterval)
+	permissionWatchInterval = 30 * time.Millisecond
+
+	done := make(chan struct{})
+	go func() { a.watchPermissions(ctx); close(done) }()
+
+	time.Sleep(3 * permissionWatchInterval)
+	br.mu.Lock()
+	br.perms.ScreenRecording = true
+	br.perms.Granted = true
+	br.perms.Details = map[string]string{"screenRecording": "granted"}
+	br.mu.Unlock()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !ctrl.Diagnostics().Permissions.ScreenRecording {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !ctrl.Diagnostics().Permissions.ScreenRecording {
+		t.Fatal("watchPermissions did not refresh ScreenRecording change")
+	}
+	cancel()
+	<-done
+}
+
 // TestSavedLeaderKeyReachesTheBridge: a Leader key picked in Settings or the
 // guide is saved by Clavis itself, which the config watcher skips; the host
 // must hand it to the bridge at once, or it worked only after a restart.

@@ -38,6 +38,7 @@ type inputEngineUI struct {
 	// Two overlays for one keystroke is the conflict this guards against.
 	suppressed atomic.Bool
 	stopped    atomic.Bool
+	onShow     func()
 }
 
 var newCandidatePanelWindow = func(opts mygo.WindowOptions) *mygo.Window {
@@ -58,6 +59,17 @@ func (a *desktopApp) createInputEngineUI(br bridge.HostService, suggest suggestF
 	u := &inputEngineUI{host: h, controller: controller}
 	u.ai = newInputEngineAIDebouncer(br, inputengine.AIDebounce, suggest, h.SetInputEngineAICandidates)
 	w, hgt := uiapp.PreferredCandidatePanelSize(inputengine.View{})
+	var appearance config.AppearanceConfig
+	if controller != nil {
+		appearance = controller.Config().Main.Appearance
+	} else {
+		appearance = config.DefaultAppearanceConfig()
+	}
+	candSpec := uiapp.FloatingSurfaceSpecWithElevation(appearance, hgt, uiapp.SurfaceElevationPanel, mygo.VibrancyGlass, uiapp.DismissExplicit, uiapp.FocusNever)
+	a.mu.Lock()
+	a.candidateSpec = candSpec
+	a.mu.Unlock()
+	u.onShow = func() { a.raiseAbove(candSpec) }
 	u.panel = newCandidatePanelWindow(mygo.WindowOptions{
 		Title: "Clavis Input", Width: w, Height: hgt,
 		Panel: true, Hidden: true, Frameless: true, Transparent: true,
@@ -72,7 +84,7 @@ func (a *desktopApp) createInputEngineUI(br bridge.HostService, suggest suggestF
 		}),
 	})
 	if u.panel != nil {
-		u.panel.OnClose(a.closeHides(u.panel.Hide))
+		a.bindSurface(u.panel, candSpec, uiapp.SurfaceHooks{Dismiss: u.panel.Hide})
 	}
 	return u
 }
@@ -240,6 +252,9 @@ func (u *inputEngineUI) onView(ctx context.Context, v bridge.InputEngineView) {
 			bridge.Size{Width: float64(pw), Height: float64(ph)}, mygo.Screen.Displays())
 		u.panel.SetBounds(bounds)
 		u.panel.ShowInactive()
+		if u.onShow != nil {
+			u.onShow()
+		}
 		u.panel.Invalidate()
 	})
 }

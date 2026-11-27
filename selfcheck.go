@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/yeisme/clavis/internal/bridge"
 	"github.com/yeisme/clavis/internal/daemon"
+	"github.com/yeisme/clavis/internal/diag"
 	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/ime"
@@ -112,13 +114,22 @@ func runSelfCheck(w io.Writer) error {
 	fmt.Fprintf(w, "capabilities: ax=%v input=%v hotkeys=%v ime=%v window=%v\n",
 		caps.Accessibility, caps.InputMonitoring, caps.GlobalHotkeys, caps.IMEControl, caps.WindowManagement)
 	if perm, err := br.Permissions(ctx); err == nil {
-		fmt.Fprintf(w, "permissions: accessibility=%v input-monitoring=%v apple-events=%v granted=%v\n",
-			perm.Accessibility, perm.InputMonitoring, perm.AppleEvents, perm.Granted)
-		if !perm.Granted {
+		fmt.Fprintf(w, "permissions: accessibility=%v input-monitoring=%v screen-recording=%v apple-events=%v granted=%v\n",
+			perm.Accessibility, perm.InputMonitoring, perm.ScreenRecording, perm.AppleEvents, perm.Granted)
+		if !perm.Accessibility || !perm.InputMonitoring {
 			fmt.Fprintln(w, "permissions: NOT granted — grant Accessibility + Input Monitoring in System Settings")
+		}
+		if !perm.ScreenRecording {
+			fmt.Fprintln(w, "permissions: screen-recording not granted (Annotate/OCR affected)")
 		}
 	} else {
 		fmt.Fprintf(w, "permissions: query failed: %v\n", err)
+	}
+
+	logDir := diag.DefaultLogDir()
+	fmt.Fprintf(w, "logs dir: %s\n", logDir)
+	if crashPath, modAt, ok := diag.HasRecentCrash(logDir); ok {
+		fmt.Fprintf(w, "recent crash log: %s (updated %s)\n", crashPath, modAt.UTC().Format(time.RFC3339))
 	}
 
 	// --- operational state ---------------------------------------------------
@@ -130,16 +141,22 @@ func runSelfCheck(w io.Writer) error {
 		fmt.Fprintf(w, "keep-alive agent: installed=%v path=%q\n", bridge.LaunchAgentInstalled(), mustLaunchAgentPath())
 	}
 	keysPath := secrets.DefaultKeysPath(cfgDir)
+	probe := cfg.Main.AI.ActiveProfile()
+	envVar := strings.TrimSpace(probe.APIKeyEnvVar)
+	if envVar == "" {
+		envVar = secrets.DefaultEnvVar
+	}
+	src := secrets.NewFileStore(keysPath)
+	srcName, srcErr := src.ResolveAPIKeySourceWithEnv(probe.KeychainAccount, envVar)
 	if info, err := os.Stat(keysPath); err == nil {
-		src := secrets.NewFileStore(keysPath)
-		// Probe the profile the user actually configured, not the default one.
-		probe := cfg.Main.AI.ActiveProfile()
-		if srcName, srcErr := src.ResolveAPIKeySource(probe.KeychainAccount); srcErr == nil && srcName != secrets.KeySourceNone {
+		if srcErr == nil && srcName != secrets.KeySourceNone {
 			fmt.Fprintf(w, "ai key source: %s (%s, mode %04o, account %q)\n",
 				srcName, keysPath, info.Mode().Perm(), probe.KeychainAccount)
 		} else {
 			fmt.Fprintf(w, "ai key source: file present but no key for %q (%s)\n", probe.KeychainAccount, keysPath)
 		}
+	} else if srcErr == nil && srcName == secrets.KeySourceEnv {
+		fmt.Fprintf(w, "ai key source: env (%s)\n", envVar)
 	} else {
 		fmt.Fprintf(w, "ai key source: none (%s missing)\n", keysPath)
 	}

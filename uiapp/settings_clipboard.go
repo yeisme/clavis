@@ -51,7 +51,7 @@ func (a *AppController) updateClipboardSensitiveTTL(sec int) int {
 		st.lastConfigTTL = norm
 	})
 	if a != nil && a.ConfigStore != nil {
-		_ = a.UpdateMainConfig(func(m *config.MainConfig) {
+		_ = a.updateMainConfigField(nil, "clipboard", "sensitive_copy_ttl_seconds", i18n.T("settings.clipboard.manager.ttl_label"), func(m *config.MainConfig) {
 			m.Clipboard.SensitiveTTLSeconds = norm
 		})
 	}
@@ -221,6 +221,111 @@ func (a *AppController) renderClipboardKeyManagerCard(c *ui.Context, theme *ui.T
 		} else if statusMsg != "" {
 			kitStatusPill(c, theme, statusMsg, chipSuccess)
 		}
+	})
+
+	a.renderClipboardWorkbenchCard(c, theme, cfg)
+}
+
+func (a *AppController) renderClipboardWorkbenchCard(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
+	clip := cfg.Main.Clipboard
+	settingsSourceCard(c, theme, i18n.T("settings.clipboard.wb.card"), "[clipboard]", func() {
+		renderChoiceGroup := func(fieldKey, title, caption, current string, opts []settingOption, onPick func(string)) {
+			a.settingRowWithFeedback(c, theme, "clipboard", fieldKey, title, caption, "", func() ui.Element {
+				return ui.Row(c).Gap(space4).AlignItems(ui.Center).Shrink(0).Children(func() {
+					for _, opt := range opts {
+						o := opt
+						active := strings.EqualFold(current, o.value)
+						btn := ui.Button(c, o.label).Key("clip-wb:"+caption+":"+o.value).Padding(space2, space8)
+						if active {
+							btn.Border(space1, selectionEdge(theme)).Background(selectionFill(theme))
+						}
+						if btn.Clicked() {
+							onPick(o.value)
+						}
+					}
+				})
+			})
+		}
+
+		renderChoiceGroup(
+			"enter_action",
+			i18n.T("settings.clipboard.wb.enter_action"),
+			"clipboard.enter_action",
+			config.NormalizeClipboardEnterAction(clip.EnterAction),
+			[]settingOption{
+				{value: "paste", label: i18n.T("settings.clipboard.wb.enter_paste")},
+				{value: "copy", label: i18n.T("settings.clipboard.wb.enter_copy")},
+			},
+			func(v string) {
+				_ = a.updateMainConfigField(c, "clipboard", "enter_action", i18n.T("settings.clipboard.wb.enter_action"), func(m *config.MainConfig) { m.Clipboard.EnterAction = v })
+			},
+		)
+		renderChoiceGroup(
+			"row_density",
+			i18n.T("settings.clipboard.wb.row_density"),
+			"clipboard.row_density",
+			config.NormalizeClipboardRowDensity(clip.RowDensity),
+			[]settingOption{
+				{value: "compact", label: i18n.T("settings.clipboard.wb.density_compact")},
+				{value: "comfortable", label: i18n.T("settings.clipboard.wb.density_comfortable")},
+			},
+			func(v string) {
+				_ = a.updateMainConfigField(c, "clipboard", "row_density", i18n.T("settings.clipboard.wb.row_density"), func(m *config.MainConfig) { m.Clipboard.RowDensity = v })
+			},
+		)
+		renderChoiceGroup(
+			"pin_placement",
+			i18n.T("settings.clipboard.wb.pin_placement"),
+			"clipboard.pin_placement",
+			config.NormalizeClipboardPinPlacement(clip.PinPlacement),
+			[]settingOption{
+				{value: "top", label: i18n.T("settings.clipboard.wb.pin_top")},
+				{value: "bottom", label: i18n.T("settings.clipboard.wb.pin_bottom")},
+				{value: "inline", label: i18n.T("settings.clipboard.wb.pin_inline")},
+			},
+			func(v string) {
+				_ = a.updateMainConfigField(c, "clipboard", "pin_placement", i18n.T("settings.clipboard.wb.pin_placement"), func(m *config.MainConfig) { m.Clipboard.PinPlacement = v })
+			},
+		)
+		renderChoiceGroup(
+			"selection_style",
+			i18n.T("settings.clipboard.wb.selection_style"),
+			"clipboard.selection_style",
+			config.NormalizeClipboardSelectionStyle(clip.SelectionStyle),
+			[]settingOption{
+				{value: "accent_bar", label: i18n.T("settings.clipboard.wb.style_accent_bar")},
+				{value: "maccy_solid", label: i18n.T("settings.clipboard.wb.style_maccy_solid")},
+			},
+			func(v string) {
+				_ = a.updateMainConfigField(c, "clipboard", "selection_style", i18n.T("settings.clipboard.wb.selection_style"), func(m *config.MainConfig) { m.Clipboard.SelectionStyle = v })
+			},
+		)
+
+		settingsCardDivider(c, theme)
+		ui.Text(c, i18n.T("settings.clipboard.wb.excluded_apps")).FontSize(typeLabel).FontWeight(600).TextColor(theme.Text).SingleLine()
+		if len(clip.ExcludedBundleIDs) == 0 {
+			ui.Text(c, i18n.T("settings.clipboard.wb.excluded_empty")).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+			return
+		}
+		ui.Row(c).FillWidth().Wrap().Gap(space6).AlignItems(ui.Center).Children(func() {
+			for _, bid := range clip.ExcludedBundleIDs {
+				id := bid
+				ui.Row(c).Gap(space4).Padding(space2, space6).Radius(radiusPill).Background(tileFill(theme)).Border(space1, hairline(theme)).AlignItems(ui.Center).Children(func() {
+					ui.Text(c, id).Font("monospace").FontSize(typeMicro).TextColor(theme.Text).SingleLine()
+					if ui.Button(c, i18n.T("settings.clipboard.wb.excluded_remove")).Key("clip-exclude-del:"+id).Padding(space1, space4).Clicked() {
+						_ = a.UpdateMainConfig(func(m *config.MainConfig) {
+							filtered := make([]string, 0, len(m.Clipboard.ExcludedBundleIDs))
+							for _, cur := range m.Clipboard.ExcludedBundleIDs {
+								if cur != id {
+									filtered = append(filtered, cur)
+								}
+							}
+							m.Clipboard.ExcludedBundleIDs = filtered
+						})
+					}
+				})
+			}
+		})
 	})
 }
 

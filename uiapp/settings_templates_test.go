@@ -11,7 +11,6 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/config"
-	"github.com/yeisme/clavis/pkg/core/engine"
 	"github.com/yeisme/clavis/pkg/core/i18n"
 	"github.com/yeisme/clavis/pkg/core/template"
 )
@@ -172,8 +171,8 @@ func TestSettingsTemplatesLocalPromptsCRUDAndRoundTrip(t *testing.T) {
 
 	// Navigate to Templates & Prompts from the Settings rail.
 	openSettingsSection(t, tt, i18n.T("settings.section.templates"))
-	if got := settingsSectionIndex(ctrl); got != settingsSectionTemplates {
-		t.Fatalf("selected section = %d, want settingsSectionTemplates (%d)", got, settingsSectionTemplates)
+	if got := settingsPageKey(ctrl); got != "templates" {
+		t.Fatalf("selected page = %q, want %q", got, "templates")
 	}
 	if !tt.HasText(i18n.T("settings.templates.defaults.card")) {
 		t.Fatalf("missing optimizer defaults card, got %v", tt.Texts())
@@ -288,7 +287,7 @@ func TestSettingsTemplatesCatalogScanImportOverlayAndComposerLaunch(t *testing.T
 	catalogDir := buildTestCatalogDir(t)
 	ctrl, _, _, _ := newTestController(t, nil)
 	ctrl.SetTemplateLibraryDir(filepath.Join(t.TempDir(), "templates"))
-	ctrl.SetSettingsSectionForTest(settingsSectionTemplates)
+	ctrl.setSettingsPage("templates")
 
 	tt := ui.NewTester(ctrl.SettingsView, 1180, 1600)
 	tt.Frame()
@@ -392,44 +391,27 @@ func TestSettingsTemplatesCatalogScanImportOverlayAndComposerLaunch(t *testing.T
 	}
 }
 
-func TestAssetsHubPinnedTemplatesActionsAndSubstateIsolation(t *testing.T) {
+func TestTemplatesAndPromptContractSubstateIsolation(t *testing.T) {
 	prevLang := i18n.Current()
 	defer i18n.SetLanguage(prevLang)
 	i18n.SetLanguage(i18n.English)
 
 	ctrl, _, _, _ := newTestController(t, nil)
-	openedSettings := 0
 	openedComposer := 0
-	ctrl.OnOpenSettings = func(SettingsTab) { openedSettings++ }
 	ctrl.OnOpenPromptComposer = func() { openedComposer++ }
 
-	ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions})
-	ctrl.ToggleHubSurface(HubSurfaceAssets)
-	ctrl.setAssetsSubTab(assetsSubPinned)
-
-	w, h := PreferredCapsuleSize(engine.PhaseOmnibox, ctrl.Config().Main.Appearance)
-	tt := ui.NewTester(ctrl.CapsuleView, w, h+240)
+	ctrl.OpenSettingsPage("templates")
+	tt := ui.NewTester(ctrl.SettingsView, 920, 620)
 	tt.Frame()
 
-	// Clicking "Manage Templates" jumps straight to Settings -> Templates.
-	if err := tt.Click(i18n.T("assets.templates.manage")); err != nil {
-		t.Fatalf("click Manage Templates in Assets Hub: %v (texts=%v)", err, tt.Texts())
+	// Open PromptComposer from the first prompt template.
+	prompts := ctrl.Config().Prompts.Items
+	if len(prompts) == 0 {
+		t.Fatal("expected default prompt templates")
 	}
-	tt.Frame()
-	if openedSettings != 1 || settingsSectionIndex(ctrl) != settingsSectionTemplates {
-		t.Fatalf("Manage Templates did not open Settings -> Templates (opened=%d section=%d)", openedSettings, settingsSectionIndex(ctrl))
-	}
-
-	// Re-open Assets Hub Pinned tab and click "Compose" on the first prompt template.
-	ctrl.ToggleHubSurface(HubSurfaceAssets)
-	ctrl.setAssetsSubTab(assetsSubPinned)
-	tt.Frame()
-	if err := tt.Click(i18n.T("assets.templates.compose")); err != nil {
-		t.Fatalf("click Compose in Assets Hub: %v (texts=%v)", err, tt.Texts())
-	}
-	tt.Frame()
+	ctrl.OpenPromptComposer(prompts[0], ctrl.State().Context)
 	if openedComposer != 1 || !ctrl.PromptComposerOpen() {
-		t.Fatalf("Compose button did not open PromptComposer (opened=%d open=%v)", openedComposer, ctrl.PromptComposerOpen())
+		t.Fatalf("OpenPromptComposer did not open PromptComposer (opened=%d open=%v)", openedComposer, ctrl.PromptComposerOpen())
 	}
 
 	// Zero-value controller isolation for templatesUI and promptContract substates.
@@ -446,9 +428,4 @@ func TestAssetsHubPinnedTemplatesActionsAndSubstateIsolation(t *testing.T) {
 	if b.PromptComposerContractActive() {
 		t.Fatal("promptContract substate leaked between controllers")
 	}
-}
-
-// SetSettingsSectionForTest is a small test helper in package uiapp.
-func (a *AppController) SetSettingsSectionForTest(section int) {
-	a.setSettingsSection(section)
 }

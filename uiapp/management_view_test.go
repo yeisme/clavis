@@ -28,18 +28,18 @@ func TestManagementHubSettingsButtonsOpenExactTargetSections(t *testing.T) {
 	cases := []struct {
 		name        string
 		buttonLabel string
-		wantSection int
+		wantPage    string
 	}{
-		{"Sync Details -> About", "Sync Details", settingsSectionAbout},
-		{"Policy -> Clipboard", "Policy", settingsSectionClipboard},
-		{"Glossary -> Glossary", "Glossary", settingsSectionGlossary},
-		{"Security -> Security", "Security", settingsSectionSecurity},
+		{"Sync Details -> About", "Sync Details", "about"},
+		{"Policy -> Clipboard", "Policy", "clipboard"},
+		{"Glossary -> Glossary", "Glossary", "glossary"},
+		{"Security -> Security", "Security", "security"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Start on General (0) so we prove the button actually navigates away from 0.
-			ctrl.setSettingsSection(settingsSectionGeneral)
+			// Start on triggers so we prove the button actually navigates away from triggers.
+			ctrl.setSettingsPage("triggers")
 			ctrl.SetHubSurface(HubSurfaceManage)
 			beforeCalls := openCalls
 			tt.Frame()
@@ -65,8 +65,8 @@ func TestManagementHubSettingsButtonsOpenExactTargetSections(t *testing.T) {
 			if openCalls != beforeCalls+1 {
 				t.Fatalf("clicking %q invoked OnOpenSettings %d times, want +1", tc.buttonLabel, openCalls-beforeCalls)
 			}
-			if got := settingsSectionIndex(ctrl); got != tc.wantSection {
-				t.Fatalf("clicking %q opened settings section %d, want %d", tc.buttonLabel, got, tc.wantSection)
+			if got := settingsPageKey(ctrl); got != tc.wantPage {
+				t.Fatalf("clicking %q opened settings page %q, want %q", tc.buttonLabel, got, tc.wantPage)
 			}
 		})
 	}

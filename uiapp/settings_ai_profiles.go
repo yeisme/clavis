@@ -240,7 +240,7 @@ func (a *AppController) renderSettingsAIProfilesSection(
 			for _, prof := range profiles {
 				p := prof
 				active := strings.EqualFold(p.ID, activeProfile.ID)
-				pill := ui.ButtonBase(c).Key("settings-ai-prof:"+p.ID).Height(space24 + space4).
+				pill := ui.ButtonBase(c).Key("settings-ai-prof:"+p.ID).Height(space24+space4).
 					Padding(space2, space12).Radius(radiusChip).FocusRing(false)
 				if active {
 					pill.Background(theme.Accent)
@@ -312,8 +312,9 @@ func (a *AppController) renderSettingsAIProfilesSection(
 			cont := cfg.Main.AI.ContinueEnabled
 			ui.Text(c, continueLabel).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
 			if sw := ui.Switch(c, &cont); sw.Changed() {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.AI.ContinueEnabled = cont })
+				_ = a.updateMainConfigField(c, "ai", "continue_enabled", continueLabel, func(m *config.MainConfig) { m.AI.ContinueEnabled = cont })
 			}
+			renderFieldSavedBadge(c, theme, a.settingsEditor(), settingsFieldID("ai", "continue_enabled"))
 		})
 	})
 
@@ -642,11 +643,26 @@ func (a *AppController) renderAIProfileConfigCard(
 		})
 
 		ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
-			if ui.Button(c, pickLang(zh, "复制当前配置", "Duplicate")).Key("ai-duplicate:"+active.ID).Clicked() {
+			se := a.settingsEditor()
+			confirmDeleteID := seGet(se, func(s *settingsEditorState) string { return s.aiProfileConfirmDelete })
+			if confirmDeleteID == active.ID {
+				kitDeleteConfirmRow(c, theme, "ai-profile-delete-confirm",
+					settingsConfirmPromptForFile(active.ID, config.FileMain),
+					i18n.T("settings.delete.confirm_action"),
+					i18n.T("settings.delete.cancel"),
+					func() { seSet(se, func(s *settingsEditorState) { s.aiProfileConfirmDelete = "" }) },
+					func() {
+						seSet(se, func(s *settingsEditorState) { s.aiProfileConfirmDelete = "" })
+						a.deleteAIProfile(active.ID)
+					},
+				)
+				return
+			}
+			if ui.Button(c, pickLang(zh, "复制当前配置", "Duplicate")).Key("ai-duplicate:" + active.ID).Clicked() {
 				a.duplicateAIProfile(active)
 			}
 			if ui.Button(c, i18n.T("settings.ai.delete_profile")).Disabled(len(cfg.Main.AI.Profiles) <= 1).Clicked() {
-				a.deleteAIProfile(active.ID)
+				seSet(se, func(s *settingsEditorState) { s.aiProfileConfirmDelete = active.ID })
 			}
 			ui.Spacer(c)
 			settingsHint(c, theme, i18n.Tf("settings.ai.profile_count", len(cfg.Main.AI.Profiles)))

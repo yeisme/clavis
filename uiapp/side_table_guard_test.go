@@ -102,11 +102,6 @@ func TestSideTableGuardZeroValueIsolation(t *testing.T) {
 		t.Fatalf("hub surfaces leaked: a=%q b=%q", a.ActiveHubSurface(), b.ActiveHubSurface())
 	}
 
-	a.setAssetsSubTab(assetsSubVault)
-	if b.assetsSubTab() != assetsSubMedia {
-		t.Fatalf("assets sub-tab leaked into b: got %v", b.assetsSubTab())
-	}
-
 	a.setAIProfilePreviewTarget("prof-a")
 	if id, _ := b.aiProfilePreviewTarget(); id != "" {
 		t.Fatalf("aiProfilePreviewTarget leaked into b: %q", id)

@@ -153,7 +153,7 @@ func (a *AppController) RefreshTemplateCatalog(catalogDir string) []template.Dia
 		st.libraryError = msg
 		st.libraryStatus = ""
 		st.mu.Unlock()
-		a.setSettingsStatus(msg)
+		a.setPageNotice("templates", msg, chipWarning)
 		return nil
 	}
 
@@ -164,7 +164,7 @@ func (a *AppController) RefreshTemplateCatalog(catalogDir string) []template.Dia
 		st.libraryError = msg
 		st.libraryStatus = ""
 		st.mu.Unlock()
-		a.setSettingsStatus(msg)
+		a.setPageNotice("templates", msg, chipWarning)
 		return nil
 	}
 	defer lib.Close()
@@ -201,14 +201,13 @@ func (a *AppController) RefreshTemplateCatalog(catalogDir string) []template.Dia
 	st.mu.Unlock()
 
 	if errMsg != "" {
-		a.setSettingsStatus(errMsg)
+		a.setPageNotice("templates", errMsg, chipWarning)
 	} else if status != "" {
-		a.setSettingsStatus(status)
+		a.setPageNotice("templates", status, chipSuccess)
 	}
 	return allDiags
 }
 
-// ReloadTemplateLibrary reloads the stored snapshot, imported CAS items, and diagnostics
 // without modifying the catalog snapshot on disk.
 func (a *AppController) ReloadTemplateLibrary() []template.Diagnostic {
 	st := a.templatesUI()
@@ -251,7 +250,7 @@ func (a *AppController) ImportTemplateVariant(packageID, solutionID, role, local
 		st.mu.Lock()
 		st.libraryError = msg
 		st.mu.Unlock()
-		a.setSettingsStatus(msg)
+		a.setPageNotice("templates", msg, chipWarning)
 		return nil
 	}
 
@@ -261,7 +260,7 @@ func (a *AppController) ImportTemplateVariant(packageID, solutionID, role, local
 		st.mu.Lock()
 		st.libraryError = msg
 		st.mu.Unlock()
-		a.setSettingsStatus(msg)
+		a.setPageNotice("templates", msg, chipWarning)
 		return nil
 	}
 	defer lib.Close()
@@ -293,9 +292,9 @@ func (a *AppController) ImportTemplateVariant(packageID, solutionID, role, local
 	st.mu.Unlock()
 
 	if errMsg != "" {
-		a.setSettingsStatus(errMsg)
+		a.setPageNotice("templates", errMsg, chipWarning)
 	} else if status != "" {
-		a.setSettingsStatus(status)
+		a.setPageNotice("templates", status, chipSuccess)
 	}
 	return allDiags
 }
@@ -309,7 +308,7 @@ func (a *AppController) RemoveTemplateImport(solutionID, role, locale string) []
 		st.mu.Lock()
 		st.libraryError = msg
 		st.mu.Unlock()
-		a.setSettingsStatus(msg)
+		a.setPageNotice("templates", msg, chipWarning)
 		return nil
 	}
 	defer lib.Close()
@@ -338,9 +337,9 @@ func (a *AppController) RemoveTemplateImport(solutionID, role, locale string) []
 	st.mu.Unlock()
 
 	if errMsg != "" {
-		a.setSettingsStatus(errMsg)
+		a.setPageNotice("templates", errMsg, chipWarning)
 	} else if status != "" {
-		a.setSettingsStatus(status)
+		a.setPageNotice("templates", status, chipSuccess)
 	}
 	return allDiags
 }
@@ -381,9 +380,9 @@ func (a *AppController) SaveTemplateOverlay(solutionID, role, locale, tomlBody s
 	st.mu.Unlock()
 
 	if errMsg != "" {
-		a.setSettingsStatus(errMsg)
+		a.setPageNotice("templates", errMsg, chipWarning)
 	} else if status != "" {
-		a.setSettingsStatus(status)
+		a.setPageNotice("templates", status, chipSuccess)
 	}
 	return saveDiags
 }
@@ -423,7 +422,7 @@ func (a *AppController) ResetTemplateOverlay(solutionID, role, locale string) []
 	st.mu.Unlock()
 
 	if status != "" {
-		a.setSettingsStatus(status)
+		a.setPageNotice("templates", status, chipSuccess)
 	}
 	return delDiags
 }
@@ -620,17 +619,25 @@ func (a *AppController) renderLocalPromptsTab(c *ui.Context, theme *ui.Theme, cf
 			}
 			ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 				if ui.PrimaryButton(c, i18n.T("settings.templates.local.new")).Key("local-prompt-new").Clicked() {
-					st.mu.Lock()
-					st.promptIsNew = true
-					st.promptSelectedID = ""
-					st.promptOriginalID = ""
-					st.promptLoaded = true
-					st.promptError = ""
-					st.promptDraft = config.PromptTemplate{
-						Category:        "general",
-						OptimizerPreset: cfg.Prompts.DefaultOptimizerPreset,
+					if a.templatesPageDirty(cfg) {
+						seSet(a.settingsEditor(), func(s *settingsEditorState) {
+							s.promptPendingSwitch = true
+							s.promptPendingNew = true
+							s.promptPendingID = ""
+						})
+					} else {
+						st.mu.Lock()
+						st.promptIsNew = true
+						st.promptSelectedID = ""
+						st.promptOriginalID = ""
+						st.promptLoaded = true
+						st.promptError = ""
+						st.promptDraft = config.PromptTemplate{
+							Category:        "general",
+							OptimizerPreset: cfg.Prompts.DefaultOptimizerPreset,
+						}
+						st.mu.Unlock()
 					}
-					st.mu.Unlock()
 				}
 				settingsHint(c, theme, i18n.T("settings.templates.local.select_hint"))
 			})
@@ -659,14 +666,25 @@ func (a *AppController) renderLocalPromptsTab(c *ui.Context, theme *ui.Theme, cf
 					ui.Text(c, i18n.Tf("settings.templates.prompt.slots_count", slotCount)).FontSize(typeMicro).TextColor(theme.TextMuted).SingleLine().Shrink(0)
 				})
 				if row.Clicked() {
-					st.mu.Lock()
-					st.promptIsNew = false
-					st.promptSelectedID = item.ID
-					st.promptOriginalID = item.ID
-					st.promptDraft = clonePromptTemplate(item)
-					st.promptLoaded = true
-					st.promptError = ""
-					st.mu.Unlock()
+					if isNew || item.ID != selectedID {
+						if a.templatesPageDirty(cfg) {
+							targetID := item.ID
+							seSet(a.settingsEditor(), func(s *settingsEditorState) {
+								s.promptPendingSwitch = true
+								s.promptPendingNew = false
+								s.promptPendingID = targetID
+							})
+						} else {
+							st.mu.Lock()
+							st.promptIsNew = false
+							st.promptSelectedID = item.ID
+							st.promptOriginalID = item.ID
+							st.promptDraft = clonePromptTemplate(item)
+							st.promptLoaded = true
+							st.promptError = ""
+							st.mu.Unlock()
+						}
+					}
 				}
 			}
 			if matches == 0 {
@@ -675,7 +693,8 @@ func (a *AppController) renderLocalPromptsTab(c *ui.Context, theme *ui.Theme, cf
 		})
 
 		// Right card: Detail editor + {{slot}} live preview.
-		settingsEditorCard(c, theme, i18n.T("settings.templates.local.editor_title"), func() {
+		dirty := a.templatesPageDirty(cfg)
+		settingsEditorCardWithDirty(c, theme, i18n.T("settings.templates.local.editor_title"), dirty, "prompt-editor-dirty-dot", func() {
 			st.mu.Lock()
 			draft := clonePromptTemplate(st.promptDraft)
 			draftIsNew := st.promptIsNew
@@ -686,6 +705,55 @@ func (a *AppController) renderLocalPromptsTab(c *ui.Context, theme *ui.Theme, cf
 			if !hasDraft {
 				settingsHint(c, theme, i18n.T("settings.templates.local.select_hint"))
 				return
+			}
+
+			se := a.settingsEditor()
+			se.mu.Lock()
+			pendingSwitch := se.promptPendingSwitch
+			pendingNew := se.promptPendingNew
+			pendingID := se.promptPendingID
+			se.mu.Unlock()
+			if pendingSwitch {
+				name := editorEntityName(draft.Title, nonEmptyOr(draft.ID, i18n.T("settings.templates.local.new")))
+				applyPending := func() {
+					seSet(se, func(s *settingsEditorState) { s.promptPendingSwitch = false })
+					if pendingNew {
+						st.mu.Lock()
+						st.promptIsNew = true
+						st.promptSelectedID = ""
+						st.promptOriginalID = ""
+						st.promptLoaded = true
+						st.promptError = ""
+						st.promptDraft = config.PromptTemplate{
+							Category:        "general",
+							OptimizerPreset: cfg.Prompts.DefaultOptimizerPreset,
+						}
+						st.mu.Unlock()
+						return
+					}
+					for _, item := range items {
+						if item.ID == pendingID {
+							st.mu.Lock()
+							st.promptIsNew = false
+							st.promptSelectedID = item.ID
+							st.promptOriginalID = item.ID
+							st.promptDraft = clonePromptTemplate(item)
+							st.promptLoaded = true
+							st.promptError = ""
+							st.mu.Unlock()
+							return
+						}
+					}
+				}
+				kitUnsavedSwitchBanner(c, theme, "prompt-unsaved-switch", name,
+					func() {
+						if a.saveLocalPromptDraftWithFeedback(c) {
+							applyPending()
+						}
+					},
+					applyPending,
+					func() { seSet(se, func(s *settingsEditorState) { s.promptPendingSwitch = false }) },
+				)
 			}
 
 			settingsInlineRow(c, theme, i18n.T("settings.field.id"), settingsFieldLabelWidth, func() {
@@ -823,8 +891,8 @@ func (a *AppController) renderLocalPromptsTab(c *ui.Context, theme *ui.Theme, cf
 			}
 
 			ui.Row(c).FillWidth().Wrap().Gap(space8).AlignItems(ui.Center).Children(func() {
-				if ui.PrimaryButton(c, i18n.T("settings.templates.prompt.save")).Key("local-prompt-save").Clicked() {
-					a.saveLocalPromptDraft()
+				if ui.PrimaryButton(c, i18n.T("settings.templates.prompt.save")).Key("local-prompt-save").Disabled(!dirty).Clicked() {
+					_ = a.saveLocalPromptDraftWithFeedback(c)
 				}
 				if ui.Button(c, i18n.T("settings.templates.prompt.open_composer")).Key("local-prompt-compose").Disabled(strings.TrimSpace(draft.Template) == "").Clicked() {
 					a.OpenPromptComposer(draft, engine.CapsuleContext{})
@@ -832,12 +900,17 @@ func (a *AppController) renderLocalPromptsTab(c *ui.Context, theme *ui.Theme, cf
 				if ui.Button(c, i18n.T("settings.templates.prompt.delete")).Key("local-prompt-delete").Disabled(draftIsNew).Clicked() {
 					a.deleteLocalPromptDraft()
 				}
+				renderFieldSavedBadge(c, theme, se, settingsFieldID("templates", "save"))
 			})
 		})
 	})
 }
 
 func (a *AppController) saveLocalPromptDraft() {
+	_ = a.saveLocalPromptDraftWithFeedback(nil)
+}
+
+func (a *AppController) saveLocalPromptDraftWithFeedback(c *ui.Context) bool {
 	st := a.templatesUI()
 	st.mu.Lock()
 	draft := clonePromptTemplate(st.promptDraft)
@@ -856,7 +929,7 @@ func (a *AppController) saveLocalPromptDraft() {
 		st.mu.Lock()
 		st.promptError = msg
 		st.mu.Unlock()
-		return
+		return false
 	}
 
 	// Recompute declared slots from placeholders while preserving existing slot metadata.
@@ -880,7 +953,7 @@ func (a *AppController) saveLocalPromptDraft() {
 			st.mu.Lock()
 			st.promptError = msg
 			st.mu.Unlock()
-			return
+			return false
 		}
 		nextItems = append(nextItems, existing)
 	}
@@ -892,7 +965,7 @@ func (a *AppController) saveLocalPromptDraft() {
 		st.mu.Lock()
 		st.promptError = err.Error()
 		st.mu.Unlock()
-		return
+		return false
 	}
 
 	st.mu.Lock()
@@ -903,6 +976,8 @@ func (a *AppController) saveLocalPromptDraft() {
 	st.promptLoaded = true
 	st.promptError = ""
 	st.mu.Unlock()
+	a.markFieldSaved(c, settingsFieldID("templates", "save"))
+	return true
 }
 
 func (a *AppController) deleteLocalPromptDraft() {

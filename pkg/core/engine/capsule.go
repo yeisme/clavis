@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -51,13 +52,16 @@ type ClipboardEntryActions struct {
 // It is the complete entry mapping contract: identity, pin state, media type,
 // preview data, and available actions are all explicit.
 type OmniboxClipboardEntry struct {
-	ID            string `json:"id"`
-	Content       string `json:"content"`
-	SourceAppName string `json:"sourceAppName,omitempty"`
-	IsPinned      bool   `json:"isPinned"`
+	ID             string `json:"id"`
+	Content        string `json:"content"`
+	SourceBundleID string `json:"sourceBundleId,omitempty"`
+	SourceAppName  string `json:"sourceAppName,omitempty"`
+	IsPinned       bool   `json:"isPinned"`
 	// CopiedAt is when the entry was last copied (a re-copy moves it up and
 	// refreshes it); the UI shows it as a relative time. Zero when unknown.
-	CopiedAt time.Time `json:"copiedAt,omitzero"`
+	CopiedAt      time.Time `json:"copiedAt,omitzero"`
+	FirstCopiedAt time.Time `json:"firstCopiedAt,omitzero"`
+	CopyCount     int       `json:"copyCount,omitempty"`
 	// Media is set for image/file/video entries (empty Kind = text).
 	Media   ClipboardMedia        `json:"media,omitzero"`
 	Preview ClipboardEntryPreview `json:"preview,omitzero"`
@@ -113,6 +117,7 @@ const (
 	ItemWorkflow       OmniboxItemKind = "workflow"
 	ItemPortProcess    OmniboxItemKind = "port_process"
 	ItemQuickJump      OmniboxItemKind = "quick_jump"
+	ItemFile           OmniboxItemKind = "file"
 )
 
 type PortEntry struct {
@@ -168,11 +173,15 @@ type OmniboxItem struct {
 	PortPID          int                    `json:"portPid,omitempty"`
 	PortProcess      string                 `json:"portProcess,omitempty"`
 	QuickJump        *QuickJumpTarget       `json:"quickJump,omitempty"`
+	File             *FileMatch             `json:"file,omitempty"`
 	// ClipboardSourceApp and ClipboardCopiedAt feed the clipboard row's
 	// "source · time" line; Subtitle keeps its "Clipboard" fallback for
 	// screen readers and other consumers.
-	ClipboardSourceApp string    `json:"clipboardSourceApp,omitempty"`
-	ClipboardCopiedAt  time.Time `json:"clipboardCopiedAt,omitzero"`
+	ClipboardSourceBundleID string    `json:"clipboardSourceBundleId,omitempty"`
+	ClipboardSourceApp      string    `json:"clipboardSourceApp,omitempty"`
+	ClipboardCopiedAt       time.Time `json:"clipboardCopiedAt,omitzero"`
+	ClipboardFirstCopiedAt  time.Time `json:"clipboardFirstCopiedAt,omitzero"`
+	ClipboardCopyCount      int       `json:"clipboardCopyCount,omitempty"`
 }
 
 // CapsulePhase identifies the current Capsule UI phase.
@@ -215,6 +224,8 @@ type State struct {
 	FrecencyScores          map[string]int          `json:"frecencyScores,omitempty"`
 	ListeningPorts          []PortEntry             `json:"listeningPorts,omitempty"`
 	QuickJumpTargets        []QuickJumpTarget       `json:"quickJumpTargets,omitempty"`
+	FileSearchQuery         string                  `json:"fileSearchQuery,omitempty"`
+	FileSearchMatches       []FileMatch             `json:"fileSearchMatches,omitempty"`
 }
 
 // NewInitialState returns a hidden initial State.
@@ -236,6 +247,7 @@ const (
 	EventSetFrecencyScores         EventType = "set_frecency_scores"
 	EventSetListeningPorts         EventType = "set_listening_ports"
 	EventSetQuickJumpTargets       EventType = "set_quick_jump_targets"
+	EventSetFileSearchResults      EventType = "set_file_search_results"
 	EventLeaderKeyPress            EventType = "leader_key_press"
 	EventUpdateQuery               EventType = "update_query"
 	EventClearQuery                EventType = "clear_query"
@@ -288,6 +300,7 @@ type Event struct {
 	FrecencyScores   map[string]int          `json:"frecencyScores,omitempty"`
 	ListeningPorts   []PortEntry             `json:"listeningPorts,omitempty"`
 	QuickJumpTargets []QuickJumpTarget       `json:"quickJumpTargets,omitempty"`
+	FileMatches      []FileMatch             `json:"fileMatches,omitempty"`
 }
 
 // EffectType identifies a side effect emitted by Reduce.
@@ -298,24 +311,27 @@ const (
 	// EffectActivateClipboardItem is retained for compatibility with older
 	// integrations. Clipboard activation is now a pure paste operation and
 	// never changes pin state.
-	EffectActivateClipboardItem EffectType = "activate_clipboard_item"
-	EffectClose                 EffectType = "close"
-	EffectRunAction             EffectType = "run_action"
-	EffectRunWorkflow           EffectType = "run_workflow"
-	EffectStartAI               EffectType = "start_ai"
-	EffectCancelAI              EffectType = "cancel_ai"
-	EffectStopAll               EffectType = "stop_all"
-	EffectApplyAIOutput         EffectType = "apply_ai_output"
-	EffectCopyText              EffectType = "copy_text"
-	EffectPasteClipboardItem    EffectType = "paste_clipboard_item"
-	EffectPinClipboardItem      EffectType = "pin_clipboard_item"
-	EffectDeleteClipboard       EffectType = "delete_clipboard_item"
-	EffectBindAppIMERule        EffectType = "bind_app_ime_rule"
-	EffectOpenPromptComposer    EffectType = "open_prompt_composer"
-	EffectRevealPath            EffectType = "reveal_path"
-	EffectOpenPath              EffectType = "open_path"
-	EffectOpenExternal          EffectType = "open_external"
-	EffectFocusHerdrTarget      EffectType = "focus_herdr_target"
+	EffectActivateClipboardItem  EffectType = "activate_clipboard_item"
+	EffectClose                  EffectType = "close"
+	EffectRunAction              EffectType = "run_action"
+	EffectRunWorkflow            EffectType = "run_workflow"
+	EffectStartAI                EffectType = "start_ai"
+	EffectCancelAI               EffectType = "cancel_ai"
+	EffectStopAll                EffectType = "stop_all"
+	EffectApplyAIOutput          EffectType = "apply_ai_output"
+	EffectCopyText               EffectType = "copy_text"
+	EffectPasteClipboardItem     EffectType = "paste_clipboard_item"
+	EffectPinClipboardItem       EffectType = "pin_clipboard_item"
+	EffectDeleteClipboard        EffectType = "delete_clipboard_item"
+	EffectBindAppIMERule         EffectType = "bind_app_ime_rule"
+	EffectOpenPromptComposer     EffectType = "open_prompt_composer"
+	EffectRevealPath             EffectType = "reveal_path"
+	EffectOpenPath               EffectType = "open_path"
+	EffectOpenExternal           EffectType = "open_external"
+	EffectFocusHerdrTarget       EffectType = "focus_herdr_target"
+	EffectOpenInTerminal         EffectType = "open_in_terminal"
+	EffectBlockClipboardApp      EffectType = "block_clipboard_app"
+	EffectSaveClipboardAsSnippet EffectType = "save_clipboard_as_snippet"
 )
 
 // Effect describes a side effect that the host/coordinator should perform.
@@ -336,6 +352,9 @@ type Effect struct {
 	ClipboardContent    string                 `json:"clipboardContent,omitempty"`
 	ClipboardMedia      *ClipboardMedia        `json:"clipboardMedia,omitempty"`
 	IsPinned            bool                   `json:"isPinned,omitempty"`
+	PlainText           bool                   `json:"plainText,omitempty"`
+	KeepOpen            bool                   `json:"keepOpen,omitempty"`
+	BundleID            string                 `json:"bundleId,omitempty"`
 	IMEMode             config.IMEMode         `json:"imeMode,omitempty"`
 	PromptTemplate      *config.PromptTemplate `json:"promptTemplate,omitempty"`
 	OptimizerPreset     string                 `json:"optimizerPreset,omitempty"`
@@ -519,7 +538,7 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		next.ClipboardSearchQuery = trimmedQuery
 		next.ClipboardSearchEntries = entries
 
-		items := makeClipboardOmniboxItems(entries)
+		items := SortClipboardOmniboxItems(makeClipboardOmniboxItems(entries), cfg.Main.Clipboard.PinPlacement)
 		next.OmniboxItems = items
 		next.SelectedIndex = preserveClipboardSelectionIndex(items, previousSelectedID, 0)
 		return next, nil
@@ -546,6 +565,27 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 		if next.Phase == PhaseOmnibox {
 			next.OmniboxItems = buildOmniboxItems(next.OmniboxTab, next.OmniboxQuery, next, cfg)
 		}
+		return next, nil
+
+	case EventSetFileSearchResults:
+		if next.Phase != PhaseOmnibox || next.OmniboxTab != config.TabActions {
+			return next, nil
+		}
+		trimmedQuery := strings.TrimSpace(event.Query)
+		if trimmedQuery == "" || strings.TrimSpace(next.OmniboxQuery) != trimmedQuery {
+			return next, nil
+		}
+		var previousSelectedID string
+		if next.SelectedIndex >= 0 && next.SelectedIndex < len(next.OmniboxItems) {
+			previousSelectedID = next.OmniboxItems[next.SelectedIndex].ID
+		}
+		matches := make([]FileMatch, len(event.FileMatches))
+		copy(matches, event.FileMatches)
+		next.FileSearchQuery = trimmedQuery
+		next.FileSearchMatches = matches
+		items := buildOmniboxItems(config.TabActions, next.OmniboxQuery, next, cfg)
+		next.OmniboxItems = items
+		next.SelectedIndex = preserveClipboardSelectionIndex(items, previousSelectedID, 0)
 		return next, nil
 
 	case EventSetInstalledApps:
@@ -608,12 +648,12 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 			if trimmed == "" {
 				next.ClipboardSearchQuery = ""
 				next.ClipboardSearchEntries = nil
-				next.OmniboxItems = makeClipboardOmniboxItems(next.ClipboardEntries)
+				next.OmniboxItems = SortClipboardOmniboxItems(makeClipboardOmniboxItems(next.ClipboardEntries), cfg.Main.Clipboard.PinPlacement)
 				next.SelectedIndex = 0
 				return next, nil
 			}
 			if next.ClipboardSearchQuery == trimmed {
-				next.OmniboxItems = makeClipboardOmniboxItems(next.ClipboardSearchEntries)
+				next.OmniboxItems = SortClipboardOmniboxItems(makeClipboardOmniboxItems(next.ClipboardSearchEntries), cfg.Main.Clipboard.PinPlacement)
 				next.SelectedIndex = 0
 				return next, nil
 			}
@@ -787,7 +827,7 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 			}
 		}
 		next.OmniboxItems = updatedItems
-		next.SelectedIndex = clamped
+		next.SelectedIndex = preserveClipboardSelectionIndex(updatedItems, selected.ID, clamped)
 		return next, []Effect{{
 			Type:        EffectPinClipboardItem,
 			ClipboardID: selected.ClipboardID,
@@ -830,7 +870,7 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 			}
 		}
 		next.OmniboxItems = updatedItems
-		next.SelectedIndex = clamped
+		next.SelectedIndex = preserveClipboardSelectionIndex(updatedItems, selected.ID, clamped)
 		return next, []Effect{{
 			Type:        EffectDeleteClipboard,
 			ClipboardID: selected.ClipboardID,
@@ -864,12 +904,12 @@ func Reduce(state State, event Event, cfg config.ClavisConfig) (State, []Effect)
 				if trimmed == "" {
 					next.ClipboardSearchQuery = ""
 					next.ClipboardSearchEntries = nil
-					next.OmniboxItems = makeClipboardOmniboxItems(next.ClipboardEntries)
+					next.OmniboxItems = SortClipboardOmniboxItems(makeClipboardOmniboxItems(next.ClipboardEntries), cfg.Main.Clipboard.PinPlacement)
 					next.SelectedIndex = 0
 					return next, nil
 				}
 				if next.ClipboardSearchQuery == trimmed {
-					next.OmniboxItems = makeClipboardOmniboxItems(next.ClipboardSearchEntries)
+					next.OmniboxItems = SortClipboardOmniboxItems(makeClipboardOmniboxItems(next.ClipboardSearchEntries), cfg.Main.Clipboard.PinPlacement)
 					next.SelectedIndex = 0
 					return next, nil
 				}
@@ -1181,19 +1221,40 @@ func modKey() string {
 }
 
 func AvailableItemActions(item OmniboxItem) []OmniboxActionSpec {
+	return AvailableItemActionsWithConfig(item, config.DefaultConfig())
+}
+
+// AvailableItemActionsWithConfig returns ordered contextual actions honoring clipboard EnterAction config.
+func AvailableItemActionsWithConfig(item OmniboxItem, cfg config.ClavisConfig) []OmniboxActionSpec {
 	switch item.Kind {
 	case ItemClipboardEntry:
 		pinLabel := i18n.T("engine.action.pin")
 		if item.KeyHint == KeyHintPinned {
 			pinLabel = i18n.T("engine.action.unpin")
 		}
-		specs := []OmniboxActionSpec{
-			{ID: "copy", Label: i18n.T("engine.action.copy_clipboard"), Shortcut: "↵"},
-			{ID: "paste", Label: i18n.T("engine.action.paste"), Shortcut: modKey() + "↵"},
-			{ID: "pin", Label: pinLabel, Shortcut: modKey() + "P"},
-			{ID: "delete", Label: i18n.T("engine.action.delete_history"), Shortcut: modKey() + "⌫"},
+		isMedia := item.ClipboardMedia != nil && item.ClipboardMedia.IsMedia()
+		enterCopy := config.NormalizeClipboardEnterAction(cfg.Main.Clipboard.EnterAction) == "copy"
+		var specs []OmniboxActionSpec
+		if enterCopy {
+			specs = append(specs,
+				OmniboxActionSpec{ID: "copy", Label: i18n.T("engine.action.copy_clipboard"), Shortcut: "↵"},
+				OmniboxActionSpec{ID: "paste", Label: i18n.T("engine.action.paste"), Shortcut: modKey() + "↵"},
+			)
+		} else {
+			specs = append(specs,
+				OmniboxActionSpec{ID: "paste", Label: i18n.T("engine.action.paste"), Shortcut: "↵"},
+				OmniboxActionSpec{ID: "paste_keep_open", Label: i18n.T("engine.action.paste_keep_open"), Shortcut: modKey() + "↵"},
+				OmniboxActionSpec{ID: "copy", Label: i18n.T("engine.action.copy_clipboard"), Shortcut: "⇧↵"},
+			)
 		}
-		if item.ClipboardMedia != nil && item.ClipboardMedia.IsMedia() {
+		if !isMedia {
+			specs = append(specs, OmniboxActionSpec{ID: "paste_plain", Label: i18n.T("engine.action.paste_plain"), Shortcut: "⌥↵"})
+		}
+		specs = append(specs,
+			OmniboxActionSpec{ID: "pin", Label: pinLabel, Shortcut: modKey() + "P"},
+			OmniboxActionSpec{ID: "delete", Label: i18n.T("engine.action.delete_history"), Shortcut: modKey() + "⌫"},
+		)
+		if isMedia {
 			specs = append(specs,
 				OmniboxActionSpec{ID: "copy_path", Label: copyMatrixLabel("复制路径", "Copy Path")},
 				OmniboxActionSpec{ID: "reveal", Label: copyMatrixLabel("在访达中显示", "Reveal")},
@@ -1203,10 +1264,22 @@ func AvailableItemActions(item OmniboxItem) []OmniboxActionSpec {
 				specs = append(specs, OmniboxActionSpec{ID: "ocr", Label: copyMatrixLabel("AI OCR 识字", "AI OCR")})
 			}
 		} else {
+			if IsHTTPURL(item.ClipboardContent) {
+				specs = append(specs, OmniboxActionSpec{ID: "open_url", Label: i18n.T("engine.action.open_url")})
+			}
 			specs = append(specs,
+				OmniboxActionSpec{ID: "save_snippet", Label: i18n.T("engine.action.save_snippet")},
 				OmniboxActionSpec{ID: "copy_md", Label: copyMatrixLabel("复制 Markdown", "Copy Markdown")},
 				OmniboxActionSpec{ID: "translate", Label: copyMatrixLabel("AI 双语翻译", "Translate")},
 			)
+		}
+		appLabel := strings.TrimSpace(item.ClipboardSourceApp)
+		if appLabel != "" || strings.TrimSpace(item.ClipboardSourceBundleID) != "" {
+			blockLbl := i18n.T("engine.action.block_app_generic")
+			if appLabel != "" {
+				blockLbl = i18n.Tf("engine.action.block_app", appLabel)
+			}
+			specs = append(specs, OmniboxActionSpec{ID: "block_app", Label: blockLbl})
 		}
 		return specs
 	case ItemSnippet:
@@ -1268,6 +1341,13 @@ func AvailableItemActions(item OmniboxItem) []OmniboxActionSpec {
 			specs = append(specs, OmniboxActionSpec{ID: "reveal", Label: copyMatrixLabel("在访达中显示", "Reveal")})
 		}
 		return specs
+	case ItemFile:
+		return []OmniboxActionSpec{
+			{ID: "open", Label: i18n.T("engine.file.open"), Shortcut: "↵"},
+			{ID: "reveal", Label: i18n.T("engine.file.reveal"), Shortcut: modKey() + "↵"},
+			{ID: "copy_path", Label: i18n.T("engine.file.copy_path"), Shortcut: modKey() + "⇧P"},
+			{ID: "open_in_terminal", Label: i18n.T("engine.file.open_terminal")},
+		}
 	default:
 		return []OmniboxActionSpec{
 			{ID: "primary", Label: i18n.T("engine.action.run"), Shortcut: "↵"},
@@ -1284,7 +1364,7 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 
 	// Resolve "secondary" alias to the item's canonical secondary action ID.
 	if actID == "secondary" {
-		specs := AvailableItemActions(item)
+		specs := AvailableItemActionsWithConfig(item, cfg)
 		if len(specs) >= 2 {
 			actID = specs[1].ID
 		} else {
@@ -1431,10 +1511,43 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 			}
 		}
 		if actID == "paste" {
+			return next, []Effect{
+				{Type: EffectPasteClipboardItem, ClipboardID: item.ClipboardID, ClipboardContent: item.ClipboardContent, ClipboardMedia: item.ClipboardMedia},
+			}
+		}
+		if actID == "paste_keep_open" {
+			return next, []Effect{
+				{Type: EffectPasteClipboardItem, ClipboardID: item.ClipboardID, ClipboardContent: item.ClipboardContent, ClipboardMedia: item.ClipboardMedia, KeepOpen: true},
+			}
+		}
+		if actID == "paste_plain" {
+			return next, []Effect{
+				{Type: EffectPasteClipboardItem, ClipboardID: item.ClipboardID, ClipboardContent: NormalizePlainTextForPaste(item.ClipboardContent), PlainText: true},
+			}
+		}
+		if actID == "open_url" && IsHTTPURL(item.ClipboardContent) {
 			clearPhaseFields(&next)
 			next.Phase = PhaseHidden
 			return next, []Effect{
-				{Type: EffectPasteClipboardItem, ClipboardID: item.ClipboardID, ClipboardContent: item.ClipboardContent, ClipboardMedia: item.ClipboardMedia},
+				{Type: EffectOpenExternal, Text: strings.TrimSpace(item.ClipboardContent)},
+				{Type: EffectClose},
+			}
+		}
+		if actID == "save_snippet" {
+			txt := item.ClipboardContent
+			if txt == "" {
+				txt = item.Title
+			}
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{
+				{Type: EffectSaveClipboardAsSnippet, Text: txt, ClipboardID: item.ClipboardID},
+				{Type: EffectClose},
+			}
+		}
+		if actID == "block_app" && (strings.TrimSpace(item.ClipboardSourceBundleID) != "" || strings.TrimSpace(item.ClipboardSourceApp) != "") {
+			return next, []Effect{
+				{Type: EffectBlockClipboardApp, BundleID: item.ClipboardSourceBundleID, Text: item.ClipboardSourceApp},
 			}
 		}
 	case ItemSnippet:
@@ -1587,6 +1700,14 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 		return next, nil
 
 	case ItemClipboardEntry:
+		if config.NormalizeClipboardEnterAction(cfg.Main.Clipboard.EnterAction) == "copy" {
+			clearPhaseFields(&next)
+			next.Phase = PhaseHidden
+			return next, []Effect{
+				{Type: EffectCopyText, Text: item.ClipboardContent, ClipboardID: item.ClipboardID, ClipboardMedia: item.ClipboardMedia},
+				{Type: EffectClose},
+			}
+		}
 		// Keep the Capsule open until the asynchronous write and platform paste
 		// both succeed; the controller dismisses it from the success callback.
 		return next, []Effect{{Type: EffectPasteClipboardItem, ClipboardID: item.ClipboardID, ClipboardContent: item.ClipboardContent, ClipboardMedia: item.ClipboardMedia}}
@@ -1797,6 +1918,28 @@ func executeOmniboxItemWithAction(item OmniboxItem, actionID string, next State,
 			{Type: EffectRunAction, Action: &act, Context: &ctxCopy},
 			{Type: EffectClose},
 		}
+
+	case ItemFile:
+		if item.File == nil {
+			return next, nil
+		}
+		f := *item.File
+		clearPhaseFields(&next)
+		next.Phase = PhaseHidden
+		switch actID {
+		case "reveal":
+			return next, []Effect{{Type: EffectRevealPath, Text: f.Path}, {Type: EffectClose}}
+		case "copy_path":
+			return next, []Effect{{Type: EffectCopyText, Text: f.Path}, {Type: EffectClose}}
+		case "open_in_terminal":
+			dir := f.Path
+			if !f.IsDir {
+				dir = filepath.Dir(f.Path)
+			}
+			return next, []Effect{{Type: EffectOpenInTerminal, Text: dir}, {Type: EffectClose}}
+		default:
+			return next, []Effect{{Type: EffectOpenPath, Text: f.Path}, {Type: EffectClose}}
+		}
 	}
 	return next, nil
 }
@@ -1871,19 +2014,22 @@ func makeClipboardOmniboxItems(entries []OmniboxClipboardEntry) []OmniboxItem {
 			kws = append(kws, entry.SourceAppName)
 		}
 		candidates = append(candidates, OmniboxItem{
-			ID:               "clipboard:" + entry.ID,
-			Title:            firstLine,
-			Subtitle:         sub,
-			KeyHint:          keyHint,
-			Icon:             icon,
-			Keywords:         kws,
-			Kind:             ItemClipboardEntry,
-			ClipboardID:      entry.ID,
-			ClipboardContent: entry.Content,
-			ClipboardMedia:   clipboardMediaPtr(entry.Media),
+			ID:                      "clipboard:" + entry.ID,
+			Title:                   firstLine,
+			Subtitle:                sub,
+			KeyHint:                 keyHint,
+			Icon:                    icon,
+			Keywords:                kws,
+			Kind:                    ItemClipboardEntry,
+			ClipboardID:             entry.ID,
+			ClipboardContent:        entry.Content,
+			ClipboardMedia:          clipboardMediaPtr(entry.Media),
+			ClipboardSourceBundleID: entry.SourceBundleID,
+			ClipboardSourceApp:      entry.SourceAppName,
+			ClipboardCopiedAt:       entry.CopiedAt,
+			ClipboardFirstCopiedAt:  entry.FirstCopiedAt,
+			ClipboardCopyCount:      entry.CopyCount,
 		})
-		candidates[len(candidates)-1].ClipboardSourceApp = entry.SourceAppName
-		candidates[len(candidates)-1].ClipboardCopiedAt = entry.CopiedAt
 		if entry.Media.IsMedia() {
 			candidates[len(candidates)-1].Icon = clipboardMediaIcon(entry.Media)
 			if entry.IsPinned {
@@ -2069,6 +2215,17 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 			}
 		}
 	}
+	// Explicit file-search route (`f `, `file `, `~`, `~/...`, or multi-segment `/...`)
+	// takes precedence in TabActions before generic prefix routing and AI fallback.
+	if tab == config.TabActions {
+		if _, explicit, ok := ParseFileSearchQuery(query); ok && explicit {
+			trimmed := strings.TrimSpace(query)
+			if trimmed != "" && strings.TrimSpace(state.FileSearchQuery) == trimmed {
+				return makeFileOmniboxItems(state.FileSearchMatches)
+			}
+			return nil
+		}
+	}
 	// Prefix quick-routing in Actions tab: >, ;, @ (or "cb "), ?, :, =
 	if tab == config.TabActions {
 		if prefix, rest, ok := ParseOmniboxPrefix(query); ok {
@@ -2097,8 +2254,17 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 				}
 				return withoutSemi
 			case '@':
-				clips := makeClipboardOmniboxItems(state.ClipboardEntries)
-				return scoreCandidates(clips, rest)
+				now := time.Now()
+				parsed := ParseClipboardQuery(rest, now)
+				filtered := state.ClipboardEntries
+				if strings.TrimSpace(rest) != "" {
+					filtered = FilterClipboardEntries(filtered, parsed, now)
+				}
+				clips := makeClipboardOmniboxItems(filtered)
+				if parsed.FreeText != "" && len(clips) > 0 && !parsed.HasFilters() {
+					clips = scoreCandidates(clips, parsed.FreeText)
+				}
+				return SortClipboardOmniboxItems(clips, cfg.Main.Clipboard.PinPlacement)
 			case '?':
 				aiModes := scoreCandidates(flattenAIModes(cfg.Leader.Nodes, nil, nil), rest)
 				if rest != "" {
@@ -2162,14 +2328,25 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 		if state.ClipboardSearchExternal {
 			trimmed := strings.TrimSpace(query)
 			if trimmed == "" {
-				return makeClipboardOmniboxItems(state.ClipboardEntries)
+				return SortClipboardOmniboxItems(makeClipboardOmniboxItems(state.ClipboardEntries), cfg.Main.Clipboard.PinPlacement)
 			}
 			if state.ClipboardSearchQuery == trimmed {
-				return makeClipboardOmniboxItems(state.ClipboardSearchEntries)
+				return SortClipboardOmniboxItems(makeClipboardOmniboxItems(state.ClipboardSearchEntries), cfg.Main.Clipboard.PinPlacement)
 			}
 			return nil
 		}
-		candidates = makeClipboardOmniboxItems(state.ClipboardEntries)
+		trimmed := strings.TrimSpace(query)
+		if trimmed == "" {
+			return SortClipboardOmniboxItems(makeClipboardOmniboxItems(state.ClipboardEntries), cfg.Main.Clipboard.PinPlacement)
+		}
+		now := time.Now()
+		parsed := ParseClipboardQuery(trimmed, now)
+		filtered := FilterClipboardEntries(state.ClipboardEntries, parsed, now)
+		items := makeClipboardOmniboxItems(filtered)
+		if parsed.FreeText != "" && len(items) > 0 && !parsed.HasFilters() {
+			items = scoreCandidates(items, parsed.FreeText)
+		}
+		return SortClipboardOmniboxItems(items, cfg.Main.Clipboard.PinPlacement)
 
 	case config.TabAI:
 		candidates = flattenAIModes(cfg.Leader.Nodes, nil, nil)
@@ -2226,13 +2403,23 @@ func buildOmniboxItems(tab config.CapsuleTab, query string, state State, cfg con
 		} else {
 			results = append(results, scoredItems...)
 			results = append(results, emojiItems...)
-			goto appendAdhocAI
+			goto appendFileFallback
 		}
 	}
 
 	results = append(results, scoredItems...)
 
-appendAdhocAI:
+appendFileFallback:
+	if tab == config.TabActions && len(results) < 5 {
+		if _, explicit, ok := ParseFileSearchQuery(trimmed); ok && !explicit && strings.TrimSpace(state.FileSearchQuery) == trimmed {
+			fileItems := makeFileOmniboxItems(state.FileSearchMatches)
+			if len(fileItems) > 5 {
+				fileItems = fileItems[:5]
+			}
+			results = append(results, fileItems...)
+		}
+	}
+
 	if tab == config.TabAI || (tab == config.TabActions && (len(results) == 0 || utf8.RuneCountInString(trimmed) >= 3)) {
 		results = append(results, makeAdhocAIItem(trimmed, state.Context))
 	}
@@ -2572,6 +2759,8 @@ func clearPhaseFields(s *State) {
 	s.SelectedIndex = 0
 	s.ClipboardSearchQuery = ""
 	s.ClipboardSearchEntries = nil
+	s.FileSearchQuery = ""
+	s.FileSearchMatches = nil
 	s.AIMode = ""
 	s.AIPrompt = ""
 	s.AISourceText = ""
@@ -2611,6 +2800,7 @@ func cloneState(s State) State {
 	out.InstalledApps = sealSlice(s.InstalledApps)
 	out.ListeningPorts = sealSlice(s.ListeningPorts)
 	out.QuickJumpTargets = sealSlice(s.QuickJumpTargets)
+	out.FileSearchMatches = sealSlice(s.FileSearchMatches)
 	out.AIHistory = sealSlice(s.AIHistory)
 	return out
 }

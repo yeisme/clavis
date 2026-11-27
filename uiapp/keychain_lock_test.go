@@ -77,7 +77,7 @@ func TestKeychainNeverReadUnderControllerLock(t *testing.T) {
 	step := func(name string) { store.step.Store(name) }
 
 	step("Settings frames")
-	ctrl.setSettingsSection(settingsSectionAI)
+	ctrl.setSettingsPage("ai")
 	tt := ui.NewTester(ctrl.SettingsView, 960, 640)
 	tt.Frame()
 	tt.Frame()

@@ -21,6 +21,7 @@ type rowMetaCacheKey struct {
 	itemID           string
 	contentLen       int
 	contentHash      uint64
+	queryHash        uint64
 	sourceApp        string
 	subtitleFallback string
 	iconFallback     string
@@ -34,12 +35,14 @@ type rowMetaCacheKey struct {
 }
 
 type cachedClipboardRowMeta struct {
-	rowKey      string
-	iconName    string
-	lineCount   int
-	subtitle    string
-	hasSwatch   bool
-	swatchColor ui.Color
+	rowKey       string
+	iconName     string
+	lineCount    int
+	subtitle     string
+	compactTitle string
+	compactMeta  string
+	hasSwatch    bool
+	swatchColor  ui.Color
 }
 
 // rowMetaCache memoizes derived per-row clipboard metadata (row key, leading
@@ -90,15 +93,24 @@ func clipboardTimeBucket(at, nowLocal time.Time) int64 {
 }
 
 func (c *rowMetaCache) getOrCompute(item engine.OmniboxItem, nowLocal time.Time, lang i18n.Language) cachedClipboardRowMeta {
+	return c.getOrComputeForQuery(item, nowLocal, lang, "")
+}
+
+func (c *rowMetaCache) getOrComputeForQuery(item engine.OmniboxItem, nowLocal time.Time, lang i18n.Language, query string) cachedClipboardRowMeta {
 	hasMedia := item.ClipboardMedia != nil
 	mediaKind := ""
 	if hasMedia {
 		mediaKind = item.ClipboardMedia.Kind
 	}
+	var qHash uint64
+	if query != "" {
+		qHash = contentSampleHash(query)
+	}
 	key := rowMetaCacheKey{
 		itemID:           item.ID,
 		contentLen:       len(item.ClipboardContent),
 		contentHash:      contentSampleHash(item.ClipboardContent),
+		queryHash:        qHash,
 		sourceApp:        item.ClipboardSourceApp,
 		subtitleFallback: item.Subtitle,
 		iconFallback:     item.Icon,
@@ -119,7 +131,7 @@ func (c *rowMetaCache) getOrCompute(item engine.OmniboxItem, nowLocal time.Time,
 	}
 	c.mu.Unlock()
 
-	meta := computeClipboardRowMeta(item, nowLocal)
+	meta := computeClipboardRowMeta(item, nowLocal, query)
 
 	c.mu.Lock()
 	if existing, ok := c.entries[key]; ok {
@@ -136,7 +148,7 @@ func (c *rowMetaCache) getOrCompute(item engine.OmniboxItem, nowLocal time.Time,
 	return meta
 }
 
-func computeClipboardRowMeta(item engine.OmniboxItem, nowLocal time.Time) cachedClipboardRowMeta {
+func computeClipboardRowMeta(item engine.OmniboxItem, nowLocal time.Time, query string) cachedClipboardRowMeta {
 	swatchColor, hasSwatch := parseHexSwatch(item.ClipboardContent)
 	iconName := item.Icon
 	if item.ClipboardMedia == nil || item.ClipboardMedia.Kind == "" {
@@ -161,18 +173,30 @@ func computeClipboardRowMeta(item engine.OmniboxItem, nowLocal time.Time) cached
 	if len(parts) > 0 {
 		subtitle = strings.Join(parts, " · ")
 	}
+	compactTitle := item.Title
+	if item.ClipboardMedia == nil || !item.ClipboardMedia.IsMedia() {
+		if collapsed := clipboardCompactTitle(item.ClipboardContent, query, 64); collapsed != "" {
+			compactTitle = collapsed
+		}
+	}
 	return cachedClipboardRowMeta{
-		rowKey:      omniboxRowKey(item),
-		iconName:    iconName,
-		lineCount:   lineCount,
-		subtitle:    subtitle,
-		hasSwatch:   hasSwatch,
-		swatchColor: swatchColor,
+		rowKey:       omniboxRowKey(item),
+		iconName:     iconName,
+		lineCount:    lineCount,
+		subtitle:     subtitle,
+		compactTitle: compactTitle,
+		compactMeta:  clipboardCompactRightMeta(item, nowLocal),
+		hasSwatch:    hasSwatch,
+		swatchColor:  swatchColor,
 	}
 }
 
 func (a *AppController) clipboardRowMetaCached(item engine.OmniboxItem, nowLocal time.Time) cachedClipboardRowMeta {
 	return capsuleUI.rowMetaCacheFor(a).getOrCompute(item, nowLocal, i18n.Current())
+}
+
+func (a *AppController) clipboardRowMetaCachedForQuery(item engine.OmniboxItem, nowLocal time.Time, query string) cachedClipboardRowMeta {
+	return capsuleUI.rowMetaCacheFor(a).getOrComputeForQuery(item, nowLocal, i18n.Current(), query)
 }
 
 func (a *AppController) agentHeaderLaneCounts() agentLaneCounts {
@@ -209,6 +233,9 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 	if state.Phase != engine.PhaseAIStreaming {
 		a.uiState.followUpQuery = ""
 	}
+	if state.Phase != engine.PhaseOmnibox {
+		capsuleUI.setActionMenuShown(a, false)
+	}
 
 	defer func() {
 		a.uiState.lastPhase = state.Phase
@@ -233,17 +260,31 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 	card := applyTextLocale(ui.Column(c).Fill().Radius(radius).Clip())
 	if state.Phase == engine.PhaseHUD {
 		card = card.Transition(profile.hudEnterTransition())
+		card = applyCapsuleCardSurface(c, card, theme, appearance)
 	} else {
 		card = card.Transition(profile.capsuleEnterTransition())
+		card = applyCapsuleShellBorder(c, card, theme, appearance)
+		if state.Phase == engine.PhaseOmnibox && state.OmniboxTab == config.TabClipboard && a.clipboardFocusMode() {
+			card.Background(contentSurface(theme))
+		}
 	}
-	card = applyCapsuleCardSurface(c, card, theme, appearance)
 
-	renderInteractivePhase := func() {
-		// The header is the glass shell's title bar; everything below it is
-		// the reading area and sits on the opaque content surface.
-		a.renderCapsuleHeader(c, theme, cfg, state, diag)
-		kitDivider(c, theme)
-		capsuleBody(c, theme).Children(func() {
+	renderInteractivePhase := func(bodyPadX float32) {
+		// Focus Mode (⇧⌘V) hides the 40pt 6-Tab header row so Clipboard opens
+		// as a tight, distraction-free workbench while full Omnibox keeps tabs.
+		focusMode := state.Phase == engine.PhaseOmnibox && state.OmniboxTab == config.TabClipboard && a.clipboardFocusMode()
+		if !focusMode {
+			headerBox := applyCapsuleHeaderGlass(c, ui.Box(c).FillWidth().Shrink(0), theme, appearance)
+			headerBox.Children(func() {
+				a.renderCapsuleHeader(c, theme, cfg, state, diag)
+			})
+			kitDivider(c, theme)
+		}
+		body := capsuleBody(c, theme)
+		if bodyPadX > 0 {
+			body.Padding(space0, bodyPadX)
+		}
+		body.Children(func() {
 			switch state.Phase {
 			case engine.PhaseLeader:
 				a.renderLeaderView(c, theme, state)
@@ -263,17 +304,19 @@ func (a *AppController) CapsuleView(c *ui.Context) {
 			return
 		}
 		if isClassicPreset(appearance) {
-			renderInteractivePhase()
+			renderInteractivePhase(0)
 			return
 		}
 		stageIdx, _ := capsuleStageIndex(state.Phase)
 		stageCfg := effectiveSpatialAppearance(c, appearance)
 		StageContainer3D(c, "capsule", stageIdx, stageCfg, func() {
-			col := ui.Column(c).Fill()
+			var bodyPadX float32
 			if Spatial3DEnabled(c, stageCfg) && stageIdx != 0 && appearance.CapsuleWidth > 720 {
-				col.Padding(space0, space6)
+				bodyPadX = space6
 			}
-			col.Children(renderInteractivePhase)
+			ui.Column(c).Fill().Children(func() {
+				renderInteractivePhase(bodyPadX)
+			})
 		})
 	})
 }
@@ -305,13 +348,15 @@ func (l visibleOmniboxList) rawIndex(row int) int {
 }
 
 func (a *AppController) currentOmniboxState(fallback engine.State) engine.State {
-	a.mu.Lock()
-	sm := a.StateMachine
-	a.mu.Unlock()
-	if sm == nil {
+	if a == nil {
 		return fallback
 	}
-	return sm.State()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.StateMachine == nil {
+		return fallback
+	}
+	return a.StateMachine.State()
 }
 
 func (a *AppController) visibleOmniboxItems(state engine.State) visibleOmniboxList {
@@ -340,14 +385,20 @@ func (a *AppController) visibleOmniboxItems(state engine.State) visibleOmniboxLi
 
 	items := state.OmniboxItems
 	if state.OmniboxTab == config.TabClipboard {
-		if kind := a.clipboardStatsFilter(); kind != "" {
+		kind := a.clipboardStatsFilter()
+		hasPendingDel := a.HasPendingClipboardDelete()
+		if kind != "" || hasPendingDel {
 			filteredItems := make([]engine.OmniboxItem, 0, len(items))
 			rawIndices := make([]int, 0, len(items))
 			for i, item := range items {
-				if clipboardItemMatchesKind(item, kind) {
-					filteredItems = append(filteredItems, item)
-					rawIndices = append(rawIndices, i)
+				if hasPendingDel && a.isClipboardIDPendingDelete(item.ClipboardID) {
+					continue
 				}
+				if kind != "" && !clipboardItemMatchesFilter(item, kind) {
+					continue
+				}
+				filteredItems = append(filteredItems, item)
+				rawIndices = append(rawIndices, i)
 			}
 			if len(filteredItems) == 0 {
 				return visibleOmniboxList{items: filteredItems, rawIndices: rawIndices, selectedRow: -1, filtered: true}
@@ -542,7 +593,7 @@ func (a *AppController) renderCapsuleHeader(
 						dotColor = kitStateWarningColor(theme)
 						lbl = fmt.Sprintf("%d", counts.Approval)
 					}
-					agentBtn := ui.ButtonBase(c).Key("header-agent-pill").Label("Agent " + lbl).
+					agentBtn := ui.ButtonBase(c).Key("header-agent-pill").Label("Agent "+lbl).
 						Padding(space2, space6).Radius(radiusPill).Background(tileFill(theme)).
 						Border(space1, hairline(theme)).FocusRing(false).Shrink(0)
 					agentBtn.Children(func() {
@@ -679,7 +730,13 @@ func (a *AppController) renderOmniboxView(
 			return
 		}
 		current := a.currentOmniboxState(state)
+		if current.Phase == engine.PhaseOmnibox && a.clipboardClearConfirm() {
+			a.setClipboardClearConfirm(false)
+			a.uiState.searchHandle.RequestFocus(c)
+			return
+		}
 		if current.Phase != engine.PhaseOmnibox || a.handleActionMenuKey(ui.KeyEscape, 0, current) {
+			a.uiState.searchHandle.RequestFocus(c)
 			return
 		}
 		if a.ActiveHubSurface() != HubSurfaceNone {
@@ -766,27 +823,32 @@ func (a *AppController) renderOmniboxView(
 	// focused editor so the IME can claim it during preedit.
 	mods := primaryMod()
 	for _, shortcut := range []struct {
-		key ui.Key
+		mods ui.Modifiers
+		key  ui.Key
 	}{
-		{ui.KeyEnter},
-		{ui.KeyK},
-		{ui.KeyI},
-		{ui.KeyP},
-		{ui.Key7},
-		{ui.Key8},
-		{ui.Key9},
+		{mods, ui.KeyEnter},
+		{mods, ui.KeyK},
+		{mods, ui.KeyI},
+		{mods, ui.KeyP},
+		{mods, ui.KeyZ},
+		{mods, ui.KeyBackspace},
+		{mods, ui.KeyDelete},
+		{mods | ui.Alt | ui.Shift, ui.KeyBackspace},
+		{mods | ui.Alt | ui.Shift, ui.KeyDelete},
+		{ui.Shift, ui.KeyEnter},
+		{ui.Alt, ui.KeyEnter},
+		{mods, ui.Key7},
+		{mods, ui.Key8},
 	} {
 		shortcut := shortcut
-		c.OnWindowShortcut(mods, shortcut.key, func() {
+		c.OnWindowShortcut(shortcut.mods, shortcut.key, func() {
 			// Modified chords remain application-owned during IME preedit.
-			a.handleOmniboxKey(shortcut.key, mods, a.currentOmniboxState(state))
+			a.handleOmniboxKey(shortcut.key, shortcut.mods, a.currentOmniboxState(state))
 		})
 	}
-	// Register window-level ⌘1..6 / Ctrl+1..6 tab shortcuts symmetrically with
-	// ⌘7..9 so tab switching works from hub surfaces, lists, and footers too,
-	// while strictly deferring to active IME preedit composition.
+	// Register window-level ⌘1..9 shortcuts (⌘1..6 tabs or Focus Mode ⌘1..9 rows).
 	if !a.uiState.isComposing {
-		for _, key := range []ui.Key{ui.Key1, ui.Key2, ui.Key3, ui.Key4, ui.Key5, ui.Key6} {
+		for _, key := range []ui.Key{ui.Key1, ui.Key2, ui.Key3, ui.Key4, ui.Key5, ui.Key6, ui.Key7, ui.Key8, ui.Key9} {
 			key := key
 			c.OnWindowShortcut(mods, key, func() {
 				if a.uiState.isComposing {
@@ -832,8 +894,6 @@ func (a *AppController) renderOmniboxView(
 				a.renderStatsHubView(c, theme, cfg)
 			case HubSurfaceManage:
 				a.renderManagementHubView(c, theme, cfg)
-			case HubSurfaceAssets:
-				a.renderAssetsHubView(c, theme, cfg)
 			}
 			ui.Divider(c)
 			ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
@@ -902,7 +962,8 @@ func (a *AppController) renderOmniboxView(
 			}
 
 			// Quick chords (⌥1..⌥9 / Alt+1..9) must be taken before the text
-			// editor types the Option+digit character.
+			// editor types the Option+digit character. Also capture ⌘C when no
+			// search text is highlighted on Clipboard tab.
 			in.HandleInput(func(ev ui.InputEvent) bool {
 				if ev.Kind != ui.InputKeyDown {
 					return false
@@ -910,6 +971,13 @@ func (a *AppController) renderOmniboxView(
 				// Tab goes on to OnTextKey: accepting a completion replaces the
 				// text the editor holds, which only a TextKey can do.
 				if ev.Key == ui.KeyTab && ev.Mods == 0 {
+					return false
+				}
+				if state.OmniboxTab == config.TabClipboard && isPrimaryMod(ev.Mods) && ev.Key == ui.KeyC {
+					start, end := in.TextSelection()
+					if start == end {
+						return a.handleOmniboxKey(ev.Key, ev.Mods, a.currentOmniboxState(state))
+					}
 					return false
 				}
 				return handleKey(ev.Key, ev.Mods)
@@ -950,6 +1018,17 @@ func (a *AppController) renderOmniboxView(
 			if icon, label, ok := omniboxRouteMode(state.OmniboxQuery); ok {
 				chip(c, theme, icon, label, chipAccent)
 			}
+			if state.OmniboxTab == config.TabClipboard && strings.TrimSpace(state.OmniboxQuery) != "" {
+				if pq := engine.ParseClipboardQuery(state.OmniboxQuery, time.Now()); pq.RegexErr != "" {
+					kitStatusPill(c, theme, i18n.T("clipboard.query.invalid_regex"), chipWarning)
+				}
+			}
+			if state.OmniboxTab == config.TabClipboard && a.clipboardFocusMode() {
+				if sens := a.SensitiveClipboardState(); sens.Active {
+					remSec := max(0, int(sens.Remaining.Round(time.Second)/time.Second))
+					kitStatusPill(c, theme, fmt.Sprintf("%ds", remSec), chipWarning)
+				}
+			}
 			a.renderOmniboxHubToggles(c, theme)
 		})
 
@@ -974,9 +1053,7 @@ func (a *AppController) renderOmniboxView(
 				a.Dispatch(engine.Event{Type: engine.EventUpdateQuery, Query: state.OmniboxQuery})
 			}, a.retryClipboardStats)
 		}
-		if a.omniboxActionMenuOpen(state) {
-			a.renderOmniboxActionMenu(c, theme, state)
-		} else if capsuleUI.actionMenuShown(a) {
+		if !a.omniboxActionMenuOpen(state) && capsuleUI.actionMenuShown(a) {
 			capsuleUI.setActionMenuShown(a, false)
 		}
 
@@ -1028,9 +1105,29 @@ func (a *AppController) renderOmniboxView(
 			}
 
 			renderList := func() {
-				// ⌥1..⌥9 quick-select badges appear only while Option (Alt)
-				// is held, so the resting list stays quiet.
-				altHeld := cfg.Main.Appearance.ShowKeyHints && c.Modifiers()&ui.Alt != 0
+				// ⌥1..⌥9 badges appear while Option (Alt) is held; in Focus Mode
+				// ⌘1..⌘9 badges appear while Cmd/Ctrl is held.
+				modsHeld := c.Modifiers()
+				focusMode := state.OmniboxTab == config.TabClipboard && a.clipboardFocusMode()
+				altHeld := cfg.Main.Appearance.ShowKeyHints && modsHeld&ui.Alt != 0
+				cmdQuickHeld := cfg.Main.Appearance.ShowKeyHints && focusMode && modsHeld&primaryMod() != 0
+				compactClip := state.OmniboxTab == config.TabClipboard &&
+					config.NormalizeClipboardRowDensity(cfg.Main.Clipboard.RowDensity) == "compact"
+				solidClipSel := state.OmniboxTab == config.TabClipboard &&
+					config.NormalizeClipboardSelectionStyle(cfg.Main.Clipboard.SelectionStyle) == "maccy_solid"
+				pinPlacement := config.NormalizeClipboardPinPlacement(cfg.Main.Clipboard.PinPlacement)
+				pinnedCount, recentCount := 0, 0
+				if state.OmniboxTab == config.TabClipboard && (pinPlacement == "top" || pinPlacement == "bottom") {
+					for _, it := range items {
+						if it.KeyHint == engine.KeyHintPinned {
+							pinnedCount++
+						} else {
+							recentCount++
+						}
+					}
+				}
+				showSections := pinnedCount > 0 && recentCount > 0
+
 				prefs := c.Preferences()
 				plan := resolveStagePlan(stageInputs{
 					Phase:      state.Phase,
@@ -1062,127 +1159,203 @@ func (a *AppController) renderOmniboxView(
 						var hasClipMeta bool
 						rowKey := ""
 						if item.Kind == engine.ItemClipboardEntry {
-							clipMeta = a.clipboardRowMetaCached(item, frameNow)
+							clipMeta = a.clipboardRowMetaCachedForQuery(item, frameNow, state.OmniboxQuery)
 							hasClipMeta = true
 							rowKey = clipMeta.rowKey
 						} else {
 							rowKey = omniboxRowKey(item)
 						}
-						row := ui.Row(c).
-							Key(rowKey).
-							FillWidth().
-							Padding(space6, space8).
-							Radius(radiusRow).
-							Gap(space10).
-							AlignItems(ui.Center)
-						// The chosen row is marked by a 2px accent bar at its leading
-						// edge over a faint tint — never a fully blue row, outline or
-						// tile. The 1px transparent border keeps the row's geometry.
-						fill, bar := ui.Transparent, ui.Transparent
-						if isSelected {
-							fill, bar = rowSelectionFill(theme), rowSelectionBar(theme)
-						}
-						if state.OmniboxTab != config.TabClipboard {
-							if selAnim := profile.selectionAnimation(); selAnim.Duration > 0 {
-								fill = row.AnimateColor("row-sel", fill, selAnim)
-								bar = row.AnimateColor("row-bar", bar, selAnim)
+
+						var sectionHeader string
+						if showSections {
+							isPinned := item.KeyHint == engine.KeyHintPinned
+							prevPinned := i > 0 && items[i-1].KeyHint == engine.KeyHintPinned
+							if i == 0 || isPinned != prevPinned {
+								if isPinned {
+									sectionHeader = i18n.Tf("clipboard.section.pinned", pinnedCount)
+								} else {
+									sectionHeader = i18n.Tf("clipboard.section.recent", recentCount)
+								}
 							}
 						}
-						row.Background(fill).Border(space1, ui.Transparent)
-						if bar.A > 0 {
-							row.Draw(func(p *ui.Painter, r ui.Rect) {
-								p.Fill(rowSelectionBarRect(r), bar, rowSelectionBarWidth/2)
-							})
-						}
 
-						row.Children(func() {
-							if state.OmniboxTab == config.TabAgent {
-								sessions, _ := a.cachedAgentData()
-								renderAgentRowLeading(c, theme, item, sessions)
-							} else if hasClipMeta {
-								a.renderClipboardRowLeadingIcon(c, theme, item, clipMeta)
+						buildInnerRow := func() ui.Element {
+							isClipMedia := item.Kind == engine.ItemClipboardEntry && item.ClipboardMedia != nil && item.ClipboardMedia.IsMedia()
+							row := ui.Row(c).Key(rowKey).FillWidth().Radius(radiusRow).AlignItems(ui.Center)
+							if compactClip {
+								if isClipMedia {
+									row.MinHeight(clipboardCompactImageRowHeight).Padding(space4, space8).Gap(space8)
+								} else {
+									row.MinHeight(clipboardCompactTextRowHeight).Padding(space4, space8).Gap(space8)
+								}
+							} else if state.OmniboxTab == config.TabClipboard {
+								row.MinHeight(clipboardComfortableRowHeight).Padding(space6, space8).Gap(space10)
 							} else {
-								a.renderOmniboxRowLeadingIcon(c, theme, item)
+								row.Padding(space6, space8).Gap(space10)
 							}
 
-							ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(1).Children(func() {
-								ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
-									// One weight whether chosen or not: a bolder chosen title
-									// re-measures and shifts its ellipsis as hover moves.
-									if len(item.MatchedIndices) == 0 {
-										ui.Text(c, item.Title).FontSize(typeBody).FontWeight(500).TextColor(theme.Text).SingleLine().Shrink(1)
-									} else {
-										spans := buildHighlightedSpans(item.Title, item.MatchedIndices, matchMark(theme), theme.Text)
-										ui.RichText(c, spans...).FontSize(typeBody).FontWeight(500).SingleLine().Shrink(1)
+							fill, bar := ui.Transparent, ui.Transparent
+							titleInk := theme.Text
+							metaInk := secondaryInk(theme)
+							pinInk := secondaryInk(theme)
+							if isSelected {
+								if solidClipSel {
+									fill = ui.RGB(10, 132, 255)
+									titleInk = ui.RGB(255, 255, 255)
+									metaInk = ui.RGBA(255, 255, 255, 0.82)
+									pinInk = ui.RGB(255, 255, 255)
+								} else {
+									fill, bar = rowSelectionFill(theme), rowSelectionBar(theme)
+								}
+							}
+							if state.OmniboxTab != config.TabClipboard {
+								if selAnim := profile.selectionAnimation(); selAnim.Duration > 0 {
+									fill = row.AnimateColor("row-sel", fill, selAnim)
+									bar = row.AnimateColor("row-bar", bar, selAnim)
+								}
+							}
+							row.Background(fill).Border(space1, ui.Transparent)
+							if bar.A > 0 {
+								row.Draw(func(p *ui.Painter, r ui.Rect) {
+									p.Fill(rowSelectionBarRect(r), bar, rowSelectionBarWidth/2)
+								})
+							}
+
+							row.Children(func() {
+								if state.OmniboxTab == config.TabAgent {
+									sessions, _ := a.cachedAgentData()
+									renderAgentRowLeading(c, theme, item, sessions)
+								} else if hasClipMeta {
+									a.renderClipboardRowLeadingIconStyled(c, theme, item, clipMeta, compactClip, isClipMedia, isSelected && solidClipSel)
+								} else {
+									a.renderOmniboxRowLeadingIcon(c, theme, item)
+								}
+
+								if compactClip && !isClipMedia && hasClipMeta {
+									titleStr := clipMeta.compactTitle
+									if titleStr == "" {
+										titleStr = item.Title
 									}
-									if item.Kind == engine.ItemClipboardEntry && item.KeyHint == engine.KeyHintPinned {
-										renderSemanticIcon(c, "pin.fill", typeMeta, secondaryInk(theme))
+									ui.Row(c).Grow(1).Shrink(1).MinWidth(0).AlignItems(ui.Center).Children(func() {
+										if len(item.MatchedIndices) == 0 {
+											ui.Text(c, titleStr).FontSize(typeBody).FontWeight(500).TextColor(titleInk).SingleLine().Shrink(1)
+										} else {
+											spans := buildHighlightedSpans(titleStr, item.MatchedIndices, matchMark(theme), titleInk)
+											ui.RichText(c, spans...).FontSize(typeBody).FontWeight(500).SingleLine().Shrink(1)
+										}
+									})
+									ui.Row(c).Gap(space4).AlignItems(ui.Center).Shrink(0).Children(func() {
+										if item.KeyHint == engine.KeyHintPinned {
+											renderSemanticIcon(c, "pin.fill", typeMicro, pinInk)
+										}
+										if clipMeta.compactMeta != "" {
+											ui.Text(c, clipMeta.compactMeta).FontSize(typeMicro).TextColor(metaInk).SingleLine()
+										}
+									})
+								} else {
+									ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(1).Children(func() {
+										ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
+											// One weight whether chosen or not: a bolder chosen title
+											// re-measures and shifts its ellipsis as hover moves.
+											if len(item.MatchedIndices) == 0 {
+												ui.Text(c, item.Title).FontSize(typeBody).FontWeight(500).TextColor(titleInk).SingleLine().Shrink(1)
+											} else {
+												spans := buildHighlightedSpans(item.Title, item.MatchedIndices, matchMark(theme), titleInk)
+												ui.RichText(c, spans...).FontSize(typeBody).FontWeight(500).SingleLine().Shrink(1)
+											}
+											if item.Kind == engine.ItemClipboardEntry && item.KeyHint == engine.KeyHintPinned {
+												renderSemanticIcon(c, "pin.fill", typeMeta, pinInk)
+											}
+										})
+										subtitle := item.Subtitle
+										if hasClipMeta {
+											subtitle = clipMeta.subtitle
+										}
+										if subtitle != "" {
+											ui.Text(c, subtitle).FontSize(typeMeta).TextColor(metaInk).SingleLine()
+										}
+									})
+								}
+
+								if cfg.Main.Appearance.ShowKeyHints && item.KeyHint != "" && item.KeyHint != engine.KeyHintPinned {
+									keyHint(c, theme, item.KeyHint, "", keyToneNeutral)
+								}
+								if state.OmniboxTab == config.TabGlossary && item.Kind == engine.ItemGlossaryTerm {
+									words, _, _ := a.lexiconTopWordsSnapshot()
+									uses, maxUse := lexiconTopWordMap(words)
+									if use := uses[item.Title]; maxUse > 0 && use > 0 {
+										width := lexiconMicrobarWidth(use, maxUse)
+										color := lexiconMicrobarColor(use, maxUse)
+										ui.Box(c).Width(width).Height(4).Radius(radius2).Background(color).Shrink(0)
+									}
+								}
+								if cmdQuickHeld && i < 9 {
+									keyHint(c, theme, modPrefix()+strconv.Itoa(i+1), "", keyToneAccent)
+								} else if altHeld && i < 9 {
+									keyHint(c, theme, quickIndexLabel(i), "", keyToneAccent)
+								}
+							})
+
+							// Pointer hover selects the row so the preview follows the
+							// mouse immediately; the row is confirmed only by a click,
+							// Enter or an explicit action.
+							if row.Hovered() {
+								x, y, _ := c.Root().PointerPosition()
+								if state.OmniboxTab == config.TabAgent {
+									a.mu.Lock()
+									a.uiState.agentSelected = i
+									a.mu.Unlock()
+								}
+								a.hoverSelect(itemIndex(i), ui.Point{X: x, Y: y})
+							}
+
+							if item.Kind == engine.ItemClipboardEntry {
+								capturedItem := item
+								capturedRawIdx := itemIndex(i)
+								row.ContextMenu(func(m *ui.Menu) {
+									for _, spec := range engine.AvailableItemActionsWithConfig(capturedItem, a.Config()) {
+										actionID := spec.ID
+										if m.Item(spec.Label).Chosen() {
+											a.SelectIndex(capturedRawIdx)
+											a.triggerOmniboxActionSpec(capturedItem, actionID)
+										}
 									}
 								})
-								subtitle := item.Subtitle
-								if hasClipMeta {
-									subtitle = clipMeta.subtitle
+							}
+							if row.RowDoubleClicked() {
+								a.SelectIndex(itemIndex(i))
+								if state.OmniboxTab == config.TabAgent {
+									_ = a.agentItemAction(item)
+								} else {
+									a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
 								}
-								if subtitle != "" {
-									ui.Text(c, subtitle).FontSize(typeMeta).TextColor(secondaryInk(theme)).SingleLine()
+							} else if row.RowClicked() {
+								a.SelectIndex(itemIndex(i))
+								if state.OmniboxTab == config.TabAgent {
+									a.mu.Lock()
+									a.uiState.agentSelected = i
+									a.mu.Unlock()
+									_ = a.agentItemAction(item)
+									return row
 								}
+								// Clipboard rows use Maccy semantics: a click pastes; pinning is
+								// available only through the explicit action menu.
+								if item.Kind == engine.ItemClipboardEntry {
+									a.Dispatch(engine.Event{Type: engine.EventActivateClipboardItem})
+								} else {
+									a.uiState.searchHandle.RequestFocus(c)
+								}
+							}
+							return row
+						}
+						if sectionHeader != "" {
+							return ui.Column(c).FillWidth().Gap(space2).Children(func() {
+								ui.Text(c, sectionHeader).Height(18).FontSize(typeMicro).FontWeight(600).
+									TextColor(theme.TextMuted).Padding(space2, space6).SingleLine()
+								_ = buildInnerRow()
 							})
-
-							if cfg.Main.Appearance.ShowKeyHints && item.KeyHint != "" && item.KeyHint != engine.KeyHintPinned {
-								keyHint(c, theme, item.KeyHint, "", keyToneNeutral)
-							}
-							if state.OmniboxTab == config.TabGlossary && item.Kind == engine.ItemGlossaryTerm {
-								words, _, _ := a.lexiconTopWordsSnapshot()
-								uses, maxUse := lexiconTopWordMap(words)
-								if use := uses[item.Title]; maxUse > 0 && use > 0 {
-									width := lexiconMicrobarWidth(use, maxUse)
-									color := lexiconMicrobarColor(use, maxUse)
-									ui.Box(c).Width(width).Height(4).Radius(radius2).Background(color).Shrink(0)
-								}
-							}
-							if altHeld && i < 9 {
-								keyHint(c, theme, quickIndexLabel(i), "", keyToneAccent)
-							}
-						})
-
-						// Pointer hover selects the row so the preview follows the
-						// mouse immediately; the row is confirmed only by a click,
-						// Enter or an explicit action.
-						if row.Hovered() {
-							x, y, _ := c.Root().PointerPosition()
-							if state.OmniboxTab == config.TabAgent {
-								a.mu.Lock()
-								a.uiState.agentSelected = i
-								a.mu.Unlock()
-							}
-							a.hoverSelect(itemIndex(i), ui.Point{X: x, Y: y})
 						}
-
-						if row.RowDoubleClicked() {
-							a.SelectIndex(itemIndex(i))
-							if state.OmniboxTab == config.TabAgent {
-								_ = a.agentItemAction(item)
-							} else {
-								a.Dispatch(engine.Event{Type: engine.EventConfirmSelection})
-							}
-						} else if row.RowClicked() {
-							a.SelectIndex(itemIndex(i))
-							if state.OmniboxTab == config.TabAgent {
-								a.mu.Lock()
-								a.uiState.agentSelected = i
-								a.mu.Unlock()
-								_ = a.agentItemAction(item)
-								return row
-							}
-							// Clipboard rows use Maccy semantics: a click pastes; pinning is
-							// available only through the explicit action menu.
-							if item.Kind == engine.ItemClipboardEntry {
-								a.Dispatch(engine.Event{Type: engine.EventActivateClipboardItem})
-							} else {
-								a.uiState.searchHandle.RequestFocus(c)
-							}
-						}
-						return row
+						return buildInnerRow()
 					}).FillWidth().Grow(1)
 
 					if list.Changed() && selectedIdx >= 0 && selectedIdx < len(items) && selectedIdx != previousRow {
@@ -1225,20 +1398,30 @@ func (a *AppController) renderOmniboxView(
 				// user drags (or moves with the arrows once focused); a double
 				// click restores the default. Each pane keeps a little air
 				// from the 1px line between them.
-				pct := a.previewListPercent()
+				pct := a.previewListPercentForTab(string(state.OmniboxTab))
+				defaultReset := defaultPreviewListPercent
+				if state.OmniboxTab == config.TabClipboard {
+					defaultReset = defaultClipboardPreviewListPercent
+				}
+				reversed := state.OmniboxTab == config.TabClipboard && a.clipboardSplitReversed()
 				ui.Box(c).FillWidth().Grow(1).MinHeight(0).Children(func() {
-					split := ui.SplitPercent(c, &pct, func() {
+					listPane := func() {
 						ui.Column(c).Fill().Padding(space0, space8, space0, space0).Gap(space4).Children(func() {
 							renderClipboardStats()
 							renderList()
 						})
-					}, func() {
-						// The preview shares the content surface. Its former elevated
-						// card consumed horizontal width and created a second frame.
+					}
+					previewPane := func() {
 						ui.Column(c).Fill().Padding(space0, space4, space4, space10).Children(func() {
 							a.renderOmniboxPreviewCard(c, theme, state, previewItem)
 						})
-					}).Fill().SplitReset(defaultPreviewListPercent)
+					}
+					var split ui.Element
+					if reversed {
+						split = ui.SplitPercent(c, &pct, previewPane, listPane).Fill().SplitReset(100 - defaultReset)
+					} else {
+						split = ui.SplitPercent(c, &pct, listPane, previewPane).Fill().SplitReset(defaultReset)
+					}
 					a.renderPreviewDividerState(c, theme, &pct)
 					if split.Changed() {
 						a.setPreviewListPercent(pct)
@@ -1252,6 +1435,45 @@ func (a *AppController) renderOmniboxView(
 
 		ui.Divider(c)
 		ui.Row(c).FillWidth().Gap(space12).AlignItems(ui.Center).Children(func() {
+			if a.clipboardClearConfirm() && state.OmniboxTab == config.TabClipboard {
+				unpinnedCount, pinnedCount := 0, 0
+				for _, entry := range state.ClipboardEntries {
+					if entry.IsPinned {
+						pinnedCount++
+					} else {
+						unpinnedCount++
+					}
+				}
+				ui.Text(c, i18n.Tf("clipboard.clear.confirm_prompt", unpinnedCount, pinnedCount)).
+					Key("clipboard-clear-confirm-msg").FontSize(typeMeta).FontWeight(600).TextColor(theme.Text).SingleLine().Grow(1)
+				cancelBtn := ui.Button(c, i18n.T("clipboard.clear.cancel_btn")).Key("clipboard-clear-cancel").Padding(space2, space8)
+				cancelBtn.AutoFocus()
+				if cancelBtn.Clicked() {
+					a.setClipboardClearConfirm(false)
+					a.uiState.searchHandle.RequestFocus(c)
+				}
+				confirmBtn := ui.ButtonBase(c).Key("clipboard-clear-confirm").Label(i18n.T("clipboard.clear.confirm_btn")).
+					Padding(space2, space8).Radius(radiusChip).Background(kitStateErrorColor(theme)).FocusRing(false)
+				confirmBtn.Children(func() {
+					ui.Text(c, i18n.T("clipboard.clear.confirm_btn")).FontSize(typeMeta).FontWeight(600).
+						TextColor(ui.RGB(255, 255, 255)).SingleLine()
+				})
+				if confirmBtn.Clicked() {
+					_ = a.ClearUnpinnedClipboardHistory()
+					a.uiState.searchHandle.RequestFocus(c)
+				}
+				return
+			}
+			if _, delTitle, hasUndo := a.PendingClipboardDelete(); hasUndo && state.OmniboxTab == config.TabClipboard {
+				ui.Text(c, i18n.Tf("clipboard.undo.deleted", delTitle)).
+					Key("clipboard-undo-msg").FontSize(typeMeta).TextColor(theme.Text).SingleLine().Grow(1)
+				if ui.Button(c, i18n.T("clipboard.undo.action")).Key("clipboard-undo-btn").Padding(space2, space8).Clicked() {
+					a.UndoSoftDeleteClipboardItem()
+					a.uiState.searchHandle.RequestFocus(c)
+				}
+				return
+			}
+
 			prefix := modPrefix()
 			a.renderOmniboxFooterHints(c, theme, cfg, state, items, selectedIdx)
 			ui.Spacer(c)
@@ -1269,6 +1491,10 @@ func (a *AppController) renderOmniboxView(
 					a.uiState.searchHandle.RequestFocus(c)
 				})
 		})
+
+		if a.omniboxActionMenuOpen(state) {
+			a.renderOmniboxActionMenu(c, theme, state)
+		}
 	})
 }
 
@@ -1420,7 +1646,7 @@ func (a *AppController) renderOmniboxFooterHints(c *ui.Context, theme *ui.Theme,
 		return
 	}
 	var hints []footerHint
-	for i, spec := range engine.AvailableItemActions(selected) {
+	for i, spec := range engine.AvailableItemActionsWithConfig(selected, cfg) {
 		if i >= 2 {
 			break
 		}
@@ -1491,25 +1717,63 @@ func (a *AppController) renderOmniboxFooterFrameToggle(
 	kitIconButton(c, theme, icon, active, label, onClick)
 }
 
-func (a *AppController) renderClipboardRowLeadingIcon(
+func (a *AppController) renderClipboardRowLeadingIconStyled(
 	c *ui.Context,
 	theme *ui.Theme,
 	item engine.OmniboxItem,
 	meta cachedClipboardRowMeta,
+	compact bool,
+	isMedia bool,
+	solidSel bool,
 ) {
 	if m := item.ClipboardMedia; m != nil && m.ThumbPath != "" {
 		if bmp := a.ThumbBitmap(m.ThumbPath); bmp != nil {
-			ui.Image(c, bmp).Size(rowLeadingSlot, rowLeadingSlot).Fit(ui.Cover).Radius(radiusTile).Shrink(0)
+			h := rowLeadingSlot
+			if compact && isMedia {
+				h = 30
+			}
+			ui.Image(c, bmp).Size(rowLeadingSlot, h).Fit(ui.Cover).Radius(radiusTile).Shrink(0)
 			return
 		}
 	}
 	if meta.hasSwatch {
-		ColorSwatch3D(c, item.ClipboardContent, rowLeadingSlot, effectiveSpatialAppearance(c, a.Config().Main.Appearance)).Border(1, hairline(theme))
+		sz := rowLeadingSlot
+		if compact && !isMedia {
+			sz = clipboardCompactIconSize
+		}
+		ui.Box(c).Size(rowLeadingSlot, sz).Center().Shrink(0).Children(func() {
+			ColorSwatch3D(c, item.ClipboardContent, sz, effectiveSpatialAppearance(c, a.Config().Main.Appearance)).Border(1, hairline(theme))
+		})
+		return
+	}
+	if compact && !isMedia {
+		ink := secondaryInk(theme)
+		if solidSel {
+			ink = ui.RGB(255, 255, 255)
+		}
+		ui.Box(c).Size(rowLeadingSlot, clipboardCompactIconSize).Center().Shrink(0).Children(func() {
+			renderSemanticIcon(c, meta.iconName, 14, ink)
+		})
 		return
 	}
 	ui.Box(c).Size(rowLeadingSlot, rowLeadingSlot).Center().Shrink(0).Children(func() {
 		iconTile(c, theme, meta.iconName, false)
 	})
+}
+
+func clipboardItemMatchesFilter(item engine.OmniboxItem, filter string) bool {
+	f := strings.ToLower(strings.TrimSpace(filter))
+	if f == "" || f == "all" {
+		return true
+	}
+	if f == "pinned" {
+		return item.KeyHint == engine.KeyHintPinned
+	}
+	return engine.ClipboardCategoryMatches(
+		engine.ClipboardItemCategory(item),
+		item.ClipboardMedia != nil && item.ClipboardMedia.IsMedia(),
+		f,
+	)
 }
 
 // renderOmniboxRowLeadingIcon draws a row's leading glyph at one fixed tile
@@ -1708,40 +1972,75 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 	case searchKeyInert:
 		return true
 	case searchKeyNextTab:
+		a.setClipboardFocusMode(false)
 		a.switchOmniboxTab(cycleOmniboxTab(state.OmniboxTab, false))
 		return true
 	case searchKeyPrevTab:
+		a.setClipboardFocusMode(false)
 		a.switchOmniboxTab(cycleOmniboxTab(state.OmniboxTab, true))
 		return true
 	}
 
-	// Clipboard pin/delete works wherever a clipboard entry is selected
-	// (the Clipboard tab, or '@' prefix routing in the Actions tab).
+	// Clipboard actions work wherever a clipboard entry is selected
+	// (Clipboard tab, or '@' prefix routing in Actions tab).
 	selected, hasSelected := selectedOmniboxItem(state)
 	if vis.selectedRow >= 0 && vis.selectedRow < len(vis.items) {
 		selected, hasSelected = vis.items[vis.selectedRow], true
 	} else if vis.filtered {
 		hasSelected = false
 	}
-	if hasSelected && selected.Kind == engine.ItemClipboardEntry {
-		if isPrimaryMod(mods) && key == ui.KeyP {
-			if vis.filtered {
-				if rawIdx := vis.rawIndex(vis.selectedRow); rawIdx != state.SelectedIndex {
-					a.Dispatch(engine.Event{Type: engine.EventSelectIndex, Index: rawIdx})
-				}
+
+	if state.OmniboxTab == config.TabClipboard && isPrimaryMod(mods) && key == ui.KeyZ && a.HasPendingClipboardDelete() {
+		return a.UndoSoftDeleteClipboardItem()
+	}
+	if state.OmniboxTab == config.TabClipboard &&
+		(mods == (primaryMod()|ui.Alt|ui.Shift) || mods == (ui.Cmd|ui.Alt|ui.Shift) || mods == (ui.Ctrl|ui.Alt|ui.Shift)) &&
+		(key == ui.KeyBackspace || key == ui.KeyDelete) {
+		a.setClipboardClearConfirm(true)
+		return true
+	}
+
+	syncVisSelection := func() {
+		if vis.filtered && vis.selectedRow >= 0 && vis.selectedRow < len(vis.items) {
+			if rawIdx := vis.rawIndex(vis.selectedRow); rawIdx != state.SelectedIndex {
+				a.Dispatch(engine.Event{Type: engine.EventSelectIndex, Index: rawIdx})
 			}
+		}
+	}
+
+	if hasSelected && selected.Kind == engine.ItemClipboardEntry {
+		if mods == ui.Alt && key == ui.KeyEnter {
+			syncVisSelection()
+			a.Dispatch(engine.Event{Type: engine.EventExecuteItemAction, ActionID: "paste_plain"})
+			return true
+		}
+		if mods == ui.Shift && key == ui.KeyEnter {
+			syncVisSelection()
+			a.Dispatch(engine.Event{Type: engine.EventExecuteItemAction, ActionID: "copy"})
+			return true
+		}
+		if state.OmniboxTab == config.TabClipboard && isPrimaryMod(mods) && key == ui.KeyC {
+			syncVisSelection()
+			a.Dispatch(engine.Event{Type: engine.EventExecuteItemAction, ActionID: "copy"})
+			return true
+		}
+		if isPrimaryMod(mods) && key == ui.KeyP {
+			syncVisSelection()
 			a.Dispatch(engine.Event{Type: engine.EventTogglePinSelectedClipboardItem})
 			return true
 		}
 		if isPrimaryMod(mods) && (key == ui.KeyBackspace || key == ui.KeyDelete) {
-			if vis.filtered {
-				if rawIdx := vis.rawIndex(vis.selectedRow); rawIdx != state.SelectedIndex {
-					a.Dispatch(engine.Event{Type: engine.EventSelectIndex, Index: rawIdx})
-				}
-			}
-			a.Dispatch(engine.Event{Type: engine.EventDeleteSelectedClipboardItem})
+			a.RequestSoftDeleteClipboardItem(selected)
 			return true
 		}
+	}
+
+	if hasSelected && selected.Kind == engine.ItemFile &&
+		(mods == (primaryMod()|ui.Shift) || mods == (ui.Cmd|ui.Shift)) &&
+		key == ui.KeyP {
+		syncVisSelection()
+		a.Dispatch(engine.Event{Type: engine.EventExecuteItemAction, ActionID: "copy_path"})
+		return true
 	}
 
 	if isPrimaryMod(mods) {
@@ -1781,12 +2080,26 @@ func (a *AppController) handleOmniboxKey(key ui.Key, mods ui.Modifiers, state en
 		if a.handleHubShortcutKey(key, mods) {
 			return true
 		}
+		// Focus Mode (⇧⌘V): ⌘1..⌘9 execute rows 1..9 directly (6-tab bar is hidden).
+		if state.OmniboxTab == config.TabClipboard && a.clipboardFocusMode() {
+			if idx, ok := rowQuickKeyIndex(key); ok {
+				if a.uiState.isComposing {
+					return false
+				}
+				if idx < len(vis.items) {
+					a.Dispatch(engine.Event{Type: engine.EventSelectAndConfirmIndex, Index: vis.rawIndex(idx)})
+					return true
+				}
+				return true
+			}
+		}
 		if idx, ok := numberKeyIndex(key); ok && idx < len(omniboxTabs) {
 			if a.uiState.isComposing {
 				return false
 			}
 			a.CloseHubSurface()
 			capsuleUI.setActionMenuShown(a, false)
+			a.setClipboardFocusMode(false)
 			a.Dispatch(engine.Event{Type: engine.EventSwitchTab, Tab: omniboxTabs[idx]})
 			return true
 		}

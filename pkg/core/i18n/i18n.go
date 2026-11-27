@@ -202,6 +202,23 @@ func T(key string, args ...any) string { return tf(Current(), key, args...) }
 // The Chinese entries may reorder arguments with %[2]s-style indexes.
 func Tf(key string, args ...any) string { return tf(Current(), key, args...) }
 
+// TIn returns the text for key in the specified language.
+func TIn(l Language, key string, args ...any) string { return tf(l, key, args...) }
+
+// Bilingual returns both English and Simplified Chinese translations for key
+// joined with a space, deduplicating when both match or one is missing.
+func Bilingual(key string) string {
+	en := strings.TrimSpace(enTable[key])
+	zh := strings.TrimSpace(zhTable[key])
+	if en == "" {
+		return zh
+	}
+	if zh == "" || zh == en {
+		return en
+	}
+	return en + " " + zh
+}
+
 func tf(l Language, key string, args ...any) string {
 	if l == Chinese {
 		if s, ok := zhTable[key]; ok && s != "" {

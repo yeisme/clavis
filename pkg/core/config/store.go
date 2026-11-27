@@ -47,6 +47,35 @@ type ConfigStore struct {
 	// writeConfigFile is kept injectable for deterministic SaveAll failure tests;
 	// production stores always use atomicWriteConfigFile.
 	writeConfigFile func(string, ConfigFileKind, string) error
+	writeErrors     map[ConfigFileKind]error
+}
+
+// SetWriteErrorForTest injects (or clears when err == nil) a simulated disk write error for kind.
+func (s *ConfigStore) SetWriteErrorForTest(kind ConfigFileKind, err error) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.writeErrors == nil {
+		s.writeErrors = make(map[ConfigFileKind]error)
+	}
+	if err == nil {
+		delete(s.writeErrors, kind)
+		return
+	}
+	s.writeErrors[kind] = err
+}
+
+func (s *ConfigStore) writeConfigFileLocked(kind ConfigFileKind, content string) error {
+	if err := s.writeErrors[kind]; err != nil {
+		return err
+	}
+	writer := s.writeConfigFile
+	if writer == nil {
+		writer = atomicWriteConfigFile
+	}
+	return writer(s.dir, kind, content)
 }
 
 type savedConfigFileState struct {
@@ -210,7 +239,7 @@ func (s *ConfigStore) SaveMain(mainCfg MainConfig) error {
 	encoded := mainCfg.Encode()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := atomicWriteConfigFile(s.dir, FileMain, encoded); err != nil {
+	if err := s.writeConfigFileLocked(FileMain, encoded); err != nil {
 		return err
 	}
 	sum := sha256.Sum256([]byte(encoded))
@@ -243,7 +272,7 @@ func (s *ConfigStore) SaveLeader(leaderCfg LeaderConfig) error {
 		return err
 	}
 	encoded := leaderCfg.Encode()
-	if err := atomicWriteConfigFile(s.dir, FileLeader, encoded); err != nil {
+	if err := s.writeConfigFileLocked(FileLeader, encoded); err != nil {
 		return err
 	}
 	sum := sha256.Sum256([]byte(encoded))
@@ -263,7 +292,7 @@ func (s *ConfigStore) SaveSnippets(snippetsCfg SnippetsConfig) error {
 	encoded := snippetsCfg.Encode()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := atomicWriteConfigFile(s.dir, FileSnippets, encoded); err != nil {
+	if err := s.writeConfigFileLocked(FileSnippets, encoded); err != nil {
 		return err
 	}
 	sum := sha256.Sum256([]byte(encoded))
@@ -283,7 +312,7 @@ func (s *ConfigStore) SaveGlossary(glossaryCfg GlossaryConfig) error {
 	encoded := glossaryCfg.Encode()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := atomicWriteConfigFile(s.dir, FileGlossary, encoded); err != nil {
+	if err := s.writeConfigFileLocked(FileGlossary, encoded); err != nil {
 		return err
 	}
 	sum := sha256.Sum256([]byte(encoded))
@@ -303,7 +332,7 @@ func (s *ConfigStore) SavePrompts(cfg PromptsConfig) error {
 	encoded := cfg.Encode()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := atomicWriteConfigFile(s.dir, FilePrompts, encoded); err != nil {
+	if err := s.writeConfigFileLocked(FilePrompts, encoded); err != nil {
 		return err
 	}
 	s.ensureSavedDigestsLocked()
@@ -357,7 +386,7 @@ func (s *ConfigStore) SaveWorkflows(workflowsCfg WorkflowsConfig) error {
 		return err
 	}
 	encoded := workflowsCfg.Encode()
-	if err := atomicWriteConfigFile(s.dir, FileWorkflows, encoded); err != nil {
+	if err := s.writeConfigFileLocked(FileWorkflows, encoded); err != nil {
 		return err
 	}
 	sum := sha256.Sum256([]byte(encoded))
@@ -418,7 +447,7 @@ func (s *ConfigStore) SaveIMERules(imeRulesCfg IMERulesConfig) error {
 	encoded := imeRulesCfg.Encode()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := atomicWriteConfigFile(s.dir, FileIMERules, encoded); err != nil {
+	if err := s.writeConfigFileLocked(FileIMERules, encoded); err != nil {
 		return err
 	}
 	sum := sha256.Sum256([]byte(encoded))

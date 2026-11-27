@@ -48,7 +48,7 @@ func TestFormatSyncRelativeTime(t *testing.T) {
 
 func TestSettingsAppearanceSectionIsDedicated(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
-	ctrl.setSettingsSection(settingsSectionAppearance)
+	ctrl.setSettingsPage("appearance")
 	tt := ui.NewTester(ctrl.SettingsView, 920, 640)
 	tt.Frame()
 	if !tt.HasText("[appearance]") {
@@ -61,7 +61,7 @@ func TestSettingsAppearanceSectionIsDedicated(t *testing.T) {
 
 func TestSettingsAISectionWiresContinueEnabledSwitch(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
-	ctrl.setSettingsSection(settingsSectionAI)
+	ctrl.setSettingsPage("ai")
 	tt := ui.NewTester(ctrl.SettingsView, 980, 760)
 	tt.Frame()
 	if !tt.HasText("Allow AI continuation") && !tt.HasText("允许续写") {

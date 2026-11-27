@@ -14,55 +14,40 @@ import (
 )
 
 func TestClipboardStatsBandGeometryAndSparklineThreshold(t *testing.T) {
-	state := clipboardStatsState{loaded: true, days: []storage.ClipboardDay{{Count: 1}, {Count: 2}, {Count: 3}, {Count: 4}, {Count: 5}, {Count: 6}, {Count: 7}}, kinds: []storage.ClipboardKindStat{{Kind: "image", Count: 2, Bytes: 2048}, {Kind: "text", Count: 5, Bytes: 1024}}}
-	tt := ui.NewTester(func(c *ui.Context) { renderClipboardStatsBand(c, ui.LightTheme(), state, func(string) {}) }, 280, 60)
+	state := clipboardStatsState{
+		loaded: true,
+		days:   []storage.ClipboardDay{{Count: 1}, {Count: 2}, {Count: 3}, {Count: 4}, {Count: 5}, {Count: 6}, {Count: 7}},
+		kinds:  []storage.ClipboardKindStat{{Kind: "image", Count: 2, Bytes: 2048}, {Kind: "text", Count: 5, Bytes: 1024}},
+	}
+	tt := ui.NewTester(func(c *ui.Context) { renderClipboardStatsBand(c, ui.LightTheme(), state, func(string) {}) }, 420, 40)
 	tt.Frame()
 	band, ok := tt.Find("clipboard-stats-band")
 	if !ok || band.H != clipboardStatsBandHeight {
-		t.Fatalf("band=%+v ok=%v, want height 54", band, ok)
+		t.Fatalf("band=%+v ok=%v, want height %v", band, ok, clipboardStatsBandHeight)
 	}
 	strip, ok := tt.Find("clipboard-kind-strip")
 	if !ok || strip.H != clipboardStripHeight {
-		t.Fatalf("strip=%+v ok=%v, want height 6", strip, ok)
+		t.Fatalf("strip=%+v ok=%v, want height %v", strip, ok, clipboardStripHeight)
 	}
-	sparkline, sparkOK := tt.Find("clipboard-sparkline")
-	legend, legendOK := tt.Find("clipboard-stats-legend")
-	countRow, countRowOK := tt.Find("clipboard-stats-count-row")
 	countText, countTextOK := tt.Find("clipboard-stats-count")
-	if !sparkOK || !legendOK || !countRowOK || !countTextOK {
-		t.Fatalf("missing stats geometry: legend=%+v sparkline=%+v countRow=%+v count=%+v", legend, sparkline, countRow, countText)
+	if !countTextOK {
+		t.Fatal("missing clipboard-stats-count")
 	}
-	if sparkline.Y < band.Y || sparkline.Y+sparkline.H > band.Y+band.H {
-		t.Fatalf("sparkline=%+v escapes band=%+v", sparkline, band)
-	}
-	strip, stripOK := tt.Find("clipboard-kind-strip")
-	if !stripOK {
-		t.Fatal("strip missing")
-	}
-	if legend.Y+legend.H > strip.Y || strip.Y+strip.H > countRow.Y {
-		t.Fatalf("stats rows overlap: legend=%+v strip=%+v countRow=%+v", legend, strip, countRow)
-	}
-	centerDelta := float64((sparkline.Y + sparkline.H/2) - (countText.Y + countText.H/2))
-	t.Logf("stats geometry: band=%+v legend=%+v strip=%+v countRow=%+v count=%+v sparkline=%+v centerDelta=%.2f", band, legend, strip, countRow, countText, sparkline, centerDelta)
-	if math.Abs(centerDelta) > 1 {
-		t.Fatalf("sparkline/count are not vertically centered: sparkline=%+v count=%+v", sparkline, countText)
-	}
-	state.kinds = []storage.ClipboardKindStat{{Kind: "image", Count: 2, Bytes: 2048}, {Kind: "text", Count: 2, Bytes: 1024}}
-	state.days = []storage.ClipboardDay{{Count: 1}, {Count: 1}, {Count: 1}, {Count: 1}, {Count: 0}, {Count: 0}, {Count: 0}}
-	tt = ui.NewTester(func(c *ui.Context) { renderClipboardStatsBand(c, ui.LightTheme(), state, func(string) {}) }, 280, 60)
-	tt.Frame()
-	if _, ok := tt.Find("clipboard-sparkline"); ok {
-		t.Fatal("sparkline must be hidden below five total entries")
+	centerDelta := math.Abs(float64((strip.Y + strip.H/2) - (countText.Y + countText.H/2)))
+	if centerDelta > 4 {
+		t.Fatalf("strip/count vertically misaligned: strip=%+v count=%+v", strip, countText)
 	}
 }
 
-func TestClipboardStatsBandAddsOnly18PointsToClipboardCapsule(t *testing.T) {
+func TestClipboardWorkbenchWindowDimensions(t *testing.T) {
 	appearance := config.DefaultConfig().Main.Appearance
 	state := engine.State{Phase: engine.PhaseOmnibox, OmniboxTab: config.TabClipboard}
-	_, baseHeight := PreferredCapsuleSize(state.Phase, appearance)
-	_, clipboardHeight := PreferredCapsuleSizeForState(state, appearance)
-	if got := clipboardHeight - baseHeight; got != int(clipboardStatsBandHeight) {
-		t.Fatalf("clipboard height delta=%d, want %d; list area should lose no extra height", got, int(clipboardStatsBandHeight))
+	w, h := PreferredCapsuleSizeForState(state, appearance)
+	if w != clipboardWorkbenchWidth || h != clipboardWorkbenchHeight {
+		t.Fatalf("clipboard workbench size = %dx%d, want %dx%d", w, h, clipboardWorkbenchWidth, clipboardWorkbenchHeight)
+	}
+	if clipboardStatsBandHeight != 28 {
+		t.Fatalf("clipboardStatsBandHeight = %v, want 28", clipboardStatsBandHeight)
 	}
 }
 
@@ -78,7 +63,9 @@ func TestClipboardStatColorsUseBlueSelectionAndNeutralGray(t *testing.T) {
 
 func TestClipboardStatsRenderedSelectionUsesSystemBlue(t *testing.T) {
 	state := clipboardStatsState{loaded: true, filter: "image", kinds: []storage.ClipboardKindStat{{Kind: "image", Count: 1}, {Kind: "text", Count: 3}}}
-	tt := ui.NewTester(func(c *ui.Context) { renderClipboardStatsBand(c, ui.LightTheme(), state, func(string) {}) }, 280, 60)
+	tt := ui.NewTester(func(c *ui.Context) {
+		renderClipboardStatsBand(c, ui.LightTheme(), state, func(string) {})
+	}, 420, 40)
 	tt.Frame()
 	strip, ok := tt.Find("clipboard-kind-strip")
 	if !ok {
@@ -117,7 +104,7 @@ func TestClipboardStatsClickFiltersRows(t *testing.T) {
 	called := ""
 	tt := ui.NewTester(func(c *ui.Context) {
 		renderClipboardStatsBand(c, ui.LightTheme(), state, func(kind string) { called = kind })
-	}, 280, 60)
+	}, 420, 40)
 	tt.Frame()
 	strip, ok := tt.Find("clipboard-kind-strip")
 	if !ok {

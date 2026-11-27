@@ -4,6 +4,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/config"
+	"github.com/yeisme/clavis/pkg/core/engine"
 )
 
 // SurfaceDismissPolicy describes which window-level exits a floating surface
@@ -114,10 +115,11 @@ func FloatingSurface(opts mygo.WindowOptions, spec SurfaceSpec) mygo.WindowOptio
 }
 
 type SurfaceHooks struct {
-	Dismiss      func()
-	RestoreFocus func()
-	CanDismiss   func() bool
-	Quitting     func() bool
+	Dismiss             func()
+	RestoreFocus        func()
+	CanDismiss          func() bool
+	InPresentTransition func() bool
+	Quitting            func() bool
 }
 
 // BindFloatingSurface centralizes close and outside-click policy. The close
@@ -127,13 +129,7 @@ func BindFloatingSurface(win *mygo.Window, spec SurfaceSpec, hooks SurfaceHooks)
 	if win == nil {
 		return
 	}
-	dismiss := func() {
-		if hooks.Quitting != nil && hooks.Quitting() {
-			return
-		}
-		if hooks.CanDismiss != nil && !hooks.CanDismiss() {
-			return
-		}
+	finishDismiss := func() {
 		if hooks.Dismiss != nil {
 			hooks.Dismiss()
 		}
@@ -147,11 +143,57 @@ func BindFloatingSurface(win *mygo.Window, spec SurfaceSpec, hooks SurfaceHooks)
 				return
 			}
 			e.PreventDefault()
-			dismiss()
+			finishDismiss()
 		})
 	}
 	if spec.Dismiss&DismissOutsideClick != 0 {
-		win.OnBlur(dismiss)
+		win.OnBlur(func() {
+			if hooks.Quitting != nil && hooks.Quitting() {
+				return
+			}
+			if hooks.InPresentTransition != nil && hooks.InPresentTransition() {
+				return
+			}
+			if hooks.CanDismiss != nil && !hooks.CanDismiss() {
+				return
+			}
+			finishDismiss()
+		})
+	}
+}
+
+// SurfaceEscapeKind names the surface handling an Escape key press.
+type SurfaceEscapeKind uint8
+
+const (
+	SurfaceEscapeCapsule SurfaceEscapeKind = iota
+	SurfaceEscapePrompt
+	SurfaceEscapeSettings
+)
+
+// surfaceEscape centralizes top-level Escape dismissal across floating surfaces
+// so IME composition consistently cancels before any surface closes (SF-09/SF-10).
+func (a *AppController) surfaceEscape(kind SurfaceEscapeKind) bool {
+	if a == nil {
+		return false
+	}
+	switch kind {
+	case SurfaceEscapePrompt:
+		if a.promptUI.isComposing {
+			return false
+		}
+		a.ClosePromptComposer()
+		return true
+	case SurfaceEscapeCapsule:
+		if a.uiState.isComposing {
+			return false
+		}
+		a.Dispatch(engine.Event{Type: engine.EventEscape})
+		return true
+	case SurfaceEscapeSettings:
+		return false
+	default:
+		return false
 	}
 }
 

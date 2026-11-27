@@ -189,7 +189,7 @@ func (a *AppController) renderManageSyncCard(c *ui.Context, theme *ui.Theme, st 
 		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 			if ui.Button(c, pickLang(zh, "同步详情", "Sync Details")).Key("manage-sync-details").Clicked() {
 				a.CloseHubSurface()
-				a.OpenSettingsSection(settingsSectionAbout)
+				a.OpenSettingsPage("about")
 			}
 		})
 	})
@@ -238,7 +238,7 @@ func (a *AppController) renderManageMediaCard(c *ui.Context, theme *ui.Theme, cf
 			}
 			if ui.Button(c, pickLang(zh, "存储策略", "Policy")).Key("manage-media-policy").Clicked() {
 				a.CloseHubSurface()
-				a.OpenSettingsSection(settingsSectionClipboard)
+				a.OpenSettingsPage("clipboard")
 			}
 		})
 	})
@@ -302,11 +302,11 @@ func (a *AppController) renderManageLexiconCard(c *ui.Context, theme *ui.Theme, 
 		ui.Row(c).FillWidth().Gap(space6).AlignItems(ui.Center).Children(func() {
 			if ui.Button(c, pickLang(zh, "管理术语", "Glossary")).Key("manage-lex-glossary").Clicked() {
 				a.CloseHubSurface()
-				a.OpenSettingsSection(settingsSectionGlossary)
+				a.OpenSettingsPage("glossary")
 			}
 			if ui.Button(c, pickLang(zh, "我的词库", "User Words")).Key("manage-lex-ime").Clicked() {
 				a.CloseHubSurface()
-				a.OpenSettingsSection(settingsSectionIMEKeymap)
+				a.OpenSettingsPage("ime-keymap")
 			}
 		})
 	})
@@ -317,7 +317,7 @@ func (a *AppController) renderManageAICard(c *ui.Context, theme *ui.Theme, cfg c
 	active := a.ActiveAIProfile()
 	visProf, visErr := ai.ResolveVisionProfile(cfg.Main.AI)
 	renderHubMetricCard(c, theme, "manage-card-ai", "sparkles", pickLang(zh, "AI 与 Vision", "AI & Vision"), pickLang(zh, "设置", "Settings"), func() {
-		a.setSettingsSection(settingsSectionAI)
+		a.setSettingsPage("ai")
 		a.OpenSettings(SettingsTabAI)
 	}, func() {
 		ui.Text(c, pickLang(zh, fmt.Sprintf("默认: %s (%s)", active.Name, active.Model), fmt.Sprintf("Active: %s (%s)", active.Name, active.Model))).
@@ -344,9 +344,9 @@ func (a *AppController) renderManageVaultQuickJumpCard(c *ui.Context, theme *ui.
 	snap := a.VaultSnapshot()
 	ttl := a.SensitiveClipboardState()
 	bookmarks := len(cfg.QuickJump.Bookmarks)
-	renderHubMetricCard(c, theme, "manage-card-vault-qj", "lock.rotation", pickLang(zh, "Vault 与快跳", "Vault & Quick Jump"), pickLang(zh, "打开资产", "Assets"), func() {
-		a.setAssetsSubTab(assetsSubVault)
-		a.SetHubSurface(HubSurfaceAssets)
+	renderHubMetricCard(c, theme, "manage-card-vault-qj", "lock.rotation", pickLang(zh, "Vault 与快跳", "Vault & Quick Jump"), pickLang(zh, "密钥库", "Vault"), func() {
+		a.CloseHubSurface()
+		a.OpenSettingsPage("security")
 	}, func() {
 		ui.Text(c, pickLang(zh,
 			fmt.Sprintf("SecretRef %d 条 · 快跳书签 %d 个", len(snap.SecretRefs), bookmarks),
@@ -365,7 +365,7 @@ func (a *AppController) renderManageVaultQuickJumpCard(c *ui.Context, theme *ui.
 			}
 			if ui.Button(c, pickLang(zh, "安全", "Security")).Key("manage-open-security").Clicked() {
 				a.CloseHubSurface()
-				a.OpenSettingsSection(settingsSectionSecurity)
+				a.OpenSettingsPage("security")
 			}
 		})
 	})

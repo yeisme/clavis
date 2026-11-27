@@ -34,24 +34,24 @@ func openSettingsSection(t *testing.T, tt *ui.Tester, label string) {
 }
 
 func TestSettingsNavigationHasFiveGroupsAndSecondaryPages(t *testing.T) {
-	sections := settingsNavigationSections()
-	if len(sections) != 14 {
-		t.Fatalf("settings navigation exposes %d pages, want 14", len(sections))
+	pages := settingsPages()
+	if len(pages) != 14 {
+		t.Fatalf("settings navigation exposes %d pages, want 14", len(pages))
 	}
 	seenKeys := map[string]bool{}
 	seenGroups := map[string]bool{}
-	for _, section := range sections {
-		if section.Key == "" || seenKeys[section.Key] {
-			t.Fatalf("duplicate or empty settings page key %q", section.Key)
+	for _, page := range pages {
+		if page.Key == "" || seenKeys[page.Key] {
+			t.Fatalf("duplicate or empty settings page key %q", page.Key)
 		}
-		seenKeys[section.Key] = true
-		seenGroups[section.Group] = true
+		seenKeys[page.Key] = true
+		seenGroups[page.Group] = true
 	}
 	if len(seenGroups) != 5 {
 		t.Fatalf("settings navigation exposes %d groups, want 5", len(seenGroups))
 	}
 	for _, key := range []string{"leader", "snippets", "glossary", "templates", "clipboard", "workflows", "appearance", "security", "about"} {
-		if _, ok := settingsSectionFromKey(key); !ok {
+		if _, ok := settingsPageByKey(key); !ok {
 			t.Fatalf("secondary settings page %q is not addressable", key)
 		}
 	}
@@ -60,18 +60,10 @@ func TestSettingsNavigationHasFiveGroupsAndSecondaryPages(t *testing.T) {
 func TestSettingsNavigationSearchMatchesPageAndConfigValue(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
 	cfg := ctrl.Config()
-	sections := settingsNavigationSections()
-	var clipboard settingsSectionMeta
-	for _, section := range sections {
-		if section.Key == "clipboard" {
-			clipboard = section
-			break
-		}
+	if results := settingsSearchQuery("clipboard", cfg); len(results) == 0 {
+		t.Fatal("clipboard query returned no results")
 	}
-	if !settingsSectionMatches(clipboard, "clipboard", cfg) {
-		t.Fatal("clipboard query did not match the secondary page")
-	}
-	if !settingsSectionMatches(clipboard, "maxhistoryitems", cfg) {
+	if results := settingsSearchQuery("maxhistoryitems", cfg); len(results) == 0 {
 		t.Fatal("config field query did not match the settings search index")
 	}
 }
@@ -136,7 +128,7 @@ func TestSettingsCenter_TriggersAndAppearancePersist(t *testing.T) {
 	}
 
 	// Appearance lives in its dedicated section.
-	ctrl.setSettingsSection(settingsSectionAppearance)
+	ctrl.setSettingsPage("appearance")
 	tt.Frame()
 	tt.Frame()
 
@@ -337,13 +329,20 @@ func TestSettingsCenter_LeaderTreeCRUD(t *testing.T) {
 		t.Fatal("a duplicate child key must not be persisted")
 	}
 
-	// Select the new node and delete it.
+	// Select the new node and delete it (confirming inline delete per IA-17).
 	if err := tt.Click("Zed"); err != nil {
 		t.Fatalf("click the Zed node: %v", err)
 	}
 	tt.Frame()
 	if err := tt.Click("Delete Node"); err != nil {
 		t.Fatalf("click Delete Node: %v", err)
+	}
+	tt.Frame()
+	if len(ctrl.Config().Leader.Nodes) != before+1 {
+		t.Fatal("leader node deleted before confirmation")
+	}
+	if err := tt.Click(i18n.T("settings.delete.confirm_action")); err != nil {
+		t.Fatalf("click confirm Delete: %v", err)
 	}
 	tt.Frame()
 	if got := len(ctrl.Config().Leader.Nodes); got != before {
@@ -474,6 +473,13 @@ func TestSettingsCenter_GlossaryCRUD(t *testing.T) {
 		t.Fatalf("click Delete Term: %v", err)
 	}
 	tt.Frame()
+	if len(ctrl.Config().Glossary.Terms) != before+1 {
+		t.Fatal("glossary term deleted before confirmation")
+	}
+	if err := tt.Click(i18n.T("settings.delete.confirm_action")); err != nil {
+		t.Fatalf("click confirm Delete: %v", err)
+	}
+	tt.Frame()
 	if got := len(ctrl.Config().Glossary.Terms); got != before {
 		t.Fatalf("glossary terms = %d after delete, want %d", got, before)
 	}
@@ -556,14 +562,14 @@ func TestSettingsCenter_ClipboardMediaControlsPersist(t *testing.T) {
 	tt.Frame()
 
 	// Glossary section must not duplicate Clipboard settings.
-	ctrl.setSettingsSection(settingsSectionGlossary)
+	ctrl.setSettingsPage("glossary")
 	tt.Frame()
 	if tt.HasText("[clipboard]") {
 		t.Fatalf("Glossary section must not duplicate [clipboard] card: %v", tt.Texts())
 	}
 
 	// Clipboard settings and ClipboardKeyManager live in the dedicated Clipboard section.
-	ctrl.setSettingsSection(settingsSectionClipboard)
+	ctrl.setSettingsPage("clipboard")
 	tt.Frame()
 	tt.Frame()
 
@@ -616,7 +622,7 @@ func TestSettingsCenter_ClipboardMediaControlsPersist(t *testing.T) {
 	}
 	restartedCtrl := NewAppController(Options{ConfigStore: restartedStore})
 	t.Cleanup(restartedCtrl.Close)
-	restartedCtrl.setSettingsSection(settingsSectionClipboard)
+	restartedCtrl.setSettingsPage("clipboard")
 	tt2 := ui.NewTester(restartedCtrl.SettingsView, 960, 1200)
 	tt2.Frame()
 	if got := restartedCtrl.ClipboardKeyManagerPolicy().SensitiveTTLSeconds; got != 60 {
@@ -674,8 +680,8 @@ func TestSettingsCenter_WorkflowsNavigation(t *testing.T) {
 	tt.Frame()
 
 	openSettingsSection(t, tt, i18n.T("settings.section.workflows"))
-	if got := settingsSectionIndex(ctrl); got != settingsSectionWorkflows {
-		t.Fatalf("rail selected section %d, want %d", got, settingsSectionWorkflows)
+	if got := settingsPageKey(ctrl); got != "workflows" {
+		t.Fatalf("rail selected page %q, want %q", got, "workflows")
 	}
 	if !tt.HasText(i18n.T("settings.section.workflows.hint")) {
 		t.Fatalf("workflow pane header missing its hint, got %v", tt.Texts())
@@ -688,7 +694,7 @@ func TestSettingsCenter_WorkflowsNavigation(t *testing.T) {
 	}
 
 	// Keyboard navigation: Tab reaches the rail entry and Enter selects it.
-	ctrl.setSettingsSection(settingsSectionConfigs)
+	ctrl.setSettingsPage("configs")
 	tt = ui.NewTester(ctrl.SettingsView, 960, 640)
 	tt.Frame()
 	if !focusByTab(t, tt, i18n.T("settings.section.workflows"), 40) {
@@ -697,8 +703,8 @@ func TestSettingsCenter_WorkflowsNavigation(t *testing.T) {
 	tt.Key(0, ui.KeyEnter)
 	tt.Frame()
 	tt.Frame()
-	if got := settingsSectionIndex(ctrl); got != settingsSectionWorkflows {
-		t.Fatalf("Enter on the Workflows rail entry selected %d, want %d", got, settingsSectionWorkflows)
+	if got := settingsPageKey(ctrl); got != "workflows" {
+		t.Fatalf("Enter on the Workflows rail entry selected %q, want %q", got, "workflows")
 	}
 	// Tab on to New Workflow and start a draft with Enter.
 	if !focusByTab(t, tt, i18n.T("settings.workflows.new_workflow"), 40) {

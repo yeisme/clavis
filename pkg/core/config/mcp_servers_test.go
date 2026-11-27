@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -51,8 +52,10 @@ auto_start = true
 }
 
 func TestValidateMCP(t *testing.T) {
+	workDir := t.TempDir()
+	toolPath := filepath.Join(workDir, "tool")
 	valid := MCPConfig{Servers: []MCPServerConfig{
-		{ID: "stdio", Transport: "stdio", Command: "/bin/tool", WorkingDir: "/tmp", TimeoutSeconds: 60, MaxConcurrency: 4},
+		{ID: "stdio", Transport: "stdio", Command: toolPath, WorkingDir: workDir, TimeoutSeconds: 60, MaxConcurrency: 4},
 		{ID: "http", Transport: "http", URL: "http://127.0.0.1:8080", OptIn: true, TimeoutSeconds: 60, MaxConcurrency: 4},
 	}}
 	if issues := ValidateMCP(valid); len(issues) != 0 {

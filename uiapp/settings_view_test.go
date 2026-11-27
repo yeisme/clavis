@@ -19,11 +19,9 @@ import (
 // initially test: that the rail still selects every section, and that all eight
 // sections render at the window's minimum size in both themes.
 
-// settingsSectionIndex returns the section the controller currently shows.
-func settingsSectionIndex(ctrl *AppController) int {
-	ctrl.mu.Lock()
-	defer ctrl.mu.Unlock()
-	return normalizeSettingsSection(ctrl.uiState.settingsTabIdx)
+// settingsPageKey returns the page key the controller currently shows.
+func settingsPageKey(ctrl *AppController) string {
+	return ctrl.currentSettingsPageKey()
 }
 
 // TestSettingsRailSelectsEverySection clicks each rail entry in turn and checks
@@ -35,9 +33,9 @@ func TestSettingsRailSelectsEverySection(t *testing.T) {
 	tt := ui.NewTester(ctrl.SettingsView, 960, 640)
 	tt.Frame()
 
-	sections := settingsSections()
-	if len(sections) != 9 {
-		t.Fatalf("settings exposes %d sections, want the documented 9", len(sections))
+	pages := settingsPages()
+	if len(pages) != 14 {
+		t.Fatalf("settings exposes %d pages, want 14", len(pages))
 	}
 	// Guard the assertion below: if HasText matched anything, every check would
 	// pass vacuously.
@@ -45,17 +43,17 @@ func TestSettingsRailSelectsEverySection(t *testing.T) {
 		t.Fatal("HasText matched nonsense, so the header assertions would be vacuous")
 	}
 	// Start somewhere that is not the first entry so every click is a change.
-	ctrl.setSettingsSection(sections[len(sections)-1].Index)
+	ctrl.setSettingsPage(pages[len(pages)-1].Key)
 	tt.Frame()
 
-	for _, meta := range sections {
+	for _, meta := range pages {
 		openSettingsSection(t, tt, meta.Label)
 
-		if got := settingsSectionIndex(ctrl); got != meta.Index {
-			t.Fatalf("clicking %q selected section %d, want %d", meta.Label, got, meta.Index)
+		if got := settingsPageKey(ctrl); got != meta.Key {
+			t.Fatalf("clicking %q selected page %q, want %q", meta.Label, got, meta.Key)
 		}
-		// The header renders "<label> — <hint>"; assert the pane really swapped
-		// rather than just the stored index changing.
+		// The header renders "<group> / <label>" and "<hint>"; assert the pane really swapped
+		// rather than just the stored page changing.
 		if !tt.HasText(meta.Hint) {
 			t.Fatalf("pane header for %q does not show its hint %q", meta.Label, meta.Hint)
 		}
@@ -75,8 +73,8 @@ func TestSettingsSectionsRenderAtMinimumSize(t *testing.T) {
 			mode = "dark"
 		}
 		t.Run(mode, func(t *testing.T) {
-			for _, meta := range settingsSections() {
-				ctrl.setSettingsSection(meta.Index)
+			for _, meta := range settingsPages() {
+				ctrl.setSettingsPage(meta.Key)
 				tt := ui.NewTester(ctrl.SettingsView, 760, 500)
 				tt.SetDark(dark)
 				tt.Frame()
@@ -119,19 +117,19 @@ func TestSettingsSidebarSearchPerSectionAccuracy(t *testing.T) {
 	i18n.SetLanguage(i18n.English)
 	ctrl, _, _, _ := newTestController(t, nil)
 	cfg := ctrl.Config()
-	sections := settingsNavigationSections()
+	pages := settingsPages()
 
 	matchingKeys := func(q string) []string {
 		var out []string
-		for _, meta := range sections {
-			if settingsSectionMatches(meta, q, cfg) {
-				out = append(out, meta.Key)
+		for _, res := range settingsSearchQuery(q, cfg) {
+			if res.Kind == searchKindPage {
+				out = append(out, res.PageKey)
 			}
 		}
 		return out
 	}
 
-	// Previously fmt.Sprintf("%+v", cfg) made every query match all 13 sections.
+	// Previously fmt.Sprintf("%+v", cfg) made every query match all sections.
 	if got := matchingKeys("maxhistoryitems"); len(got) != 1 || got[0] != "clipboard" {
 		t.Fatalf("query 'maxhistoryitems' matched %v, want only [clipboard]", got)
 	}
@@ -156,6 +154,7 @@ func TestSettingsSidebarSearchPerSectionAccuracy(t *testing.T) {
 	if got := matchingKeys("模板库"); len(got) != 1 || got[0] != "templates" {
 		t.Fatalf("query '模板库' matched %v, want only [templates]", got)
 	}
+	_ = pages
 }
 
 func TestSettingsScreenshotShortcutQuickJumpAndAllSectionsRender(t *testing.T) {
@@ -194,10 +193,10 @@ func TestSettingsScreenshotShortcutQuickJumpAndAllSectionsRender(t *testing.T) {
 	}
 	i18n.SetLanguage(i18n.English)
 
-	// All 13 navigation sections (including Security & About) render cleanly at MinHeight (500) and default (640).
+	// All 14 navigation pages (including Security & About) render cleanly at MinHeight (500) and default (640).
 	for _, size := range [][2]int{{760, 500}, {960, 640}} {
-		for _, meta := range settingsNavigationSections() {
-			ctrl.setSettingsSection(meta.Index)
+		for _, meta := range settingsPages() {
+			ctrl.setSettingsPage(meta.Key)
 			st := ui.NewTester(ctrl.SettingsView, size[0], size[1])
 			st.Frame()
 			st.Frame()
@@ -214,7 +213,7 @@ func TestSettingsAIProfilesShortcutHintAndSingleImpactCard(t *testing.T) {
 	i18n.SetLanguage(i18n.English)
 
 	ctrl, _, _, _ := newTestController(t, nil)
-	ctrl.setSettingsSection(settingsSectionAI)
+	ctrl.setSettingsPage("ai")
 	tt := ui.NewTester(ctrl.SettingsView, 980, 1400)
 	tt.Frame()
 

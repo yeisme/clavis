@@ -454,7 +454,7 @@ func TestOmniboxWindowShortcutsCmd1To6AndIMEPreeditPriority(t *testing.T) {
 	}{
 		{ui.Key8, ui.Key2, config.TabClipboard},
 		{ui.Key7, ui.Key3, config.TabSnippets},
-		{ui.Key9, ui.Key4, config.TabAI},
+		{ui.Key7, ui.Key4, config.TabAI},
 		{ui.Key8, ui.Key5, config.TabGlossary},
 		{ui.Key7, ui.Key6, config.TabAgent},
 		{ui.Key8, ui.Key1, config.TabActions},

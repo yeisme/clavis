@@ -164,3 +164,64 @@ func applyCapsuleCardSurface(c *ui.Context, card ui.Element, theme *ui.Theme, cf
 	}
 	return card
 }
+
+// applyCapsuleShellBorder applies only the rounded corner radius and border to
+// the outer interactive Capsule container so the glass material shader runs only
+// on the visible 40pt header strip instead of behind the opaque body.
+func applyCapsuleShellBorder(c *ui.Context, card ui.Element, theme *ui.Theme, cfg config.AppearanceConfig) ui.Element {
+	prefs := c.Preferences()
+	radius := NormalizeCornerRadius(cfg)
+	card.Radius(radius)
+	if isClassicPreset(cfg) {
+		if prefs.ReduceTransparency {
+			borderW := float32(1)
+			if prefs.HighContrast {
+				borderW = 1.5
+			}
+			card.Background(theme.Background).Border(borderW, theme.Border)
+		} else if prefs.HighContrast {
+			card.Border(1.5, theme.Border)
+		} else {
+			card.Border(1, withAlpha(theme.Border, 0.5))
+		}
+		return card
+	}
+	if prefs.ReduceTransparency {
+		borderW := float32(1)
+		if prefs.HighContrast {
+			borderW = 1.5
+		}
+		card.Background(c.Theme().Surface).Border(borderW, c.Theme().Border)
+		return card
+	}
+	if prefs.HighContrast {
+		card.Border(1.5, theme.Border)
+	} else {
+		card.Border(1, c.Theme().Border.Alpha(0.32))
+	}
+	return card
+}
+
+// applyCapsuleHeaderGlass applies translucent glass material solely to the 40pt
+// Capsule header bar, leaving the opaque reading body free of overdraw.
+func applyCapsuleHeaderGlass(c *ui.Context, header ui.Element, theme *ui.Theme, cfg config.AppearanceConfig) ui.Element {
+	if c.Preferences().ReduceTransparency {
+		if isClassicPreset(cfg) {
+			header.Background(theme.Background)
+		} else {
+			header.Background(c.Theme().Surface)
+		}
+		return header
+	}
+	if isClassicPreset(cfg) {
+		header.Material(glass.Glass{Native: c.Vibrancy()})
+		return header
+	}
+	header.Material(glass.Glass{
+		Style:   glass.Regular,
+		Tint:    shellGlassTint(theme),
+		Native:  c.Vibrancy(),
+		Clarity: float32(cfg.GlassClarity),
+	})
+	return header
+}

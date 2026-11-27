@@ -292,11 +292,13 @@ func TestOmniboxActionMenuOpensClosesAndExecutes(t *testing.T) {
 		t.Fatalf("action menu copied %q, want %q", got, "menu-target")
 	}
 
-	// Palette keyboard navigation: ↓ moves selection to "pin", Enter executes it.
+	// Palette keyboard navigation: ↓×4 moves selection to "pin" (index 4), Enter executes it.
 	f.ctrl.OpenOmnibox(config.TabClipboard, "")
 	tt.Frame()
 	tt.Key(ui.Cmd, ui.KeyK)
 	tt.Frame()
+	tt.Key(0, ui.KeyDown)
+	tt.Key(0, ui.KeyDown)
 	tt.Key(0, ui.KeyDown)
 	tt.Key(0, ui.KeyDown)
 	tt.Key(0, ui.KeyEnter)
@@ -358,22 +360,22 @@ func TestOmniboxSplitPreviewPane(t *testing.T) {
 		t.Fatalf("click footer %q: %v", previewLabel, err)
 	}
 	tt.Frame()
-	if tt.HasText("line three") {
+	if tt.HasText(stats) {
 		t.Fatalf("expected preview hidden after footer toggle, got %v", tt.Texts())
 	}
 	tt.Key(ui.Cmd, ui.KeyI)
 	tt.Frame()
-	if !tt.HasText("line three") {
+	if !tt.HasText(stats) {
 		t.Fatalf("expected preview back after ⌘I, got %v", tt.Texts())
 	}
 	tt.Key(ui.Cmd, ui.KeyI)
 	tt.Frame()
-	if tt.HasText("line three") {
+	if tt.HasText(stats) {
 		t.Fatalf("expected preview hidden after second ⌘I, got %v", tt.Texts())
 	}
 	tt.Key(ui.Cmd, ui.KeyI)
 	tt.Frame()
-	if !tt.HasText("line three") {
+	if !tt.HasText(stats) {
 		t.Fatalf("expected preview back after third ⌘I, got %v", tt.Texts())
 	}
 
@@ -390,7 +392,7 @@ func TestOmniboxSplitPreviewPane(t *testing.T) {
 	if err := f.ctrl.ConfigStore.SaveSnippets(cfg.Snippets); err != nil {
 		t.Fatalf("SaveSnippets: %v", err)
 	}
-	f.ctrl.StateMachine.SetConfig(f.ctrl.ConfigStore.Current())
+	f.ctrl.SetConfig(f.ctrl.ConfigStore.Current())
 
 	f.ctrl.OpenOmnibox(config.TabSnippets, "greet")
 	tt.Frame()

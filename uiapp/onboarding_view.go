@@ -13,6 +13,7 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"github.com/yeisme/clavis/internal/bridge"
+	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/pkg/core/config"
 	"github.com/yeisme/clavis/pkg/core/host"
 	"github.com/yeisme/clavis/pkg/core/i18n"
@@ -32,6 +33,10 @@ type OnboardingHooks struct {
 	// Relaunch restarts Clavis. macOS gives Input Monitoring to processes
 	// started after it was granted, so the keyboard monitor may need one.
 	Relaunch func()
+	// LaunchAgentInstalled reports whether launch-at-login is currently enabled.
+	LaunchAgentInstalled func() bool
+	// SetLaunchAgent installs or uninstalls the keep-alive LaunchAgent.
+	SetLaunchAgent func(enabled bool) error
 }
 
 // onboardingState is the guide's live state, under AppController.mu.
@@ -42,6 +47,7 @@ type onboardingState struct {
 	// relaunchNeeded: every permission is granted, yet the keyboard monitor
 	// failed to start; a new process would start it.
 	relaunchNeeded bool
+	launchAgentErr string
 }
 
 // onboardingGuideTimeout bounds how long a permission guide waits for the
@@ -142,22 +148,29 @@ func (a *AppController) renderOnboarding(c *ui.Context, goos string) {
 	diag := a.Diagnostics()
 	a.mu.Lock()
 	st := a.onboarding
+	apiKeySource := a.apiKeySource
+	aiTestStatus := a.aiTestStatus
+	aiTestMsg := a.aiTestMessage
 	a.mu.Unlock()
 
 	perms := diag.Permissions
 	granted := !onboardingAsksPermissions(goos) || perms.Accessibility && perms.InputMonitoring && screenRecordingGranted(perms)
 	ready := granted && diag.MonitorRunning
+	_, aiConfigured, _ := aiKeySourceSummary(cfg.Main.AI.ActiveProfile(), apiKeySource)
+	launchInstalled := goos == "darwin" && st.hooks.LaunchAgentInstalled != nil && st.hooks.LaunchAgentInstalled()
+	step4Done := aiConfigured || launchInstalled
 
 	applyTextLocale(ui.Column(c).Fill().Background(theme.Background)).Children(func() {
 		ui.Scroll(c).FillWidth().Grow(1).Children(func() {
 			ui.Column(c).FillWidth().Padding(dialogPadY, dialogPadX).Gap(space12).Children(func() {
 				renderOnboardingHeader(c, theme)
 				ui.Row(c).FillWidth().Gap(space10).AlignItems(ui.Start).Children(func() {
-					renderOnboardingRail(c, theme, granted, st.leaderSeen, ready)
+					renderOnboardingRail(c, theme, granted, st.leaderSeen, ready, step4Done)
 					ui.Column(c).FillWidth().Grow(1).Gap(space12).Children(func() {
 						a.renderOnboardingPermissions(c, theme, goos, diag, st, ready)
 						a.renderOnboardingLeader(c, theme, cfg, goos, st.leaderSeen, granted, diag.MonitorRunning)
 						renderOnboardingShortcuts(c, theme, cfg, goos)
+						a.renderOnboardingReadyStep(c, theme, cfg, goos, st, apiKeySource, aiTestStatus, aiTestMsg, step4Done)
 					})
 				})
 			})
@@ -183,12 +196,11 @@ func renderOnboardingHeader(c *ui.Context, theme *ui.Theme) {
 	})
 }
 
-// renderOnboardingRail is a compact progress guide that keeps the three steps
-// legible even when the body is scrolled. Completion uses the existing success
-// semantic and the current step uses the accent, with no extra status colour.
-func renderOnboardingRail(c *ui.Context, theme *ui.Theme, permissionsDone, leaderDone, ready bool) {
+// renderOnboardingRail is a compact progress guide that keeps the steps legible
+// even when the body is scrolled. Completion uses the existing success semantic.
+func renderOnboardingRail(c *ui.Context, theme *ui.Theme, permissionsDone, leaderDone, ready, step4Done bool) {
 	ui.Column(c).Width(space20).Gap(space8).AlignItems(ui.Center).Padding(space8, space0).Children(func() {
-		for i, done := range []bool{permissionsDone, leaderDone, ready} {
+		for i, done := range []bool{permissionsDone, leaderDone, ready, step4Done} {
 			if i > 0 {
 				ui.Box(c).Width(space1).Height(space12).Background(hairline(theme))
 			}
@@ -503,6 +515,107 @@ func renderOnboardingShortcuts(c *ui.Context, theme *ui.Theme, cfg config.Clavis
 					})
 				})
 			}
+		})
+	})
+}
+
+// renderOnboardingReadyStep is optional step 4: launch-at-login toggle (macOS)
+// and non-blocking AI provider quick-check/setup.
+func (a *AppController) renderOnboardingReadyStep(
+	c *ui.Context,
+	theme *ui.Theme,
+	cfg config.ClavisConfig,
+	goos string,
+	st onboardingState,
+	apiKeySource secrets.APIKeySource,
+	aiTestStatus AITestStatus,
+	aiTestMsg string,
+	done bool,
+) {
+	onboardingStep(c, theme, 4, i18n.T("onboarding.step.ready"), done, func() {
+		applyProseLineHeight(ui.Text(c, i18n.T("onboarding.ready.optional_hint"))).FontSize(typeMeta).TextColor(theme.TextMuted)
+
+		if goos == "darwin" && st.hooks.LaunchAgentInstalled != nil {
+			installed := st.hooks.LaunchAgentInstalled()
+			kitInsetWell(c, theme, func() {
+				ui.Row(c).FillWidth().Gap(space10).AlignItems(ui.Center).Children(func() {
+					var labelEl ui.Element
+					ui.Column(c).Grow(1).MinWidth(0).Gap(space2).Children(func() {
+						labelEl = ui.Text(c, i18n.T("onboarding.ready.launch_agent")).FontSize(typeBody).FontWeight(600).TextColor(theme.Text).SingleLine()
+						applyProseLineHeight(ui.Text(c, i18n.T("onboarding.ready.launch_agent_hint"))).FontSize(typeMeta).TextColor(theme.TextMuted)
+					})
+					statusLabel := i18n.T("onboarding.ready.launch_off")
+					statusTone := chipNeutral
+					if installed {
+						statusLabel = i18n.T("onboarding.ready.launch_on")
+						statusTone = chipSuccess
+					}
+					kitStatusPill(c, theme, statusLabel, statusTone)
+					toggle := installed
+					sw := ui.Switch(c.Key("onboarding-launch-agent"), &toggle)
+					sw.LabelledBy(labelEl)
+					if sw.Changed() && st.hooks.SetLaunchAgent != nil {
+						err := st.hooks.SetLaunchAgent(toggle)
+						a.mu.Lock()
+						if err != nil {
+							a.onboarding.launchAgentErr = err.Error()
+						} else {
+							a.onboarding.launchAgentErr = ""
+						}
+						a.mu.Unlock()
+					}
+				})
+				if st.launchAgentErr != "" {
+					kitErrorBanner(c, theme, st.launchAgentErr)
+				}
+			})
+		}
+
+		activeProfile := cfg.Main.AI.ActiveProfile()
+		keyLabel, _, keyTone := aiKeySourceSummary(activeProfile, apiKeySource)
+		kitInsetWell(c, theme, func() {
+			ui.Column(c).FillWidth().Gap(space8).Children(func() {
+				ui.Row(c).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+					ui.Column(c).Grow(1).MinWidth(0).Gap(space2).Children(func() {
+						ui.Text(c, i18n.T("onboarding.ready.ai_title")).FontSize(typeBody).FontWeight(600).TextColor(theme.Text).SingleLine()
+						profSummary := strings.TrimSpace(activeProfile.ID)
+						if activeProfile.Model != "" {
+							profSummary = profSummary + " · " + activeProfile.Model
+						}
+						ui.Text(c, profSummary).FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
+					})
+					kitStatusPill(c, theme, keyLabel, keyTone)
+				})
+				ui.Row(c).FillWidth().Wrap().Gap(space8).AlignItems(ui.Center).Children(func() {
+					if ui.Button(c, i18n.T("onboarding.ready.ai_configure")).Key("onboarding-ai-configure").Clicked() {
+						a.OpenSettings(SettingsTabAI)
+					}
+					svc := c.Services()
+					profID := activeProfile.ID
+					if ui.Button(c, i18n.T("onboarding.ready.ai_test")).Key("onboarding-ai-test").Disabled(aiTestStatus == AITestLoading).Clicked() {
+						go func() {
+							_ = a.TestAIConnectionForProfile(context.Background(), profID)
+							svc.Invalidate()
+						}()
+					}
+					if aiTestStatus == AITestLoading {
+						kitStatusDot(c, kitStateLoadingColor(theme), true)
+					}
+				})
+				if aiTestMsg != "" {
+					if aiTestStatus == AITestError {
+						kitErrorBanner(c, theme, aiTestMsg)
+					} else {
+						tone := chipNeutral
+						if aiTestStatus == AITestSuccess {
+							tone = chipSuccess
+						} else if aiTestStatus == AITestLoading {
+							tone = chipAccent
+						}
+						kitStatusPill(c, theme, aiTestMsg, tone)
+					}
+				}
+			})
 		})
 	})
 }

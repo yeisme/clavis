@@ -850,8 +850,7 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 			}
 			switch {
 			case ev.Key == ui.KeyEscape && ev.Mods == 0:
-				a.ClosePromptComposer()
-				return true
+				return a.surfaceEscape(SurfaceEscapePrompt)
 			case ev.Key == ui.KeyEnter && ev.Mods == 0:
 				a.CommitPromptComposer()
 				return true
@@ -942,8 +941,7 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 										a.CommitPromptComposer()
 										return true
 									case ev.Key == ui.KeyEscape && ev.Mods == 0:
-										a.ClosePromptComposer()
-										return true
+										return a.surfaceEscape(SurfaceEscapePrompt)
 									}
 									return false
 								})
@@ -1038,8 +1036,7 @@ func (a *AppController) PromptComposerView(c *ui.Context) {
 										a.CommitPromptComposer()
 										return true
 									case k.Key == ui.KeyEscape && k.Mods == 0:
-										a.ClosePromptComposer()
-										return true
+										return a.surfaceEscape(SurfaceEscapePrompt)
 									}
 									return false
 								})

@@ -172,7 +172,7 @@ func DefaultAppearanceConfig() AppearanceConfig {
 		ShowKeyHints:            true,
 		ShowPreviewPane:         true,
 		HUDDurationMs:           1400,
-		VisualPreset:            "spatial_3d",
+		VisualPreset:            "liquid_glass",
 		Enable3DEffects:         true,
 		EnableShaders:           true,
 		GlassClarity:            0.18,
@@ -1222,6 +1222,50 @@ type ClipboardConfig struct {
 	// SensitiveTTLSeconds is the auto-clear countdown (5..300s, default 30s) for
 	// user-only sensitive clipboard copies.
 	SensitiveTTLSeconds int `json:"sensitiveTtlSeconds"`
+	// EnterAction controls the primary Enter action on a clipboard entry ("paste" default | "copy").
+	EnterAction string `json:"enterAction"`
+	// RowDensity controls clipboard list density ("compact" default 32pt | "comfortable" 42pt).
+	RowDensity string `json:"rowDensity"`
+	// PinPlacement controls where pinned items appear ("top" default | "bottom" | "inline").
+	PinPlacement string `json:"pinPlacement"`
+	// SelectionStyle controls active row styling ("accent_bar" B1 default | "maccy_solid" B2).
+	SelectionStyle string `json:"selectionStyle"`
+}
+
+// NormalizeClipboardEnterAction returns "copy" when configured, otherwise "paste".
+func NormalizeClipboardEnterAction(v string) string {
+	if strings.EqualFold(strings.TrimSpace(v), "copy") {
+		return "copy"
+	}
+	return "paste"
+}
+
+// NormalizeClipboardRowDensity returns "comfortable" when configured, otherwise "compact".
+func NormalizeClipboardRowDensity(v string) string {
+	if strings.EqualFold(strings.TrimSpace(v), "comfortable") {
+		return "comfortable"
+	}
+	return "compact"
+}
+
+// NormalizeClipboardPinPlacement returns "bottom" or "inline" when configured, otherwise "top".
+func NormalizeClipboardPinPlacement(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "bottom":
+		return "bottom"
+	case "inline":
+		return "inline"
+	default:
+		return "top"
+	}
+}
+
+// NormalizeClipboardSelectionStyle returns "maccy_solid" when configured, otherwise "accent_bar".
+func NormalizeClipboardSelectionStyle(v string) string {
+	if strings.EqualFold(strings.TrimSpace(v), "maccy_solid") {
+		return "maccy_solid"
+	}
+	return "accent_bar"
 }
 
 func DefaultClipboardConfig() ClipboardConfig {
@@ -1237,6 +1281,10 @@ func DefaultClipboardConfig() ClipboardConfig {
 		MediaCapture:        true,
 		MediaQuotaMB:        512,
 		SensitiveTTLSeconds: DefaultSensitiveCopyTTLSeconds,
+		EnterAction:         "paste",
+		RowDensity:          "compact",
+		PinPlacement:        "top",
+		SelectionStyle:      "accent_bar",
 	}
 }
 
@@ -1285,6 +1333,26 @@ func decodeClipboardConfig(tbl *toml.Table, path string) (ClipboardConfig, error
 	} else if ok {
 		cfg.SensitiveTTLSeconds = NormalizeSensitiveTTLSeconds(n)
 	}
+	if s, ok, err := optionalString(tbl, "enter_action", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.EnterAction = strings.ToLower(strings.TrimSpace(s))
+	}
+	if s, ok, err := optionalString(tbl, "row_density", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.RowDensity = strings.ToLower(strings.TrimSpace(s))
+	}
+	if s, ok, err := optionalString(tbl, "pin_placement", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.PinPlacement = strings.ToLower(strings.TrimSpace(s))
+	}
+	if s, ok, err := optionalString(tbl, "selection_style", path); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.SelectionStyle = strings.ToLower(strings.TrimSpace(s))
+	}
 	return cfg, nil
 }
 
@@ -1298,6 +1366,10 @@ func (c ClipboardConfig) toTOML() *toml.Table {
 	t.Set("media_capture", toml.BoolVal(c.MediaCapture))
 	t.Set("media_quota_mb", toml.IntVal(int64(c.MediaQuotaMB)))
 	t.Set("sensitive_ttl_seconds", toml.IntVal(int64(NormalizeSensitiveTTLSeconds(c.SensitiveTTLSeconds))))
+	t.Set("enter_action", toml.StringVal(NormalizeClipboardEnterAction(c.EnterAction)))
+	t.Set("row_density", toml.StringVal(NormalizeClipboardRowDensity(c.RowDensity)))
+	t.Set("pin_placement", toml.StringVal(NormalizeClipboardPinPlacement(c.PinPlacement)))
+	t.Set("selection_style", toml.StringVal(NormalizeClipboardSelectionStyle(c.SelectionStyle)))
 	return t
 }
 

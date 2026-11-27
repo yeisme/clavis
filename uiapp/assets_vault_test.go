@@ -81,7 +81,7 @@ func TestVaultMetadataPersistenceUserCopyAndRevoke(t *testing.T) {
 	}
 }
 
-func TestAssetsHubCmd9ThreeTabsAndVaultUI(t *testing.T) {
+func TestCmd9AssetsHubRemovedAndVaultSettingsUIHidesPlaintext(t *testing.T) {
 	dir := t.TempDir()
 	cfgStore := config.NewConfigStore(dir)
 	if _, err := cfgStore.LoadOrInitialize(); err != nil {
@@ -96,50 +96,19 @@ func TestAssetsHubCmd9ThreeTabsAndVaultUI(t *testing.T) {
 	})
 	t.Cleanup(ctrl.Close)
 
+	if entries := registeredHubEntries(); len(entries) != 2 {
+		t.Fatalf("registeredHubEntries len = %d, want 2 (Stats + Manage only)", len(entries))
+	}
+
 	if _, err := ctrl.VaultPutSecret("ref-ui-1", "clavis.staging.key", "Staging Key", secrets.SecretKindPassword, "val-hidden-ui"); err != nil {
 		t.Fatal(err)
 	}
-	ctrl.Dispatch(engine.Event{
-		Type: engine.EventSetClipboardEntries,
-		ClipboardEntries: []engine.OmniboxClipboardEntry{{
-			ID:            "pin-1",
-			Content:       "pinned snippet text",
-			IsPinned:      true,
-			SourceAppName: "Notes",
-			CopiedAt:      time.Now(),
-		}},
-	})
-	ctrl.Dispatch(engine.Event{Type: engine.EventOpenOmnibox, Tab: config.TabActions})
-	ctrl.ToggleHubSurface(HubSurfaceAssets)
+	ctrl.OpenSettingsPage("security")
 
-	w, h := PreferredCapsuleSize(engine.PhaseOmnibox, ctrl.Config().Main.Appearance)
-	tt := ui.NewTester(ctrl.CapsuleView, w, h)
-	tt.Frame()
-
-	// Switch to Pinned & Templates sub-tab.
-	pinnedLbl := "Pinned"
-	if _, ok := tt.Find("置顶与模板"); ok {
-		pinnedLbl = "置顶与模板"
-	}
-	if err := tt.Click(pinnedLbl); err != nil {
-		t.Fatalf("click Pinned sub-tab: %v (%v)", err, tt.Texts())
-	}
-	tt.Frame()
-	if !tt.HasText("pinned snippet text") {
-		t.Fatalf("pinned item missing on Pinned sub-tab: %v", tt.Texts())
-	}
-
-	// Switch to Vault sub-tab and verify secret plaintext is never rendered.
-	vaultLbl := "Vault"
-	if _, ok := tt.Find("密钥库"); ok {
-		vaultLbl = "密钥库"
-	}
-	if err := tt.Click(vaultLbl); err != nil {
-		t.Fatalf("click Vault sub-tab: %v", err)
-	}
+	tt := ui.NewTester(ctrl.SettingsView, 920, 620)
 	tt.Frame()
 	if !tt.HasText("Staging Key") {
-		t.Fatalf("Vault item label missing: %v", tt.Texts())
+		t.Fatalf("Vault item label missing in Settings -> Security: %v", tt.Texts())
 	}
 	for _, txt := range tt.Texts() {
 		if strings.Contains(txt, "val-hidden-ui") {
@@ -289,26 +258,5 @@ func TestVaultClipboardOwnershipAndAssetsHubEdgePaths(t *testing.T) {
 	snap := ctrl.VaultSnapshot()
 	if len(snap.SecretRefs) != 2 || snap.SecretRefs[0].ID != "ref-b" || snap.SecretRefs[1].ID != "ref-a" {
 		t.Fatalf("expected active ref-b sorted before revoked ref-a, got %+v", snap.SecretRefs)
-	}
-
-	// collectMediaAssetItems falls back to ClipboardEntries when MediaSearchItems is empty.
-	items := ctrl.collectMediaAssetItems(engine.State{
-		ClipboardEntries: []engine.OmniboxClipboardEntry{
-			{ID: "txt-1", Content: "just text"},
-			{
-				ID:            "pic-1",
-				Content:       "",
-				IsPinned:      true,
-				SourceAppName: "Preview",
-				CopiedAt:      time.Now(),
-				Media:         engine.ClipboardMedia{Kind: "image", Path: "/tmp/a.png"},
-			},
-		},
-	})
-	if len(items) != 1 || items[0].ID != "clip:pic-1" || items[0].KeyHint != engine.KeyHintPinned {
-		t.Fatalf("collectMediaAssetItems fallback failed: %+v", items)
-	}
-	if got := previewSingleLine("  line1\n  line2\tline3  ", 8); got != "line1 li…" {
-		t.Fatalf("previewSingleLine = %q", got)
 	}
 }

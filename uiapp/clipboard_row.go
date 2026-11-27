@@ -1,9 +1,11 @@
 package uiapp
 
 import (
+	"fmt"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/yeisme/clavis/pkg/core/engine"
@@ -212,4 +214,173 @@ func parseHexSwatch(content string) (ui.Color, bool) {
 		}
 	}
 	return ui.Hex(s), true
+}
+
+// collapseClipboardLine flattens a bounded prefix (<= clipboardSniffBytes) onto one
+// dense display line, replacing newlines with the visible " ↵ " marker and collapsing
+// runs of whitespace so 256 KiB clipboard blobs never allocate linearly per frame.
+func collapseClipboardLine(content string) string {
+	if content == "" {
+		return ""
+	}
+	if len(content) > clipboardSniffBytes {
+		content = content[:clipboardSniffBytes]
+		for len(content) > 0 && !utf8.ValidString(content) {
+			content = content[:len(content)-1]
+		}
+	}
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(min(len(trimmed), 256))
+	pendingSpace := false
+	pendingNL := false
+	for _, r := range trimmed {
+		switch r {
+		case '\r':
+			continue
+		case '\n':
+			pendingNL = true
+			pendingSpace = false
+		case ' ', '\t':
+			if !pendingNL {
+				pendingSpace = true
+			}
+		default:
+			if pendingNL {
+				if b.Len() > 0 {
+					b.WriteString(" ↵ ")
+				}
+				pendingNL = false
+				pendingSpace = false
+			} else if pendingSpace {
+				if b.Len() > 0 {
+					b.WriteByte(' ')
+				}
+				pendingSpace = false
+			}
+			b.WriteRune(r)
+			if b.Len() >= clipboardSniffBytes {
+				return b.String()
+			}
+		}
+	}
+	return b.String()
+}
+
+// clipboardCompactTitle produces a single-line title with semantic middle truncation:
+// - active search match past rune 40 centers a window around the hit;
+// - HTTP URLs keep scheme+host + "…" + tail path;
+// - file paths keep root prefix + "…" + filename;
+// - unbroken tokens >= 36 runes keep head 18 + "…" + tail 12;
+// - general text truncates cleanly at maxRunes.
+func clipboardCompactTitle(content, query string, maxRunes int) string {
+	if maxRunes <= 0 {
+		maxRunes = 64
+	}
+	collapsed := collapseClipboardLine(content)
+	if collapsed == "" {
+		return ""
+	}
+	runes := []rune(collapsed)
+	n := len(runes)
+	if n <= maxRunes {
+		return collapsed
+	}
+
+	// Center around deep search match (> rune 40).
+	if q := strings.TrimSpace(query); q != "" {
+		parsed := engine.ParseClipboardQuery(q, time.Time{})
+		needle := strings.ToLower(strings.TrimSpace(parsed.FreeText))
+		if needle == "" && len(parsed.ExactPhrases) > 0 {
+			needle = strings.ToLower(parsed.ExactPhrases[0])
+		}
+		if needle != "" {
+			if byteIdx := strings.Index(strings.ToLower(collapsed), needle); byteIdx > 0 {
+				runeHit := utf8.RuneCountInString(collapsed[:byteIdx])
+				if runeHit > 40 {
+					half := maxRunes / 2
+					start := max(0, runeHit-half/2)
+					end := min(n, start+maxRunes-2)
+					if end-start < maxRunes-2 {
+						start = max(0, end-(maxRunes-2))
+					}
+					prefix := ""
+					if start > 0 {
+						prefix = "…"
+					}
+					suffix := ""
+					if end < n {
+						suffix = "…"
+					}
+					return prefix + string(runes[start:end]) + suffix
+				}
+			}
+		}
+	}
+
+	// Semantic middle truncation for URLs.
+	lower := strings.ToLower(collapsed)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		if schemeEnd := strings.Index(collapsed, "://"); schemeEnd >= 0 {
+			rest := collapsed[schemeEnd+3:]
+			if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+				hostEnd := utf8.RuneCountInString(collapsed[:schemeEnd+3+slash])
+				headLen := min(hostEnd+1, maxRunes-16)
+				tailLen := max(12, maxRunes-headLen-1)
+				if headLen >= 10 && headLen+tailLen+1 < n {
+					return string(runes[:headLen]) + "…" + string(runes[n-tailLen:])
+				}
+			}
+		}
+	}
+
+	// Semantic middle truncation for file paths.
+	if looksLikePath(collapsed) {
+		headLen := min(18, maxRunes/2-4)
+		tailLen := max(14, maxRunes-headLen-1)
+		if headLen >= 8 && headLen+tailLen+1 < n {
+			return string(runes[:headLen]) + "…" + string(runes[n-tailLen:])
+		}
+	}
+
+	// Long unbroken single token (e.g. JWT, base64, SHA digest).
+	if !strings.ContainsRune(collapsed, ' ') && n >= 36 {
+		headLen := min(20, maxRunes-13)
+		tailLen := 12
+		if headLen >= 8 && headLen+tailLen+1 < n {
+			return string(runes[:headLen]) + "…" + string(runes[n-tailLen:])
+		}
+	}
+
+	return string(runes[:maxRunes-1]) + "…"
+}
+
+func clipboardCompactRightMeta(item engine.OmniboxItem, now time.Time) string {
+	if item.ClipboardMedia != nil && item.ClipboardMedia.IsMedia() {
+		var parts []string
+		if item.ClipboardMedia.Width > 0 && item.ClipboardMedia.Height > 0 {
+			parts = append(parts, fmt.Sprintf("%d×%d", item.ClipboardMedia.Width, item.ClipboardMedia.Height))
+		}
+		if item.ClipboardMedia.ByteSize > 0 {
+			parts = append(parts, formatClipboardBytes(item.ClipboardMedia.ByteSize))
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, " · ")
+		}
+	}
+	var parts [2]string
+	p := parts[:0]
+	if app := strings.TrimSpace(item.ClipboardSourceApp); app != "" {
+		p = append(p, app)
+	}
+	if !item.ClipboardCopiedAt.IsZero() {
+		p = append(p, relativeCopyTime(item.ClipboardCopiedAt, now))
+	}
+	if len(p) > 0 {
+		return strings.Join(p, " · ")
+	}
+	return ""
 }

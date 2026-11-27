@@ -339,6 +339,30 @@ func ValidateMain(main MainConfig) []ValidationIssue {
 			Message: i18n.T("diag.clipboard.media_quota.nonneg"),
 		})
 	}
+	if v := strings.ToLower(strings.TrimSpace(main.Clipboard.EnterAction)); v != "" && v != "paste" && v != "copy" {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "clipboard.enter_action", Severity: SeverityWarning,
+			Message: i18n.Tf("diag.clipboard.enter_action.unknown", main.Clipboard.EnterAction),
+		})
+	}
+	if v := strings.ToLower(strings.TrimSpace(main.Clipboard.RowDensity)); v != "" && v != "compact" && v != "comfortable" {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "clipboard.row_density", Severity: SeverityWarning,
+			Message: i18n.Tf("diag.clipboard.row_density.unknown", main.Clipboard.RowDensity),
+		})
+	}
+	if v := strings.ToLower(strings.TrimSpace(main.Clipboard.PinPlacement)); v != "" && v != "top" && v != "bottom" && v != "inline" {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "clipboard.pin_placement", Severity: SeverityWarning,
+			Message: i18n.Tf("diag.clipboard.pin_placement.unknown", main.Clipboard.PinPlacement),
+		})
+	}
+	if v := strings.ToLower(strings.TrimSpace(main.Clipboard.SelectionStyle)); v != "" && v != "accent_bar" && v != "maccy_solid" {
+		issues = append(issues, ValidationIssue{
+			File: file, KeyPath: "clipboard.selection_style", Severity: SeverityWarning,
+			Message: i18n.Tf("diag.clipboard.selection_style.unknown", main.Clipboard.SelectionStyle),
+		})
+	}
 
 	if main.Appearance.VisualPreset != "" && main.Appearance.VisualPreset != "spatial_3d" && main.Appearance.VisualPreset != "liquid_glass" && main.Appearance.VisualPreset != "classic" {
 		issues = append(issues, ValidationIssue{File: file, KeyPath: "appearance.visual_preset", Severity: SeverityError, Message: "unsupported visual preset"})

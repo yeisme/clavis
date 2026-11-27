@@ -442,7 +442,7 @@ func TestVaultInvalidInputAndDuplicateKeyNotClassifiedAsDenied(t *testing.T) {
 	uiSt.mu.Lock()
 	uiSt.setStatusLocked(kind, code, detail)
 	uiSt.mu.Unlock()
-	ctrl.OpenSettingsSection(settingsSectionSecurity)
+	ctrl.OpenSettingsPage("security")
 	tt := ui.NewTester(ctrl.SettingsView, 960, 820)
 	tt.Frame()
 	if !tt.HasText("Invalid Input") {

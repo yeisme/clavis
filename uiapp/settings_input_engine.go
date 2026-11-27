@@ -268,43 +268,43 @@ var fuzzyPinyinPresets = [][2]string{
 func (a *AppController) renderInputEngineCard(c *ui.Context, theme *ui.Theme, cfg config.ClavisConfig) {
 	ie := cfg.Main.InputEngine
 	settingsSourceCard(c, theme, i18n.T("settings.card.input_engine"), "[input_engine]", func() {
-		if v, changed := settingSwitchRow(c, theme, i18n.T("settings.input_engine.enabled"), "enabled",
-			i18n.T("settings.input_engine.enabled_help"), ie.Enabled); changed {
-			_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.InputEngine.Enabled = v })
-		}
+		a.immediateSwitchRow(c, theme, "ime-keymap", i18n.T("settings.input_engine.enabled"), "input_engine.enabled",
+			i18n.T("settings.input_engine.enabled_help"), ie.Enabled, func(m *config.MainConfig, v bool) {
+				m.InputEngine.Enabled = v
+			})
 		// The rest only matters with the engine on; it stays readable.
 		ui.Column(c).FillWidth().Gap(space6).Disabled(!ie.Enabled).Children(func() {
 			schemes := make([]settingOption, len(inputSchemes))
 			for i, s := range inputSchemes {
 				schemes[i] = settingOption{s, i18n.T("settings.input_engine.scheme." + s)}
 			}
-			if v, changed := settingSelectRow(c, theme, i18n.T("settings.input_engine.scheme"), "scheme", "",
-				schemes, ie.Scheme, 150); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.InputEngine.Scheme = v })
-			}
-			if v, changed := settingNumberRow(c, theme, i18n.T("settings.input_engine.candidate_count"), "candidate_count", "",
-				float64(ie.CandidateCount), 3, 9, 1, ""); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.InputEngine.CandidateCount = int(v) })
-			}
+			a.immediateSelectRow(c, theme, "ime-keymap", i18n.T("settings.input_engine.scheme"), "input_engine.scheme", "",
+				schemes, ie.Scheme, 150, func(m *config.MainConfig, v string) {
+					m.InputEngine.Scheme = v
+				})
+			a.immediateNumberRow(c, theme, "ime-keymap", i18n.T("settings.input_engine.candidate_count"), "input_engine.candidate_count", "",
+				float64(ie.CandidateCount), 3, 9, 1, "", func(m *config.MainConfig, v float64) {
+					m.InputEngine.CandidateCount = int(v)
+				})
 			orientation := cfg.Main.Appearance.CandidateBarOrientation
 			if orientation == "" {
 				orientation = "horizontal"
 			}
-			if v, changed := settingChoiceRow(c, theme, i18n.T("settings.input_engine.orientation"),
+			a.immediateChoiceRow(c, theme, "ime-keymap", i18n.T("settings.input_engine.orientation"),
 				"appearance.candidate_bar_orientation", "", []settingOption{
 					{"horizontal", i18n.T("settings.option.horizontal")},
 					{"vertical", i18n.T("settings.option.vertical")},
-				}, orientation); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.Appearance.CandidateBarOrientation = v })
-			}
-			if v, changed := settingSwitchRow(c, theme, i18n.T("settings.input_engine.shift_toggle"), "shift_toggle_ascii", "",
-				ie.ShiftToggleASCII); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.InputEngine.ShiftToggleASCII = v })
-			}
-			if v, changed := settingSwitchRow(c, theme, i18n.T("settings.input_engine.user_learning"), "user_learning",
-				i18n.T("settings.input_engine.user_learning_help"), ie.UserLearning); changed {
-				_ = a.UpdateMainConfig(func(m *config.MainConfig) { m.InputEngine.UserLearning = v })
-			}
+				}, orientation, func(m *config.MainConfig, v string) {
+					m.Appearance.CandidateBarOrientation = v
+				})
+			a.immediateSwitchRow(c, theme, "ime-keymap", i18n.T("settings.input_engine.shift_toggle"), "input_engine.shift_toggle_ascii", "",
+				ie.ShiftToggleASCII, func(m *config.MainConfig, v bool) {
+					m.InputEngine.ShiftToggleASCII = v
+				})
+			a.immediateSwitchRow(c, theme, "ime-keymap", i18n.T("settings.input_engine.user_learning"), "input_engine.user_learning",
+				i18n.T("settings.input_engine.user_learning_help"), ie.UserLearning, func(m *config.MainConfig, v bool) {
+					m.InputEngine.UserLearning = v
+				})
 			a.renderFuzzyPinyin(c, theme, ie.FuzzyPinyin)
 			a.renderUserWordsCard(c, theme, cfg)
 		})
@@ -445,10 +445,10 @@ func (a *AppController) renderUserBlocklistCard(c *ui.Context, theme *ui.Theme) 
 				ui.Column(c).FillWidth().Gap(space4).Children(func() {
 					for _, w := range words {
 						word := w
-						ui.Row(c).Key("blocklist-row:"+word).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
+						ui.Row(c).Key("blocklist-row:" + word).FillWidth().Gap(space8).AlignItems(ui.Center).Children(func() {
 							ui.Text(c, word).FontSize(typeBody).TextColor(theme.Text).Grow(1).Shrink(1).SingleLine()
 							if ui.Button(c, pickLang(zh, "移除", "Unblock")).
-								Key("unblock-word:" + word).
+								Key("unblock-word:"+word).
 								Padding(space2, space10).
 								Shrink(0).
 								Clicked() {

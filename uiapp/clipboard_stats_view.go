@@ -15,12 +15,12 @@ import (
 )
 
 const (
-	clipboardStatsBandHeight float32 = 54
+	clipboardStatsBandHeight float32 = 28
 	clipboardStripHeight     float32 = 6
 	clipboardStripRadius     float32 = 3
 	clipboardStripGap        float32 = 1.5
-	clipboardSparkWidth      float32 = 72
-	clipboardSparkHeight     float32 = 20
+	clipboardSparkWidth      float32 = 52
+	clipboardSparkHeight     float32 = 16
 )
 
 // clipboardStatsState is a snapshot copied by value into the render path, so it must not
@@ -212,49 +212,63 @@ func renderClipboardStatsBand(c *ui.Context, theme *ui.Theme, state clipboardSta
 }
 
 func renderClipboardStatsBandWithRetry(c *ui.Context, theme *ui.Theme, state clipboardStatsState, onFilter func(string), onRetry func()) {
-	band := ui.Column(c).Key("clipboard-stats-band").Label("clipboard-stats-band").FillWidth().Height(clipboardStatsBandHeight).Gap(space4).Padding(space4, space0)
+	band := ui.Row(c).Key("clipboard-stats-band").Label("clipboard-stats-band").FillWidth().Height(clipboardStatsBandHeight).Gap(space4).AlignItems(ui.Center)
 	band.Children(func() {
 		if state.err != nil {
-			ui.Row(c).FillWidth().Grow(1).AlignItems(ui.Center).Children(func() {
-				kitInlineError(c, theme, "clipboard-stats-error", clipboardStatsErrorText(), onRetry)
-			})
+			kitInlineError(c, theme, "clipboard-stats-error", clipboardStatsErrorText(), onRetry)
 			return
 		}
-		if !state.loaded || state.loading {
-			ui.Row(c).FillWidth().Grow(1).AlignItems(ui.Center).Children(func() {
-				kitInlineLoading(c, theme, "clipboard-stats-loading", clipboardStatsLoadingText())
-			})
-			return
+		filterChips := []struct {
+			kind  string
+			label string
+		}{
+			{"", i18n.T("clipboard.filter.all")},
+			{"pinned", i18n.T("clipboard.filter.pinned")},
+			{"text", i18n.T("clipboard.filter.text")},
+			{"image", i18n.T("clipboard.filter.image")},
+			{"file", i18n.T("clipboard.filter.file")},
+			{"link", i18n.T("clipboard.filter.link")},
 		}
-		stripWidth := float32(240)
-		segments := clipboardStatSegments(state.kinds, stripWidth, state.filter)
-		legend := ui.Row(c).Key("clipboard-stats-legend").Label("clipboard-stats-legend").FillWidth().Gap(space8).Height(typeMeta).AlignItems(ui.Center).Children(func() {
-			for i, segment := range segments {
-				seg := segment
-				selected := strings.EqualFold(state.filter, seg.Kind)
-				dotColor := clipboardStatColor(theme, i, selected)
-				ink := theme.TextMuted
+		ui.Row(c).Key("clipboard-filter-bar").Gap(space2).AlignItems(ui.Center).Shrink(0).Children(func() {
+			for _, chip := range filterChips {
+				fc := chip
+				selected := strings.EqualFold(state.filter, fc.kind)
+				btn := ui.ButtonBase(c).Key("clipboard-filter:"+fc.kind).Label(fc.label).
+					Padding(space1, space4).Radius(radiusPill).FocusRing(false)
+				fg := secondaryInk(theme)
 				if selected {
-					ink = accentInk(theme, surfaceBase(theme))
+					btn.Background(theme.Accent)
+					fg = theme.AccentText
+				} else {
+					btn.Background(tileFill(theme)).Border(space1, hairline(theme))
 				}
-				item := ui.Row(c).Gap(space4).AlignItems(ui.Center).OnClick(func() {
-					if onFilter != nil {
-						onFilter(seg.Kind)
-					}
+				btn.Children(func() {
+					ui.Text(c, fc.label).FontSize(typeMicro).FontWeight(600).TextColor(fg).SingleLine()
 				})
-				item.Children(func() {
-					ui.Box(c).Size(space6, space6).Radius(radius2).Background(dotColor).Shrink(0)
-					ui.Text(c, clipboardKindLabel(seg.Kind)).FontSize(typeMeta).TextColor(ink).SingleLine()
-				})
+				if btn.Clicked() && onFilter != nil {
+					onFilter(fc.kind)
+				}
 			}
 		})
-		_ = legend
-		bar := ui.Box(c).Key("clipboard-kind-strip").Label("clipboard-kind-strip").FillWidth().Height(clipboardStripHeight).Radius(clipboardStripRadius)
+
+		ui.Spacer(c)
+
+		if !state.loaded || state.loading {
+			kitInlineLoading(c, theme, "clipboard-stats-loading", clipboardStatsLoadingText())
+			return
+		}
+
+		stripWidth := float32(32)
+		count, bytes := clipboardStatsTotals(state.kinds)
+		ui.Text(c, clipboardStatsCountLabel(count, bytes)).Key("clipboard-stats-count").Label("clipboard-stats-count").
+			FontSize(typeMicro).FontFeatures("tnum").TextColor(theme.TextMuted).SingleLine().Shrink(0)
+		bar := ui.Box(c).Key("clipboard-kind-strip").Label("clipboard-kind-strip").Width(stripWidth).Height(clipboardStripHeight).Radius(clipboardStripRadius).Shrink(0)
 		bar.Draw(func(p *ui.Painter, r ui.Rect) {
-			if r.W > 0 {
-				stripWidth = r.W
+			w := r.W
+			if w <= 0 {
+				w = stripWidth
 			}
-			drawSegs := clipboardStatSegments(state.kinds, stripWidth, state.filter)
+			drawSegs := clipboardStatSegments(state.kinds, w, state.filter)
 			for i, segment := range drawSegs {
 				selected := strings.EqualFold(state.filter, segment.Kind)
 				color := clipboardStatColor(theme, i, selected)
@@ -266,7 +280,7 @@ func renderClipboardStatsBandWithRetry(c *ui.Context, theme *ui.Theme, state cli
 			}
 		})
 		bar.HandleInput(func(ev ui.InputEvent) bool {
-			if ev.Kind != ui.InputPointerDown {
+			if ev.Kind != ui.InputPointerDown || onFilter == nil {
 				return false
 			}
 			x := ev.X
@@ -277,14 +291,6 @@ func renderClipboardStatsBandWithRetry(c *ui.Context, theme *ui.Theme, state cli
 				}
 			}
 			return false
-		})
-		count, bytes := clipboardStatsTotals(state.kinds)
-		ui.Row(c).Key("clipboard-stats-count-row").Label("clipboard-stats-count-row").FillWidth().Height(clipboardSparkHeight).Gap(space8).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, clipboardStatsCountLabel(count, bytes)).Key("clipboard-stats-count").Label("clipboard-stats-count").FontSize(typeMeta).TextColor(theme.TextMuted).SingleLine()
-			ui.Spacer(c)
-			if len(state.days) >= 7 && count >= 5 {
-				renderClipboardSparkline(c, theme, state.days)
-			}
 		})
 	})
 }

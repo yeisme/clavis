@@ -624,34 +624,20 @@ func (m *mockMainBridge) InjectText(_ context.Context, text string, _ int, _ int
 	return nil
 }
 
-// TestCloseHidesLetsQuitThrough: closing one of Clavis's windows hides it,
-// but while the app quits the close must go through: MyGo closes every
-// window before quitting and a refused close cancels the quit, which left
-// tray Quit (and App.Relaunch) doing nothing.
-func TestCloseHidesLetsQuitThrough(t *testing.T) {
+// TestQuitAndVisibilityKeepFocusInClavis verifies that shutting down/quitting
+// never attempts to restore external focus, keeping exit fast and clean.
+func TestQuitAndVisibilityKeepFocusInClavis(t *testing.T) {
 	a := newDesktopApp()
-	hidden := 0
-	onClose := a.closeHides(func() { hidden++ })
-
-	e := &mygo.CloseEvent{}
-	onClose(e)
-	if !e.DefaultPrevented() || hidden != 1 {
-		t.Fatalf("close outside a quit: prevented=%v hidden=%d; want the window kept and hidden", e.DefaultPrevented(), hidden)
-	}
-
 	a.quitting.Store(true)
-	e = &mygo.CloseEvent{}
-	onClose(e)
-	if e.DefaultPrevented() || hidden != 1 {
-		t.Fatalf("close during a quit: prevented=%v hidden=%d; want it to go through", e.DefaultPrevented(), hidden)
-	}
-
-	// A canceled quit restores hiding.
-	a.quitting.Store(false)
-	e = &mygo.CloseEvent{}
-	onClose(e)
-	if !e.DefaultPrevented() || hidden != 2 {
-		t.Fatalf("close after a canceled quit: prevented=%v hidden=%d", e.DefaultPrevented(), hidden)
+	a.mu.Lock()
+	a.returnToExternalBundleID = "com.apple.Safari"
+	a.mu.Unlock()
+	a.restorePreviousAppFocus()
+	a.mu.Lock()
+	target := a.returnToExternalBundleID
+	a.mu.Unlock()
+	if target != "com.apple.Safari" {
+		t.Fatalf("restorePreviousAppFocus ran while quitting (target=%q)", target)
 	}
 }
 
@@ -831,7 +817,7 @@ func TestRefreshTrayLabelsPreservesPermissionStatus(t *testing.T) {
 	}
 }
 
-func TestHasVisibleSurfaceIncludesAnnotateAndInputUI(t *testing.T) {
+func TestDocumentAndFloatingWindowGroupsIncludeAnnotateAndInputUI(t *testing.T) {
 	app := newDesktopApp()
 	annotate := new(mygo.Window)
 	inputPanel := new(mygo.Window)
@@ -843,14 +829,21 @@ func TestHasVisibleSurfaceIncludesAnnotateAndInputUI(t *testing.T) {
 	app.inputUI = &inputEngineUI{panel: inputPanel}
 	app.mu.Unlock()
 
-	if app.hasVisibleSurface(func(*mygo.Window) bool { return false }) {
-		t.Fatal("expected false when no surfaces are visible")
+	docs := app.documentWindows()
+	floats := app.floatingWindows()
+	hasWin := func(list []*mygo.Window, want *mygo.Window) bool {
+		for _, w := range list {
+			if w == want {
+				return true
+			}
+		}
+		return false
 	}
-	if !app.hasVisibleSurface(func(w *mygo.Window) bool { return w == annotate }) {
-		t.Fatal("annotateWin visibility must keep Clavis from calling App.Hide()")
+	if !hasWin(docs, settings) || !hasWin(docs, annotate) {
+		t.Fatal("documentWindows must include settingsWin and annotateWin")
 	}
-	if !app.hasVisibleSurface(func(w *mygo.Window) bool { return w == inputPanel }) {
-		t.Fatal("inputUI.panel visibility must keep Clavis from calling App.Hide()")
+	if !hasWin(floats, inputPanel) {
+		t.Fatal("floatingWindows must include inputUI.panel")
 	}
 }
 

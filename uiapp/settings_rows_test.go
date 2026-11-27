@@ -97,7 +97,7 @@ func TestSettingsListsKeepTheirLayout(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
 	tt := ui.NewTester(ctrl.SettingsView, 960, 640)
 
-	ctrl.setSettingsSection(settingsSectionSnippets)
+	ctrl.setSettingsPage("snippets")
 	tt.Frame()
 	trig, ok1 := tt.Find(";sig")
 	desc, ok2 := tt.Find("Standard email sign-off")
@@ -108,7 +108,7 @@ func TestSettingsListsKeepTheirLayout(t *testing.T) {
 		t.Fatalf("snippet trigger and description touch (gap %.1f)", gap)
 	}
 
-	ctrl.setSettingsSection(settingsSectionLeader)
+	ctrl.setSettingsPage("leader")
 	tt.Frame()
 	parent, ok1 := tt.Find("Window")
 	child, ok2 := tt.Find("Left Half")
@@ -125,7 +125,7 @@ func TestSettingsListsKeepTheirLayout(t *testing.T) {
 func TestAIProfileEditorShowsNumbers(t *testing.T) {
 	ctrl, _, _, _ := newTestController(t, nil)
 	tt := ui.NewTester(ctrl.SettingsView, 960, 640)
-	ctrl.setSettingsSection(settingsSectionAI)
+	ctrl.setSettingsPage("ai")
 	tt.Frame()
 	p := ctrl.ActiveAIProfile()
 	for _, want := range []string{

@@ -10,6 +10,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,8 @@ import (
 	"github.com/yeisme/clavis/internal/apps"
 	"github.com/yeisme/clavis/internal/bridge"
 	"github.com/yeisme/clavis/internal/daemon"
+	"github.com/yeisme/clavis/internal/diag"
+	"github.com/yeisme/clavis/internal/filesearch"
 	"github.com/yeisme/clavis/internal/secrets"
 	"github.com/yeisme/clavis/internal/storage"
 	internalsync "github.com/yeisme/clavis/internal/sync"
@@ -74,6 +77,13 @@ func main() {
 		return
 	}
 
+	logDir := diag.DefaultLogDir()
+	defer diag.RecoverPanic(logDir, "1.0.0", "main", nil)
+	if logger, logErr := diag.NewRollingLogger(logDir, 0, 0); logErr == nil {
+		defer logger.Close()
+		_ = logger.Logf("info", "clavis starting")
+	}
+
 	mygo.App.SetName(appName)
 	if !mygo.App.RequestSingleInstanceLock() {
 		return
@@ -90,7 +100,7 @@ func main() {
 		app.start()
 	})
 	// MyGo closes every window before it quits, and Clavis's windows only
-	// hide when closed (see closeHides): they let the close through while a
+	// hide when closed (see bindSurface): they let the close through while a
 	// quit runs, or tray Quit and App.Relaunch would be canceled.
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { app.quitting.Store(true) })
 	mygo.App.OnQuitCanceled(func() { app.quitting.Store(false) })
@@ -170,26 +180,32 @@ type desktopApp struct {
 	learningStore *storage.LearningStore
 	// learningWriter is the only path hook, commit and UI callers use to
 	// learn: RAM mirror at once, SQLite in coalesced background batches.
-	learningWriter       *storage.LearningWriter
-	blocklistStore       *storage.UserBlocklistStore
-	syncStateStore       *internalsync.SQLiteStateStore
-	clipStore            clipboard.Store
-	mediaStore           *clipboard.MediaStore
-	auditLog             *automation.AuditLog
-	hostBridge           bridge.HostService
-	controller           *uiapp.AppController
-	supervisor           *daemon.ResidentSupervisor
-	frecencySyncer       *daemon.FrecencySyncer
-	configWatcher        *watcher.ConfigWatcher
-	dictionaryWatcher    *watcher.DictionaryWatcher
-	capsulePanel         *mygo.Window
-	promptPanel          *mygo.Window
-	imePillPanel         *mygo.Window
-	inputUI              *inputEngineUI
-	settingsWin          *mygo.Window
-	annotateWin          *mygo.Window
-	selectionBar         *mygo.Window
-	selectionBarPayload  uiapp.SelectionBarPayload
+	learningWriter           *storage.LearningWriter
+	blocklistStore           *storage.UserBlocklistStore
+	syncStateStore           *internalsync.SQLiteStateStore
+	clipStore                clipboard.Store
+	mediaStore               *clipboard.MediaStore
+	auditLog                 *automation.AuditLog
+	hostBridge               bridge.HostService
+	controller               *uiapp.AppController
+	supervisor               *daemon.ResidentSupervisor
+	frecencySyncer           *daemon.FrecencySyncer
+	configWatcher            *watcher.ConfigWatcher
+	dictionaryWatcher        *watcher.DictionaryWatcher
+	capsulePanel             *mygo.Window
+	promptPanel              *mygo.Window
+	imePillPanel             *mygo.Window
+	inputUI                  *inputEngineUI
+	settingsWin              *mygo.Window
+	annotateWin              *mygo.Window
+	selectionBar             *mygo.Window
+	selectionBarPayload      uiapp.SelectionBarPayload
+	capsuleSpec              uiapp.SurfaceSpec
+	promptSpec               uiapp.SurfaceSpec
+	pillSpec                 uiapp.SurfaceSpec
+	selectionSpec            uiapp.SurfaceSpec
+	candidateSpec            uiapp.SurfaceSpec
+	returnToExternalBundleID string
 	tray                     *mygo.Tray
 	permMenuItem             *mygo.MenuItem
 	healthMenuItem           *mygo.MenuItem
@@ -434,6 +450,7 @@ func (a *desktopApp) ensureLaunchAgent() {
 }
 
 func (a *desktopApp) start() {
+	defer diag.RecoverPanic(diag.DefaultLogDir(), "1.0.0", "start", nil)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	cfgDir := resolveConfigDir()
@@ -556,6 +573,8 @@ func (a *desktopApp) start() {
 
 	controller := uiapp.NewAppController(uiapp.Options{
 		ConfigStore:      cfgStore,
+		DataDir:          dataDir,
+		LogDir:           diag.DefaultLogDir(),
 		ClipboardStore:   clipStore,
 		AIUsageDaily:     aiUsageDaily,
 		AIUsageRecorder:  aiUsageRecorder,
@@ -575,10 +594,47 @@ func (a *desktopApp) start() {
 		OpenPath: func(p string) error {
 			return mygo.Shell.OpenPath(p)
 		},
-		OnRepaint:             a.handleRepaint,
-		OnPresentPhase:        a.handlePresentPhase,
-		OnHide:                a.handleHide,
-		OnOpenSettings:        a.handleOpenSettings,
+		FileSearcher: func(searchCtx context.Context, query string) ([]engine.FileMatch, error) {
+			needle, explicit, ok := engine.ParseFileSearchQuery(query)
+			if !ok {
+				return nil, nil
+			}
+			target := needle
+			if !explicit {
+				target = strings.TrimSpace(query)
+			}
+			if target == "" {
+				return nil, nil
+			}
+			matches, err := filesearch.SearchFiles(searchCtx, target, filesearch.Options{})
+			if err != nil {
+				return nil, err
+			}
+			out := make([]engine.FileMatch, 0, len(matches))
+			for _, m := range matches {
+				out = append(out, engine.FileMatch{
+					Path:        m.Path,
+					Name:        m.Name,
+					Dir:         m.Dir,
+					IsDir:       m.IsDir,
+					SizeBytes:   m.SizeBytes,
+					ModTimeUnix: m.ModTime.Unix(),
+				})
+			}
+			return out, nil
+		},
+		OnRepaint:      a.handleRepaint,
+		OnPresentPhase: a.handlePresentPhase,
+		OnHide:         a.handleHide,
+		OnOpenSettings: a.handleOpenSettings,
+		OnDocumentEdited: func(edited bool) {
+			a.mu.Lock()
+			win := a.settingsWin
+			a.mu.Unlock()
+			if win != nil {
+				win.SetDocumentEdited(edited)
+			}
+		},
 		OnOpenPromptComposer:  a.handleOpenPromptComposer,
 		OnClosePromptComposer: a.handleClosePromptComposer,
 		OnShowAnnotateWindow:  a.handleShowAnnotateWindow,
@@ -614,16 +670,12 @@ func (a *desktopApp) start() {
 		SkipTaskbar:   true,
 		Content:       ui.View(controller.CapsuleView),
 	}, capsuleSpec))
-	uiapp.BindFloatingSurface(capsulePanel, capsuleSpec, uiapp.SurfaceHooks{
+	a.bindSurface(capsulePanel, capsuleSpec, uiapp.SurfaceHooks{
 		Dismiss: func() { controller.Dispatch(engine.Event{Type: engine.EventDismiss}) },
 		CanDismiss: func() bool {
-			if a.isInPresentTransition() {
-				return false
-			}
 			phase := controller.State().Phase
 			return phase != engine.PhaseHidden && phase != engine.PhaseHUD
 		},
-		Quitting: a.quitting.Load,
 	})
 
 	promptW, promptH := uiapp.PreferredPromptComposerPanelSize(2)
@@ -642,10 +694,9 @@ func (a *desktopApp) start() {
 		SkipTaskbar:   true,
 		Content:       ui.View(controller.PromptComposerView),
 	}, promptSpec))
-	uiapp.BindFloatingSurface(promptPanel, promptSpec, uiapp.SurfaceHooks{
+	a.bindSurface(promptPanel, promptSpec, uiapp.SurfaceHooks{
 		Dismiss:    func() { controller.ClosePromptComposer() },
-		CanDismiss: func() bool { return !a.isInPresentTransition() && controller.PromptComposerOpen() },
-		Quitting:   a.quitting.Load,
+		CanDismiss: func() bool { return controller.PromptComposerOpen() },
 	})
 
 	pillW, pillH := uiapp.PreferredIMEPillSize()
@@ -666,8 +717,8 @@ func (a *desktopApp) start() {
 			uiapp.IMEPillView(c, a.currentIMEPillLabel())
 		}),
 	}, pillSpec))
-	uiapp.BindFloatingSurface(imePillPanel, pillSpec, uiapp.SurfaceHooks{
-		Dismiss: imePillPanel.Hide, Quitting: a.quitting.Load,
+	a.bindSurface(imePillPanel, pillSpec, uiapp.SurfaceHooks{
+		Dismiss: imePillPanel.Hide,
 	})
 
 	sbW, sbH := uiapp.PreferredSelectionBarWidth(nil), 34
@@ -689,9 +740,15 @@ func (a *desktopApp) start() {
 			uiapp.SelectionBarViewWithController(c, a.selectionBarSnapshot(), cfg.Main.Appearance, controller)
 		}),
 	}, selectionSpec))
-	uiapp.BindFloatingSurface(selectionBar, selectionSpec, uiapp.SurfaceHooks{
-		Dismiss: selectionBar.Hide, Quitting: a.quitting.Load,
+	a.bindSurface(selectionBar, selectionSpec, uiapp.SurfaceHooks{
+		Dismiss: selectionBar.Hide,
 	})
+	a.mu.Lock()
+	a.capsuleSpec = capsuleSpec
+	a.promptSpec = promptSpec
+	a.pillSpec = pillSpec
+	a.selectionSpec = selectionSpec
+	a.mu.Unlock()
 
 	settingsSpec := surfaceSpec(640, uiapp.SurfaceElevationFlat, mygo.VibrancyNone, uiapp.DismissExplicit, uiapp.FocusPreviousApp)
 	settingsSpec.Radius = uiapp.SurfaceRadius{Kind: uiapp.SurfaceRadiusSystem}
@@ -705,8 +762,8 @@ func (a *desktopApp) start() {
 		StateKey:  "settings",
 		Content:   ui.View(controller.SettingsView),
 	}, settingsSpec))
-	uiapp.BindFloatingSurface(settingsWin, settingsSpec, uiapp.SurfaceHooks{
-		Dismiss: settingsWin.Hide, RestoreFocus: a.restorePreviousAppFocus, Quitting: a.quitting.Load,
+	a.bindSurface(settingsWin, settingsSpec, uiapp.SurfaceHooks{
+		Dismiss: settingsWin.Hide, RestoreFocus: a.restorePreviousAppFocus,
 	})
 
 	onboardingSpec := surfaceSpec(740, uiapp.SurfaceElevationFlat, mygo.VibrancyNone, uiapp.DismissExplicit, uiapp.FocusPreviousApp)
@@ -722,12 +779,27 @@ func (a *desktopApp) start() {
 	}, onboardingSpec))
 	// Closing the guide finishes it, as Get Started does; a quit (a restart
 	// for Input Monitoring) closes it without, so it shows again after.
-	uiapp.BindFloatingSurface(onboardingWin, onboardingSpec, uiapp.SurfaceHooks{
-		Dismiss: a.finishOnboarding, RestoreFocus: a.restorePreviousAppFocus, Quitting: a.quitting.Load,
+	a.bindSurface(onboardingWin, onboardingSpec, uiapp.SurfaceHooks{
+		Dismiss: a.finishOnboarding, RestoreFocus: a.restorePreviousAppFocus,
 	})
 	controller.SetOnboardingHooks(uiapp.OnboardingHooks{
-		Finish:   a.finishOnboardingAndRestore,
-		Relaunch: func() { mygo.App.Relaunch() },
+		Finish:               a.finishOnboardingAndRestore,
+		Relaunch:             func() { mygo.App.Relaunch() },
+		LaunchAgentInstalled: bridge.LaunchAgentInstalled,
+		SetLaunchAgent: func(enabled bool) error {
+			if !enabled {
+				return bridge.UninstallLaunchAgent()
+			}
+			exe, err := os.Executable()
+			if err != nil || exe == "" {
+				return err
+			}
+			if resolved, err := filepath.EvalSymlinks(exe); err == nil && resolved != "" {
+				exe = resolved
+			}
+			_, err = bridge.InstallLaunchAgent(exe)
+			return err
+		},
 	})
 
 	frecencySyncer := daemon.NewFrecencySyncer(
@@ -888,53 +960,149 @@ func screenRecordingRequiredMissing(status host.PermissionStatus) bool {
 	return false
 }
 
-// closeHides is the close handler of a window that only hides: Clavis lives
-// in the tray and keeps its windows for the next time. While the app quits
-// the close goes through: MyGo closes every window first, and one that
-// refuses cancels the quit.
-func (a *desktopApp) closeHides(hide func()) func(*mygo.CloseEvent) {
-	return func(e *mygo.CloseEvent) {
-		if a.quitting.Load() {
-			return
-		}
-		e.PreventDefault()
-		hide()
-	}
+// bindSurface centralizes Quitting and present-transition guards for every window.
+func (a *desktopApp) bindSurface(win *mygo.Window, spec uiapp.SurfaceSpec, hooks uiapp.SurfaceHooks) {
+	hooks.Quitting = a.quitting.Load
+	hooks.InPresentTransition = a.isInPresentTransition
+	uiapp.BindFloatingSurface(win, spec, hooks)
 }
 
-// surfaceWindows returns all windows owned by the desktop shell so focus
-// restoration can avoid hiding the app while any surface remains open.
-func (a *desktopApp) surfaceWindows() []*mygo.Window {
+type surfaceZEntry struct {
+	name         string
+	elevation    int
+	visible      bool
+	showInactive func()
+}
+
+// raiseAboveOrder selects visible floating surfaces strictly higher than
+// showingElevation and raises them in ascending elevation order via ShowInactive.
+func raiseAboveOrder(showingElevation int, entries []surfaceZEntry) []string {
+	var higher []surfaceZEntry
+	for _, e := range entries {
+		if e.visible && e.elevation > showingElevation {
+			higher = append(higher, e)
+		}
+	}
+	sort.SliceStable(higher, func(i, j int) bool {
+		return higher[i].elevation < higher[j].elevation
+	})
+	raised := make([]string, 0, len(higher))
+	for _, e := range higher {
+		if e.showInactive != nil {
+			e.showInactive()
+		}
+		raised = append(raised, e.name)
+	}
+	return raised
+}
+
+// raiseAbove keeps higher-elevation visible floating surfaces (such as the IME
+// indicator pill) above newly shown or refocused panels (SF-05).
+func (a *desktopApp) raiseAbove(spec uiapp.SurfaceSpec) {
+	a.mu.Lock()
+	capsule, capSpec := a.capsulePanel, a.capsuleSpec
+	prompt, pSpec := a.promptPanel, a.promptSpec
+	pill, plSpec := a.imePillPanel, a.pillSpec
+	selBar, sSpec := a.selectionBar, a.selectionSpec
+	candSpec := a.candidateSpec
+	var candPanel *mygo.Window
+	if a.inputUI != nil {
+		candPanel = a.inputUI.panel
+	}
+	a.mu.Unlock()
+
+	entry := func(name string, w *mygo.Window, s uiapp.SurfaceSpec) surfaceZEntry {
+		if w == nil {
+			return surfaceZEntry{name: name, elevation: s.Elevation}
+		}
+		return surfaceZEntry{
+			name:         name,
+			elevation:    s.Elevation,
+			visible:      w.IsVisible(),
+			showInactive: w.ShowInactive,
+		}
+	}
+	raiseAboveOrder(spec.Elevation, []surfaceZEntry{
+		entry("selection", selBar, sSpec),
+		entry("capsule", capsule, capSpec),
+		entry("prompt", prompt, pSpec),
+		entry("candidate", candPanel, candSpec),
+		entry("pill", pill, plSpec),
+	})
+}
+
+func (a *desktopApp) documentWindows() []*mygo.Window {
+	a.mu.Lock()
+	settings := a.settingsWin
+	onboarding := a.onboardingWin
+	annotate := a.annotateWin
+	a.mu.Unlock()
+	return []*mygo.Window{settings, onboarding, annotate}
+}
+
+func (a *desktopApp) floatingWindows() []*mygo.Window {
 	a.mu.Lock()
 	capsule := a.capsulePanel
 	prompt := a.promptPanel
 	pill := a.imePillPanel
 	selection := a.selectionBar
-	settings := a.settingsWin
-	onboarding := a.onboardingWin
-	annotate := a.annotateWin
 	var inputPanel *mygo.Window
 	if a.inputUI != nil {
 		inputPanel = a.inputUI.panel
 	}
 	a.mu.Unlock()
-	return []*mygo.Window{capsule, prompt, pill, selection, settings, onboarding, annotate, inputPanel}
+	return []*mygo.Window{capsule, prompt, pill, selection, inputPanel}
 }
 
-func (a *desktopApp) hasVisibleSurface(isVisible func(*mygo.Window) bool) bool {
-	for _, win := range a.surfaceWindows() {
-		if win != nil && isVisible(win) {
+func anyWindowVisible(wins []*mygo.Window) bool {
+	for _, win := range wins {
+		if win != nil && win.IsVisible() {
 			return true
 		}
 	}
 	return false
 }
 
-// restorePreviousAppFocus returns focus after a document-style surface closes.
-// MyGo has no API for activating an arbitrary external bundle, so the safe
-// fallback is to hide Clavis and let macOS reveal the previous application.
-// Never do this while another Clavis surface is visible, because App.Hide
-// would hide that surface as a side effect.
+func (a *desktopApp) recordExternalReturnTarget() {
+	if anyWindowVisible(a.documentWindows()) {
+		return
+	}
+	a.mu.Lock()
+	br := a.hostBridge
+	a.mu.Unlock()
+	act, ok := br.(bridge.ExternalAppActivator)
+	if !ok {
+		return
+	}
+	app := act.LastExternalApp()
+	if app.BundleID == "" && app.ProcessName == "" {
+		app = act.CurrentFrontmostApp()
+	}
+	if app.BundleID != "" && !strings.EqualFold(app.BundleID, "com.yeisme.clavis") {
+		a.mu.Lock()
+		a.returnToExternalBundleID = app.BundleID
+		a.mu.Unlock()
+	}
+}
+
+func restoreDocumentFocus(docVisible, floatVisible bool, targetBundleID string, activate func(string) error, hideApp func()) bool {
+	if docVisible {
+		return false
+	}
+	if targetBundleID != "" && activate != nil {
+		if err := activate(targetBundleID); err == nil {
+			return true
+		}
+	}
+	if !floatVisible && hideApp != nil {
+		hideApp()
+		return true
+	}
+	return false
+}
+
+// restorePreviousAppFocus returns focus after a document-style surface closes
+// once no FocusPreviousApp document window remains open (SF-11/SF-12/SF-13).
 func (a *desktopApp) restorePreviousAppFocus() {
 	a.mu.Lock()
 	shuttingDown := a.shuttingDown
@@ -942,12 +1110,27 @@ func (a *desktopApp) restorePreviousAppFocus() {
 	if shuttingDown || a.quitting.Load() {
 		return
 	}
-	if a.hasVisibleSurface((*mygo.Window).IsVisible) {
+	if anyWindowVisible(a.documentWindows()) {
 		return
 	}
-	if mygo.App.IsReady() {
-		mygo.App.Hide()
+	a.mu.Lock()
+	targetBundleID := a.returnToExternalBundleID
+	a.returnToExternalBundleID = ""
+	br := a.hostBridge
+	a.mu.Unlock()
+
+	floatVisible := anyWindowVisible(a.floatingWindows())
+	var activate func(string) error
+	if act, ok := br.(bridge.ExternalAppActivator); ok {
+		activate = func(bundleID string) error {
+			return act.ActivateAppByBundleID(context.Background(), bundleID)
+		}
 	}
+	var hideApp func()
+	if mygo.App.IsReady() {
+		hideApp = mygo.App.Hide
+	}
+	restoreDocumentFocus(false, floatVisible, targetBundleID, activate, hideApp)
 }
 
 func (a *desktopApp) finishOnboardingAndRestore() {
@@ -2199,6 +2382,10 @@ func (a *desktopApp) presentIMEPillAsync(ctx context.Context, gen uint64, br bri
 		pill.SetBounds(bounds)
 		pill.SetOpacity(1) // undo a fade-out the new label interrupted
 		pill.ShowInactive()
+		a.mu.Lock()
+		pillSpec := a.pillSpec
+		a.mu.Unlock()
+		a.raiseAbove(pillSpec)
 		pill.Invalidate()
 		a.scheduleIMEPillAutoHide(gen)
 	})
@@ -2384,6 +2571,10 @@ func (a *desktopApp) handlePresentPhase(phase engine.CapsulePhase) {
 					a.scheduleCapsuleReveal(seq, delay, fade)
 				}
 			}
+			a.mu.Lock()
+			capSpec := a.capsuleSpec
+			a.mu.Unlock()
+			a.raiseAbove(capSpec)
 			panel.Invalidate()
 		})
 	})
@@ -2583,6 +2774,10 @@ func (a *desktopApp) handleOpenPromptComposer() {
 			win.SetBounds(bounds)
 			win.Show()
 			win.Focus()
+			a.mu.Lock()
+			pSpec := a.promptSpec
+			a.mu.Unlock()
+			a.raiseAbove(pSpec)
 			win.Invalidate()
 		})
 	})
@@ -2634,7 +2829,7 @@ func (a *desktopApp) handleShowAnnotateWindow() {
 					StateKey:  "annotate",
 					Content:   ui.View(ctrl.AnnotateView),
 				}, spec))
-				uiapp.BindFloatingSurface(win, spec, uiapp.SurfaceHooks{
+				a.bindSurface(win, spec, uiapp.SurfaceHooks{
 					Dismiss: func() {
 						if win.IsVisible() {
 							win.Hide()
@@ -2642,12 +2837,13 @@ func (a *desktopApp) handleShowAnnotateWindow() {
 						ctrl.CloseAnnotateWindow()
 					},
 					RestoreFocus: a.restorePreviousAppFocus,
-					Quitting:     a.quitting.Load,
 				})
 				a.mu.Lock()
 				a.annotateWin = win
 				a.mu.Unlock()
 			}
+			a.recordExternalReturnTarget()
+			mygo.App.Show()
 			win.Show()
 			win.Focus()
 			win.Invalidate()
@@ -2684,6 +2880,7 @@ func (a *desktopApp) handleOpenSettings(_ uiapp.SettingsTab) {
 			if win == nil {
 				return
 			}
+			a.recordExternalReturnTarget()
 			mygo.App.Show()
 			win.Show()
 			win.Focus()
@@ -2829,6 +3026,10 @@ func (a *desktopApp) handleShowSelectionBar(p uiapp.SelectionBarPayload) {
 			win.SetBounds(bounds)
 			win.Invalidate()
 			win.ShowInactive()
+			a.mu.Lock()
+			sSpec := a.selectionSpec
+			a.mu.Unlock()
+			a.raiseAbove(sSpec)
 		})
 	})
 }

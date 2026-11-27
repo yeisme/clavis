@@ -753,11 +753,15 @@ func TestClipboardTab_PinAndDeleteWithFIFOPersistence(t *testing.T) {
 			st.OmniboxItems[st.SelectedIndex].ClipboardContent)
 	}
 
-	// Delete "first-entry" with Cmd+Backspace
+	// Delete "first-entry" with Cmd+Backspace (5s soft-delete undo commits after window)
+	ctrl.SetClipboardDeleteUndoWindowForTest(250 * time.Millisecond)
 	tt.Key(ui.Cmd, ui.KeyBackspace)
+	if !ctrl.HasPendingClipboardDelete() {
+		t.Fatal("expected pending soft-delete immediately after Cmd+Backspace")
+	}
 	tt.Frame()
 
-	waitUntil(t, time.Second, func() bool {
+	waitUntil(t, 2*time.Second, func() bool {
 		recent, _ := clipStore.Recent(ctx, 10)
 		return len(recent) == 1 && recent[0].Content == "second-entry"
 	}, "first-entry deleted from store")
@@ -784,8 +788,8 @@ func TestSettingsView_AllFourTabsKeychainAndValidationErrors(t *testing.T) {
 	_ = secStore.DeleteKey(ctrl.Config().Main.AI.KeychainAccount)
 	ctrl.APIKeyStatus()
 
-	if len(SettingsTabNames()) != 5 {
-		t.Fatalf("SettingsTabNames() len = %d, want 5", len(SettingsTabNames()))
+	if len(settingsPages()) != 14 {
+		t.Fatalf("settingsPages() len = %d, want 14", len(settingsPages()))
 	}
 
 	tt := ui.NewTester(ctrl.SettingsView, 760, 560)
@@ -875,9 +879,13 @@ func TestSettingsView_AllFourTabsKeychainAndValidationErrors(t *testing.T) {
 		t.Fatalf("expected 'Connected: OK' on AI tab, got %v", tt.Texts())
 	}
 
-	// Clear Key
+	// Clear Key (confirm inline delete per IA-17)
 	if err := tt.Click("Clear Key"); err != nil {
 		t.Fatalf("click Clear Key: %v", err)
+	}
+	tt.Frame()
+	if err := tt.Click("Delete"); err != nil {
+		t.Fatalf("click confirm Delete: %v", err)
 	}
 	tt.Frame()
 	if !tt.HasText("Not configured") {

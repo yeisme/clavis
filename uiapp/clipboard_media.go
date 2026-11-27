@@ -299,7 +299,17 @@ func writeClipboardMedia(m engine.ClipboardMedia) error {
 //
 // The optional callback runs only after both the clipboard write and platform paste succeed.
 func (c *AppController) pasteClipboardMediaAsync(m engine.ClipboardMedia, onWritten ...func()) {
-	c.pasteClipboardMediaAsyncWithWriter(m, writeClipboardMedia, firstCallback(onWritten))
+	c.pasteClipboardMediaAsyncWithOptions(m, pasteOptions{}, firstCallback(onWritten))
+}
+
+// pasteClipboardMediaAsyncWithOptions writes media to the clipboard and optionally keeps
+// the Capsule open after pasting (⌘↵ continuous multi-paste).
+func (c *AppController) pasteClipboardMediaAsyncWithOptions(m engine.ClipboardMedia, opts pasteOptions, onWritten func()) {
+	if err := writeClipboardMedia(m); err != nil {
+		c.ShowToastOrHUD(err.Error())
+		return
+	}
+	c.startClipboardPasteWithOptions(opts, onWritten)
 }
 
 // pasteClipboardMediaAsyncWithWriter is the testable seam for the MyGo clipboard write. Production
