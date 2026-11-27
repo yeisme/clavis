@@ -65,8 +65,10 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Validate mygo.json with plutil
-        run: plutil -lint mygo.json
+      # plutil -lint only accepts property lists; mygo.json is plain JSON, so that command reported
+      # "Unexpected character { at line 1" and never passed. Use the same JSON check as the Linux job.
+      - name: Validate mygo.json manifest
+        run: python3 -m json.tool mygo.json > /dev/null
 
       - name: Run full test suite
         run: go test -count=1 ./...
