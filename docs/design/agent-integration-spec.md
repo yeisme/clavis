@@ -173,7 +173,7 @@ type FocusResult struct { Focused, CreatedNewWindow bool; Method, Diagnostic str
 - Raycast AI Chat 提供聊天搜索、前十个会话的 Cmd-1 到 Cmd-0 跳转、Cmd-J 从 Quick AI 转入完整会话。[Raycast AI Chat](https://manual.raycast.com/ai/ai-chat)
 - Warp Command Palette 把 workflows、prompts、files、actions、sessions 作为可筛选类型，并用 sessions: 前缀筛活动 session。[Warp Command Palette](https://docs.warp.dev/terminal/command-palette/)
 - VS Code 要求命令名称清晰、带 category 前缀，并明确不覆盖现有快捷键。Clavis agent 命令应使用 Agent: 前缀。[VS Code Command Palette UX](https://code.visualstudio.com/api/ux-guidelines/command-palette)
-- 本机 DSH 的 Codex 子代理封装显示 app-server 采用 initialize、initialized、thread/start 和 turn/completed。它只能证明协议形态，不能证明 DSH 已暴露持久会话列表。证据来自本机 /Users/yeisme/.dsh/profiles/web/node_modules/@deepseek-ai/dsh-subagent-codex/README.md 与 src/wire.ts，版本需随依赖升级重新核对。
+- 本机 DSH 的 Codex 子代理封装显示 app-server 采用 initialize、initialized、thread/start 和 turn/completed。它只能证明协议形态，不能证明 DSH 已暴露持久会话列表。证据来自本机 <DSH_HOME>/profiles/web/node_modules/@deepseek-ai/dsh-subagent-codex/README.md 与 src/wire.ts，版本需随依赖升级重新核对。
 
 ## 9. 隐私、缓存和失败处理
 

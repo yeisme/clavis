@@ -171,7 +171,7 @@ type BigramRuntime interface {
 ## 8. 可执行验收
 
 ```bash
-cd /Users/yeisme/workspace/clavis
+cd <clavis checkout>
 
 go test -count=1 -v ./internal/storage ./pkg/core/inputengine -run 'Test(Bigram|Learning|EngineConcurrent|.*ColdStart)'
 ```

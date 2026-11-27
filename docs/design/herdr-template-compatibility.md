@@ -4,8 +4,8 @@ Status: `observed` (read-only local inspection through the Herdr-connected works
 
 ## Sources and gaps
 
-- Source: `/Users/yeisme/work/muweave-dsh` (`packages/dsh-muweave-core/src/protocol.ts`, `host-safe-catalog.ts`, `packages/muweave-bundle/src/schema.ts`, `packages/muweave-bundle/src/cli.ts`).
-- Source: `/Users/yeisme/workspace/pi-local-extensions/extensions/herdr-bridge.ts` (Herdr pane state bridge).
+- Source: `<muweave-dsh checkout>` (`packages/dsh-muweave-core/src/protocol.ts`, `host-safe-catalog.ts`, `packages/muweave-bundle/src/schema.ts`, `packages/muweave-bundle/src/cli.ts`).
+- Source: `<pi-local-extensions checkout>/extensions/herdr-bridge.ts` (Herdr pane state bridge).
 - Missing: no standalone remote template parser/renderer/schema or `render`/`preview`/`validate` template CLI was present in the inspected tree. The catalog exposes metadata and `templates.render_preview` RPC only; its implementation/provider payload is not copied.
 
 ## Compatibility matrix

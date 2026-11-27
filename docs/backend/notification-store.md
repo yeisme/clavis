@@ -271,7 +271,7 @@ func (s Source) Capabilities(ctx context.Context) (SourceCapabilities, error)
 纯 Go conformance：
 
 ```bash
-cd /Users/yeisme/workspace/clavis
+cd <clavis checkout>
 go test -count=1 -race -v ./pkg/core/notification ./internal/notification -run 'Test(Notification|Event|Dedup|Cursor|ReadOnly)'
 ```
 

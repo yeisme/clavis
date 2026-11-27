@@ -219,7 +219,7 @@ func maybeFail(opts MigrationOptions, step string) error {
 ## 7. 可执行验收
 
 ```bash
-cd /Users/yeisme/workspace/clavis
+cd <clavis checkout>
 
 go test -count=1 -v ./internal/storage -run 'Test(Migration|SQLiteStoreRestart|SyncStoreContract)'
 ```

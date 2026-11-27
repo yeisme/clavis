@@ -7,3 +7,5 @@ build/
 *.db-shm
 .DS_Store
 *.test
+.metadata_never_index
+.claude/
