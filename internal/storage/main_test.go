@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 )
 
@@ -28,17 +27,14 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "storage tests: cannot resolve a home directory for the private temp base: %v\n", err)
 		os.Exit(1)
 	}
-	// Pin the umask to 022, the value these tests were written against (it is also the macOS default).
+	// Pin the umask to 022 — the value these tests were written against, and the macOS default. Linux CI runs
+	// with 002, which shows up twice and in opposite directions: t.TempDir() comes out 0775 (group-writable, so
+	// mkdirPrivate rejects it) and os.WriteFile(p, 0o666) comes out 0664 where the assertions expect 0644.
+	// 077 would be stricter and wrong: it makes files 0600 and breaks those same assertions.
 	//
-	// Linux CI runs with 002. That difference shows up twice and in opposite directions:
-	//   - t.TempDir() comes out 0775 (group-writable, rejected by mkdirPrivate) instead of 0755;
-	//   - os.WriteFile(p, 0o666) comes out 0664 instead of 0644, so `replacement mode = 664, want 644` fails.
-	// Both are the suite encoding one platform's umask, not a product bug. Pinning 022 at the test binary's
-	// start makes the suite mean the same thing everywhere; production code keeps whatever the host uses.
-	//
-	// 077 would be "safer" and is wrong: it makes files 0600 and breaks assertions that expect 0644.
-	previousUmask := syscall.Umask(0o022)
-	_ = previousUmask // process-wide for this test binary only; nothing to restore once it exits
+	// The call itself lives in umask_unix_test.go / umask_windows_test.go behind build tags: syscall.Umask does
+	// not exist on Windows, and the Windows job builds this package too.
+	pinUmaskForTests()
 
 	base, err := os.MkdirTemp(home, "clavis-storage-tests-")
 	if err != nil {
