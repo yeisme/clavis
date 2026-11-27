@@ -388,6 +388,7 @@ func (r *runtime) handshakeLocked(ctx context.Context) error {
 
 func (r *runtime) unavailable(err error) error {
 	r.available = false
+	r.stopping = true
 	r.startErr = err
 	if r.process != nil {
 		_ = r.process.Kill()
@@ -450,6 +451,7 @@ func (s *Supervisor) Invoke(ctx context.Context, id, capability string, params j
 		_ = r.encoder.Write(pluginprotocol.Notification{JSONRPC: pluginprotocol.Version, Method: "cancel", Params: mustJSON(cancelParams{ID: requestID})})
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			r.available = false
+			r.stopping = true
 			r.startErr = err
 			_ = r.process.Kill()
 			return nil, ErrPluginTimeout
