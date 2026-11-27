@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/yeisme/clavis/internal/diag"
 	"github.com/yeisme/clavis/internal/secrets"
 	internalsync "github.com/yeisme/clavis/internal/sync"
 	"github.com/yeisme/clavis/pkg/core/automation"
@@ -68,7 +69,11 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		return usageError(stderr)
 	}
-	configDir, jsonOutput, commandArgs, err := parseGlobalFlags(args)
+	dataDir, strippedArgs, err := extractDataDirFlag(args)
+	if err != nil {
+		return err
+	}
+	configDir, jsonOutput, commandArgs, err := parseGlobalFlags(strippedArgs)
 	if err != nil {
 		return err
 	}
@@ -77,6 +82,20 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	}
 	if len(commandArgs) > 0 && commandArgs[0] == "sync" {
 		return runSyncCommand(stdout, stderr, configDir, jsonOutput, commandArgs[1:])
+	}
+	if len(commandArgs) > 0 {
+		switch commandArgs[0] {
+		case "doctor":
+			return runDoctorCommand(stdout, stderr, configDir, dataDir, jsonOutput, commandArgs[1:])
+		case "diag":
+			return runDiagCommand(stdout, stderr, configDir, dataDir, jsonOutput, commandArgs[1:])
+		case "backup":
+			return runBackupCommand(stdout, stderr, configDir, dataDir, jsonOutput, commandArgs[1:])
+		case "restore":
+			return runRestoreCommand(stdout, stderr, configDir, dataDir, jsonOutput, commandArgs[1:])
+		case "uninstall":
+			return runUninstallCommand(stdout, stderr, configDir, dataDir, jsonOutput, commandArgs[1:])
+		}
 	}
 	if len(commandArgs) < 2 {
 		return usageError(stderr)
@@ -187,6 +206,30 @@ func compileDict(stdout, stderr io.Writer, args []string) error {
 	return err
 }
 
+func extractDataDirFlag(args []string) (string, []string, error) {
+	dataDir := diag.DefaultDataDir()
+	rest := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--data-dir":
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return "", nil, errors.New("--data-dir requires a directory")
+			}
+			dataDir = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--data-dir="):
+			dataDir = strings.TrimPrefix(arg, "--data-dir=")
+			if strings.TrimSpace(dataDir) == "" {
+				return "", nil, errors.New("--data-dir requires a directory")
+			}
+		default:
+			rest = append(rest, arg)
+		}
+	}
+	return dataDir, rest, nil
+}
+
 func defaultConfigDir() string {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		return filepath.Join(home, ".config", "clavis")
@@ -198,7 +241,7 @@ func defaultConfigDir() string {
 }
 
 func usageError(w io.Writer) error {
-	err := errors.New("usage: clavis [--config-dir DIR] [--json] action list | workflow list | workflow plan WORKFLOW | compile-dict INPUT -o OUTPUT | sync status [--dir DIR] | sync plan | sync run --dir DIR")
+	err := errors.New("usage: clavis [--config-dir DIR] [--data-dir DIR] [--json] action list | workflow list | workflow plan WORKFLOW | compile-dict INPUT -o OUTPUT | sync status|plan|run | doctor | diag export [-o FILE] | backup [--out DIR] [--include-secrets] | restore --from DIR [--dry-run] | uninstall [--purge-data] [--backup-dir DIR] [--dry-run]")
 	if w != nil {
 		fmt.Fprintln(w, err)
 	}

@@ -19,7 +19,7 @@ hooks: ## Install repository .githooks (refuses to overwrite non-empty custom ho
 test-fast: ## Fast local check (<90s target): diff whitespace, go vet, core/pkg tests
 	git diff --check
 	go vet ./...
-	go test -count=1 ./pkg/... ./internal/secrets/... ./internal/storage/... ./internal/sync/... ./internal/watcher/... ./cmd/clavis/... .
+	go test -count=1 ./pkg/... ./internal/secrets/... ./internal/storage/... ./internal/sync/... ./internal/watcher/... ./internal/diag/... ./internal/filesearch/... ./cmd/clavis/... .
 
 ci-race: ## Run race detector across uiapp, watcher, core, internal, CLI & root
 	go test -count=1 -race \
@@ -29,6 +29,8 @@ ci-race: ## Run race detector across uiapp, watcher, core, internal, CLI & root
 		./internal/storage/... \
 		./internal/sync/... \
 		./internal/daemon/... \
+		./internal/diag/... \
+		./internal/filesearch/... \
 		./pkg/core/... \
 		./cmd/clavis/... \
 		.
