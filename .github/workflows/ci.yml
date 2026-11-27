@@ -139,14 +139,7 @@ jobs:
         run: go vet ./...
 
       - name: Run Linux package tests with race detector
-        # TMPDIR must not be under /tmp for these tests. mkdirPrivate walks every EXISTING ancestor of the database
-        # path and rejects any that is group/world-writable, and /tmp is 1777 on Linux, so every t.TempDir() (which
-        # honours TMPDIR) lands under a directory the store is right to refuse. The runner's $HOME is 0700, which is
-        # the parent the guard expects. Set here, one place covers every package.
-        env:
-          TMPDIR: /home/runner/.clavis-tmp
         run: >-
-          mkdir -p "$TMPDIR" && chmod 700 "$TMPDIR" &&
           go test -count=1 -race
           ./pkg/...
           ./internal/secrets/...
