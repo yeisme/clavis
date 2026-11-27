@@ -45,6 +45,14 @@ type InlineIMEForcer interface {
 	InlineIMEForced() bool
 }
 
+// ExternalAppActivator tracks the most recent non-Clavis foreground application
+// and activates a running application by bundle ID (macOS SF-11/SF-13).
+type ExternalAppActivator interface {
+	LastExternalApp() AppIdentity
+	CurrentFrontmostApp() AppIdentity
+	ActivateAppByBundleID(ctx context.Context, bundleID string) error
+}
+
 type ExtendedHostService interface {
 	HostService
 	CommitText(ctx context.Context, text string, deleteCount int, cursorBackOffset int) error

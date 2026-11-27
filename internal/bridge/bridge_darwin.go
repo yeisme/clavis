@@ -516,11 +516,12 @@ type darwinBridge struct {
 	tapCallback  uintptr
 	onTrigger    func(host.TriggerEvent)
 
-	tapRecoveries  atomic.Int64
-	triggers       *triggerRuntime
-	lastBundleIDMu sync.RWMutex
-	lastBundleID   string
-	lastFrontApp   AppIdentity
+	tapRecoveries   atomic.Int64
+	triggers        *triggerRuntime
+	lastBundleIDMu  sync.RWMutex
+	lastBundleID    string
+	lastFrontApp    AppIdentity
+	lastExternalApp AppIdentity
 
 	router        *triggerRouter
 	keymapEngine  *KeymapLayerEngine
@@ -643,7 +644,87 @@ func (b *darwinBridge) setCachedFrontmostApp(app AppIdentity) {
 	b.lastBundleIDMu.Lock()
 	b.lastFrontApp = app
 	b.lastBundleID = app.BundleID
+	if !isSelfClavisApp(app) {
+		b.lastExternalApp = app
+	}
 	b.lastBundleIDMu.Unlock()
+}
+
+// LastExternalApp returns the most recent non-Clavis foreground application,
+// probing NSWorkspace once if none has been cached yet.
+func (b *darwinBridge) LastExternalApp() AppIdentity {
+	b.lastBundleIDMu.RLock()
+	ext := b.lastExternalApp
+	b.lastBundleIDMu.RUnlock()
+	if ext.BundleID != "" || ext.ProcessName != "" {
+		return ext
+	}
+	if initDarwin() != nil {
+		return AppIdentity{}
+	}
+	live := darwinFrontmostAppIdentity()
+	if (live.BundleID != "" || live.ProcessName != "") && !isSelfClavisApp(live) {
+		b.setCachedFrontmostApp(live)
+		return live
+	}
+	return AppIdentity{}
+}
+
+// CurrentFrontmostApp queries the live foreground application and updates the cache.
+func (b *darwinBridge) CurrentFrontmostApp() AppIdentity {
+	if initDarwin() != nil {
+		return b.cachedFrontmostApp()
+	}
+	live := darwinFrontmostAppIdentity()
+	if live.BundleID != "" || live.ProcessName != "" {
+		b.setCachedFrontmostApp(live)
+		return live
+	}
+	return AppIdentity{}
+}
+
+// ActivateAppByBundleID brings a running application with bundleID to the
+// foreground without launching exited applications (SF-11/SF-12).
+func (b *darwinBridge) ActivateAppByBundleID(ctx context.Context, bundleID string) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	target := strings.TrimSpace(bundleID)
+	if target == "" {
+		return errors.New("darwin: empty bundle ID")
+	}
+	if err := initDarwin(); err != nil {
+		return err
+	}
+	const nsApplicationActivateIgnoringOtherApps = uint(1 << 1)
+	activated := false
+	withAutoreleasePool(func() {
+		clsApp := cls("NSRunningApplication")
+		if clsApp == 0 {
+			return
+		}
+		arr := clsApp.Send(sel("runningApplicationsWithBundleIdentifier:"), nsString(target))
+		if arr == 0 {
+			return
+		}
+		count := objc.Send[uint](arr, sel("count"))
+		for i := uint(0); i < count; i++ {
+			item := arr.Send(sel("objectAtIndex:"), i)
+			if item == 0 || objc.Send[bool](item, sel("isTerminated")) {
+				continue
+			}
+			if objc.Send[bool](item, sel("activateWithOptions:"), nsApplicationActivateIgnoringOtherApps) {
+				activated = true
+				return
+			}
+		}
+	})
+	if !activated {
+		return fmt.Errorf("darwin: no running application activated for %s", target)
+	}
+	return nil
 }
 
 func (b *darwinBridge) cachedFrontmostApp() AppIdentity {

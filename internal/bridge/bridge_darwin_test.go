@@ -337,7 +337,10 @@ func TestReplaceEditableFieldWholeFieldAndSelection(t *testing.T) {
 			setSelectedText: func(string) bool { calls = append(calls, "ax_selected"); return false },
 			setValue:        func(string) bool { calls = append(calls, "ax_value"); return true },
 			selectAll:       func(context.Context) error { calls = append(calls, "select_all"); return nil },
-			inject:          func(_ context.Context, text string, _, _ int) error { calls = append(calls, "inject:"+text); return nil },
+			inject: func(_ context.Context, text string, _, _ int) error {
+				calls = append(calls, "inject:"+text)
+				return nil
+			},
 		})
 		if err != nil {
 			t.Fatalf("err = %v", err)
@@ -347,4 +350,14 @@ func TestReplaceEditableFieldWholeFieldAndSelection(t *testing.T) {
 			t.Fatalf("calls = %v, want %v", calls, want)
 		}
 	})
+}
+
+func TestDarwinBridge_LastExternalAppSkipsSelfClavis(t *testing.T) {
+	b := newPlatformBridge(Options{}).(*darwinBridge)
+	b.setCachedFrontmostApp(AppIdentity{BundleID: "com.apple.Safari", ProcessName: "Safari"})
+	b.setCachedFrontmostApp(AppIdentity{BundleID: "com.yeisme.clavis", ProcessName: "Clavis"})
+	ext := b.LastExternalApp()
+	if ext.BundleID != "com.apple.Safari" || ext.ProcessName != "Safari" {
+		t.Fatalf("LastExternalApp = %+v, want com.apple.Safari / Safari", ext)
+	}
 }
