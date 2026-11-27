@@ -574,9 +574,20 @@ func TestSQLiteCloseRejectsReplacedRegularSidecar(t *testing.T) {
 
 func provisionSQLiteTestPath(t *testing.T) string {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "sync")
+	// t.TempDir() builds its chain with 0777&^umask, so on Linux (umask 002) that directory is 0775 and
+	// mkdirPrivate rejects it as group-writable while walking the ancestors. Tighten it explicitly instead of
+	// changing the process umask: a umask would also change the permissions the tests assert on files they
+	// create themselves, which broke a different test when tried.
+	base := t.TempDir()
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatalf("cannot tighten the test temp dir: %v", err)
+	}
+	dir := filepath.Join(base, "sync")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("cannot tighten %s: %v", dir, err)
 	}
 	path := filepath.Join(dir, "state.db")
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
