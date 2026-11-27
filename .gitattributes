@@ -1,0 +1,23 @@
+# Line endings are part of the content contract here, not a matter of taste.
+#
+# Clavis stores a sha256 digest for prompt and contract files and refuses to load them when the bytes on disk do not
+# match the declared digest. Git's default `core.autocrlf=true` on Windows rewrites LF to CRLF on checkout, so the same
+# file hashed on Linux/macOS and on Windows produces two different digests — and every test that installs or verifies a
+# solution fails there with `digest_mismatch: content does not match declared digest`.
+#
+# Normalising everything to LF in the repository makes the working tree byte-identical on every platform, which is
+# exactly what a content digest needs.
+* text=auto eol=lf
+
+# Binary assets: never touch their bytes.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.db binary
+*.sqlite binary
