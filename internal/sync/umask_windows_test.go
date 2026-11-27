@@ -1,0 +1,6 @@
+//go:build windows
+
+package sync
+
+// pinUmaskForTests is a no-op on Windows: there is no umask, and NTFS ACLs are not what these assertions measure.
+func pinUmaskForTests() {}
